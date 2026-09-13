@@ -81,7 +81,8 @@ class FakeDumpSession:
         rng = (headers or {}).get("Range")
         if rng and rng.startswith("bytes=") and rng.endswith("-"):
             offset = int(rng[len("bytes=") : -1])
-        self.calls.append({"kind": "download", "offset": offset, "range": rng, "timeout": timeout})
+        self.calls.append({"kind": "download", "offset": offset, "range": rng,
+                           "timeout": timeout, "headers": dict(headers or {})})
         step = self.plan.pop(0) if self.plan else self._whole(offset)
         if callable(step):
             step = step(offset)                 # 让响应依赖当前 Range 起点
@@ -113,12 +114,17 @@ class _Slurp:
     def json(self): return self._payload
 
 
-def _parquet_bytes(rows: int = 50) -> bytes:
-    """造一段**真的可读**的 Parquet 字节（完整性校验要用）。"""
+def _parquet_bytes(rows: int = 50, start: int = 0) -> bytes:
+    """造一段**真的可读**的 Parquet 字节（完整性校验要用）。
+
+    `start` 用来造"另一代"数据：只要起点不同，**文件前缀就不同**，
+    这样"把新版本尾部贴到旧版本头部"拼出来的文件才与任何一代都不相等
+    （否则两代共享前缀，拼接结果可能刚好等于新一代，护栏被关掉也测不出来）。
+    """
     import pandas as pd
 
     buf = io.BytesIO()
-    pd.DataFrame({"a": range(rows)}).to_parquet(buf, index=False)
+    pd.DataFrame({"a": range(start, start + rows)}).to_parquet(buf, index=False)
     return buf.getvalue()
 
 
@@ -577,3 +583,271 @@ def test_existing_good_dump_is_reused_without_download(cfg, monkeypatch) -> None
 
     assert sync.download_dump(cfg, "daily-k", Boom()) == target
     assert sync.dump_is_usable(target) is True
+
+
+# ── 6) 断点续传的"还是不是同一代 dump"护栏 ──
+#
+# dump（`daily-k`）**按天重新生成**，而续传只看"本地 .part 有多少字节"，`Range`
+# 请求服务端不校验内容。于是"今天下到一半、明天点继续"会把新版本的尾部贴到旧版本的
+# 头部后面 —— 拼出一个**能读、但两天数据混在一起**的文件。这一组用例钉住护栏：
+# 首次响应记下远端身份（ETag / Last-Modified / 总大小），续传时比对，不同就作废重下；
+# 远端不给指纹时退回"跨天的半截文件一律作废"。
+
+_GEN_A = _parquet_bytes(rows=50)
+_GEN_B = _parquet_bytes(rows=80, start=1000)   # 另一代 dump：前缀与长度都不一样
+
+
+def _write_part(tmp_path: Path, name: str, data: bytes, *, meta: str | None = None,
+                age_days: float = 0.0) -> tuple[Path, Path]:
+    """造一个"上一轮留下的半截文件"（可带身份档案、可把时间改到过去）。"""
+    part = tmp_path / f"{name}.parquet.part"
+    part.write_bytes(data)
+    if age_days:
+        import os
+        old = __import__("time").time() - age_days * 86400
+        os.utime(part, (old, old))
+    meta_path = Path(str(part) + ".meta")
+    if meta is not None:
+        meta_path.write_text(meta, encoding="utf-8")
+    return part, meta_path
+
+
+def test_same_generation_keeps_resuming(client, tmp_path, monkeypatch) -> None:
+    """回归：**同一代** dump 的续传照旧从断点继续（护栏不能把正常路走坏）。"""
+    split = len(_GEN_A) // 2
+    part, _meta = _write_part(
+        tmp_path, "daily-k", _GEN_A[:split],
+        meta=f"tag=daily-k\nat=2026-09-13 16:00:00\netag=gen-A\n"
+             f"last_modified=Fri, 13 Sep 2026 08:00:00 GMT\ntotal={len(_GEN_A)}\n",
+    )
+    session = FakeDumpSession(_GEN_A, [])
+    session.payload = _GEN_A
+    client.session = session
+    _patch_time(monkeypatch)
+
+    # 让服务端每次都带同一代的身份头
+    def resp(offset: int) -> FakeStreamResponse:
+        body = _GEN_A[offset:]
+        return FakeStreamResponse(
+            status_code=206, body=body,
+            headers={"content-range": f"bytes {offset}-{len(_GEN_A) - 1}/{len(_GEN_A)}",
+                     "content-length": str(len(body)),
+                     "etag": "gen-A",
+                     "last-modified": "Fri, 13 Sep 2026 08:00:00 GMT"},
+        )
+
+    session.plan = [lambda offset: resp(offset)]
+    target = tmp_path / "daily-k.parquet"
+    out = client.download_dump("daily-k", dest=target, max_attempts=2)
+
+    assert out.read_bytes() == _GEN_A                 # 拼出来的是完整的一代
+    assert session.download_calls[0]["offset"] == split     # 从断点继续，没有从头下
+    assert session.download_calls[0]["range"] == f"bytes={split}-"
+    assert not part.exists() and not Path(str(part) + ".meta").exists()
+
+
+def test_remote_etag_change_discards_local_part(client, tmp_path, monkeypatch) -> None:
+    """**远端换了一代（ETag 变了）→ 本地半截文件作废，从 0 重下**（核心护栏）。
+
+    这就是"今天下到一半、明天点继续"的真实场景：服务端只按字节切、不校验内容，
+    不拦住的话会拼出两代混合的文件（能读、但价格是两天的混合物）。
+    """
+    split = len(_GEN_A) // 2
+    part, meta_path = _write_part(
+        tmp_path, "daily-k", _GEN_A[:split],
+        meta=f"tag=daily-k\nat=2026-09-13 16:00:00\netag=gen-A\n"
+             f"last_modified=Fri, 13 Sep 2026 08:00:00 GMT\ntotal={len(_GEN_A)}\n",
+    )
+    session = FakeDumpSession(_GEN_B, [])
+
+    def stale(offset: int) -> FakeStreamResponse:      # 第 1 次：远端已是 gen-B
+        return FakeStreamResponse(
+            status_code=206, body=_GEN_B[offset:],
+            headers={"content-range": f"bytes {offset}-{len(_GEN_B) - 1}/{len(_GEN_B)}",
+                     "content-length": str(len(_GEN_B) - offset),
+                     "etag": "gen-B",
+                     "last-modified": "Sat, 14 Sep 2026 08:00:00 GMT"},
+        )
+
+    def fresh(offset: int) -> FakeStreamResponse:      # 第 2 次：作废后从 0 下 gen-B
+        return FakeStreamResponse(
+            status_code=206 if offset else 200, body=_GEN_B[offset:],
+            headers={"content-range": f"bytes {offset}-{len(_GEN_B) - 1}/{len(_GEN_B)}",
+                     "content-length": str(len(_GEN_B) - offset),
+                     "etag": "gen-B",
+                     "last-modified": "Sat, 14 Sep 2026 08:00:00 GMT"},
+        )
+
+    session.plan = [lambda offset: stale(offset), lambda offset: fresh(offset)]
+    client.session = session
+    _patch_time(monkeypatch)
+
+    notes: list[str] = []
+    target = tmp_path / "daily-k.parquet"
+    # `verify=False`：把"完整性校验顺手挡下混合文件"这条退路关掉，**只**测指纹护栏
+    # （否则护栏坏了也可能被 parquet_ok 兜住，用例就成了假绿）
+    out = client.download_dump("daily-k", dest=target, max_attempts=3, verify=False,
+                               note_cb=lambda text: notes.append(text))
+
+    offsets = [c["offset"] for c in session.download_calls]
+    assert offsets[0] == split, offsets          # 先按断点试了一次
+    assert offsets[1] == 0, offsets              # 发现不同代 → **从 0 重下**
+    assert any("远端文件已更新" in n for n in notes), notes
+    assert out.read_bytes() == _GEN_B            # 最终是完整的一代，不是混合文件
+    assert _GEN_A[:split] not in out.read_bytes()
+    assert not meta_path.exists()
+
+
+def test_remote_size_change_without_etag_discards_local_part(client, tmp_path, monkeypatch) -> None:
+    """没有 ETag 时，**总大小变了**同样要作废（对比 Content-Range 里的总长）。"""
+    split = len(_GEN_A) // 2
+    _part, meta_path = _write_part(
+        tmp_path, "daily-k", _GEN_A[:split],
+        meta=f"tag=daily-k\nat=2026-09-13 16:00:00\netag=\nlast_modified=\ntotal={len(_GEN_A)}\n",
+    )
+    session = FakeDumpSession(_GEN_B, [])
+
+    def resp(offset: int) -> FakeStreamResponse:
+        return FakeStreamResponse(
+            status_code=206, body=_GEN_B[offset:],
+            headers={"content-range": f"bytes {offset}-{len(_GEN_B) - 1}/{len(_GEN_B)}",
+                     "content-length": str(len(_GEN_B) - offset)},
+        )
+
+    session.plan = [lambda offset: resp(offset), lambda offset: resp(offset)]
+    client.session = session
+    _patch_time(monkeypatch)
+
+    notes: list[str] = []
+    out = client.download_dump("daily-k", dest=tmp_path / "daily-k.parquet", max_attempts=3,
+                               verify=False, note_cb=lambda text: notes.append(text))
+    offsets = [c["offset"] for c in session.download_calls]
+    assert offsets[:2] == [split, 0], offsets
+    assert any("远端文件已更新（总大小" in n for n in notes), notes
+    assert out.read_bytes() == _GEN_B
+    assert not meta_path.exists()
+
+
+def test_no_fingerprint_at_all_still_resumes(client, tmp_path, monkeypatch) -> None:
+    """远端一个指纹都不给：仍然允许按字节续传（只是留个日志/状态说明）。"""
+    split = len(_GEN_A) // 3
+    part, _meta = _write_part(tmp_path, "daily-k", _GEN_A[:split], meta=None)
+    session = FakeDumpSession(_GEN_A, [])
+
+    def resp(offset: int) -> FakeStreamResponse:
+        body = _GEN_A[offset:]
+        return FakeStreamResponse(
+            status_code=206 if offset else 200, body=body,
+            headers={"content-length": str(len(body))},      # 没有 content-range、没有 etag
+        )
+
+    session.plan = [lambda offset: resp(offset)]
+    client.session = session
+    _patch_time(monkeypatch)
+
+    out = client.download_dump("daily-k", dest=tmp_path / "daily-k.parquet", max_attempts=2)
+    assert session.download_calls[0]["offset"] == split      # 照旧续传
+    assert out.read_bytes() == _GEN_A
+
+
+def test_part_from_previous_day_is_discarded(client, tmp_path, monkeypatch) -> None:
+    """**跨天的半截文件一律作废**（远端不给指纹时的兜底判据）。
+
+    dump 每天重新生成 → 跨天留下的 .part 必然属于上一代，接着下就是在拼两个版本。
+    """
+    part, meta_path = _write_part(
+        tmp_path, "daily-k", _GEN_A[: len(_GEN_A) // 2], meta=None, age_days=2.0
+    )
+    notes: list[str] = []
+    session = FakeDumpSession(_GEN_B, [])
+
+    def resp(offset: int) -> FakeStreamResponse:
+        body = _GEN_B[offset:]
+        return FakeStreamResponse(
+            status_code=206 if offset else 200, body=body,
+            headers={"content-length": str(len(body))},
+        )
+
+    session.plan = [lambda offset: resp(offset)]
+    client.session = session
+    _patch_time(monkeypatch)
+
+    out = client.download_dump(
+        "daily-k", dest=tmp_path / "daily-k.parquet", max_attempts=2,
+        note_cb=lambda text: notes.append(text),
+    )
+    assert session.download_calls[0]["offset"] == 0, "跨天的 .part 不该被继续用"
+    assert out.read_bytes() == _GEN_B
+    assert any("作废" in n and "每天重新生成" in n for n in notes), notes
+    assert not part.exists() and not meta_path.exists()
+
+
+def test_part_from_today_is_not_discarded(client, tmp_path, monkeypatch) -> None:
+    """对照：**今天的**半截文件照常续传（护栏别把正常续传也砍了）。"""
+    split = len(_GEN_A) // 2
+    _part, _meta = _write_part(tmp_path, "daily-k", _GEN_A[:split], meta=None)
+    session = FakeDumpSession(_GEN_A, [])
+
+    def resp(offset: int) -> FakeStreamResponse:
+        body = _GEN_A[offset:]
+        return FakeStreamResponse(
+            status_code=206 if offset else 200, body=body,
+            headers={"content-length": str(len(body))},
+        )
+
+    session.plan = [lambda offset: resp(offset)]
+    client.session = session
+    _patch_time(monkeypatch)
+
+    out = client.download_dump("daily-k", dest=tmp_path / "daily-k.parquet", max_attempts=2)
+    assert session.download_calls[0]["offset"] == split
+    assert out.read_bytes() == _GEN_A
+
+
+def test_failed_download_keeps_identity_meta_for_next_run(client, tmp_path, monkeypatch) -> None:
+    """重试耗尽时，`.part` 与身份档案都要留着 —— 下次运行才能比对"还是不是同一代"。"""
+    first = FakeStreamResponse(
+        status_code=200, body=_GEN_A, headers={"content-length": str(len(_GEN_A))},
+        fail_after=len(_GEN_A) // 4,
+    )
+    session = FakeDumpSession(_GEN_A, [first])
+    client.session = session
+    _patch_time(monkeypatch)
+
+    with pytest.raises(hx.DumpDownloadError):
+        client.download_dump("daily-k", dest=tmp_path / "daily-k.parquet", max_attempts=1)
+
+    part = tmp_path / "daily-k.parquet.part"
+    meta = Path(str(part) + ".meta")
+    assert part.exists() and part.stat().st_size > 0
+    assert meta.exists(), "身份档案要留着，否则下次续传无法判断是不是同一代"
+    assert "total=" in meta.read_text(encoding="utf-8")
+
+
+def test_download_requests_ask_for_identity_encoding(client, tmp_path, monkeypatch) -> None:
+    """请求头带 `Accept-Encoding: identity`：避免代理 gzip 让"字节数对不上"。"""
+    session = FakeDumpSession(_GEN_A, [])
+    client.session = session
+    _patch_time(monkeypatch)
+    client.download_dump("daily-k", dest=tmp_path / "daily-k.parquet", max_attempts=1)
+    assert session.download_calls[0]["headers"].get("Accept-Encoding") == "identity"
+
+
+@pytest.mark.parametrize(
+    ("expected", "current", "should_complain"),
+    [
+        ({"etag": "a"}, {"etag": "b"}, True),                       # ETag 变了
+        ({"etag": "a"}, {"etag": "a"}, False),                      # 一样 → 放行
+        ({"last_modified": "x"}, {"last_modified": "y"}, True),      # Last-Modified 变了
+        ({"total": "100"}, {"total": "200"}, True),                  # 总大小变了
+        ({"total": "100"}, {"total": "100"}, False),
+        ({"etag": "", "total": ""}, {"etag": "b", "total": "5"}, False),   # 上次没记 → 不拦
+        ({}, {}, False),                                             # 完全没信息 → 不拦
+    ],
+)
+def test_identity_mismatch_rules(expected, current, should_complain) -> None:
+    """身份比对规则：**任一可得且不同**才拦；拿不到信息时不拦（宁可续传也不误杀）。"""
+    reason = hx._identity_mismatch(expected, current)
+    assert bool(reason) is should_complain, reason
+    if reason:
+        assert "已更新" in reason

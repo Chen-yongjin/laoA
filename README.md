@@ -63,6 +63,12 @@
   都能在 `config.toml` 里调（`download_connect_timeout` / `download_read_timeout` / `download_max_attempts`）；
 - **完整性校验**：下完先确认是可读的 Parquet（行数 > 0），**通过了才原子替换**成正式文件；
   残缺文件永远不会被当成"已下好"。
+- **同源校验（这条很关键）**：dump 是**每天重新生成**的，而续传请求服务端只按字节切、
+  并不校验内容。所以第一次响应会把远端的 ETag / Last-Modified / 总大小记进
+  `<tag>.parquet.part.meta`，续传时逐项比对；**一旦发现远端换了一代，就把本地半截文件
+  作废、从 0 重下** —— 绝不把两天的数据拼成一个"能读、但内容是两代混合"的库。
+  远端不给任何指纹时退回保守规则：**跨天的半截文件一律作废**。
+  （换句话说：同一天内断了接着下是最省时间的；隔天再点会重新下，这是刻意的安全取舍。）
 - 界面上有**百分比进度**（`87.3/180.7 MB`），不会让人以为卡死了。
 
 **下载失败了怎么排查**：
@@ -310,7 +316,7 @@ laoA/
 ```
 
 > **详细打包教程（含分发与踩坑）见 [`docs/打包教程.md`](docs/打包教程.md)**
-> 一句话版本：`py -3.11 -m venv .venv` → `pip install -e ".[dev]"` → `pytest tests -q`（期望 617 passed）
+> 一句话版本：`py -3.11 -m venv .venv` → `pip install -e ".[dev]"` → `pytest tests -q`（期望 632 passed）
 > → `build\build.bat` → 产物 `dist\LaoATrader\LaoATrader.exe`。
 > **只运行 exe 的人不需要装 Python**；打包的人才需要 Python 3.11。
 
@@ -368,7 +374,7 @@ PYTHONPATH=src /tmp/laoa-venv/bin/python -m pytest tests -q
 
 > 装 `pyarrow` 不能省：dump 相关用例要么真跑（需要它读写 Parquet），要么整组跳过；
 > 装 `PySide6` 则让 47 条界面用例真跑（离屏），否则那一整个文件跳过。
-> 依赖装齐时是 **617 passed**；跑完记得把 `__pycache__` / `.pytest_cache` 删掉再打包
+> 依赖装齐时是 **632 passed**；跑完记得把 `__pycache__` / `.pytest_cache` 删掉再打包
 > （`.gitignore` 已列出，交付目录里不该出现这些）。
 
 > 测试自己拼 `config.toml` 时，**路径必须转义**（Windows 的 `C:\Users\...` 会让 `tomllib`

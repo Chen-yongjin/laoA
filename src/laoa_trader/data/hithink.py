@@ -226,6 +226,99 @@ def _content_total(headers: dict, offset: int) -> int:
     return 0
 
 
+# ── 断点续传的"还是不是同一代 dump"护栏 ──
+#
+# 为什么必须有：dump（`daily-k`）是**按天重新生成**的，而续传只看"本地 .part 有多少
+# 字节"，`Range` 请求服务端**不校验内容**（它只按字节切）。于是"今天下到一半、明天点
+# 继续"会把新版本的尾部贴到旧版本的头部后面，拼出一个**能读、但两天数据混在一起**的
+# 文件 —— 对选股程序来说这比直接报错危险得多。所以：
+#   1. 首次响应时把远端的"身份"（ETag / Last-Modified / 总大小）记在 sidecar 里；
+#   2. 每次续传请求回来后比对，**任一可得且不同** → 本地半截文件作废、从头下载；
+#   3. 远端什么指纹都不给时，退回"跨天的半截文件一律作废"（dump 每天重生成）。
+
+#: `.part` 的身份档案后缀（纯文本，用户可以直接打开看）
+_PART_META_SUFFIX = ".meta"
+
+
+def _remote_identity(headers: dict, offset: int) -> dict[str, str]:
+    """从响应头提取远端文件的身份指纹（拿不到的字段留空串）。"""
+    head = headers or {}
+    total = _content_total(head, offset)
+    return {
+        "etag": str(head.get("etag") or "").strip(),
+        "last_modified": str(head.get("last-modified") or "").strip(),
+        "total": str(total) if total else "",
+    }
+
+
+def _read_meta(path: Path) -> dict[str, str]:
+    """读 sidecar（不存在/读不了都返回空字典，绝不因此挡住下载）。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip():
+            out[key.strip()] = value.strip()
+    return out
+
+
+def _write_meta(path: Path, ident: dict[str, str], tag: str) -> None:
+    """记下这一代远端的身份（写不了只记日志，不影响下载）。"""
+    lines = [
+        f"tag={tag}",
+        f"at={datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        *[f"{key}={value}" for key, value in ident.items()],
+    ]
+    try:
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001 - 档案写不了不该毁掉下载
+        logger.debug(f"写 {path.name} 失败（忽略）：{exc}")
+
+
+def _stale_part_reason(part: Path) -> str:
+    """半截文件是不是"上一代 dump"留下的？（跨天一律作废）
+
+    这是远端一个指纹都不给时的兜底判据：dump 每天重新生成，跨天的半截文件
+    **必然**来自上一代，接着下就是在拼两个版本。
+    """
+    try:
+        mtime = datetime.fromtimestamp(part.stat().st_mtime)
+    except OSError:
+        return ""
+    if mtime.date() == datetime.now().date():
+        return ""
+    return (
+        f"本地半截文件是 {mtime:%Y-%m-%d %H:%M} 留下的，而 dump 每天重新生成，"
+        "接着下会拼出两个版本的混合文件，已作废改为从头下载"
+    )
+
+
+def _identity_mismatch(expected: dict[str, str], current: dict[str, str]) -> str:
+    """两代远端身份不一致 → 中文原因；无法判断或一致 → 空串。"""
+    for key, label in (("etag", "ETag"), ("last_modified", "Last-Modified")):
+        old, new = expected.get(key, ""), current.get(key, "")
+        if old and new and old != new:
+            return f"远端文件已更新（{label} 由 {old} 变成 {new}）"
+    old_total, new_total = expected.get("total", ""), current.get("total", "")
+    if old_total and new_total and old_total != new_total:
+        return (
+            f"远端文件已更新（总大小 {_mb_text(old_total)} → {_mb_text(new_total)}）"
+        )
+    return ""
+
+
+def _mb_text(text: str) -> str:
+    """`"189000000"` → `"189.0 MB"`（数字认不出来就原样返回）。"""
+    try:
+        return format_mb(int(text))
+    except (TypeError, ValueError):
+        return str(text)
+
+
+
 # ── 凭据 ──
 
 
@@ -754,6 +847,7 @@ class HithinkClient:
         target = Path(dest) if dest else Path(tempfile.gettempdir()) / f"hithink-{tag}.parquet"
         target.parent.mkdir(parents=True, exist_ok=True)
         part = target.with_suffix(target.suffix + ".part")
+        meta_path = Path(str(part) + _PART_META_SUFFIX)
         attempts = max(int(max_attempts), 1)
 
         downloaded = _file_size(part)
@@ -762,6 +856,14 @@ class HithinkClient:
         if downloaded:
             logger.info(f"{tag}：发现未下完的 .part（{format_mb(downloaded)}），将从中断处继续")
             _note(note_cb, f"{tag}：发现未下完的文件（{format_mb(downloaded)}），从断点继续")
+            # 兜底护栏：跨天的半截文件必然是上一代 dump（每天重新生成），一律作废
+            stale = _stale_part_reason(part)
+            if stale:
+                logger.warning(f"{tag}：{stale}")
+                _note(note_cb, f"{tag}：{stale}")
+                part.unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+                downloaded = 0
 
         for attempt in range(1, attempts + 1):
             # **每次尝试前都以 .part 的真实大小为准**：上一次尝试可能已经写进去一部分
@@ -782,18 +884,19 @@ class HithinkClient:
                     _note(note_cb, f"正在下载 {tag}（取签名 URL 并开始传输）")
                 downloaded, total = self._download_once(
                     tag, part, downloaded, progress_cb, connect_timeout, read_timeout,
-                    should_stop,
+                    should_stop, meta_path,
                 )
             except DownloadCancelled:
                 logger.info(f"{tag}：用户取消下载（已下载 {format_mb(_file_size(part))} 已保留）")
                 _note(note_cb, f"已取消下载（已下 {format_mb(_file_size(part))}，下次接着传）")
                 raise
             except _Restart as exc:
-                # .part 不可信（远端说 Range 超界 / 服务器忽略了 Range）→ 丢掉从头来，
-                # 这属于"手动清理残留"，不该让用户看到一个莫名其妙的报错
-                logger.warning(f"{tag}：本地残留的 .part 不可用（{exc}），改为从头下载")
-                _note(note_cb, f"{tag}：本地残留文件不可用（{exc}），改为从头下载")
+                # .part 不可信（远端说 Range 超界 / 服务器忽略了 Range / 远端文件换了
+                # 一代）→ 丢掉从头来，这属于"清理残留"，不该让用户看到莫名其妙的报错
+                logger.warning(f"{tag}：{exc}，改为从头下载（已下载的 {format_mb(downloaded)} 作废）")
+                _note(note_cb, f"{tag}：{exc}，改为从头下载")
                 part.unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
                 downloaded, total, stage, reason = 0, 0, "清理残留", str(exc)
             except _Retry as exc:
                 stage, reason = exc.stage, exc.reason
@@ -818,6 +921,7 @@ class HithinkClient:
                     _note(note_cb, f"{tag}：{reason}，已丢弃并重下")
                 else:
                     part.replace(target)
+                    meta_path.unlink(missing_ok=True)   # 下好了就不需要身份档案了
                     logger.info(
                         f"下载完成：{target}（{format_mb(_file_size(target))}，"
                         f"共 {attempt} 次尝试）"
@@ -860,18 +964,29 @@ class HithinkClient:
         connect_timeout: float,
         read_timeout: float,
         should_stop: Any = None,
+        meta_path: Path | None = None,
     ) -> tuple[int, int]:
         """一次尝试：重签 URL → 从 `downloaded` 处 Range 续传 → 写完当前响应。
+
+        Args:
+            meta_path: 身份档案（sidecar）路径。首次（`downloaded == 0`）把远端的
+                ETag / Last-Modified / 总大小记进去；续传时比对，**不是同一代就作废重下**
+                （dump 每天重新生成，而 Range 请求服务端不校验内容）。
 
         Returns:
             (已下载字节, 文件总大小)；总大小未知时为 0。
 
         Raises:
             _Retry: 可重试（URL 过期/网络/校验前的传输中断），`.part` 保留。
-            _Restart: `.part` 不可信，应删掉重来。
+            _Restart: `.part` 不可信（Range 超界 / 服务器忽略 Range / 远端换了一代），
+                应把 `.part` 与身份档案一起删掉重来。
         """
         url, expires = self.dump_url(tag)      # **每次尝试都重新签**：URL 只活 ~5 分钟
-        headers = {"Range": f"bytes={downloaded}-"} if downloaded else {}
+        # `Accept-Encoding: identity`：别让中间代理对响应做 gzip —— 那样"收到的字节数"
+        # 会与 Content-Length 对不上，续传会算出错误的断点并误判成"没下完"。
+        headers = {"Accept-Encoding": "identity"}
+        if downloaded:
+            headers["Range"] = f"bytes={downloaded}-"
         try:
             resp = self.session.get(
                 url, headers=headers, stream=True,
@@ -893,7 +1008,21 @@ class HithinkClient:
                 # 服务器忽略了 Range：如果还按"追加"写就会把文件写坏，必须从头写
                 raise _Restart("服务器未按 Range 返回（HTTP 200）")
 
-            total = _content_total(getattr(resp, "headers", None) or {}, downloaded)
+            resp_headers = getattr(resp, "headers", None) or {}
+            ident = _remote_identity(resp_headers, downloaded)
+            if downloaded:
+                # 续传：先确认"还是同一代 dump"，否则拼出来的文件是两天的混合物
+                mismatch = _identity_mismatch(
+                    _read_meta(meta_path) if meta_path is not None else {}, ident
+                )
+                if mismatch:
+                    raise _Restart(
+                        f"{mismatch}，本地已下载的 {format_mb(downloaded)} 与它不同源"
+                    )
+            elif meta_path is not None:
+                _write_meta(meta_path, ident, tag)
+
+            total = _content_total(resp_headers, downloaded)
             written = downloaded
             _call_progress(progress_cb, written, total or written)
             try:
