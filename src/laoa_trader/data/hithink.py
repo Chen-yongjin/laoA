@@ -66,6 +66,18 @@ _LOCAL_PREFIX = {"SH": "sh", "SZ": "sz", "BJ": "bj"}
 #: 其它业务码（含认证、参数、能力不支持）重试无意义，直接抛出。
 _RETRY_CODES = frozenset({4001, 5001, 5002, 5003})
 
+# ── dump 下载参数（dump 是几百 MB 的大文件，"一次 GET 写完"必然不可靠）──
+#: 下载失败后的最大尝试次数（每次都会**重新签 URL** 并从断点继续）
+DEFAULT_DOWNLOAD_ATTEMPTS = 5
+#: 连接超时（秒）——建连慢通常是网络问题，短一点好尽快重试
+DEFAULT_CONNECT_TIMEOUT = 15.0
+#: 读取超时（秒）——两个数据块之间的最大间隔；几百 MB 的流给它宽松些
+DEFAULT_READ_TIMEOUT = 90.0
+#: 每次读取的块大小（1 MB）
+DOWNLOAD_CHUNK = 1 << 20
+#: 重试退避上限（秒）
+_MAX_BACKOFF = 30.0
+
 
 class HithinkError(RuntimeError):
     """接口业务错误（信封 `code != 0`）。"""
@@ -87,6 +99,131 @@ class HithinkRateLimitError(HithinkError):
 
 class HithinkNotReadyError(HithinkError):
     """数据尚未就绪（4040）。"""
+
+
+class DumpDownloadError(HithinkError):
+    """dump 下载失败 —— **结构化**错误（已下载多少 / 卡在哪一步 / 建议怎么办）。
+
+    为什么单独一个异常：几百 MB 的下载失败是**常态**（URL 5 分钟过期、家用宽带抖动、
+    公司网络断流），用户需要知道的三件事是"下到哪了""为什么停的""现在该怎么办"，
+    而不是一句 `ReadTimeout`。上层（sync）把它转成 `SyncResult` 显示在界面/CLI 上。
+    """
+
+    def __init__(
+        self,
+        tag: str,
+        message: str,
+        *,
+        downloaded: int = 0,
+        total: int = 0,
+        attempts: int = 0,
+        stage: str = "",
+        suggestion: str = "",
+    ) -> None:
+        super().__init__(-1, message, tag)
+        self.tag = tag
+        self.downloaded = downloaded
+        self.total = total
+        self.attempts = attempts
+        self.stage = stage
+        self.suggestion = suggestion
+
+    def as_dict(self) -> dict:
+        """给界面/日志用的结构化字段。"""
+        return {
+            "tag": self.tag, "downloaded": self.downloaded, "total": self.total,
+            "attempts": self.attempts, "stage": self.stage, "suggestion": self.suggestion,
+            "message": str(self),
+        }
+
+
+class DownloadCancelled(HithinkError):
+    """用户取消了下载（`.part` 保留，下次从断点继续）。"""
+
+
+class _Retry(Exception):
+    """内部信号：这次尝试失败，但**保留 .part**、重新签 URL 后继续。"""
+
+    def __init__(self, stage: str, reason: str) -> None:
+        super().__init__(reason)
+        self.stage = stage
+        self.reason = reason
+
+
+class _Restart(Exception):
+    """内部信号：`.part` 不可信（Range 超界 / 校验不过），删掉从头下。"""
+
+
+# ── 下载与校验的小工具 ──
+
+
+def format_mb(size: int | float) -> str:
+    """人类可读的大小（日志与错误信息里用）。"""
+    value = float(size or 0)
+    if value >= 1e9:
+        return f"{value / 1e9:.2f} GB"
+    if value >= 1e6:
+        return f"{value / 1e6:.1f} MB"
+    if value >= 1e3:
+        return f"{value / 1e3:.0f} KB"
+    return f"{value:.0f} B"
+
+
+def parquet_rows(path: Path | str) -> int:
+    """Parquet 行数（读不了返回 0）。"""
+    try:
+        import pyarrow.parquet as pq
+
+        return int(pq.ParquetFile(path).metadata.num_rows)
+    except Exception:  # noqa: BLE001 - 损坏/缺依赖都按"读不了"处理
+        return 0
+
+
+def parquet_ok(path: Path | str, min_rows: int = 1) -> bool:
+    """文件是不是一个**可读且非空**的 Parquet（下载完整性校验）。
+
+    没有 pyarrow 时退化成"文件大小 > 1KB"（此时本来也读不了 Parquet）。
+    """
+    target = Path(path)
+    try:
+        if target.stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        return target.stat().st_size > 1024
+    try:
+        return int(pq.ParquetFile(target).metadata.num_rows) >= min_rows
+    except Exception:  # noqa: BLE001 - 损坏/被截断
+        return False
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return 0
+
+
+def _content_total(headers: dict, offset: int) -> int:
+    """从响应头推断**文件总大小**。
+
+    - `content-range: bytes 32768-180700000/180700001` → 取斜杠后的总数（206 时最准）；
+    - `content-length`：206 时是"本次剩余字节"，要加上偏移；200 时就是总大小。
+
+    （不能用 HEAD 拿大小：预签名 URL 只允许 GET，HEAD 会 403。）
+    """
+    content_range = str((headers or {}).get("content-range") or "")
+    if "/" in content_range:
+        tail = content_range.rsplit("/", 1)[-1].strip()
+        if tail.isdigit():
+            return int(tail)
+    length = str((headers or {}).get("content-length") or "")
+    if length.isdigit():
+        return offset + int(length)
+    return 0
 
 
 # ── 凭据 ──
@@ -566,27 +703,220 @@ class HithinkClient:
             raise HithinkError(-1, "dump 端点未返回 presigned_url", tag)
         return url, str(data.get("presigned_url_expires_at") or "")
 
-    def download_dump(self, tag: str = "daily-k-10d", dest: Path | str | None = None) -> Path:
-        """下载全市场 Parquet dump 到本地文件（流式，避免整包进内存）。
+    def download_dump(
+        self,
+        tag: str = "daily-k-10d",
+        dest: Path | str | None = None,
+        *,
+        progress_cb: Any = None,
+        max_attempts: int = DEFAULT_DOWNLOAD_ATTEMPTS,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        read_timeout: float = DEFAULT_READ_TIMEOUT,
+        verify: bool = True,
+        should_stop: Any = None,
+        note_cb: Any = None,
+    ) -> Path:
+        """下载全市场 Parquet dump 到本地文件（**分块 + 断点续传 + 过期自动重签**）。
 
-        大文件下载用更长的超时（默认 30s 对几百 MB 的 dump 太短），
-        并且**只在拿到响应后才写文件** —— 失败时不会留下半截文件骗过"续传"判断。
+        为什么要这么麻烦：dump 有几百 MB（`daily-k` 约 180 MB），而预签名 URL
+        **只允许 GET、有效期约 5 分钟**（HEAD 会 403）。一次 `requests.get(stream=True)`
+        写完的做法，遇到"下载中途 URL 过期 / 家用宽带抖动 / 公司网络断流"就整轮失败，
+        而且下次还得从 0 开始 —— 这正是用户"下载不了 10 年数据"的原因。
+
+        现在的做法：
+
+        1. 写 `<目标>.part`，**已下载字节数就是下次的 `Range` 起点**；
+        2. 每次尝试都**重新签一次 URL**（过期问题自然解决）并从断点续传；
+        3. 有界重试 + 指数退避（默认 5 次），日志写清"从第 X MB 继续，第 N 次尝试"；
+        4. 连接超时与读取超时分开设（读取更宽松，见常量）；
+        5. 传输完成后校验确实是可读的 Parquet（行数 > 0），**通过后才原子替换**成正式文件名；
+        6. 失败时抛 `DumpDownloadError`（结构化：已下载多少 / 卡在哪一步 / 建议），
+           上层转成 `SyncResult` 显示，不用裸异常糊用户一脸。
+
+        Args:
+            tag: `daily-k` / `daily-k-10d` / `adjustment-factors`。
+            dest: 目标文件；缺省放系统临时目录。
+            progress_cb: `(已下载字节, 总字节)` 回调（总大小未知时等于已下载）。
+            max_attempts: 最大尝试次数（每次都会重新签 URL）。
+            connect_timeout / read_timeout: 建连与读取超时（秒）。
+            verify: 是否做完 Parquet 完整性校验。
+            should_stop: 可选回调，返回真表示用户取消（`.part` 保留、下次继续）。
+            note_cb: 可选回调 `(一句话中文状态)` —— 用于界面/命令行显示
+                "正在重签 URL 继续下载（第 2 次）"这类**状态**（与进度分开：
+                进度是百分比，状态是"此刻在干什么"）。
+
+        Returns:
+            下载好的文件路径。
+
+        Raises:
+            DumpDownloadError: 重试耗尽（含已下载字节数与建议）。
         """
-        url, expires = self.dump_url(tag)
         target = Path(dest) if dest else Path(tempfile.gettempdir()) / f"hithink-{tag}.parquet"
         target.parent.mkdir(parents=True, exist_ok=True)
-        logger.info(f"下载同花顺 dump：{tag} → {target}（URL 过期时间 {expires or '未知'}）")
-        tmp = target.with_suffix(target.suffix + ".part")
-        with self.session.get(url, stream=True, timeout=max(self.timeout, 120)) as resp:
-            resp.raise_for_status()
-            with open(tmp, "wb") as fh:
-                for chunk in resp.iter_content(chunk_size=1 << 20):
-                    if chunk:
+        part = target.with_suffix(target.suffix + ".part")
+        attempts = max(int(max_attempts), 1)
+
+        downloaded = _file_size(part)
+        total = 0
+        stage, reason = "准备", ""
+        if downloaded:
+            logger.info(f"{tag}：发现未下完的 .part（{format_mb(downloaded)}），将从中断处继续")
+            _note(note_cb, f"{tag}：发现未下完的文件（{format_mb(downloaded)}），从断点继续")
+
+        for attempt in range(1, attempts + 1):
+            # **每次尝试前都以 .part 的真实大小为准**：上一次尝试可能已经写进去一部分
+            # （断流前收到的字节），不能还用上一轮的旧值 —— 否则重试会从 0 重下。
+            downloaded = _file_size(part)
+            try:
+                logger.info(
+                    f"下载 dump {tag}：第 {attempt}/{attempts} 次尝试，"
+                    f"从 {format_mb(downloaded)} 处继续（目标 {target.name}）"
+                )
+                if attempt > 1:
+                    _note(
+                        note_cb,
+                        f"正在重签 URL 继续下载（第 {attempt} 次，"
+                        f"从 {format_mb(downloaded)} 处接着下）",
+                    )
+                else:
+                    _note(note_cb, f"正在下载 {tag}（取签名 URL 并开始传输）")
+                downloaded, total = self._download_once(
+                    tag, part, downloaded, progress_cb, connect_timeout, read_timeout,
+                    should_stop,
+                )
+            except DownloadCancelled:
+                logger.info(f"{tag}：用户取消下载（已下载 {format_mb(_file_size(part))} 已保留）")
+                _note(note_cb, f"已取消下载（已下 {format_mb(_file_size(part))}，下次接着传）")
+                raise
+            except _Restart as exc:
+                # .part 不可信（远端说 Range 超界 / 服务器忽略了 Range）→ 丢掉从头来，
+                # 这属于"手动清理残留"，不该让用户看到一个莫名其妙的报错
+                logger.warning(f"{tag}：本地残留的 .part 不可用（{exc}），改为从头下载")
+                _note(note_cb, f"{tag}：本地残留文件不可用（{exc}），改为从头下载")
+                part.unlink(missing_ok=True)
+                downloaded, total, stage, reason = 0, 0, "清理残留", str(exc)
+            except _Retry as exc:
+                stage, reason = exc.stage, exc.reason
+                downloaded = _file_size(part)
+                logger.warning(
+                    f"{tag}：第 {attempt}/{attempts} 次未成功（{exc.stage}：{exc.reason}），"
+                    f"已下载 {format_mb(downloaded)}；退避后重签 URL 从断点继续"
+                )
+                _note(
+                    note_cb,
+                    f"第 {attempt}/{attempts} 次未成功（{exc.stage}：{exc.reason}），"
+                    f"已下 {format_mb(downloaded)}；稍后自动重签 URL 继续",
+                )
+            else:
+                if verify and not parquet_ok(part):
+                    # 大小够了但内容不可读（半截/损坏）→ 删掉重来，避免"看起来下好了"
+                    size = _file_size(part)
+                    part.unlink(missing_ok=True)
+                    downloaded, total = 0, 0
+                    stage, reason = "完整性校验", f"文件 {format_mb(size)} 但不可读（行数 0）"
+                    logger.warning(f"{tag}：{reason}，已丢弃并重下")
+                    _note(note_cb, f"{tag}：{reason}，已丢弃并重下")
+                else:
+                    part.replace(target)
+                    logger.info(
+                        f"下载完成：{target}（{format_mb(_file_size(target))}，"
+                        f"共 {attempt} 次尝试）"
+                    )
+                    _note(
+                        note_cb,
+                        f"{tag} 下载完成（{format_mb(_file_size(target))}，"
+                        f"共 {attempt} 次尝试）",
+                    )
+                    if progress_cb:
+                        _call_progress(progress_cb, _file_size(target), _file_size(target))
+                    return target
+
+            if attempt < attempts:
+                wait = min(2.0 ** (attempt - 1), _MAX_BACKOFF)
+                time.sleep(wait)
+
+        message = (
+            f"dump {tag} 下载失败：已下载 {format_mb(downloaded)}"
+            + (f" / {format_mb(total)}" if total else "")
+            + f"，{attempts} 次尝试后放弃（卡在{stage}：{reason}）"
+        )
+        suggestion = (
+            "检查网络后**重新运行本程序即可从断点继续**（不会从头下载）；"
+            "若反复失败，可先把网络调到更稳的环境（或在能下载的机器上下好 "
+            f"{tag}.parquet 后拷进数据目录的 dumps 子目录）"
+        )
+        logger.error(f"{message}；建议：{suggestion}")
+        raise DumpDownloadError(
+            tag, message, downloaded=downloaded, total=total, attempts=attempts,
+            stage=stage, suggestion=suggestion,
+        )
+
+    def _download_once(
+        self,
+        tag: str,
+        part: Path,
+        downloaded: int,
+        progress_cb: Any,
+        connect_timeout: float,
+        read_timeout: float,
+        should_stop: Any = None,
+    ) -> tuple[int, int]:
+        """一次尝试：重签 URL → 从 `downloaded` 处 Range 续传 → 写完当前响应。
+
+        Returns:
+            (已下载字节, 文件总大小)；总大小未知时为 0。
+
+        Raises:
+            _Retry: 可重试（URL 过期/网络/校验前的传输中断），`.part` 保留。
+            _Restart: `.part` 不可信，应删掉重来。
+        """
+        url, expires = self.dump_url(tag)      # **每次尝试都重新签**：URL 只活 ~5 分钟
+        headers = {"Range": f"bytes={downloaded}-"} if downloaded else {}
+        try:
+            resp = self.session.get(
+                url, headers=headers, stream=True,
+                timeout=(connect_timeout, read_timeout),
+            )
+        except requests.RequestException as exc:
+            raise _Retry("建连", f"{type(exc).__name__}: {exc}") from exc
+
+        with resp:
+            status = int(getattr(resp, "status_code", 200) or 200)
+            if status in (401, 403):
+                # 预签名 URL 过期/被拒：重新签一次就好（下一次尝试会拿到新 URL）
+                raise _Retry("取签名", f"URL 已过期或被拒（HTTP {status}，过期时间 {expires or '未知'}）")
+            if status == 416:
+                raise _Restart(f"Range 超出远端文件（本地 .part 有 {format_mb(downloaded)}）")
+            if status not in (200, 206):
+                raise _Retry("传输", f"HTTP {status}")
+            if status == 200 and downloaded:
+                # 服务器忽略了 Range：如果还按"追加"写就会把文件写坏，必须从头写
+                raise _Restart("服务器未按 Range 返回（HTTP 200）")
+
+            total = _content_total(getattr(resp, "headers", None) or {}, downloaded)
+            written = downloaded
+            _call_progress(progress_cb, written, total or written)
+            try:
+                with open(part, "ab" if downloaded else "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=DOWNLOAD_CHUNK):
+                        if not chunk:
+                            continue
                         fh.write(chunk)
-        # 原子替换：中途失败时 target 保持原样（续传逻辑据此判断"有没有下好"）
-        tmp.replace(target)
-        logger.info(f"下载完成：{target}（{target.stat().st_size / 1e6:.1f} MB）")
-        return target
+                        written += len(chunk)
+                        _call_progress(progress_cb, written, total or written)
+                        if _stop_requested(should_stop):
+                            raise DownloadCancelled(
+                                -1, f"已取消（已下载 {format_mb(written)}，下次从断点继续）", tag
+                            )
+            except _Retry:
+                raise
+            except (requests.RequestException, OSError) as exc:
+                # 传输中断：**保留 .part**，下次从 written 处继续
+                raise _Retry("传输", f"{type(exc).__name__}: {exc}") from exc
+
+            if total and written != total:
+                raise _Retry("传输", f"只下到 {format_mb(written)} / {format_mb(total)}（连接被中断）")
+            return written, total
 
     def iter_dump(self, tag: str = "daily-k-10d", keep: bool = False):
         """下载并解析 dump 为 pandas DataFrame。
@@ -609,6 +939,36 @@ class HithinkClient:
             if not keep:
                 path.unlink(missing_ok=True)
         return frame
+
+
+def _stop_requested(should_stop: Any) -> bool:
+    """用户是否要求取消？（回调出错按"不取消"处理，别让界面小毛病打断下载）"""
+    if should_stop is None:
+        return False
+    try:
+        return bool(should_stop())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _call_progress(progress_cb: Any, done: int, total: int) -> None:
+    """调用进度回调；回调本身出错**不能**影响下载（界面回调最容易踩到）。"""
+    if progress_cb is None:
+        return
+    try:
+        progress_cb(int(done), int(total))
+    except Exception:  # noqa: BLE001
+        logger.debug("下载进度回调异常，已忽略", exc_info=True)
+
+
+def _note(note_cb: Any, text: str) -> None:
+    """调用状态回调（"正在重签 URL 继续下载（第 2 次）"这类）；回调出错不影响下载。"""
+    if note_cb is None:
+        return
+    try:
+        note_cb(str(text))
+    except Exception:  # noqa: BLE001
+        logger.debug("下载状态回调异常，已忽略", exc_info=True)
 
 
 def default_client(**kwargs: Any) -> HithinkClient:

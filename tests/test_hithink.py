@@ -165,18 +165,25 @@ def test_limit_up_pool_paginates_by_page_size() -> None:
 
 
 def test_download_dump_uses_presigned_url_and_atomic_replace(tmp_path: Path) -> None:
-    """dump 下载：先落 .part 再原子替换（半截文件不能骗过续传判断）。"""
+    """dump 下载：先落 .part，**校验通过后**再原子替换（半截文件不能骗过续传判断）。"""
+    import io
+
+    import pandas as pd
+
     target = tmp_path / "daily-k.parquet"
+    buf = io.BytesIO()
+    pd.DataFrame({"thscode": ["600519.SH"], "date_ms": [1]}).to_parquet(buf, index=False)
+    payload = buf.getvalue()
 
     class StreamResponse:
         status_code = 200
+        headers = {"content-length": str(len(payload))}
 
         def raise_for_status(self) -> None:
             pass
 
         def iter_content(self, chunk_size: int):
-            yield b"PAR1"
-            yield b"DATA"
+            yield payload
 
         def __enter__(self):
             return self
@@ -191,7 +198,7 @@ def test_download_dump_uses_presigned_url_and_atomic_replace(tmp_path: Path) -> 
     })
     path = _client(session).download_dump("daily-k", dest=target)
     assert path == target
-    assert target.read_bytes() == b"PAR1DATA"
+    assert target.read_bytes() == payload
     assert not (tmp_path / "daily-k.parquet.part").exists()
 
 

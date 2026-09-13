@@ -226,6 +226,14 @@ class Config:
     stop_loss: float = 0.05
     take_profit: float = 0.10
 
+    # ── 大文件下载（dump 几百 MB：断点续传 + 过期自动重签）──
+    #: 单次下载失败后的最大尝试次数（每次都会重新签 URL 并从断点继续）
+    download_max_attempts: int = 5
+    #: 建连超时（秒）——网络不好时短一点，尽快重试
+    download_connect_timeout: float = 15.0
+    #: 读取超时（秒）——两个数据块之间的最大间隔，给流式下载留足余量
+    download_read_timeout: float = 90.0
+
     # ── 定时（界面「设置 → 自动运行」可改；改完**立即生效**，不用重启）──
     #: 是否每天自动运行（关掉则只在你手动点按钮时跑）
     auto_run: bool = True
@@ -431,6 +439,9 @@ def _apply_env(cfg: Config) -> Config:
         ("MIN_HISTORY_YEARS", "min_history_years"),
         ("MIN_SYMBOLS", "min_symbols"),
         ("MAX_STALE_TRADING_DAYS", "max_stale_trading_days"),
+        ("DOWNLOAD_MAX_ATTEMPTS", "download_max_attempts"),
+        ("DOWNLOAD_CONNECT_TIMEOUT", "download_connect_timeout"),
+        ("DOWNLOAD_READ_TIMEOUT", "download_read_timeout"),
         ("TRADE_CAPITAL", "trade_capital"),
         ("TRADE_POSITION_PCT", "trade_position_pct"),
         ("TRADE_MAX_POSITIONS", "trade_max_positions"),
@@ -628,6 +639,10 @@ def render_config_updates(text: str, updates: dict[str, Any]) -> str:
     return new_text + ("\n" if text.endswith("\n") or new_text else "")
 
 
+#: 值类型是 Path 的顶层键（`save_settings` 时把界面传来的字符串收紧成 Path）
+_PATH_FIELDS = frozenset({"data_dir", "source_path"})
+
+
 def update_config_file(
     path: Path | str | None,
     updates: dict[str, Any],
@@ -681,6 +696,11 @@ def save_settings(cfg: Config, updates: dict[str, Any]) -> tuple[Path, Config]:
     path = update_config_file(cfg.source_path, updates)
     for key, value in updates.items():
         if hasattr(cfg, key):
+            # 路径类字段：界面传来的是 QLineEdit 的字符串，这里统一收紧成 Path ——
+            # 否则 `cfg.data_dir / "logs"` 这种写法会 TypeError: unsupported operand
+            # type(s) for /: 'str' and 'str'（首次运行向导保存数据目录后就会踩到）
+            if key in _PATH_FIELDS and isinstance(value, str):
+                value = Path(value)
             setattr(cfg, key, value)
     cfg.source_path = path
     set_config(cfg)

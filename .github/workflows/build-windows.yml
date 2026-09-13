@@ -79,19 +79,6 @@ jobs:
           $summary = ($lines | Where-Object { $_ -match 'passed|failed|error' } | Select-Object -Last 1)
           Write-Host "::error::测试汇总：$summary"
 
-      - name: 把失败日志推回 ci-log 分支（便于本地 git fetch 查看）
-        if: failure() && hashFiles('pytest.log') != ''
-        shell: pwsh
-        run: |
-          git config user.name "ci-log-bot"
-          git config user.email "ci-log-bot@users.noreply.github.com"
-          New-Item -ItemType Directory -Force -Path ci-log | Out-Null
-          Copy-Item pytest.log ci-log/pytest.log -Force
-          "run=$env:GITHUB_RUN_ID`nsha=$env:GITHUB_SHA`nref=$env:GITHUB_REF_NAME`njob=$env:GITHUB_JOB" | Set-Content ci-log/meta.txt
-          git add -f ci-log
-          git commit -m "CI 失败日志（run $env:GITHUB_RUN_ID）" --no-verify
-          git push -f origin HEAD:ci-log
-
       - name: 失败时上传测试日志
         if: failure() && hashFiles('pytest.log') != '' 
         uses: actions/upload-artifact@v7
@@ -139,3 +126,27 @@ jobs:
         with:
           files: dist/LaoATrader/LaoATrader.exe
           generate_release_notes: true
+
+      # ── 构建结果回写 ci-log 分支 ──
+      # 无论是成功还是失败都写一次：本机只要 `git fetch origin ci-log` 就能确认
+      # "这一版的 CI 到底是绿的还是红的、跑的是哪个 sha"，不必登录 GitHub 看页面。
+      # 失败时顺带把完整 pytest.log 一起推上去，就不用手工复制日志了。
+      - name: 记录构建结果到 ci-log 分支（成功也记）
+        if: always()
+        shell: pwsh
+        run: |
+          git config user.name "ci-log-bot"
+          git config user.email "ci-log-bot@users.noreply.github.com"
+          New-Item -ItemType Directory -Force -Path ci-log | Out-Null
+          if (Test-Path pytest.log) { Copy-Item pytest.log ci-log/pytest.log -Force }
+          @(
+            "run=$env:GITHUB_RUN_ID"
+            "sha=$env:GITHUB_SHA"
+            "ref=$env:GITHUB_REF_NAME"
+            "job=$env:GITHUB_JOB"
+            "result=${{ job.status }}"
+          ) | Set-Content ci-log/meta.txt
+          Get-Content ci-log/meta.txt
+          git add -f ci-log
+          git commit -m "CI 结果：${{ job.status }}（run $env:GITHUB_RUN_ID）" --no-verify
+          git push -f origin HEAD:ci-log

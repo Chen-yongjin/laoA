@@ -19,13 +19,13 @@ import time
 import traceback
 from typing import Any
 
-from laoa_trader import intraday, pool
+from laoa_trader import intraday, pool, state
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import sync
 from laoa_trader.data.engine import DataEngine
 from laoa_trader.log import get_logger
 from laoa_trader.notify import KINDS, summarize
-from laoa_trader.scheduler import Scheduler, refresh_data, run_daily
+from laoa_trader.scheduler import Scheduler, data_gate, refresh_data, run_daily
 from laoa_trader.strategy import rules as rules_mod
 
 logger = get_logger(__name__)
@@ -82,15 +82,20 @@ if QT_AVAILABLE:
         failed = Signal(str)
 
         stage = Signal(str)
+        #: 状态（"正在重签 URL 继续下载（第 2 次）"）—— 与进度分开：
+        #: 进度条回答"还剩多少"，状态回答"此刻在干什么"
+        note = Signal(str)
 
         def __init__(self, fn, *args, with_progress: bool = False,
-                     with_stage: bool = False, **kwargs) -> None:
+                     with_stage: bool = False, with_note: bool = False,
+                     **kwargs) -> None:
             super().__init__()
             self._fn = fn
             self._args = args
             self._kwargs = kwargs
             self._with_progress = with_progress
             self._with_stage = with_stage
+            self._with_note = with_note
 
         def run(self) -> None:  # noqa: D102
             try:
@@ -99,6 +104,8 @@ if QT_AVAILABLE:
                     kwargs["progress_cb"] = self._emit_progress
                 if self._with_stage:
                     kwargs["stage_cb"] = self.stage.emit
+                if self._with_note:
+                    kwargs["note_cb"] = self.note.emit
                 result = self._fn(*self._args, **kwargs)
                 self.finished_ok.emit(result)
             except Exception as exc:  # noqa: BLE001 - 工作线程异常也必须回主线程提示
@@ -601,12 +608,12 @@ if QT_AVAILABLE:
             self.wizard_skip.setEnabled(True)
             self.wizard_status.setText("正在下载…（可点【取消下载】中断，下次接着传）")
             self._run_worker(
-                lambda progress_cb: sync.download_history(
-                    self.cfg, progress_cb=progress_cb,
+                lambda progress_cb, note_cb: sync.download_history(
+                    self.cfg, progress_cb=progress_cb, note_cb=note_cb,
                     should_stop=lambda: self._cancel_download,
                 ),
                 "下载历史数据",
-                with_progress=True,
+                with_progress=True, with_note=True,
             )
 
         def on_wizard_cancel(self) -> None:
@@ -637,6 +644,18 @@ if QT_AVAILABLE:
             except Exception:  # noqa: BLE001 - 向导可能已被关掉
                 pass
             if getattr(result, "ok", False):
+                # 数据变了 → 之前缓存的"needs_full"结论立刻作废，重算一次。
+                # 这里**不**走 run_preflight()：那会在"还是不够用"时再弹一次向导，
+                # 用户刚下完就被弹窗怼一脸不合适；只把结论写进状态栏。
+                gate = data_gate(self.cfg, self.engine)
+                self.preflight_result = gate.get("result") or None
+                self._set_status(
+                    ("✅ " if gate["ok"] else "⚠️ ") + gate["message"]
+                )
+                if not gate["ok"]:
+                    # 下完了还不够（例如跨度/行业覆盖仍不达标）：说清原因，别硬跑
+                    self._toast(f"⚠️ 数据仍不可用：{gate['reason']}")
+                    return
                 self._toast("下载完成，正在跑一次选股建池…")
                 self.on_run_pipeline()
 
@@ -690,6 +709,11 @@ if QT_AVAILABLE:
                 + (f"（补跑 {st['run_at_fallback']}）" if st.get("run_at_fallback") else "")
                 + f"｜下次自动运行：{st['next_run']['label']}"
                 + ("" if st.get("auto_run") else "（自动运行已关闭）")
+                # 正在下载：一直挂着这个提示（进度回调用 5 秒一次的定时器刷不出来，
+                # 而且"下载中"这件事要盖过其它状态，否则用户以为卡死了）
+                + ("｜⏬ 正在下载历史数据…" if st.get("downloading") else "")
+                # 因为数据没就绪而没自动跑：说清原因（否则用户以为定时坏了）
+                + (f"｜⚠️ {st['skipped_reason']}" if st.get("skipped_reason") else "")
                 + (f"｜⚠️ {st['last_error']}" if st.get("last_error") else "")
             )
             # 瞬时消息保留 10 分钟（够用户看见），之后自然消失
@@ -971,19 +995,52 @@ if QT_AVAILABLE:
             return False
 
         def _run_worker(self, fn, label: str, with_progress: bool = False,
-                        with_stage: bool = False) -> None:
+                        with_stage: bool = False, with_note: bool = False) -> None:
+            # 明确设成"确定进度"的 0%（range=0..100）：下载最初几秒在取签名/建连，
+            # 这期间进度条必须显示 0% 而不是"未开始/不确定"的样子
+            self.progress.setRange(0, 100)
+            self.progress.setFormat(f"{label} %p%")
             self.progress.setValue(0)
             self._set_status(f"{label}…")
-            worker = Worker(fn, with_progress=with_progress, with_stage=with_stage)
+            worker = Worker(fn, with_progress=with_progress, with_stage=with_stage,
+                            with_note=with_note)
             self._worker = worker
             worker.progress.connect(self._on_progress)
             worker.stage.connect(lambda name: self._set_status(f"{label}：{name}…"))
+            worker.note.connect(lambda text: self._on_worker_note(label, text))
             worker.finished_ok.connect(lambda result: self._on_worker_done(label, result))
             worker.failed.connect(lambda msg: self._on_worker_failed(label, msg))
             worker.start()
 
+        def _on_worker_note(self, label: str, text: str) -> None:
+            """后台任务的一句话状态（下载重签/重试/完成）→ 状态栏 + 向导窗口。"""
+            self._set_status(f"{label}：{text}")
+            if self.wizard is not None and self.wizard.isVisible():
+                try:
+                    self.wizard_status.setText(text)
+                except Exception:  # noqa: BLE001 - 向导可能已被关掉
+                    pass
+
+        @staticmethod
+        def _progress_texts(stage: str, done: int, total: int) -> tuple[str, str]:
+            """(进度条上的文字, 状态栏文字)。
+
+            下载 dump 时数值是**字节**（几百 MB）：不显示 MB 与百分比的话，
+            180 MB / 十几分钟的过程看起来就像卡死了（用户实测反馈）。
+            """
+            if total >= 1_000_000:
+                pct = (done / total * 100) if total else 0.0
+                label = f"{stage}｜{done / 1e6:.1f}/{total / 1e6:.1f} MB"
+                status = (f"{stage} {pct:.0f}%"
+                          f"（{done / 1e6:.0f}/{total / 1e6:.0f} MB）")
+                return label, status
+            if total > 0:
+                return f"{stage}｜{done}/{total}", f"{stage}：{done}/{total}"
+            return f"{stage}｜{done}", f"{stage}：{done}"
+
         def _on_progress(self, stage: str, done: int, total: int) -> None:
-            self.progress.setFormat(f"{stage} %p%")
+            label, status = self._progress_texts(stage, done, total)
+            self.progress.setFormat(label + " %p%")
             self.progress.setRange(0, max(total, 1))
             self.progress.setValue(min(done, max(total, 1)))
             # 首次向导里也有自己的进度条（下载时用户盯的是那个窗口）
@@ -991,10 +1048,12 @@ if QT_AVAILABLE:
                 try:
                     self.wizard_progress.setRange(0, max(total, 1))
                     self.wizard_progress.setValue(min(done, max(total, 1)))
-                    self.wizard_status.setText(f"{stage}：{done}/{total}")
+                    if total >= 1_000_000:
+                        self.wizard_progress.setFormat(label + " %p%")
+                    self.wizard_status.setText(status)
                 except Exception:  # noqa: BLE001 - 向导可能已被关掉
                     pass
-            self._set_status(f"{stage}：{done}/{total}")
+            self._set_status(status)
 
         def _on_worker_done(self, label: str, result: Any) -> None:
             self.progress.setValue(self.progress.maximum())
@@ -1158,9 +1217,23 @@ if QT_AVAILABLE:
         # ── 手动跑（与定时任务共用同一套流程，保证幂等）──
 
         def on_run_pipeline(self) -> None:
-            """【立即选股并建池】：增量数据 → 策略 → 建池 → 按通知设置推送。"""
+            """【立即选股并建池】：先过**数据闸门** → 增量 → 策略 → 建池 → 推送。
+
+            闸门是必须的：数据没下好就点这个按钮，跑出来的池子是错的
+            （在只写了一半的库上跑策略），所以这里**明确拒绝并指路**，
+            而不是"静默跑出个空池子"骗用户。
+            """
             if self._busy():
                 return
+            if state.is_downloading():
+                self._refuse_pipeline("正在下载历史数据，请等下载完成后再选股")
+                return
+            gate = data_gate(self.cfg, self.engine)
+            if not gate["ok"]:
+                self._refuse_pipeline(gate["message"])
+                return
+            if gate.get("result"):
+                self.preflight_result = gate["result"]  # 顺手把缓存的结论刷新
 
             def _job(progress_cb, stage_cb):
                 report = run_daily(
@@ -1173,6 +1246,19 @@ if QT_AVAILABLE:
 
             self._run_worker(_job, "立即选股并建池",
                              with_progress=True, with_stage=True)
+
+        def _refuse_pipeline(self, message: str) -> None:
+            """数据不可用时拒绝手动选股：中文提示 + 把注意力引到下载按钮。"""
+            text = f"⚠️ {message}"
+            self._toast(text)
+            self._set_status(text)
+            logger.warning(f"已拒绝手动选股：{message}")
+            try:
+                # 引导：把焦点/视觉移回下载按钮（文字提示已经说清了要做什么）
+                self.btn_download.setDefault(True)
+                self.btn_download.setFocus()
+            except Exception:  # noqa: BLE001 - 界面细节失败不影响"拒绝"本身
+                pass
 
         def on_refresh_data(self) -> None:
             """【只刷新数据】：只跑增量同步，不选股、不推送。"""
@@ -1197,11 +1283,11 @@ if QT_AVAILABLE:
                 )
                 return
             self._run_worker(
-                lambda progress_cb: sync.download_history(
-                    self.cfg, progress_cb=progress_cb
+                lambda progress_cb, note_cb: sync.download_history(
+                    self.cfg, progress_cb=progress_cb, note_cb=note_cb
                 ),
                 "下载/更新历史数据",
-                with_progress=True,
+                with_progress=True, with_note=True,
             )
 
         def on_test_notify(self) -> None:

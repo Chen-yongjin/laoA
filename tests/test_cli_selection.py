@@ -16,6 +16,8 @@ import pytest
 
 from laoa_trader.__main__ import cli
 from laoa_trader.data import storage
+
+from tests._toml import p
 from tests.conftest import READY_THRESHOLDS
 
 
@@ -58,7 +60,7 @@ def seeded(cfg, tmp_path):
     config = tmp_path / "config.toml"
     config.write_text(
         f'# 用户自己的注释\n'
-        f'data_dir = "{cfg.data_dir}"\n'
+        f'data_dir = "{p(cfg.data_dir)}"\n'
         'hithink_api_key = ""\n'
         'enabled_groups = ["ultra", "short", "swing"]\n'
         'enabled_strategies = []\n'

@@ -27,6 +27,7 @@ from laoa_trader.scheduler import (
     validate_run_times,
 )
 
+from tests._toml import p
 
 # ── 解析与校验 ──
 
@@ -288,7 +289,7 @@ def cli_config(tmp_path, cfg):
     path = tmp_path / "config.toml"
     path.write_text(
         f'# 用户注释\n'
-        f'data_dir = "{cfg.data_dir}"\n'
+        f'data_dir = "{p(cfg.data_dir)}"\n'
         'hithink_api_key = ""\n'
         'run_at = "16:00"\nrun_at_fallback = "19:15"\nauto_run = true\n',
         encoding="utf-8",

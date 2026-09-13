@@ -19,6 +19,10 @@ from laoa_trader.config import (
     update_config_file,
 )
 
+from tests._toml import p
+
+#: 模板：`{data_dir}` 处必须传**已转义**的路径（`tests._toml.p()`），
+#: 否则 Windows 的 `C:\Users\...` 会让 tomllib 解析失败、配置静默退回默认值。
 SAMPLE = '''# 老A法师配置（这些注释必须活下来）
 # 第二行注释      # 行尾也有注释
 
@@ -48,12 +52,12 @@ future_key = "keep me"           # 将来版本的键，不能丢
 @pytest.fixture()
 def sample_file(tmp_path: Path) -> Path:
     path = tmp_path / "config.toml"
-    path.write_text(SAMPLE.format(data_dir=tmp_path / "data"), encoding="utf-8")
+    path.write_text(SAMPLE.format(data_dir=p(tmp_path / "data")), encoding="utf-8")
     return path
 
 
 def test_render_keeps_comments_and_unknown_keys(tmp_path: Path) -> None:
-    text = SAMPLE.format(data_dir=tmp_path / "data")
+    text = SAMPLE.format(data_dir=p(tmp_path / "data"))
     out = render_config_updates(text, {
         "notify_channels": ["windows"],
         "notify_windows_sound": False,
@@ -79,7 +83,7 @@ def test_render_keeps_comments_and_unknown_keys(tmp_path: Path) -> None:
 
 
 def test_render_appends_missing_keys(tmp_path: Path) -> None:
-    text = SAMPLE.format(data_dir=tmp_path / "data")
+    text = SAMPLE.format(data_dir=p(tmp_path / "data"))
     out = render_config_updates(text, {"notify_windows_open_url": False, "feishu_on": True})
     assert "notify_windows_open_url = false" in out
     assert "feishu_on = true" in out
@@ -185,3 +189,27 @@ def test_save_settings_raises_oserror_on_unwritable(tmp_path: Path) -> None:
     cfg = Config(data_dir=tmp_path, source_path=blocker / "sub" / "config.toml")
     with pytest.raises(OSError):
         save_settings(cfg, {"notify_channels": []})
+
+
+def test_writeback_escapes_windows_data_dir(tmp_path: Path) -> None:
+    r"""界面里把数据目录设成 Windows 路径：写回的文件必须还能被解析出来。
+
+    这是一条**产品流程**（不是测试自己拼字符串）：`_toml_value()` 会转义反斜杠，
+    所以 `C:\Users\me\LaoATrader\data` 写进 config.toml 后重新加载必须一字不差。
+    如果哪天有人给 `_toml_value` "优化"掉转义，这里立刻红。
+    """
+    win = r"C:\Users\me\AppData\Local\LaoATrader\data"
+    target = tmp_path / "config.toml"
+    target.write_text(f'data_dir = "{p(tmp_path / "old")}"\n', encoding="utf-8")
+    cfg = Config(data_dir=tmp_path, source_path=target)
+
+    path, updated = save_settings(cfg, {"data_dir": win})
+    assert path == target
+    assert updated.data_dir == Path(win)                    # 内存里立刻生效
+
+    text = target.read_text(encoding="utf-8")
+    assert "\\\\" in text                                   # 文件里是转义过的
+    reloaded = load_config(target, use_env=False)
+    assert reloaded.config_error == ""                      # 没有"解析失败"
+    assert str(reloaded.data_dir) == win                    # 值原样取回
+    assert reloaded.data_dir == Path(win)

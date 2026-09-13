@@ -22,6 +22,8 @@ import pytest
 from laoa_trader.config import Config, load_config
 from laoa_trader.data import hithink as hx
 from laoa_trader.data import preflight, storage, sync
+
+from tests._toml import p
 from tests.conftest import FakeClient, seed_ready_db, workdays_ending
 
 # 本项目约定：缺 pyarrow 时整模块跳过，而不是让用例失败
@@ -302,7 +304,7 @@ def test_doctor_shows_history_window(capsys, tmp_path, history_cfg) -> None:
     cfg.min_symbols = 1
     cli_config = tmp_path / "config.toml"
     cli_config.write_text(
-        f'data_dir = "{cfg.data_dir}"\nhithink_api_key = ""\n'
+        f'data_dir = "{p(cfg.data_dir)}"\nhithink_api_key = ""\n'
         "history_years = 5\nmin_history_years = 4.5\nmin_symbols = 1\n",
         encoding="utf-8",
     )
@@ -324,7 +326,7 @@ def test_doctor_reports_config_contradiction(capsys, tmp_path) -> None:
 
     path = tmp_path / "config.toml"
     path.write_text(
-        f'data_dir = "{tmp_path / "d9"}"\n'
+        f'data_dir = "{p(tmp_path / "d9")}"\n'
         "history_years = 5\nmin_history_years = 9\n",
         encoding="utf-8",
     )

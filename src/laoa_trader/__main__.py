@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+from pathlib import Path
 
 from laoa_trader import pool as pool_mod
 from laoa_trader.config import get_config, load_config
@@ -61,7 +63,8 @@ def _doctor(cfg, startup_problem: str = "") -> None:
     print(f"数据库      : {cfg.db_path}"
           f"（{'已存在' if cfg.db_path.exists() else '尚未创建'}）")
     print(f"dump 目录   : {cfg.dump_dir}（{'已存在' if cfg.dump_dir.exists() else '尚未创建'}）")
-    print(f"日志文件    : {cfg.data_dir / 'logs' / 'laoa-trader.log'}")
+    # Path(...) 包一层：`data_dir` 可能还是界面传进来的字符串（save_settings 之前）
+    print(f"日志文件    : {Path(cfg.data_dir) / 'logs' / 'laoa-trader.log'}")
     print("-" * 56)
     print(f"同花顺 Key  : {_mask(cfg.hithink_api_key)}")
     print(f"飞书凭证    : AppID {_mask(cfg.feishu_app_id)} / Secret {_mask(cfg.feishu_app_secret)}"
@@ -188,7 +191,8 @@ def _preflight_gate(cfg, auto_download: bool) -> int | None:
         if cfg.auto_download_on_start or auto_download:
             print(f"落后 {result['stale_trading_days']} 个交易日，先跑一次增量更新…")
             ok, after, results = preflight.ensure_ready(
-                cfg, auto_download=True, progress_cb=_progress)
+                cfg, auto_download=True, progress_cb=_progress, note_cb=_note)
+            print()
             for item in results:
                 print(("✅ " if item.ok else "❌ ") + item.message)
             return None if ok else 1
@@ -199,14 +203,16 @@ def _preflight_gate(cfg, auto_download: bool) -> int | None:
     # needs_full：没有 10 年库
     if not auto_download:
         print("")
-        print(f"❌ {result['reason']}")
-        print("本地没有可用的历史数据（或数据落后太多，增量补不回来）。请先运行：")
-        print("    python -m laoa_trader --cli --download")
-        print("（或在 config.toml 里填好 hithink_api_key 后加 --auto-download 自动下载）")
+        print(f"❌ 本地没有可用的历史数据：{result['reason']}")
+        print("数据没下好之前**不会跑策略**（否则会选出错的票）。请先下载：")
+        print("    python -m laoa_trader --cli --download        # 下载历史数据")
+        print("或在 config.toml 里填好 hithink_api_key 后加 --auto-download 自动下载；")
+        print("界面版点【下载/更新历史数据】按钮同样可以（支持断点续传）。")
         return 1
-    print("需要下载 10 年全量历史（约 10~20 分钟，可中断后重跑续传）…")
+    print("需要下载 10 年全量历史（约 10~20 分钟，有进度显示，可中断后重跑续传）…")
     ok, after, results = preflight.ensure_ready(
-        cfg, auto_download=True, progress_cb=_progress)
+        cfg, auto_download=True, progress_cb=_progress, note_cb=_note)
+    print()
     for item in results:
         print(("✅ " if item.ok else "❌ ") + item.message)
     if not ok or (results and not results[-1].ok):
@@ -349,15 +355,69 @@ def _print_groups() -> None:
     print("    python -m laoa_trader --cli --strategies 低价股,连板回踩低吸 --once")
 
 
-def _progress(stage: str, done: int, total: int) -> None:
-    """CLI 进度：单行覆盖刷新（终端里比滚屏友好）。"""
+def _fmt_amount(value: int) -> str:
+    """进度数值的显示：超过 1MB 就按 MB 显示（dump 下载是几百 MB，字节数没人看得懂）。"""
+    if value >= 1_000_000:
+        return f"{value / 1e6:.1f} MB"
+    return f"{value:,}"
+
+
+#: 进度打印节流：同一阶段至少间隔这么久、或至少跨这么多个百分点，才**新起一行**
+PROGRESS_MIN_INTERVAL = 1.0
+PROGRESS_STEP_PCT = 10
+#: {阶段: (上次**成行**打印的时刻, 当时的百分比, 光标是否停在半行上)}
+_PROGRESS_LAST: dict[str, tuple[float, int, bool]] = {}
+
+
+def _progress_line(stage: str, done: int, total: int) -> str:
+    """一行进度文本（不含换行）：带 MB、百分比与进度条。"""
     if total <= 0:
-        print(f"\r{stage}…", end="", flush=True)
-        return
+        return f"{stage}：{_fmt_amount(done)}"
     pct = done / total * 100
-    print(f"\r{stage}：{done}/{total}（{pct:5.1f}%）", end="", flush=True)
-    if done >= total:
-        print()
+    bar = ""
+    if total >= 1_000_000:                      # 大文件给一条进度条，180MB 才有"在动"的感觉
+        filled = int(pct / 5)
+        bar = " [" + "#" * filled + "." * (20 - filled) + "]"
+    return (f"{stage}：{_fmt_amount(done)}/{_fmt_amount(total)}{bar}"
+            f"（{pct:5.1f}%）")
+
+
+def _progress(stage: str, done: int, total: int) -> None:
+    """CLI 进度：**按秒或按 10%** 打一行（同一阶段内节流，不刷屏）。
+
+    为什么要节流：dump 是 1 MB 一块下下来的，180 MB 就是 180 次回调；
+    每次都打一行会把终端刷爆、有用的报错全被冲走。这里的规则是：
+
+    - 距上次打印 ≥ `PROGRESS_MIN_INTERVAL` 秒，或百分比跨过 `PROGRESS_STEP_PCT` 的整数倍
+      → **新起一行**（带换行，滚屏也看得见）；
+    - 其余回调只在**同一行**上覆盖刷新（`\r`），保证"一直在动"；
+    - 跑完（done ≥ total）一定收尾打一行 100%。
+    """
+    now = time.monotonic()
+    pct = int(done / total * 100) if total > 0 else 0
+    last_at, last_pct, inline = _PROGRESS_LAST.get(
+        stage, (0.0, -PROGRESS_STEP_PCT, False)
+    )
+    finished = total > 0 and done >= total
+    fresh_line = (
+        finished
+        or now - last_at >= PROGRESS_MIN_INTERVAL
+        or pct // PROGRESS_STEP_PCT > last_pct // PROGRESS_STEP_PCT
+    )
+    line = _progress_line(stage, done, total)
+    if fresh_line:
+        if inline:
+            print()                      # 先把"半行"结束掉，否则新行会接在它后面
+        print(line, flush=True)
+        _PROGRESS_LAST[stage] = (now, pct, False)
+    else:
+        print(f"\r{line}", end="", flush=True)
+        _PROGRESS_LAST[stage] = (last_at, last_pct, True)
+
+
+def _note(text: str) -> None:
+    """下载状态（"正在重签 URL 继续下载（第 2 次）"）—— 另起一行，别被进度覆盖掉。"""
+    print(f"  ↻ {text}", flush=True)
 
 
 def cli(argv: list[str] | None = None) -> int:
@@ -406,6 +466,7 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", type=int, help="盘中轮询间隔（秒）")
     parser.add_argument("--limit", type=int, help="只处理前 N 只股票（试跑）")
     args = parser.parse_args(argv)
+    _PROGRESS_LAST.clear()          # 每轮重新计数：同一阶段第二次跑也要有进度输出
 
     cfg = load_config(args.config) if args.config else get_config()
     _apply_selection_override(cfg, args)
@@ -477,17 +538,25 @@ def cli(argv: list[str] | None = None) -> int:
             print(f"✅ {preflight.summary_line(local)}；无需重新下载。"
                   "如确实要重下，请加 --force-download。")
             return 0
-        print("开始下载历史数据（首次约 10~20 分钟，可中断后重跑续传）…")
+        print("开始下载历史数据（首次约 10~20 分钟，有进度显示，可中断后重跑续传）…")
         result = sync.download_history(
-            cfg, progress_cb=_progress, symbol_limit=args.limit
+            cfg, progress_cb=_progress, symbol_limit=args.limit, note_cb=_note
         )
+        print()
         _print_result(result)
         return 0 if result.ok else 1
 
     if args.once:
-        from laoa_trader.scheduler import run_daily
+        from laoa_trader.scheduler import data_gate, run_daily
 
         from laoa_trader.strategy import groups as groups_mod
+
+        # 数据闸门（与界面【立即选股并建池】、调度线程同一口径）：
+        # 没数据就跑策略 = 选出错的票，所以这里明确拒绝并返回非零退出码
+        gate = data_gate(cfg, DataEngine(cfg.db_path))
+        if not gate["ok"]:
+            print(f"❌ {gate['message']}")
+            return 1
 
         selection = groups_mod.resolve_from_config(cfg)
         for warn in selection.warnings:

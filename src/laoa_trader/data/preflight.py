@@ -309,6 +309,7 @@ def ensure_ready(
     today: str | None = None,
     progress_cb: Any = None,
     should_stop: Any = None,
+    note_cb: Any = None,
 ) -> tuple[bool, dict, list]:
     """自检 + （按需）自动补数据，返回 `(是否可继续, 自检结果, 同步结果列表)`。
 
@@ -324,6 +325,7 @@ def ensure_ready(
         auto_download: 调用方是否已明确同意下载（界面向导、CLI `--auto-download`）。
         progress_cb: 下载进度回调 `(stage, done, total)`。
         should_stop: 可调用对象，返回真表示用户取消了（用于界面取消按钮）。
+        note_cb: 下载状态回调 `(一句话中文状态)`（"正在重签 URL 继续下载（第 2 次）"）。
 
     Returns:
         (proceed, result, sync_results)。`proceed=False` 时调用方应提示原因并停止，
@@ -350,13 +352,14 @@ def ensure_ready(
         if not allow:
             logger.info("落后不多，但 auto_download_on_start=false：只提示、不自动下载")
             return True, result, sync_results
-        sync_results.append(sync_mod.sync_daily(cfg, progress_cb=progress_cb))
+        sync_results.append(sync_mod.sync_daily(cfg, progress_cb=progress_cb,
+                                                note_cb=note_cb))
         return True, check(cfg.db_path, cfg, today=today), sync_results
 
     # needs_full
     if not allow:
         return False, result, sync_results
     sync_results.append(sync_mod.download_history(
-        cfg, progress_cb=progress_cb, should_stop=should_stop
+        cfg, progress_cb=progress_cb, should_stop=should_stop, note_cb=note_cb
     ))
     return True, check(cfg.db_path, cfg, today=today), sync_results

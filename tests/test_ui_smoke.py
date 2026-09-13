@@ -27,16 +27,7 @@ from laoa_trader.data import storage  # noqa: E402
 from laoa_trader.data.engine import DataEngine  # noqa: E402
 from laoa_trader.notify import KINDS  # noqa: E402
 from laoa_trader.strategy import rules as rules_mod  # noqa: E402
-
-
-def _p(path) -> str:
-    r"""把路径安全地写进 TOML 字符串。
-
-    Windows 路径含反斜杠（如 C:\Users\me\data），直接塞进双引号 TOML 字符串时
-    会被当成转义序列，tomllib 报 "Invalid hex value" → 配置整体解析失败、退回默认值，
-    后续断言全崩（CI 上就是这么暴露的）。所以这里统一转义。
-    """
-    return str(path).replace("\\", "\\\\")
+from tests._toml import p  # noqa: E402
 
 
 @pytest.fixture()
@@ -82,11 +73,17 @@ def seeded(cfg):
              "detail": "现价 12.50 突破 20 日高点"},
         ], days[-1])
 
+    # 让**内存里的配置**与下面写进 config.toml 的 READY_THRESHOLDS 一致：
+    # 2 只股票 / 30 个交易日远低于默认门槛（4000 只 / 4.5 年），不放开的话
+    # 数据闸门会（正确地）拒绝选股，那测的就不是"按钮/定时"而是闸门本身了
+    cfg.min_symbols = 1
+    cfg.min_history_years = 0.0
+
     # 界面"保存设置"会把值写回这个文件；写一份带注释+未知键的，顺便验证不会丢
     config_file = cfg.data_dir / "config.toml"
     config_file.write_text(
         "# 用户自己的注释（保存设置后必须还在）\n"
-        f'data_dir = "{_p(cfg.data_dir)}"\n'
+        f'data_dir = "{p(cfg.data_dir)}"\n'
         'hithink_api_key = ""\n'
         'enabled_groups = ["ultra", "short", "swing"]\n'
         'enabled_strategies = []\n'
@@ -271,7 +268,7 @@ def test_doctor_command_prints_report(cfg, capsys, tmp_path) -> None:
     from laoa_trader.__main__ import cli
 
     config_file = tmp_path / "config.toml"
-    config_file.write_text(f'data_dir = "{_p(cfg.data_dir)}"', encoding="utf-8")
+    config_file.write_text(f'data_dir = "{p(cfg.data_dir)}"', encoding="utf-8")
     assert cli(["--cli", "--doctor", "--config", str(config_file)]) == 0
     out = capsys.readouterr().out
     assert "老A法师 · 交易终端 —— 自检" in out
@@ -646,7 +643,7 @@ def wizard_window(cfg, qapp, monkeypatch):
     # 向导里点"开始下载"会把 Key 写回配置文件；给一个真实的临时路径，
     # 免得落到 ~/.config（沙箱里可能不可写、也不是本用例要测的东西）
     config_file = cfg.data_dir / "config.toml"
-    config_file.write_text(f'data_dir = "{_p(cfg.data_dir)}"', encoding="utf-8")
+    config_file.write_text(f'data_dir = "{p(cfg.data_dir)}"', encoding="utf-8")
     cfg.source_path = config_file
     win = ui_app.MainWindow(cfg)
     win.show()
@@ -677,8 +674,11 @@ def test_wizard_appears_when_needs_full(wizard_window) -> None:
 
 def test_wizard_start_triggers_download_and_progress(qapp, wizard_window, monkeypatch) -> None:
     """点【开始下载】→ 触发下载回调、进度更新不崩、完成后自动跑一次选股建池。"""
+    import dataclasses
+
     from laoa_trader.data import sync as sync_mod
     from laoa_trader.ui import app as ui_app
+    from tests.conftest import seed_ready_db
 
     seen: dict = {}
     pipeline_calls: list[str] = []
@@ -688,6 +688,10 @@ def test_wizard_start_triggers_download_and_progress(qapp, wizard_window, monkey
         if progress_cb:
             progress_cb("下载全市场日K（10 年）", 1, 2)
             progress_cb("写入行情", 2, 2)
+        # "下载成功"在真实世界里意味着**数据已经可用**（自检会变 ready）。
+        # 这里把那件事造出来：否则数据闸门会（正确地）拒绝接着跑选股建池 ——
+        # 那是另一条用例（test_download_ok_but_still_not_ready_does_not_run_pipeline）。
+        seed_ready_db(dataclasses.replace(cfg_, min_history_years=0.0, min_symbols=1))
         return sync_mod.SyncResult(stage="下载历史数据", ok=True, rows=42,
                                    detail="写入 42 行")
 
@@ -696,6 +700,11 @@ def test_wizard_start_triggers_download_and_progress(qapp, wizard_window, monkey
                         lambda self: pipeline_calls.append("pipeline"))
 
     win = wizard_window
+    # 向导已经因为"严格门槛 + 空库"弹出来了（那是 fixture 的设定）。
+    # 现在把窗口里的门槛调成小样本口径：模拟"下载完成后数据真的够用了"，
+    # 否则闸门会（正确地）拒绝接着跑 —— 那条路径由
+    # test_download_ok_but_still_not_ready_does_not_run_pipeline 覆盖。
+    win.cfg.min_history_years, win.cfg.min_symbols = 0.0, 1
     win.wizard_key.setText("dummy-key")
     win.on_wizard_start()
     assert win._worker is not None
@@ -921,3 +930,245 @@ def test_saved_time_takes_effect_without_restart(window, seeded, qapp, monkeypat
     qapp.processEvents()
     window.scheduler._maybe_daily(moment)
     assert runs == [1]                                 # 下一轮就按新时间跑
+
+# ── 下载进度可见（用户反馈："180MB 没有任何进度，像卡死"）──
+
+
+def test_progress_shows_mb_and_percent_in_status_bar(window) -> None:
+    """下载 dump 时：主进度条要走、状态栏要显示"MB + 百分比"。"""
+    window._on_progress("下载 daily-k", 81_000_000, 180_700_000)
+
+    assert window.progress.maximum() == 180_700_000
+    assert window.progress.value() == 81_000_000        # 不是 -1（不是"不确定进度"）
+    assert "MB" in window.progress.format()
+    status = window.status_label.text()
+    assert "下载 daily-k" in status
+    assert "45%" in status or "44%" in status           # 81/180.7 ≈ 44.8%
+    assert "81" in status and "181" in status or "180" in status
+
+
+def test_progress_reaches_full_and_reports_downloading_flag(window, monkeypatch) -> None:
+    """进度走到底 + 下载期间状态栏挂"正在下载"（下载中这面旗由 sync 层负责）。"""
+    from laoa_trader import state
+
+    total = 180_700_000
+    for pct in (10, 55, 100):
+        window._on_progress("下载 daily-k", total * pct // 100, total)
+    assert window.progress.value() == total
+    assert window.progress.maximum() == total
+    assert "100" in window.progress.format() or window.progress.value() == total
+
+    state.begin_download()
+    try:
+        window._tick()                                   # 定时刷新也要体现"在下载"
+        assert "正在下载" in window.status_label.text()
+    finally:
+        state.end_download()
+    window._tick()
+    assert "正在下载" not in window.status_label.text()   # 结束后切回正常状态
+
+
+def test_wizard_progress_bar_moves_during_download(wizard_window, qapp) -> None:
+    """首次向导里那条进度条也要动，并显示 MB（用户盯的就是那个窗口）。
+
+    用**真实的向导窗口**（不是手搓的控件替身）：下载 180 MB 时它必须
+    走到 90/180 的位置、状态文字里有 MB 与百分比。
+    """
+    win = wizard_window
+    assert win.wizard is not None and win.wizard.isVisible()
+
+    win._on_progress("下载 daily-k", 90_000_000, 180_700_000)
+
+    assert win.wizard_progress.maximum() == 180_700_000
+    assert win.wizard_progress.value() == 90_000_000       # 不是 -1、也不是停在 0
+    assert "MB" in win.wizard_progress.format()
+    assert "下载 daily-k" in win.wizard_progress.format()
+    text = win.wizard_status.text()
+    assert "MB" in text and "%" in text                    # "…50%（90/181 MB）"
+    assert "下载 daily-k" in text
+
+
+def test_worker_note_updates_status(window) -> None:
+    """下载状态（"正在重签 URL 继续下载（第 2 次）"）要显示出来，不被进度覆盖。"""
+    window._on_worker_note("下载历史数据", "正在重签 URL 继续下载（第 2 次，从 87.0 MB 处接着下）")
+    assert "正在重签 URL 继续下载（第 2 次" in window.status_label.text()
+
+
+# ── 状态栏要能说清"今天为什么没自动跑"（用户不必翻日志）──
+
+
+def test_status_bar_shows_why_daily_was_skipped(cfg, qapp, monkeypatch) -> None:
+    """定时任务被数据闸门跳过 → 状态栏直接显示中文原因（`skipped_reason`）。"""
+    from laoa_trader import scheduler as sched_mod
+    from laoa_trader.ui import app as ui_app
+
+    cfg.min_history_years, cfg.min_symbols = 4.5, 4000      # 空库 → needs_full
+    monkeypatch.setattr(sched_mod.intraday, "is_trading_day", lambda *a, **k: True)
+    win = ui_app.MainWindow(cfg)
+    win.show()
+    qapp.processEvents()
+
+    ran: list[str] = []
+    monkeypatch.setattr(win.scheduler, "run_daily_now", lambda **k: ran.append("ran"))
+    win.scheduler._maybe_daily(datetime.now().replace(hour=16, minute=30))
+    win._tick()
+    qapp.processEvents()
+
+    assert ran == []                                        # 没跑
+    st = win.scheduler.status()
+    assert st["preflight_status"] == "needs_full"
+    assert st["daily_skipped_today"] is True
+    text = win.status_label.text()
+    assert st["skipped_reason"] in text                     # 状态栏确实把它显示出来了
+    assert "跳过本次自动选股" in text
+
+    win.scheduler.stop()
+    win.deleteLater()
+    qapp.processEvents()
+
+
+# ── 手动【立即选股并建池】的数据闸门 ──
+
+
+def test_run_pipeline_refuses_when_data_not_ready(cfg, qapp, monkeypatch) -> None:
+    """空库点【立即选股并建池】：**明确拒绝 + 指路**，绝不在不完整的数据上跑策略。"""
+    from laoa_trader import scheduler as sched_mod
+    from laoa_trader.ui import app as ui_app
+
+    cfg.min_history_years, cfg.min_symbols = 4.5, 4000
+    ran: list[str] = []
+    monkeypatch.setattr(sched_mod, "run_daily", lambda *a, **k: ran.append("run_daily"))
+    win = ui_app.MainWindow(cfg)
+    win.show()
+    qapp.processEvents()
+
+    win.on_run_pipeline()
+    qapp.processEvents()
+
+    assert ran == []                                   # 策略一次都没跑
+    assert win._worker is None                          # 也没起后台任务
+    text = win.status_label.text()
+    assert "本地无可用历史数据" in text
+    assert "下载" in text                               # 指路到下载按钮
+
+    win.scheduler.stop()
+    win.deleteLater()
+    qapp.processEvents()
+
+
+def test_run_pipeline_refuses_while_downloading(window, qapp, monkeypatch) -> None:
+    """正在下载时点【立即选股并建池】：同样拒绝（避免在不完整数据上跑）。"""
+    from laoa_trader import state
+
+    ran: list[str] = []
+    monkeypatch.setattr(window.scheduler, "run_daily_now", lambda **k: ran.append(1))
+
+    state.begin_download()
+    try:
+        window.on_run_pipeline()
+        qapp.processEvents()
+    finally:
+        state.end_download()
+
+    assert ran == []
+    assert window._worker is None
+    assert "正在下载历史数据" in window.status_label.text()
+
+
+def test_wizard_download_done_runs_pipeline(cfg, qapp, monkeypatch) -> None:
+    """首次下载完成 → 自检变 ready → **自动跑一次建池**（现有行为保留）。
+
+    这条是端到端的"分发后第一次用"：空库 → needs_full → 向导下载 → 数据到位
+    → 自动选股建池。装载的门槛按小样本放低（与其它小样本 fixture 同一约定），
+    但"空库 = needs_full"这一条是真实的，所以起点确实会被闸门挡住 ——
+    正好验证"下完能自己走过去"。
+    """
+    import dataclasses
+
+    from laoa_trader import scheduler as sched_mod
+    from laoa_trader.data import sync as sync_mod
+    from laoa_trader.ui import app as ui_app
+    from tests.conftest import seed_ready_db
+
+    cfg.min_history_years, cfg.min_symbols = 0.0, 1
+    config_file = cfg.data_dir / "config.toml"
+    config_file.write_text(f'data_dir = "{p(cfg.data_dir)}"', encoding="utf-8")
+    cfg.source_path = config_file
+
+    def fake_download(cfg_, progress_cb=None, note_cb=None, should_stop=None, **kwargs):
+        """模拟"下载完成"：把库写成 ready，并回报进度与状态（不联网）。"""
+        if note_cb:
+            note_cb("下载完成（180.7 MB，共 1 次尝试）")
+        if progress_cb:
+            progress_cb("下载 daily-k", 180_700_000, 180_700_000)
+        seed_ready_db(dataclasses.replace(cfg_, min_history_years=0.0, min_symbols=1))
+        return sync_mod.SyncResult(stage="下载历史数据", ok=True, rows=10, detail="写入 10 行")
+
+    monkeypatch.setattr(sync_mod, "download_history", fake_download)
+    monkeypatch.setattr(sched_mod.sync, "daily_update", lambda *a, **k: [])
+    monkeypatch.setattr("laoa_trader.notify.notify_all",
+                        lambda *a, **k: {"tray": {"kind": "tray", "ok": True}})
+
+    win = ui_app.MainWindow(cfg)
+    win.show()
+    qapp.processEvents()
+    win.run_preflight()
+    qapp.processEvents()
+    assert win.preflight_result["status"] == "needs_full"     # 空库
+    assert win.wizard is not None                             # 弹了首次向导
+
+    win.wizard_key.setText("dummy-key")
+    win.on_wizard_start()
+    assert win._worker is not None
+    win._worker.wait(60_000)
+    qapp.processEvents()
+    # 下载完成 → 自动接着跑一次选股建池（此时闸门必须已经放行）
+    for _ in range(3):
+        if win._worker is not None and win._worker.isRunning():
+            win._worker.wait(60_000)
+        qapp.processEvents()
+
+    with storage.connect(cfg.db_path) as conn:
+        pool_rows = conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0]
+    assert pool_rows > 0, "下载完成后应当自动选出池子"
+    status = win.status_label.text()
+    assert "本地无可用历史数据" not in status
+    assert win.preflight_result is not None                    # 缓存的是"下载后"的新结论
+    assert win.preflight_result["status"] == "ready"           # 数据确实到位了
+
+    win.scheduler.stop()
+    win.deleteLater()
+    qapp.processEvents()
+
+def test_download_ok_but_still_not_ready_does_not_run_pipeline(qapp, wizard_window,
+                                                               monkeypatch) -> None:
+    """下载"成功"但数据仍不达标（例如行业覆盖不够）→ **不跑策略**，状态栏说清原因。
+
+    闸门看的是"数据到底能不能用"，不是"上一动作成功没有"——
+    否则半成品库照样会跑出错的池子。
+    """
+    from laoa_trader.data import sync as sync_mod
+    from laoa_trader.ui import app as ui_app
+
+    pipeline_calls: list[str] = []
+
+    def fake_download(cfg_, progress_cb=None, note_cb=None, should_stop=None, **kwargs):
+        # 故意**不**把库写成 ready：模拟"下到了文件但库仍然不可用"
+        return sync_mod.SyncResult(stage="下载历史数据", ok=True, rows=0,
+                                   detail="导入 0 行")
+
+    monkeypatch.setattr(sync_mod, "download_history", fake_download)
+    monkeypatch.setattr(ui_app.MainWindow, "on_run_pipeline",
+                        lambda self: pipeline_calls.append("pipeline"))
+
+    win = wizard_window
+    win.wizard_key.setText("dummy-key")
+    win.on_wizard_start()
+    assert win._worker is not None
+    win._worker.wait(30_000)
+    qapp.processEvents()
+
+    assert pipeline_calls == []                      # 数据不可用 → 绝不跑策略
+    assert "数据仍不可用" in win.status_label.text()
+    assert win.preflight_result is not None
+    assert win.preflight_result["status"] == "needs_full"

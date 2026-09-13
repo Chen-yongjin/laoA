@@ -9,15 +9,7 @@ import pytest
 from laoa_trader import config as config_mod
 from laoa_trader.config import load_config
 
-
-def _p(path) -> str:
-    r"""把路径安全地写进 TOML 字符串。
-
-    Windows 路径含反斜杠（如 C:\Users\me\data），直接塞进双引号 TOML 字符串时
-    会被当成转义序列，tomllib 报 "Invalid hex value" → 配置整体解析失败、退回默认值，
-    后续断言全崩（CI 上就是这么暴露的）。所以这里统一转义。
-    """
-    return str(path).replace("\\", "\\\\")
+from tests._toml import p
 
 
 def _write(tmp_path: Path, text: str) -> Path:
@@ -41,7 +33,7 @@ def test_defaults() -> None:
 
 
 def test_reads_toml(tmp_path: Path) -> None:
-    path = _write(tmp_path, """
+    path = _write(tmp_path, f"""
 hithink_api_key = "key-from-file"
 feishu_app_id = "app"
 feishu_app_secret = "secret"
@@ -50,8 +42,8 @@ notify_windows = false
 trade_capital = 50000
 stop_loss = 0.08
 run_at = "20:30"
-data_dir = "%s"
-""" % _p(tmp_path / "mydata"))
+data_dir = "{p(tmp_path / 'mydata')}"
+""")
     cfg = load_config(path, use_env=False)
     assert cfg.hithink_api_key == "key-from-file"
     assert cfg.feishu_ready is True

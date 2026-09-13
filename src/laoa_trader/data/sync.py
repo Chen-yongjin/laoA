@@ -37,6 +37,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from laoa_trader import state
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import hithink as hx
 from laoa_trader.data import storage
@@ -46,6 +47,9 @@ logger = get_logger(__name__)
 
 #: 进度回调签名：progress_cb(stage, done, total)
 ProgressCb = Callable[[str, int, int], None]
+
+#: 状态回调签名：note_cb(一句话中文状态)
+NoteCb = Callable[[str], None]
 
 #: 默认 dump 目录
 DEFAULT_DUMP_DIR = "dumps"
@@ -103,6 +107,16 @@ class SyncResult:
 
     def __bool__(self) -> bool:  # 便于 `if result:`
         return self.ok
+
+
+def _note(note_cb: NoteCb | None, text: str) -> None:
+    """状态回调（"正在重签 URL 继续下载（第 2 次）"这类）——回调出错不该影响下载。"""
+    if note_cb is None:
+        return
+    try:
+        note_cb(str(text))
+    except Exception:  # noqa: BLE001 - 显示层的问题不能弄崩下载
+        pass
 
 
 def _notify(progress_cb: ProgressCb | None, stage: str, done: int, total: int) -> None:
@@ -364,23 +378,7 @@ def dump_is_usable(path: Path, *, min_rows: int = 1) -> bool:
     为什么要校验：dump 有几百 MB，下载中途断线时文件仍然存在，
     直接复用会得到"看起来成功、其实只有一半股票"的库 —— 这比报错更危险。
     """
-    if not path.is_file():
-        return False
-    try:
-        if path.stat().st_size <= 0:
-            return False
-    except OSError:
-        return False
-    try:
-        import pyarrow.parquet as pq
-
-        meta = pq.ParquetFile(path).metadata
-        return int(meta.num_rows) >= min_rows
-    except ImportError:
-        # 没有 pyarrow 时无法校验（真正读取也会失败），只按大小判断
-        return path.stat().st_size > 1024
-    except Exception:  # noqa: BLE001 - 文件损坏
-        return False
+    return hx.parquet_ok(path, min_rows=min_rows)
 
 
 def download_dump(
@@ -389,18 +387,50 @@ def download_dump(
     client: hx.HithinkClient,
     *,
     force: bool = False,
+    progress_cb: ProgressCb | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    note_cb: NoteCb | None = None,
 ) -> Path:
     """下载（或复用）一个 dump 到 `<data_dir>/dumps/<tag>.parquet`。
 
-    复用已下好的文件是为了**可中断续传**：几亿字节的重下代价太高，
-    而 Parquet 是完整文件（改用 .part 临时文件原子替换），校验通过即可复用。
+    复用已下好的文件是为了**可中断续传**：几亿字节的重下代价太高。
+    真正下载交给客户端的 `download_dump`（分块 + 断点续传 + URL 过期自动重签），
+    这里只负责：选目标路径、把字节进度翻译成 `(stage, done, total)` 给界面、
+    以及下载后再校验一次。
+
+    Args:
+        progress_cb: `(stage, done, total)`，`done/total` 是**字节**（显示层格式化成 MB）。
+        note_cb: 一句话状态回调（"正在重签 URL 继续下载（第 2 次）"这类），
+            给界面/命令行的"状态"而不是"进度"。
+
+    Raises:
+        hx.DumpDownloadError: 重试耗尽（含已下载字节数与建议）。
     """
     cfg.ensure_dirs()
     target = cfg.dump_dir / f"{tag}.parquet"
     if not force and dump_is_usable(target):
         logger.info(f"复用已下载的 dump：{target}（{dump_summary(target)}）")
+        _note(note_cb, f"{tag}：复用已下好的 dump（{dump_summary(target)}）")
         return target
-    client.download_dump(tag, dest=target)
+
+    def _bytes_progress(done: int, total: int) -> None:
+        # 界面上的进度条吃 (stage, done, total)：stage 只写"在干什么"，
+        # 字节数交给显示层格式化成 MB（否则同一条信息会重复两遍）
+        if progress_cb is None:
+            return
+        progress_cb(f"下载 {tag}", int(done), int(total or done))
+
+    with state.download_scope():
+        client.download_dump(
+            tag,
+            dest=target,
+            progress_cb=_bytes_progress,
+            note_cb=note_cb,
+            max_attempts=int(getattr(cfg, "download_max_attempts", 5) or 5),
+            connect_timeout=float(getattr(cfg, "download_connect_timeout", 15) or 15),
+            read_timeout=float(getattr(cfg, "download_read_timeout", 90) or 90),
+            should_stop=should_stop,
+        )
     if not dump_is_usable(target):
         raise hx.HithinkError(-1, f"下载的 dump 不可用（文件损坏或被截断）：{target}", tag)
     return target
@@ -418,6 +448,7 @@ def download_history(
     force_download: bool = False,
     include_names: bool = True,
     should_stop: Callable[[], bool] | None = None,
+    note_cb: NoteCb | None = None,
 ) -> SyncResult:
     """下载 10 年全市场历史 + 复权事件，算后复权因子并入库（可中断续传）。
 
@@ -431,12 +462,38 @@ def download_history(
         should_stop: 协作式取消回调（界面向导的"取消"按钮）。返回真时在**阶段边界**
             停止并返回失败结果 —— 已下好的 dump 与已写入的行都会保留，
             下次点"开始下载"就是**续传**，不会从头再来。
+        note_cb: 状态回调（"正在重签 URL 继续下载（第 2 次）"这类中文状态）。
 
     Returns:
         SyncResult（`rows` = 本次写入的行情行数，`extra` 含跳过行数等）。
+
+    Note:
+        整个下载期间 `laoa_trader.state.is_downloading()` 为真 —— 调度线程据此
+        **跳过自动选股**，避免在只写了一半的库上跑策略（见 `state` 模块说明）。
     """
     cfg = cfg or get_config()
     result = SyncResult(stage="下载历史数据")
+    with state.download_scope():
+        return _download_history_inner(
+            cfg, client, progress_cb, result,
+            symbol_limit=symbol_limit, force_download=force_download,
+            include_names=include_names, should_stop=should_stop, note_cb=note_cb,
+        )
+
+
+def _download_history_inner(
+    cfg: Config,
+    client: hx.HithinkClient | None,
+    progress_cb: ProgressCb | None,
+    result: SyncResult,
+    *,
+    symbol_limit: int | None = None,
+    force_download: bool = False,
+    include_names: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+    note_cb: NoteCb | None = None,
+) -> SyncResult:
+    """`download_history` 的实现体（拆出来只为让"下载中"这面旗包住整个流程）。"""
     try:
         cfg.ensure_dirs()
         client = client or make_client(cfg)
@@ -467,13 +524,14 @@ def download_history(
             return result
 
         # 1) 下载两个 dump（各带预签名 URL，拿到就下）
-        _notify(progress_cb, "下载全市场日K（10 年）", 0, 1)
-        raw_path = download_dump(cfg, "daily-k", client, force=force_download)
-        _notify(progress_cb, "下载全市场日K（10 年）", 1, 1)
-
-        _notify(progress_cb, "下载复权事件", 0, 1)
-        event_path = download_dump(cfg, "adjustment-factors", client, force=force_download)
-        _notify(progress_cb, "下载复权事件", 1, 1)
+        _note(note_cb, "正在下载全市场日K（约 180 MB，可中断续传）…")
+        raw_path = download_dump(cfg, "daily-k", client, force=force_download,
+                                 progress_cb=progress_cb, should_stop=should_stop,
+                                 note_cb=note_cb)
+        _note(note_cb, "正在下载复权事件…")
+        event_path = download_dump(cfg, "adjustment-factors", client, force=force_download,
+                                   progress_cb=progress_cb, should_stop=should_stop,
+                                   note_cb=note_cb)
 
         # 2) 解析（**导入按 history_years 过滤**；dump 本身仍是整个 10 年，没法只下 5 年）
         years = float(getattr(cfg, "history_years", DEFAULT_HISTORY_YEARS) or 0)
@@ -611,9 +669,9 @@ def download_history(
                 logger.warning(f"股票名称同步失败（不影响行情）：{name_result.message}")
         return result
 
-    except _Cancelled:
+    except (hx.DownloadCancelled, _Cancelled):
         result.ok = False
-        result.error = "已取消（已写入的数据都保留，下次继续即可续传）"
+        result.error = "已取消（已下好的 dump 与已写入的数据都保留，下次继续即可续传）"
         logger.info("下载历史数据：用户取消")
     except hx.HithinkError as exc:
         result.ok = False
@@ -756,6 +814,7 @@ def sync_daily(
     *,
     day: str | None = None,
     include_calendar: bool = True,
+    note_cb: NoteCb | None = None,
 ) -> SyncResult:
     """日更：`daily-k-10d` 增量行情 + 当日涨停池（不做估值）。
 
@@ -782,19 +841,17 @@ def sync_daily(
 
     try:
         # 1) 近 10 交易日全市场日K（体量小，每次强制重下，避免拿到过期的缓存）
-        _notify(progress_cb, "下载近 10 日行情", 0, 1)
-        raw_path = download_dump(cfg, "daily-k-10d", client, force=True)
+        raw_path = download_dump(cfg, "daily-k-10d", client, force=True,
+                                 progress_cb=progress_cb, note_cb=note_cb)
         raw = load_raw(raw_path)
-        _notify(progress_cb, "下载近 10 日行情", 1, 1)
         if len(raw) == 0:
             result.ok = False
             result.error = "daily-k-10d dump 为空"
             return result
 
-        _notify(progress_cb, "下载复权事件", 0, 1)
-        event_path = download_dump(cfg, "adjustment-factors", client, force=True)
+        event_path = download_dump(cfg, "adjustment-factors", client, force=True,
+                                   progress_cb=progress_cb)
         events = load_events(event_path)
-        _notify(progress_cb, "下载复权事件", 1, 1)
 
         with storage.connect(cfg.db_path, timeout=300) as conn:
             # 只查"本次 dump 里出现过的股票"已有哪些日期（10 日窗口 ≈ 5 万行，不整库载入）

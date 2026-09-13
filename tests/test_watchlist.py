@@ -21,6 +21,8 @@ from laoa_trader import intraday, pool
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
 from laoa_trader.strategy import groups
+
+from tests._toml import p
 from tests.conftest import READY_THRESHOLDS
 
 
@@ -499,14 +501,14 @@ def test_watchlist_rows_survive_strategy_selection_filter(wl_db) -> None:
 
 def test_cli_once_with_strategies_off(wl_db, tmp_path, capsys, monkeypatch) -> None:
     """`--once` 在 enabled_groups=["none"] 时不该报错退出，而要只处理自选股。"""
-    from laoa_trader.__main__ import cli
     import laoa_trader.scheduler as sched
+    from laoa_trader.__main__ import cli
 
     _add(wl_db, "600100", name="冷门样本", note="龙头")
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
     config = tmp_path / "config.toml"
     config.write_text(
-        f'data_dir = "{wl_db.data_dir}"\nhithink_api_key = ""\n'
+        f'data_dir = "{p(wl_db.data_dir)}"\nhithink_api_key = ""\n'
         'enabled_groups = ["none"]\nnotify_channels = []\n' + READY_THRESHOLDS,
         encoding="utf-8",
     )
@@ -519,13 +521,13 @@ def test_cli_once_with_strategies_off(wl_db, tmp_path, capsys, monkeypatch) -> N
 
 def test_cli_once_still_fails_on_typo_selection(wl_db, tmp_path, capsys, monkeypatch) -> None:
     """名字拼错还是配置错误：明确报错并返回非零。"""
-    from laoa_trader.__main__ import cli
     import laoa_trader.scheduler as sched
+    from laoa_trader.__main__ import cli
 
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
     config = tmp_path / "config.toml"
     config.write_text(
-        f'data_dir = "{wl_db.data_dir}"\nhithink_api_key = ""\n'
+        f'data_dir = "{p(wl_db.data_dir)}"\nhithink_api_key = ""\n'
         'enabled_groups = ["nope"]\nnotify_channels = []\n' + READY_THRESHOLDS,
         encoding="utf-8",
     )

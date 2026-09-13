@@ -18,6 +18,7 @@ from __future__ import annotations
 import socket
 import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -96,6 +97,41 @@ def _block_network(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(socket, "create_connection", create_connection)
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     yield
+
+
+@pytest.fixture()
+def log_records():
+    """收集 `laoa_trader` 日志（用来断言"日志里必须说清中文原因"）。
+
+    为什么不直接用 pytest 的 `caplog`：`log.setup_logging()` 把 `laoa_trader`
+    这个 logger 的 `propagate` 设成了 False（桌面版要自己写文件），
+    记录不会冒泡到 root，`caplog` 就抓不到。这里直接挂一个 handler 上去。
+    """
+    import logging
+
+    records: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:  # noqa: D102
+            records.append(record)
+
+    logger = logging.getLogger("laoa_trader")
+    handler = _Collect(level=logging.DEBUG)
+    # logger 自身的级别也要放开：`log.setup_logging()` 未必在本用例里跑过，
+    # 默认只有 WARNING 能过 —— 那样 INFO 级别的"为什么这样跑"就断言不到了
+    previous_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+
+def messages(records) -> str:
+    """把收集到的日志拼成一段文本（断言用）。"""
+    return "\n".join(r.getMessage() for r in records)
 
 
 #: 让"小样本合成库"能通过自检的宽松阈值（真实默认值另有用例断言）
@@ -215,7 +251,7 @@ def db(cfg: Config, trading_days: list[str]) -> str:
     - 成交量：`300001` 前 3 日地量、最后一日放量（满足地量后放量）。
     """
     path = storage.init_db(cfg.db_path)
-    symbols = {
+    symbols: dict[str, tuple[str, str, float]] = {
         "600001": ("浦发样本", "银行", 3.0),
         "600002": ("半导体甲", "半导体", 12.0),
         "600003": ("半导体乙", "半导体", 18.0),
@@ -228,6 +264,7 @@ def db(cfg: Config, trading_days: list[str]) -> str:
             conn,
             [(s, meta[0], meta[1]) for s, meta in symbols.items()],
         )
+        symbols_first = next(iter(symbols))
         rows = []
         for i, (symbol, (_, _, base)) in enumerate(symbols.items()):
             price = base
@@ -256,6 +293,16 @@ def db(cfg: Config, trading_days: list[str]) -> str:
             (last, "600001", "浦发样本", 1, "首板", "10:10:00", "10:20:00",
              3e7, 0, "银行", 1.0, 10.0, 5e8, 0, 1, "首板", 3e7, 3.0, 0, "hithink", "t"),
         ])
+        # 让合成小库也能通过"运行时自检"（否则调度/界面会因为数据闸门而拒绝跑策略）：
+        # 补一条**零效果**复权事件 —— 只为满足"复权事件非空"这一条判据。
+        # 0 送股/0 配股/0 现金分红 ⇒ 因子恒等于 1，**不改变任何策略输入**
+        # （用真实的送配股事件会整体缩放后复权价，可能影响其它用例的选股结果）。
+        storage.write_adjust_events(conn, [(symbols_first, trading_days[0], 0.0, 0.0, 0.0, 0.0)])
+    # 小样本库（6 只股票 / 40 个交易日）远低于默认门槛 4000 只、4.5 年 ——
+    # 放低门槛，让它按"真实小库"参与后续流程；其余判据（行业覆盖/复权事件/日历）
+    # 都是**如实造出来**的，不是为了绕过检查
+    cfg.min_symbols = 1
+    cfg.min_history_years = 0.0
     return str(path)
 
 
@@ -378,7 +425,12 @@ class FakeClient:
         self._check("valuations", symbols)
         return []
 
-    def download_dump(self, tag="daily-k-10d", dest=None):
+    def download_dump(self, tag="daily-k-10d", dest=None, **kwargs):
+        """模拟下载：把预置的 parquet 复制过去。
+
+        `**kwargs` 吸收真实实现的那堆参数（progress_cb / max_attempts / 超时 /
+        should_stop）—— 测试只关心"文件到位"，但签名必须兼容，否则会掩盖真实调用。
+        """
         self._check("download_dump", tag)
         source = self.dump_files.get(tag)
         if source is None:
@@ -387,9 +439,16 @@ class FakeClient:
             )
         import shutil
 
-        target = Path(dest) if dest else Path("/tmp") / f"{tag}.parquet"
+        # 没给 dest 时落到系统临时目录（**别写死 /tmp**：Windows 上 Path("/tmp")
+        # 是"当前盘符根目录下的 \\tmp"，行为不一样；真实实现也用 gettempdir）
+        target = Path(dest) if dest else Path(tempfile.gettempdir()) / f"{tag}.parquet"
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
+        progress_cb = kwargs.get("progress_cb")
+        if callable(progress_cb):
+            size = target.stat().st_size
+            progress_cb(size // 2, size)
+            progress_cb(size, size)
         return target
 
 

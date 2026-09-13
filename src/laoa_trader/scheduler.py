@@ -27,7 +27,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
-from laoa_trader import intraday, pool
+from laoa_trader import intraday, pool, state
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import sync
 from laoa_trader.data.engine import DataEngine
@@ -35,8 +35,12 @@ from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
 
-#: 主循环的滴答间隔（秒）—— 够细才能"到点就触发"，又不会空转烧 CPU
+#: 主循环的滴答间隔（秒）—— 够细才能"到点就触发"，又不会空转 CPU
 TICK = 1.0
+
+#: 数据闸门拦住时，同一原因的日志最多多久重复一次（秒）。
+#: 调度每秒滴答一次，而"数据没下好"可能持续十几分钟 —— 不节流会把日志刷爆。
+BLOCKED_LOG_INTERVAL = 300.0
 
 #: 信号落库时每条策略保留的条数（与服务器版策略默认 top_n 一致）
 SIGNAL_TOP_N = 30
@@ -179,6 +183,68 @@ def pool_fingerprint(title: str, lines: list[str]) -> str:
 
     text = title + "\n" + "\n".join(lines)
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+
+
+#: 数据闸门拦住时给用户看的中文下一步指引（界面与 CLI 共用同一句话）
+DOWNLOAD_HINT = "请先下载：点界面上的【下载/更新历史数据】，或命令行运行 --download"
+
+
+def data_gate(
+    cfg: Config | None = None,
+    engine: DataEngine | None = None,
+    *,
+    today: str | None = None,
+) -> dict:
+    """**跑策略前的数据闸门**：本地数据到底能不能用来选股？
+
+    这是"在不完整的数据上跑策略"这个 bug 的正解：策略、建池、通知都必须过这道门。
+    判据直接复用 `preflight.check()`（纯本地、秒级、一次请求都不发）：
+
+    - `ready` → 放行；
+    - `needs_incremental` → **也放行**（数据可用，只是落后几天；`run_daily` 会先跑
+      增量再选股，所以口径仍然是"先补数据再选股"）；
+    - `needs_full`（空库/跨度不足/缺复权事件/落后超窗口…）→ **拦下**，给出原因与下一步。
+
+    Args:
+        cfg: 配置（阈值来源）。
+        engine: 数据引擎（不传就用 `cfg.db_path`）。
+        today: 覆盖"今天"（测试用）。
+
+    Returns:
+        ```python
+        {"ok": bool,              # 能不能跑
+         "status": "ready"|"needs_incremental"|"needs_full",
+         "reason": "中文原因",
+         "message": "可直接显示给用户的一句话",
+         "result": {...}}         # 原始 preflight 结果
+        ```
+    """
+    from laoa_trader.data import preflight
+
+    cfg = cfg or get_config()
+    db_path = engine.db_path if engine is not None else cfg.db_path
+    try:
+        result = preflight.check(db_path, cfg, today=today)
+    except Exception as exc:  # noqa: BLE001 - 自检自己出错不能变成"崩界面"
+        reason = f"数据自检失败（{type(exc).__name__}: {exc}）"
+        return {"ok": False, "status": preflight.NEEDS_FULL, "reason": reason,
+                "message": f"{reason}；{DOWNLOAD_HINT}", "result": {}}
+
+    status = result.get("status")
+    reason = result.get("reason") or ""
+    if status == preflight.READY:
+        return {"ok": True, "status": status, "reason": reason,
+                "message": preflight.summary_line(result), "result": result}
+    if status == preflight.NEEDS_INCREMENTAL:
+        return {"ok": True, "status": status, "reason": reason,
+                "message": preflight.summary_line(result), "result": result}
+    return {
+        "ok": False,
+        "status": preflight.NEEDS_FULL,
+        "reason": reason,
+        "message": f"本地无可用历史数据（{reason}）；{DOWNLOAD_HINT}",
+        "result": result,
+    }
 
 
 def run_daily(
@@ -386,6 +452,17 @@ class Scheduler:
         self._last_error: str = ""
         self._last_daily_report: dict = {}
         self._last_intraday_report: dict = {}
+        #: 最近一次"为什么没自动跑"的中文原因（状态栏直接显示，None = 没被跳过）
+        self._skipped_reason: str | None = None
+        #: 最近一次数据自检的结论（ready / needs_incremental / needs_full）
+        self._preflight_status: str | None = None
+        #: 今天因为"数据没就绪/正在下载"被跳过的日期。
+        #: 它**不是** `_daily_failed_date`：那个会让调度一直等到补跑点（例如 19:15）才重试，
+        #: 而"数据下好了就该马上补跑"。所以单独记一份，只用于状态栏说明"今天还没跑"。
+        self._skipped_date: str | None = None
+        #: 闸门日志节流用（同一个原因 BLOCKED_LOG_INTERVAL 秒内只记一次）
+        self._blocked_log_key: tuple[str, str] | None = None
+        self._blocked_log_at: float = 0.0
 
     # ── 生命周期 ──
 
@@ -453,6 +530,11 @@ class Scheduler:
             "last_error": self._last_error,
             "last_daily": self._last_daily_report,
             "last_intraday": self._last_intraday_report,
+            # 数据闸门：界面状态栏据此显示"为什么今天没自动跑"（用户不必翻日志）
+            "skipped_reason": self._skipped_reason,
+            "preflight_status": self._preflight_status,
+            "daily_skipped_today": self._skipped_date == today,
+            "downloading": state.is_downloading(),
         }
 
     def pause_intraday(self) -> None:
@@ -545,7 +627,10 @@ class Scheduler:
             3. 非交易日 → 记一次就跳过（周末不重复试）；
             4. 未到主跑时间 → 等；
             5. 已过主跑、未到补跑：只有"今天主跑失败过"时才等到补跑点，否则就在主跑点跑；
-            6. 已过补跑点：补跑（如果主跑失败过）或主跑（例如程序 20:00 才启动）。
+            6. 已过补跑点：补跑（如果主跑失败过）或主跑（例如程序 20:00 才启动）；
+            7. **数据闸门**（本轮新增，见 `data_gate`）：正在下载 → 跳过；
+               数据 `needs_full` → 跳过。两种情况都**不写成功标记**，
+               所以下载/补数据完成后，当天仍会正常补跑一次。
         """
         now = now or datetime.now()
         today = now.strftime("%Y-%m-%d")
@@ -576,6 +661,39 @@ class Scheduler:
             # 直接放行（下一次循环还会进这里），但记日志便于排查
             logger.info("主跑失败且未配置补跑时间，将按下一轮循环重试")
 
+        # ── 闸门一：正在下载就不选股（否则会在只写了一半的库上算策略）──
+        if state.is_downloading():
+            self._block_daily(
+                "正在下载历史数据：已跳过本次自动选股；"
+                "下载完成后当天仍会自动补跑一次（也可以点【立即选股并建池】）",
+                now,
+            )
+            return
+
+        # ── 闸门二：本地数据不可用就不选股 ──
+        gate = data_gate(self.cfg, self.engine)
+        self._preflight_status = gate["status"]
+        if not gate["ok"]:
+            self._block_daily(
+                f"本地数据不可用（{gate['reason']}）：已跳过本次自动选股；"
+                "请先下载历史数据（界面【下载/更新历史数据】或命令行 --download）",
+                now,
+            )
+            return
+        self._skipped_reason = None          # 这回能跑了 → 清掉"上次被跳过"的提示
+        self._skipped_date = None
+        if gate["status"] == "needs_incremental":
+            # 数据可用、只是不新鲜：按现有配置走 —— 日更本身就是"先增量再选股"
+            # （run_daily(with_data=True) 里第一步就是 daily_update）
+            stale = gate["result"].get("stale_trading_days", 0)
+            if getattr(self.cfg, "auto_download_on_start", True):
+                logger.info(f"数据落后 {stale} 个交易日；先跑增量再选股（auto_download_on_start=true）")
+            else:
+                logger.info(
+                    f"数据落后 {stale} 个交易日，但 auto_download_on_start=false："
+                    "不额外补数据，仍按日更流程先增量再选股（结论基于最新可取到的数据）"
+                )
+
         logger.info(
             ("到补跑时间，" if is_fallback else "到达定时时间，")
             + f"开始日更（主跑 {now.strftime('%H:%M')}）"
@@ -590,6 +708,27 @@ class Scheduler:
             self._last_daily_date = None           # 没成功 → 允许补跑
             self._daily_failed_date = today
             logger.warning("本次日更未成功，将在补跑时间再试一次")
+
+    def _block_daily(self, message: str, now: datetime) -> None:
+        """记录"这一轮被闸门拦住了"：写一条中文日志（**节流**），**不写成功标记**。
+
+        两个关键点：
+
+        1. **不写"今天已完成"**：拦住的不是"今天不用跑了"，而是"现在还不能跑"。
+           数据下好之后当天仍然要补跑一次（用户预期："下完就该自动选一次"）。
+        2. 也**不写 `_daily_failed_date`**（即"今天主跑失败"）：那个标记会让调度
+           一直等到补跑点（例如 19:15）才重试；而这里要的是"数据一就绪就补跑"。
+           所以另外记一份 `_skipped_date`，只用来在状态栏说明"今天因为数据没就绪还没跑"。
+        """
+        self._skipped_reason = message
+        self._skipped_date = now.strftime("%Y-%m-%d")
+        key = (self._skipped_date, message)
+        last_key, last_at = self._blocked_log_key, self._blocked_log_at
+        if key == last_key and (time.monotonic() - last_at) < BLOCKED_LOG_INTERVAL:
+            return                                   # 同一原因 5 分钟内只记一次
+        self._blocked_log_key, self._blocked_log_at = key, time.monotonic()
+        logger.warning(message + "；数据就绪后当天仍会补跑")
+
 
     @staticmethod
     def _report_succeeded(report: dict | None) -> bool:

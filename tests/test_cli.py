@@ -18,17 +18,9 @@ import pytest
 
 from laoa_trader.__main__ import cli
 from laoa_trader.data import storage
+
+from tests._toml import p
 from tests.conftest import READY_THRESHOLDS, seed_ready_db, workdays_ending
-
-
-def _p(path) -> str:
-    r"""把路径安全地写进 TOML 字符串。
-
-    Windows 路径含反斜杠（如 C:\Users\me\data），直接塞进双引号 TOML 字符串时
-    会被当成转义序列，tomllib 报 "Invalid hex value" → 配置整体解析失败、退回默认值，
-    后续断言全崩（CI 上就是这么暴露的）。所以这里统一转义。
-    """
-    return str(path).replace("\\", "\\\\")
 
 
 @pytest.fixture()
@@ -36,7 +28,7 @@ def config_file(tmp_path, cfg):
     """指向临时数据目录的 config.toml（含让合成小库能通过自检的宽松阈值）。"""
     path = tmp_path / "config.toml"
     path.write_text(
-        f'data_dir = "{_p(cfg.data_dir)}"\n'
+        f'data_dir = "{p(cfg.data_dir)}"\n'
         'hithink_api_key = ""\n'
         "notify_feishu = false\nnotify_windows = false\nnotify_tray = false\n"
         + READY_THRESHOLDS,
@@ -50,7 +42,7 @@ def ready_config(tmp_path, ready_cfg):
     """指向**已就绪**数据目录的 config.toml（自检 ready，可以直接跑正题）。"""
     path = tmp_path / "config.toml"
     path.write_text(
-        f'data_dir = "{_p(ready_cfg.data_dir)}"\n'
+        f'data_dir = "{p(ready_cfg.data_dir)}"\n'
         'hithink_api_key = ""\n'
         "notify_feishu = false\nnotify_windows = false\nnotify_tray = false\n"
         + READY_THRESHOLDS,
@@ -65,7 +57,7 @@ def blocked_config(tmp_path):
     blocker = tmp_path / "blocker"
     blocker.write_text("我不是目录", encoding="utf-8")
     path = tmp_path / "blocked.toml"
-    path.write_text(f'data_dir = "{_p(blocker / "data")}"', encoding="utf-8")
+    path.write_text(f'data_dir = "{p(blocker / "data")}"', encoding="utf-8")
     return str(path)
 
 
@@ -86,7 +78,7 @@ def test_doctor_never_leaks_credentials(capsys, tmp_path) -> None:
     """Key 只显示前 4 位（排障要把输出贴给别人看，不能把 Key 一起送出去）。"""
     path = tmp_path / "with-key.toml"
     path.write_text(
-        f'data_dir = "{_p(tmp_path / "data")}"\nhithink_api_key = "SUPER-SECRET-KEY-123456"\n',
+        f'data_dir = "{p(tmp_path / "data")}"\nhithink_api_key = "SUPER-SECRET-KEY-123456"\n',
         encoding="utf-8",
     )
     assert cli(["--cli", "--doctor", "--config", str(path)]) == 0
@@ -204,7 +196,7 @@ def watch_db(cfg):
 
 def test_watchlist_add_autofills_name(capsys, watch_db, tmp_path) -> None:
     config = tmp_path / "config.toml"
-    config.write_text(f'data_dir = "{_p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
+    config.write_text(f'data_dir = "{p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
                       encoding="utf-8")
     assert cli(["--cli", "--watchlist", "add", "600519", "--note", "龙头",
                 "--config", str(config)]) == 0
@@ -219,7 +211,7 @@ def test_watchlist_add_autofills_name(capsys, watch_db, tmp_path) -> None:
 
 def test_watchlist_add_unknown_symbol_warns_but_adds(capsys, watch_db, tmp_path) -> None:
     config = tmp_path / "config.toml"
-    config.write_text(f'data_dir = "{_p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
+    config.write_text(f'data_dir = "{p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
                       encoding="utf-8")
     assert cli(["--cli", "--watchlist", "add", "601999", "--config", str(config)]) == 0
     out = capsys.readouterr().out
@@ -233,7 +225,7 @@ def test_watchlist_add_warns_when_over_limit(capsys, watch_db, tmp_path) -> None
     """超过 watchlist_max 要提示（不静默丢弃）。"""
     config = tmp_path / "config.toml"
     config.write_text(
-        f'data_dir = "{_p(watch_db.data_dir)}"\nwatchlist_max = 1\n' + READY_THRESHOLDS,
+        f'data_dir = "{p(watch_db.data_dir)}"\nwatchlist_max = 1\n' + READY_THRESHOLDS,
         encoding="utf-8")
     cli(["--cli", "--watchlist", "add", "600519", "--config", str(config)])
     capsys.readouterr()
@@ -243,7 +235,7 @@ def test_watchlist_add_warns_when_over_limit(capsys, watch_db, tmp_path) -> None
 
 def test_watchlist_list_shows_status_and_pool(capsys, watch_db, tmp_path) -> None:
     config = tmp_path / "config.toml"
-    config.write_text(f'data_dir = "{_p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
+    config.write_text(f'data_dir = "{p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
                       encoding="utf-8")
     cli(["--cli", "--watchlist", "add", "600519", "--note", "龙头", "--config", str(config)])
     capsys.readouterr()
@@ -258,7 +250,7 @@ def test_watchlist_list_shows_status_and_pool(capsys, watch_db, tmp_path) -> Non
 def test_watchlist_list_warns_when_monitoring_off(capsys, watch_db, tmp_path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(
-        f'data_dir = "{_p(watch_db.data_dir)}"\nwatchlist_in_pool = false\n'
+        f'data_dir = "{p(watch_db.data_dir)}"\nwatchlist_in_pool = false\n'
         + READY_THRESHOLDS, encoding="utf-8")
     cli(["--cli", "--watchlist", "add", "600519", "--config", str(config)])
     capsys.readouterr()
@@ -270,7 +262,7 @@ def test_watchlist_list_warns_when_monitoring_off(capsys, watch_db, tmp_path) ->
 
 def test_watchlist_disable_enable_remove(capsys, watch_db, tmp_path) -> None:
     config = tmp_path / "config.toml"
-    config.write_text(f'data_dir = "{_p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
+    config.write_text(f'data_dir = "{p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
                       encoding="utf-8")
     cli(["--cli", "--watchlist", "add", "600519", "--config", str(config)])
     capsys.readouterr()
@@ -294,7 +286,7 @@ def test_watchlist_disable_enable_remove(capsys, watch_db, tmp_path) -> None:
 
 def test_watchlist_unknown_action_and_missing_symbol(capsys, watch_db, tmp_path) -> None:
     config = tmp_path / "config.toml"
-    config.write_text(f'data_dir = "{_p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
+    config.write_text(f'data_dir = "{p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
                       encoding="utf-8")
     assert cli(["--cli", "--watchlist", "wat", "--config", str(config)]) == 1
     assert "未知动作" in capsys.readouterr().out
@@ -309,7 +301,7 @@ def test_watchlist_unknown_action_and_missing_symbol(capsys, watch_db, tmp_path)
 def test_pool_output_shows_source_and_note(capsys, watch_db, tmp_path) -> None:
     """`--pool` 要能看出来源与备注（策略 / 自选 / 策略+自选）。"""
     config = tmp_path / "config.toml"
-    config.write_text(f'data_dir = "{_p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
+    config.write_text(f'data_dir = "{p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
                       encoding="utf-8")
     with storage.connect(watch_db.db_path) as conn:
         storage.save_pool(conn, [
@@ -349,6 +341,7 @@ def _ready_with_lag(cfg, lag: int, *, min_history_years: float = 0.0) -> str:
 def _count_dump_calls(monkeypatch) -> list[str]:
     """把 CLI 内部创建的客户端换成"记账"的假客户端，返回调用记录列表。"""
     from laoa_trader.data import sync as sync_mod
+
     from tests.conftest import FakeClient
 
     client = FakeClient()
@@ -400,6 +393,7 @@ def test_needs_full_with_auto_download_downloads_first(capsys, config_file, cfg,
                                                        monkeypatch) -> None:
     """`--once --auto-download`：**先下载再继续**（用假客户端验证调用顺序）。"""
     from laoa_trader.data import sync as sync_mod
+
     from tests.conftest import FakeClient
 
     order: list[str] = []
@@ -440,7 +434,7 @@ def test_needs_incremental_auto_updates_on_start(capsys, tmp_path, cfg, monkeypa
                                             detail="写入 2 行"))
     config = tmp_path / "config.toml"
     config.write_text(
-        f'data_dir = "{_p(cfg.data_dir)}"\nhithink_api_key = ""\n'
+        f'data_dir = "{p(cfg.data_dir)}"\nhithink_api_key = ""\n'
         "auto_download_on_start = true\nnotify_channels = []\n" + READY_THRESHOLDS,
         encoding="utf-8",
     )
@@ -461,7 +455,7 @@ def test_needs_incremental_respects_config_off(capsys, tmp_path, cfg, monkeypatc
                         lambda *a, **k: pytest.fail("配置关掉了就不该自动下载"))
     config = tmp_path / "config.toml"
     config.write_text(
-        f'data_dir = "{_p(cfg.data_dir)}"\nhithink_api_key = ""\n'
+        f'data_dir = "{p(cfg.data_dir)}"\nhithink_api_key = ""\n'
         "auto_download_on_start = false\nnotify_channels = []\n" + READY_THRESHOLDS,
         encoding="utf-8",
     )
