@@ -310,7 +310,7 @@ laoA/
 ```
 
 > **详细打包教程（含分发与踩坑）见 [`docs/打包教程.md`](docs/打包教程.md)**
-> 一句话版本：`py -3.11 -m venv .venv` → `pip install -e ".[dev]"` → `pytest tests -q`（期望 609 passed）
+> 一句话版本：`py -3.11 -m venv .venv` → `pip install -e ".[dev]"` → `pytest tests -q`（期望 615 passed）
 > → `build\build.bat` → 产物 `dist\LaoATrader\LaoATrader.exe`。
 > **只运行 exe 的人不需要装 Python**；打包的人才需要 Python 3.11。
 
@@ -368,7 +368,7 @@ PYTHONPATH=src /tmp/laoa-venv/bin/python -m pytest tests -q
 
 > 装 `pyarrow` 不能省：dump 相关用例要么真跑（需要它读写 Parquet），要么整组跳过；
 > 装 `PySide6` 则让 47 条界面用例真跑（离屏），否则那一整个文件跳过。
-> 依赖装齐时是 **609 passed**；跑完记得把 `__pycache__` / `.pytest_cache` 删掉再打包
+> 依赖装齐时是 **615 passed**；跑完记得把 `__pycache__` / `.pytest_cache` 删掉再打包
 > （`.gitignore` 已列出，交付目录里不该出现这些）。
 
 > 测试自己拼 `config.toml` 时，**路径必须转义**（Windows 的 `C:\Users\...` 会让 `tomllib`

@@ -20,7 +20,7 @@ from laoa_trader.config import (
     update_config_file,
 )
 
-from tests._toml import p
+from tests._toml import p, toml_str
 
 #: 模板：`{data_dir}` 处必须传**已转义**的路径（`tests._toml.p()`），
 #: 否则 Windows 的 `C:\Users\...` 会让 tomllib 解析失败、配置静默退回默认值。
@@ -238,7 +238,7 @@ def test_render_config_updates_keeps_windows_path_readable(win_path: str) -> Non
     text = SAMPLE.format(data_dir=p(win_path))
     out = render_config_updates(text, {"notify_channels": ["windows"]})
 
-    assert 'data_dir = "' + win_path.replace("\\", "\\\\") + '"' in out   # 落盘形态是转义过的
+    assert f'data_dir = "{toml_str(win_path)}"' in out   # 落盘形态是转义过的（走同一个 helper）
     parsed = _load_text(out)
     assert parsed.config_error == ""                    # 没有"解析失败（已退回默认值）"
     assert str(parsed.data_dir) == win_path              # 一字不差（含反斜杠）

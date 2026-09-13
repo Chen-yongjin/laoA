@@ -139,7 +139,8 @@ def messages(records) -> str:
 # 而历史上正因为"每个文件各写一份 _p()"，CI 上连续漏了 5 个文件没转义
 # （Windows 的 `C:\Users\...` 会让 tomllib 报 Invalid hex value，配置静默退回默认值）。
 # 现在实现只有 `tests/_toml.py` 一份，这里只是把它摆到最顺手的入口上。
-from tests._toml import escape, p, q, toml_str  # noqa: E402
+from tests._toml import escape, p, q, toml_str  # noqa: E402,F401
+#                     ↑ 这四个就是给别的测试文件 import 用的（re-export），不是本文件自己要用
 
 
 #: 让"小样本合成库"能通过自检的宽松阈值（真实默认值另有用例断言）

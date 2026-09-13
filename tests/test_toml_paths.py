@@ -145,7 +145,7 @@ _FORMAT_ARG = re.compile(
 #: 所以**不许**再转义（转了就变成双反斜杠，路径静默出错，另一种难查）
 _LITERAL = re.compile(r"data_dir\s*=\s*'\{([^{}]*)\}'")
 #: 静态能认出来的"这个值已经处理过了"
-_ESCAPED = re.compile(r"\b(p|q|escape)\(")
+_ESCAPED = re.compile(r"\b(p|q|escape|toml_str)\(")   # toml_str 是规范名，p/q 是短名
 #: 显式豁免标记：**故意**写不转义的用例（例如"证明不转义确实会炸"的反面证据）。
 #: 目的是让豁免看得见、可 grep，而不是让扫描器对整类写法睁一只眼闭一只眼。
 _ALLOW_MARKER = "toml-guard: allow-unescaped"

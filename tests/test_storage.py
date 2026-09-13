@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 
 from laoa_trader.data import storage
 
@@ -115,6 +116,38 @@ def test_save_pool_removes_stale_rows_of_same_day_only(cfg) -> None:
             "SELECT symbol FROM stock_pool WHERE date = '2026-09-10'")}
     assert same_day == {"600003"}
     assert other_day == {"000001"}   # 其它日期不受影响
+
+
+def test_save_pool_batch_is_unique_even_with_frozen_clock(cfg, monkeypatch) -> None:
+    """**时钟被冻住**（Windows 上 15.6ms 粒度就是这个效果）时，批次号仍必须唯一。
+
+    批次号原来取 `datetime.now().strftime("...%f")`，而清理逻辑是"删掉同一天里
+    batch 不等于本次的行"。时钟一冻结（或同一 tick 内连调两次），第二次就会把第一次
+    留下的行当成"本次的行"而清不掉 → 同一天重复建池会**残留上一批标的**
+    （CI 的 Windows runner 上 100% 复现；Linux 时钟精度高，侥幸一直是绿的）。
+
+    这条用例不依赖平台：冻住时钟后，修之前必红。
+    """
+    storage.init_db(cfg.db_path)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):        # type: ignore[override]
+            return datetime(2026, 9, 13, 16, 0, 0, 123456)
+
+    monkeypatch.setattr(storage, "datetime", _FrozenDatetime)
+    with storage.connect(cfg.db_path) as conn:
+        storage.save_pool(conn, [{"symbol": "600001"}, {"symbol": "600002"}], "2026-09-11")
+        storage.save_pool(conn, [{"symbol": "600003"}], "2026-09-11")
+        rows = list(conn.execute(
+            "SELECT symbol, batch FROM stock_pool WHERE date = '2026-09-11'"))
+    assert {symbol for symbol, _batch in rows} == {"600003"}
+    assert len({batch for _symbol, batch in rows}) == 1      # 只剩本次的批次
+
+
+def test_new_batch_never_repeats() -> None:
+    """批次号连取 1000 次不能有重复（不能依赖时钟分辨率）。"""
+    assert len({storage._new_batch() for _ in range(1000)}) == 1000
 
 
 def test_load_pool_defaults_to_latest_day(cfg) -> None:

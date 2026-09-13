@@ -29,7 +29,10 @@
 
 from __future__ import annotations
 
+import itertools
+import os
 import sqlite3
+import uuid
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +41,23 @@ from typing import Any
 from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
+
+#: 进程内自增序号：保证**同一个时钟 tick 内**连续两次调用也拿到不同批次号
+_BATCH_SEQ = itertools.count(1)
+
+
+def _new_batch() -> str:
+    """本次运行的批次号 —— **必须唯一，不能只靠时钟**。
+
+    为什么不能用 `datetime.now().strftime("...%f")`：Windows 的系统时钟粒度约 15.6ms，
+    在同一个 tick 里连续两次调用会拿到**一模一样**的批次号。而清理逻辑是
+    "删掉同一天里 batch 不等于本次的行"，于是第一次留下的行会被当成"本次的行"
+    留了下来 —— 同一天重复建池时池子里就残留上一批标的（CI 的 Windows runner 上
+    这条用例 100% 复现；Linux 因为时钟精度高而侥幸通过，所以一直没暴露）。
+
+    现在 = 进程号 + 进程内自增序号 + 随机后缀：跨 tick、跨多次调用、跨进程都不会撞。
+    """
+    return f"{os.getpid()}-{next(_BATCH_SEQ)}-{uuid.uuid4().hex[:8]}"
 
 #: 建表 DDL（全部 IF NOT EXISTS，可反复执行）
 SCHEMA: tuple[str, ...] = (
@@ -499,7 +519,7 @@ def save_pool(
     """
     if not pool:
         return 0
-    day_batch = batch or datetime.now().strftime("%Y%m%d%H%M%S%f")
+    day_batch = batch or _new_batch()
     now = _now()
     written = upsert(
         conn,

@@ -41,6 +41,12 @@
 - [ ] `copy config.example.toml config.toml`，填入同花顺 API Key（`hithink_api_key`）
 - [ ] `.venv\Scripts\python -m pytest tests -q` —— **全绿**（与我这边 Linux 结果一致：615 passed）
 
+      * 测试**不联网**：socket 层被 `tests/conftest.py` 的守卫封死，任何真实外呼都会直接失败
+      * 日志里出现"限流/5001"字样是**假客户端合成的错误**，不是真实请求
+      * Windows 路径（`C:\Users\...`）：测试自己拼 `config.toml` 时统一走
+        `tests/_toml.py` 的 `p()` / `q()` 转义；`tests/test_toml_paths.py` 会静态扫描
+        `tests/*.py`，**未转义就把文件名+行号列出来**（CI 上那批失败就是这个根因）
+
 #### 本地三连跑（把"只在 Windows / 只在某个时刻才红"的失败前移到 Linux）
 
 这三类失败都真的在 CI 上连续红过，而本地一直是绿的 —— 只跑一遍 `pytest tests -q` 抓不到：
@@ -66,11 +72,7 @@ PYTHONPATH=src python -m pytest tests -q \
   —— 静态扫描整个 `tests/`，谁把路径没转义地拼进 TOML，就在**普通 Linux 跑法**下点名到行号；
 - `tests/test_notify_channels.py` 里的**假 `winotify`**（照抄真库的 duration 校验）
   —— 让"时长非法 → 原生通知永远弹不出来"这类只在 Windows 上出现的问题在 Linux 上也红。
-      * 测试**不联网**：socket 层被 `tests/conftest.py` 的守卫封死，任何真实外呼都会直接失败
-      * 日志里出现"限流/5001"字样是**假客户端合成的错误**，不是真实请求
-      * Windows 路径（`C:\Users\...`）：测试自己拼 `config.toml` 时统一走
-        `tests/_toml.py` 的 `p()` / `q()` 转义；`tests/test_toml_paths.py` 会静态扫描
-        `tests/*.py`，**未转义就把文件名+行号列出来**（这就是 CI 那 18 条失败的根因）
+
 - [ ] `.venv\Scripts\python -m laoa_trader --cli --pool` —— 能打印空池提示（还没下数据）
 - [ ] `.venv\Scripts\python -m laoa_trader` —— **界面能打开**
 
