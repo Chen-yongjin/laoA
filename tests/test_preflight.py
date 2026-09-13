@@ -42,8 +42,12 @@ def _cfg(tmp_path, **kwargs) -> Config:
 
 
 def test_default_thresholds_match_spec() -> None:
+    """默认：导入 5 年、跨度门槛 4.5 年（否则 5 年的库会被永远判不足）。"""
     cfg = Config()
-    assert cfg.min_history_years == 9
+    assert cfg.history_years == 5
+    assert cfg.min_history_years == 4.5
+    assert cfg.min_history_years < cfg.history_years      # 联动约束
+    assert cfg.history_warning() == ""
     assert cfg.min_symbols == 4000
     assert cfg.max_stale_trading_days == 0
     assert cfg.auto_download_on_start is True
@@ -85,8 +89,8 @@ def test_missing_table_needs_full(tmp_path) -> None:
 
 
 def test_short_history_needs_full(tmp_path) -> None:
-    """9.5 年缺失（这里用 30 天）→ needs_full。"""
-    cfg = _cfg(tmp_path, min_history_years=9)
+    """跨度不足（这里用 30 天、门槛 9 年）→ needs_full。"""
+    cfg = _cfg(tmp_path, min_history_years=9, history_years=10)
     seed_ready_db(cfg, days=30)
     result = preflight.check(cfg.db_path, cfg)
     assert result["status"] == preflight.NEEDS_FULL
@@ -99,6 +103,21 @@ def test_too_few_symbols_needs_full(tmp_path) -> None:
     result = preflight.check(cfg.db_path, cfg)
     assert result["status"] == preflight.NEEDS_FULL
     assert "只股票" in result["reason"]
+
+
+def test_contradictory_history_settings_reported(tmp_path) -> None:
+    """min_history_years ≥ history_years → 中文提示，且**不下载**（下完照样判不足）。"""
+    cfg = _cfg(tmp_path, min_history_years=9, history_years=5)
+    storage.init_db(cfg.db_path)
+    result = preflight.check(cfg.db_path, cfg)
+    assert result["status"] == preflight.NEEDS_FULL
+    assert "配置矛盾" in result["reason"]
+    assert "min_history_years" in result["reason"] and "history_years" in result["reason"]
+    assert result.get("config_problem")
+
+    proceed, _, results = preflight.ensure_ready(cfg, auto_download=True)
+    assert proceed is False
+    assert results == []          # 没有白下载
 
 
 def test_missing_adjust_events_needs_full(tmp_path) -> None:
@@ -295,7 +314,7 @@ def test_ensure_ready_incremental_respects_config_off(tmp_path, monkeypatch) -> 
 
 def test_ensure_ready_needs_full_requires_explicit_consent(tmp_path, monkeypatch) -> None:
     """needs_full 时不擅自全量下载（20 分钟的大动作必须用户同意）。"""
-    cfg = _cfg(tmp_path, min_history_years=9)      # 空库必然 needs_full
+    cfg = _cfg(tmp_path, min_history_years=9, history_years=10)   # 空库必然 needs_full
     storage.init_db(cfg.db_path)
     monkeypatch.setattr("laoa_trader.data.sync.download_history",
                         lambda *a, **k: pytest.fail("没有明确同意就不该下载"))
@@ -307,7 +326,7 @@ def test_ensure_ready_needs_full_requires_explicit_consent(tmp_path, monkeypatch
 
 def test_ensure_ready_needs_full_with_consent_downloads(tmp_path, monkeypatch) -> None:
     """给了明确同意 → 先下载再重查自检。"""
-    cfg = _cfg(tmp_path, min_history_years=9)
+    cfg = _cfg(tmp_path, min_history_years=9, history_years=10)
     storage.init_db(cfg.db_path)
     order: list[str] = []
 
@@ -329,7 +348,7 @@ def test_ensure_ready_needs_full_with_consent_downloads(tmp_path, monkeypatch) -
 
 def test_ensure_ready_cancel_is_respected(tmp_path, monkeypatch) -> None:
     """取消回调要能传下去（界面向导的"取消下载"）。"""
-    cfg = _cfg(tmp_path, min_history_years=9)
+    cfg = _cfg(tmp_path, min_history_years=9, history_years=10)
     storage.init_db(cfg.db_path)
     seen: dict = {}
 

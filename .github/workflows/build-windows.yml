@@ -8,6 +8,8 @@
 # 说明：
 # - 测试不过就不出包（pytest 失败即整轮失败），避免把坏版本发出去
 # - 产物是 onedir 目录版（启动快、杀软误报少），压缩后通常 200~400MB
+# - 构建失败时会额外上传 pytest-log 产物（里面是完整测试输出），报错时先看它
+# - 关于 "Node.js 20 is deprecated" 的告警：官方 action 自身的运行时提示，不影响构建结果
 name: build-windows
 
 on:
@@ -44,7 +46,31 @@ jobs:
           pip install -e ".[dev]"
 
       - name: 跑测试（不通过就不出包）
-        run: python -m pytest tests -q
+        shell: pwsh
+        run: |
+          # 完整输出落盘并在失败时上传成产物，方便定位（Windows 上的失败多半是本机看不出来的平台差异）
+          python -m pytest tests -q --tb=short 2>&1 | Tee-Object -FilePath pytest.log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::测试未通过，详见 pytest.log 产物"
+            exit 1
+          }
+          # 顺便报告条数（便于和本地对比）
+          Get-Content pytest.log | Select-Object -Last 3
+
+      - name: 失败时上传测试日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log
+          path: pytest.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 记录环境（排查平台差异用）
+        shell: pwsh
+        run: |
+          python -c "import platform,sys;print('平台',platform.platform());print('Python',sys.version)"
+          python -c "import PySide6,pyarrow,pandas;print('PySide6',PySide6.__version__,'| pyarrow',pyarrow.__version__,'| pandas',pandas.__version__)"
 
       - name: PyInstaller 打包
         run: pyinstaller --noconfirm --clean build/laoa_trader.spec

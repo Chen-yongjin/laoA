@@ -174,19 +174,13 @@ class Config:
     #: 缺数据时是否自动下载：**增量自动**（1 次请求）；全量始终需要明确同意
     #: （界面向导点"开始下载"、CLI 加 --auto-download）
     auto_download_on_start: bool = True
-    #: 历史跨度下限（年）——低于它就认为不是"10 年库"
-    min_history_years: float = 9.0
-    #: 最新交易日股票数下限——低于它说明只下了一部分
-    min_symbols: int = 4000
-    #: `ready` 允许的最大落后交易日数（0 = 必须是最新交易日）
-    max_stale_trading_days: int = 0
-
-    # ── 运行时自检（本地数据够不够用；三态判定见 data/preflight.py）──
-    #: 缺数据时是否自动补：**增量自动**（1 次请求）；全量始终需要明确同意
-    #: （界面向导点"开始下载"、CLI 加 --auto-download）
-    auto_download_on_start: bool = True
-    #: 历史跨度下限（年）——低于它就认为不是"10 年库"
-    min_history_years: float = 9.0
+    #: 首次下载**导入**多少年历史（同花顺 dump 固定 10 年，导入时按这个值过滤）。
+    #: 默认 5 年：全市场约 500 万行，分发出去的库更小、首次下载更快；
+    #: 想要 10 年（例如自己做长样本回测）把它改成 10。
+    history_years: float = 5.0
+    #: 历史跨度下限（年）——低于它就认为"历史不够，需要重新下载"。
+    #: **必须小于** history_years，否则 5 年的库会被永远判成"不足"（见 history_warning()）
+    min_history_years: float = 4.5
     #: 最新交易日股票数下限——低于它说明只下了一部分
     min_symbols: int = 4000
     #: `ready` 允许的最大落后交易日数（0 = 必须是最新交易日）
@@ -309,6 +303,26 @@ class Config:
         """配置有问题时返回中文提示（空串 = 没问题）。界面与 --doctor 都用它。"""
         return self.config_error
 
+    def history_warning(self) -> str:
+        """`history_years` / `min_history_years` 写矛盾时的中文提示（空串 = 没问题）。
+
+        为什么必须联动：自检的 ready 判据是"跨度 ≥ min_history_years"。
+        如果 min_history_years（默认 4.5）不小于 history_years（默认 5），
+        那么**按配置导入的库永远达不到 ready**，用户会被反复催着重新下载 ——
+        这个组合必须当场说清楚，不能让它表现成"数据老是缺"。
+        """
+        years = float(getattr(self, "history_years", 5) or 0)
+        floor = float(getattr(self, "min_history_years", 4.5) or 0)
+        if years <= 0:
+            return f"history_years 必须大于 0（当前 {years:g}）"
+        if floor >= years:
+            return (
+                f"配置矛盾：min_history_years（{floor:g}）必须**小于** history_years（{years:g}），"
+                f"否则按 {years:g} 年导入的库永远达不到自检要求、会被反复要求重新下载。"
+                f"建议 min_history_years 设为 {max(years - 0.5, 0.5):g}"
+            )
+        return ""
+
     def ensure_dirs(self) -> None:
         """建好数据目录（幂等）。
 
@@ -413,9 +427,7 @@ def _apply_env(cfg: Config) -> Config:
         ("FEISHU_CHAT_ID", "feishu_chat_id"),
         ("FEISHU_RECEIVE_ID_TYPE", "receive_id_type"),
         ("WATCHLIST_MAX", "watchlist_max"),
-        ("MIN_HISTORY_YEARS", "min_history_years"),
-        ("MIN_SYMBOLS", "min_symbols"),
-        ("MAX_STALE_TRADING_DAYS", "max_stale_trading_days"),
+        ("HISTORY_YEARS", "history_years"),
         ("MIN_HISTORY_YEARS", "min_history_years"),
         ("MIN_SYMBOLS", "min_symbols"),
         ("MAX_STALE_TRADING_DAYS", "max_stale_trading_days"),

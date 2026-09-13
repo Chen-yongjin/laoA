@@ -523,19 +523,22 @@ if QT_AVAILABLE:
 
             dialog = QDialog(self)
             dialog.setWindowTitle("首次运行 · 下载历史数据")
-            dialog.resize(680, 380)
+            dialog.resize(680, 420)
             layout = QVBoxLayout(dialog)
+            # 导入年限（默认 5 年；0 表示不限制）
+            years = float(getattr(self.cfg, "history_years", 5) or 0)
             layout.addWidget(QLabel("本地数据还不能用来选股："))
             reason = QLabel(f"· {result.get('reason')}")
             reason.setWordWrap(True)
             layout.addWidget(reason)
             layout.addWidget(QLabel(
-                f"· 判据：需要 {self.cfg.min_history_years:g} 年历史、"
+                f"· 判据：需要 {self.cfg.min_history_years:g} 年历史（按 {years:g} 年导入）、"
                 f"至少 {self.cfg.min_symbols} 只股票、有复权事件、行业覆盖 ≥90%、交易日历齐全"
             ))
             layout.addWidget(QLabel(
-                "点【开始下载】会拉取 10 年全市场日K 与复权事件（约 10~20 分钟，"
-                "可中断，下次接着传）。"
+                f"点【开始下载】会拉取全市场日K 与复权事件，**导入最近 {years:g} 年**"
+                f"（约 {int(round(years * 100))} 万行，预计 8~15 分钟；可中断，下次接着传）。"
+                "\n想要 10 年（长样本回测）：把 config.toml 里的 history_years 改成 10 再下。"
             ))
 
             form = QHBoxLayout()

@@ -106,7 +106,10 @@ def check(
         }
     """
     cfg = cfg or get_config()
-    min_years = float(getattr(cfg, "min_history_years", 9) or 0)
+    min_years = float(getattr(cfg, "min_history_years", 4.5) or 0)
+    # 配置写矛盾时**先说清楚**：否则 5 年的库会被永远判成"历史不足"，
+    # 用户只会看到"又要重新下载"，根本猜不到是配置写错了
+    linkage_problem = cfg.history_warning() if hasattr(cfg, "history_warning") else ""
     min_symbols = int(getattr(cfg, "min_symbols", 4000) or 0)
     max_stale = int(getattr(cfg, "max_stale_trading_days", 0) or 0)
     today = today or datetime.now().strftime("%Y-%m-%d")
@@ -114,6 +117,8 @@ def check(
     result: dict[str, Any] = {
         "status": NEEDS_FULL,
         "reason": "",
+        "history_years": float(getattr(cfg, "history_years", 5) or 0),
+        "min_history_years": min_years,
         "stale_trading_days": 0,
         "rows": 0,
         "symbols": 0,
@@ -126,6 +131,11 @@ def check(
         "needs_download": DOWNLOAD_FULL,
         "missing_tables": [],
     }
+
+    if linkage_problem:
+        result["reason"] = linkage_problem
+        result["config_problem"] = linkage_problem
+        return result
 
     if not Path(db_path).exists():
         result["reason"] = "本地还没有数据库（首次运行）"
@@ -166,7 +176,7 @@ def check(
         if result["span_years"] < min_years:
             result["reason"] = (
                 f"历史跨度只有 {result['span_years']:.1f} 年（要求 ≥{min_years:g} 年），"
-                f"最早 {earliest}"
+                f"最早 {earliest}；可调低 min_history_years，或把 history_years 调大后重下"
             )
             return result
 
@@ -250,6 +260,30 @@ def check(
         conn.close()
 
 
+def imported_range(db_path: str | Path) -> dict:
+    """库里实际导入的区间与行数（`--doctor` 与状态栏用）。"""
+    if not Path(db_path).exists():
+        return {"start": None, "end": None, "rows": 0, "span_years": 0.0}
+    try:
+        conn = storage.connect(db_path)
+    except Exception:  # noqa: BLE001
+        return {"start": None, "end": None, "rows": 0, "span_years": 0.0}
+    try:
+        start = _scalar(conn, "SELECT MIN(date) FROM stock_daily_raw")
+        end = _scalar(conn, "SELECT MAX(date) FROM stock_daily_raw")
+        rows = int(_scalar(conn, "SELECT COUNT(*) FROM stock_daily_raw") or 0)
+    finally:
+        conn.close()
+    span = 0.0
+    if start and end:
+        try:
+            span = round((datetime.strptime(end, "%Y-%m-%d")
+                          - datetime.strptime(start, "%Y-%m-%d")).days / DAYS_PER_YEAR, 2)
+        except ValueError:
+            span = 0.0
+    return {"start": start, "end": end, "rows": rows, "span_years": span}
+
+
 def summary_line(result: dict) -> str:
     """一行中文结论（界面状态栏 / CLI 输出用）。"""
     status = result.get("status")
@@ -298,6 +332,10 @@ def ensure_ready(
     cfg = cfg or get_config()
     result = check(cfg.db_path, cfg, today=today)
     logger.info(f"数据自检：{result['status']} —— {result['reason']}")
+    if result.get("config_problem"):
+        # 配置自相矛盾时**不要**下载：下完照样判不足，白等十几分钟
+        logger.warning("配置矛盾，已跳过下载：" + result["config_problem"])
+        return False, result, []
     sync_results: list = []
     wanted = needs_download(result)
     if wanted == DOWNLOAD_NONE:

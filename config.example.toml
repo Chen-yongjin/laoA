@@ -97,10 +97,19 @@ run_at_fallback = "19:15"
 # 是否每天自动运行：关掉则只在你点【立即选股并建池】（或命令行 --once）时跑。
 auto_run = true
 
+# ── 导入多少年历史（首次下载时用）──────────────────────────────────
+# 同花顺 daily-k dump 固定就是 10 年，**没法只下 5 年**；这里的做法是：
+# 照常下载整个 dump，但**只把最近 history_years 年的行情导入本地库**。
+#   * 默认 5 年：全市场约 500 万行，分发给别人时库更小、首次下载更快；
+#   * 想要 10 年（自己做长样本回测）：改成 10，库会大一倍、内存峰值也更高；
+#   * 复权事件（分红/送股/配股，5.7 万条）**永远全部保留** ——
+#     否则窗口起点之前的除权算不进去，整段后复权价会差一个常数。
+history_years = 5
+
 # ── 启动自检（判定本地数据是否可用；纯本地、不联网、秒级）──
-# 三态：ready（不下载） / needs_incremental（落后 ≤10 个交易日，只下增量） / needs_full（下 10 年全量）
+# 三态：ready（不下载） / needs_incremental（落后 ≤10 个交易日，只下增量） / needs_full（重新下载并导入）
 auto_download_on_start = true    # needs_incremental 时是否自动在后台跑增量；needs_full 始终需要你确认（或 CLI 加 --auto-download）
-min_history_years = 9            # 历史跨度低于此值算"缺数据"（10 年库约 10.0）
+min_history_years = 4.5          # 历史跨度低于此值算"缺数据"（必须 < history_years）
 min_symbols = 4000               # 股票数低于此值算"缺数据"（全市场约 5200）
 max_stale_trading_days = 0       # 允许落后的交易日数（0=必须是最新）；落后 >10 个交易日一律判 needs_full
 

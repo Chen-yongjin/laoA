@@ -110,6 +110,11 @@ def _doctor(cfg, startup_problem: str = "") -> None:
           f"（阈值 {cfg.min_symbols}）")
     print(f"  历史跨度  : {result['span_years']:g} 年（阈值 {cfg.min_history_years:g}）"
           f"；最新 {result['latest_date']}")
+    imported = preflight.imported_range(cfg.db_path)
+    print(f"  已导入区间: {imported['start'] or '—'} → {imported['end'] or '—'}"
+          f"；{imported['rows']:,} 行；覆盖 {imported['span_years']:g} 年")
+    print(f"  history_years: {cfg.history_years:g}（导入年限，dump 固定 10 年、"
+          f"按这个值过滤；改成 10 可导满 10 年）")
     print(f"  落后交易日: {result['stale_trading_days']}"
           f"（ready 允许 ≤{cfg.max_stale_trading_days}）")
     print(f"  复权事件  : {'有' if result['has_adjust_events'] else '**缺失**'}"
@@ -412,6 +417,8 @@ def cli(argv: list[str] | None = None) -> int:
 
     if cfg.config_warning():
         print(f"⚠️ {cfg.config_warning()}")
+    if cfg.history_warning():
+        print(f"❌ {cfg.history_warning()}")
 
     problem = cfg.ensure_dirs_message()
     if problem:

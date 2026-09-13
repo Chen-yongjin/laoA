@@ -58,8 +58,20 @@ DEFAULT_INDICES: dict[str, str] = {
     "sz.399006": "399006.SZ",  # 创业板指
 }
 
-#: 历史数据起始年份（同花顺 `daily-k` dump 覆盖约 10 年）
-HISTORY_YEARS = 10
+#: 同花顺 `daily-k` dump **固定**覆盖约 10 年（端点没有"只要 5 年"的选项，
+#: 所以只能整个下载下来、导入时按 `history_years` 过滤）
+DUMP_SPAN_YEARS = 10
+
+#: 首次导入的默认年限（可被 config 的 `history_years` 覆盖）。
+#: 默认 5 年：全市场约 500 万行，分发包更小、首次下载更快；
+#: 要做长样本回测就把 `history_years` 改成 10（库会大一倍、内存峰值也更高）。
+DEFAULT_HISTORY_YEARS = 5
+
+#: 兼容旧名（历史上这个常量表示"dump 覆盖 10 年"）
+HISTORY_YEARS = DUMP_SPAN_YEARS
+
+#: 一年按多少天算（与 preflight 保持一致）
+DAYS_PER_YEAR = 365.25
 
 
 class _Cancelled(Exception):
@@ -154,34 +166,73 @@ def adjust_ratio(
     return k
 
 
-def load_raw(path: Path) -> Any:
-    """读取日K dump，转成项目内部结构（裸 6 位代码 + YYYY-MM-DD）。"""
+#: 日K dump 里需要的列（列裁剪本身就能省一大半内存）
+RAW_COLUMNS: tuple[str, ...] = (
+    "thscode", "date_ms", "open_price", "high_price", "low_price", "close_price",
+    "volume", "turnover",
+)
+
+
+#: 内部列名 → dump 里的列名
+_RAW_SOURCE_COLUMNS: dict[str, str] = {
+    "open": "open_price",
+    "high": "high_price",
+    "low": "low_price",
+    "close": "close_price",
+    "volume": "volume",
+    "turnover": "turnover",
+}
+
+#: 默认要的行情列
+DEFAULT_PRICE_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "volume", "turnover")
+
+
+def load_raw(
+    path: Path,
+    since: str | None = None,
+    columns: tuple[str, ...] | None = None,
+) -> Any:
+    """读取日K dump，转成项目内部结构（裸 6 位代码 + YYYY-MM-DD）。
+
+    Args:
+        since: 只要 `date >= since`（`YYYY-MM-DD`）的行；None = 全部。
+            **先在 Arrow 层按列 + 日期过滤，再转 pandas** ——
+            10 年全市场 1028 万行直接进 pandas 峰值约 2GB，先过滤能省掉大部分，
+            分发给别人（默认只导入 5 年）时尤其明显。
+        columns: 只要这些行情列（默认 OHLCV+成交额）。
+            算复权因子只需要 `close`，这里传 `("close",)` 能把内存再压一大截。
+
+    Returns:
+        DataFrame[symbol, date, *columns]
+    """
     import pandas as pd
 
-    frame = pd.read_parquet(
-        path,
-        columns=[
-            "thscode",
-            "date_ms",
-            "open_price",
-            "high_price",
-            "low_price",
-            "close_price",
-            "volume",
-            "turnover",
-        ],
-    )
+    wanted = tuple(columns) if columns else DEFAULT_PRICE_COLUMNS
+    read_columns = ["thscode", "date_ms"] + [_RAW_SOURCE_COLUMNS[c] for c in wanted]
+    cutoff_ms = hx.date_to_ms(since) if since else None
+
+    frame = None
+    try:
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(
+            path,
+            columns=read_columns,
+            filters=[("date_ms", ">=", cutoff_ms)] if cutoff_ms is not None else None,
+        )
+        frame = table.to_pandas()
+        del table
+    except ImportError:  # pragma: no cover - 没有 pyarrow 时退回 pandas（更慢更吃内存）
+        frame = pd.read_parquet(path, columns=read_columns)
+        if cutoff_ms is not None:
+            frame = frame[frame["date_ms"] >= cutoff_ms].reset_index(drop=True)
+    if frame is None:  # pragma: no cover
+        frame = pd.read_parquet(path, columns=read_columns)
+
     frame["symbol"] = frame["thscode"].map(lambda t: hx.to_local_symbol(str(t)))
     frame["date"] = frame["date_ms"].map(hx.ms_to_date)
-    frame = frame.rename(
-        columns={
-            "open_price": "open",
-            "high_price": "high",
-            "low_price": "low",
-            "close_price": "close",
-        }
-    )
-    return frame[["symbol", "date", "open", "high", "low", "close", "volume", "turnover"]]
+    frame = frame.rename(columns={v: k for k, v in _RAW_SOURCE_COLUMNS.items()})
+    return frame[["symbol", "date", *wanted]]
 
 
 def load_events(path: Path) -> Any:
@@ -424,27 +475,49 @@ def download_history(
         event_path = download_dump(cfg, "adjustment-factors", client, force=force_download)
         _notify(progress_cb, "下载复权事件", 1, 1)
 
-        # 2) 解析
-        _notify(progress_cb, "解析日K dump", 0, 1)
-        raw = load_raw(raw_path)
+        # 2) 解析（**导入按 history_years 过滤**；dump 本身仍是整个 10 年，没法只下 5 年）
+        years = float(getattr(cfg, "history_years", DEFAULT_HISTORY_YEARS) or 0)
+        cutoff = ""
+        if years > 0:
+            cutoff = (datetime.now() - timedelta(days=round(years * DAYS_PER_YEAR))
+                      ).strftime("%Y-%m-%d")
+        _notify(progress_cb, f"解析日K dump（保留 {years:g} 年）", 0, 1)
+        raw = load_raw(raw_path, since=cutoff or None)
+        raw_total = int(dump_summary(raw_path).get("rows") or 0)
         events = load_events(event_path)
         if len(raw) == 0:
             result.ok = False
-            result.error = "日K dump 为空（远端数据未就绪？）"
+            result.error = (
+                "日K dump 为空（远端数据未就绪？）"
+                if not cutoff else
+                f"按 history_years={years:g} 过滤后没有数据（起点 {cutoff}）："
+                "确认 dump 里有这个区间，或把 config.toml 的 history_years 调大"
+            )
             return result
         if symbol_limit:
             keep = sorted(raw["symbol"].unique())[: int(symbol_limit)]
             raw = raw[raw["symbol"].isin(keep)]
             events = events[events["symbol"].isin(keep)]
             logger.info(f"试跑模式：只处理 {len(keep)} 只股票、{len(raw)} 行")
-        _notify(progress_cb, "解析日K dump", 1, 1)
+        _notify(progress_cb, f"解析日K dump（保留 {years:g} 年）", 1, 1)
 
-        # 3) 算复权因子（全量重算：dump 是完整历史，因子必然正确）
+        # 3) 算复权因子
+        #
+        # **关键**：因子必须用**全量历史**算，不能只用窗口内的行 ——
+        # 除权日的"前收"取自除权日之前最后一个交易日；窗口起点的除权事件，
+        # 前收落在窗口之外。只用窗口内数据算，那些事件会被整条丢掉，
+        # 于是整段序列相对真实后复权价差一个常数（收益率不受影响，但价格全错）。
+        #
+        # 省内存的做法：算因子只需要 (symbol, date, close) 三列 + 全量复权事件，
+        # 所以单独读一份"瘦"数据算完就释放，窗口内的 8 列数据另读一份。
         _notify(progress_cb, "计算后复权因子", 0, 1)
-        factors = compute_adjust_factors(raw, events)
+        factor_input = load_raw(raw_path, columns=("close",))
+        events_all = load_events(event_path)
+        factors = compute_adjust_factors(factor_input, events_all)
+        del factor_input
         adjusted = cumulative_factor(raw, factors)
         # 全市场 10 年约 1000 万行 × float64 ≈ 1GB，两份同时在内存里会翻倍；
-        # 算完因子后原始表就没用了，显式释放（Windows 上内存吃紧时这一步很关键）
+        # 算完因子后窗口内的原始表也没用了，显式释放（Windows 上内存吃紧时很关键）
         del raw
         _notify(progress_cb, "计算后复权因子", 1, 1)
         logger.info(f"复权事件 {len(events)} 条 → 有效因子 {len(factors)} 条")
@@ -503,16 +576,32 @@ def download_history(
             _notify(progress_cb, "写入行情", total, total)
 
         result.rows = written
+        start_date = min(adjusted["date"]) if total else ""
+        end_date = max(adjusted["date"]) if total else ""
         result.extra = {
             "skipped": skipped,
-            "raw_rows": total,
+            "raw_rows": total,                  # 过滤后参与导入的行数
+            "dump_rows": raw_total,             # dump 原始行数（约 1028 万）
+            "history_years": years,
+            "cutoff": cutoff,
+            "start": start_date,
+            "end": end_date,
             "events": int(len(events)),
             "factors": int(len(factors)),
         }
-        result.detail = (
-            f"写入行情 {written} 行、跳过已入库 {skipped} 行；"
-            f"复权事件 {len(events)} 条 → 有效因子 {len(factors)} 条"
-        )
+        if cutoff:
+            result.detail = (
+                f"本次导入 {years:g} 年：{start_date} → {end_date}，共 {total:,} 行"
+                f"（原始 dump {raw_total:,} 行，已按 history_years 过滤）；"
+                f"写入 {written} 行、跳过已入库 {skipped} 行；"
+                f"复权事件 {len(events)} 条（**全部保留**，含窗口之前的除权）"
+                f" → 有效因子 {len(factors)} 条"
+            )
+        else:
+            result.detail = (
+                f"写入行情 {written} 行、跳过已入库 {skipped} 行；"
+                f"复权事件 {len(events)} 条 → 有效因子 {len(factors)} 条"
+            )
 
         # 5) 顺带更新股票名称（失败不算整体失败：名字只影响展示）
         if include_names:
