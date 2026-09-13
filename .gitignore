@@ -16,11 +16,13 @@ dist/
 
 # 本地配置与数据（含凭据，绝不入库）
 config.toml
-data/
+# ⚠️ 必须是 /data/ 而不是 data/：后者会连源码里的 src/laoa_trader/data/ 一起忽略掉
+# （数据层 hithink/storage/sync/preflight/engine 全在里面，漏了 git 里就没有它们）
+/data/
 *.db
 *.db-wal
 *.db-shm
-logs/
+/logs/
 
 # 下载的同花顺 dump（几十 MB~几百 MB，运行时自己下）
 *.parquet
