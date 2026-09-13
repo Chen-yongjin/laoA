@@ -29,6 +29,16 @@ from laoa_trader.notify import KINDS  # noqa: E402
 from laoa_trader.strategy import rules as rules_mod  # noqa: E402
 
 
+def _p(path) -> str:
+    r"""把路径安全地写进 TOML 字符串。
+
+    Windows 路径含反斜杠（如 C:\Users\me\data），直接塞进双引号 TOML 字符串时
+    会被当成转义序列，tomllib 报 "Invalid hex value" → 配置整体解析失败、退回默认值，
+    后续断言全崩（CI 上就是这么暴露的）。所以这里统一转义。
+    """
+    return str(path).replace("\\", "\\\\")
+
+
 @pytest.fixture()
 def seeded(cfg):
     """给界面准备一点数据，让三个表都有内容可渲染。"""
@@ -76,7 +86,7 @@ def seeded(cfg):
     config_file = cfg.data_dir / "config.toml"
     config_file.write_text(
         "# 用户自己的注释（保存设置后必须还在）\n"
-        f'data_dir = "{cfg.data_dir}"\n'
+        f'data_dir = "{_p(cfg.data_dir)}"\n'
         'hithink_api_key = ""\n'
         'enabled_groups = ["ultra", "short", "swing"]\n'
         'enabled_strategies = []\n'
@@ -261,7 +271,7 @@ def test_doctor_command_prints_report(cfg, capsys, tmp_path) -> None:
     from laoa_trader.__main__ import cli
 
     config_file = tmp_path / "config.toml"
-    config_file.write_text(f'data_dir = "{cfg.data_dir}"', encoding="utf-8")
+    config_file.write_text(f'data_dir = "{_p(cfg.data_dir)}"', encoding="utf-8")
     assert cli(["--cli", "--doctor", "--config", str(config_file)]) == 0
     out = capsys.readouterr().out
     assert "老A法师 · 交易终端 —— 自检" in out
@@ -636,7 +646,7 @@ def wizard_window(cfg, qapp, monkeypatch):
     # 向导里点"开始下载"会把 Key 写回配置文件；给一个真实的临时路径，
     # 免得落到 ~/.config（沙箱里可能不可写、也不是本用例要测的东西）
     config_file = cfg.data_dir / "config.toml"
-    config_file.write_text(f'data_dir = "{cfg.data_dir}"', encoding="utf-8")
+    config_file.write_text(f'data_dir = "{_p(cfg.data_dir)}"', encoding="utf-8")
     cfg.source_path = config_file
     win = ui_app.MainWindow(cfg)
     win.show()
