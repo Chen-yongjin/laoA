@@ -2,6 +2,7 @@
 name = "laoa-trader"
 version = "0.1.0"
 description = "老A法师 · 交易终端（Windows 单机版）：A 股选股 + 盯盘 + 提醒"
+authors = [{ name = "async-chen" }]           # 与「关于」对话框、README 的版权信息一致
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",

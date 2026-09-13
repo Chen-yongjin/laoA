@@ -37,6 +37,9 @@ DEFAULT_APP_NAME = "LaoATrader"
 #: 支持的通知频道（顺序 = 界面与 --doctor 的展示顺序）
 CHANNELS: tuple[str, ...] = ("windows", "feishu", "tray")
 
+#: 股票池的两种视图（界面右上角【切换为卡片/表格】）；写错的值当 `cards`
+POOL_VIEWS: tuple[str, ...] = ("cards", "table")
+
 
 def default_data_dir() -> Path:
     """默认数据目录：Windows `%LOCALAPPDATA%\\LaoATrader\\data`，其它平台同构。"""
@@ -242,10 +245,24 @@ class Config:
     #: 补跑时间（HH:MM）：主跑**没成功**时到这个点再试一次
     run_at_fallback: str = "19:15"
 
+    # ── 界面偏好（只影响"怎么显示"，不影响任何计算）──
+    #: 股票池默认视图：`cards` = 卡片（默认，信息完整）/ `table` = 9 列表格（更密）
+    pool_view: str = "cards"
+
     #: 记录配置实际来自哪个文件（状态栏展示用）
     source_path: Path | None = None
     #: 配置文件解析/读取失败的原因（空 = 一切正常）
     config_error: str = ""
+
+    def __post_init__(self) -> None:
+        """把界面偏好收紧到合法取值。
+
+        为什么要在这里做：`pool_view` 是给界面看的，手改 config.toml 写错一个字母
+        （"card" / "Cards" / 中文）不该表现成"股票池页打不开/空白"——
+        统一按 `cards` 处理，用户看到的仍然是一个能用的界面。
+        """
+        value = str(self.pool_view or "").strip().lower()
+        self.pool_view = value if value in POOL_VIEWS else "cards"
 
     # -- 派生属性 --
 

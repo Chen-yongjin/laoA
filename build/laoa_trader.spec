@@ -109,7 +109,19 @@ HIDDEN = [
 DATAS = [
     (str(PROJECT_ROOT / "config.example.toml"), "."),
     (str(PROJECT_ROOT / "README.md"), "."),
+    # 图标要打进包里：窗口 / 托盘 / 关于页都从 `laoa_trader/assets/` 取
+    # （位置解析集中在 `laoa_trader/assets.py`，spec 这里只负责把文件放进去）
+    (str(SRC / "laoa_trader" / "assets"), "laoa_trader/assets"),
 ]
+
+#: exe 的图标：Windows 用它显示在任务栏 / 资源管理器 / 快捷方式上。
+#: 多尺寸 ICO 由 `python build/make_icon.py` 生成；缺失时不阻塞打包（退化成默认图标，
+#: 同时打印一句提示，免得"图标没换"变成一件要靠猜的事）。
+ICON_PATH = SRC / "laoa_trader" / "assets" / "icon.ico"
+if not ICON_PATH.exists():
+    print(f"提示：没找到图标 {ICON_PATH}，本次打包用默认图标"
+          f"（需要的话先跑 python build/make_icon.py）")
+
 
 # ── 排除：省体积（这些包被打进去会多几百 MB）──
 EXCLUDES = [
@@ -163,7 +175,7 @@ exe = EXE(  # noqa: F821
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,          # 有图标时填 .ico 路径
+    icon=str(ICON_PATH) if ICON_PATH.exists() else None,   # 见上面 ICON_PATH
 )
 
 coll = COLLECT(  # noqa: F821

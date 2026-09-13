@@ -122,13 +122,48 @@ def window(seeded, qapp):
     win.scheduler.stop()
     if win.wizard is not None:      # 首次向导（非模态）不要留给下一个用例
         win.wizard.close()
+    if win.about_dialog is not None:
+        win.about_dialog.close()    # 「关于」窗口同理
     win.tray.hide()
     win.deleteLater()
     qapp.processEvents()
 
 
+def _layout_widgets(layout) -> list:
+    """顶层布局（含其子布局）里直接挂着的控件。
+
+    为什么要这么写：原来的两个输入行是 `layout.addLayout(pos_row)` 挂在**主窗口底部**的，
+    这种"全局行"正是本辅助函数要抓的东西 —— 现在它们只应出现在各自页签里。
+    """
+    found: list = []
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        widget = item.widget()
+        if widget is not None:
+            found.append(widget)
+        sub = item.layout()
+        if sub is not None:
+            found.extend(_layout_widgets(sub))
+    return found
+
+
+def _tab_page(window, title: str):
+    """按页签标题取页面控件（页序变了也不会让断言找错地方）。"""
+    titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    return window.tabs.widget(titles.index(title))
+
+
+def _card_of(window, symbol: str):
+    for card in window.pool_cards:
+        if card.symbol == symbol:
+            return card
+    raise AssertionError(f"卡片视图里没有 {symbol}")
+
+
 def test_window_renders_all_panels(window) -> None:
+    # 池子两套视图（卡片 / 表格）都填好了：切换视图只是 setVisible，不重建
     assert window.pool_table.rowCount() == 1
+    assert len(window.pool_cards) == 1
     assert window.position_table.rowCount() == 1
     assert window.alert_table.rowCount() == 1
     # 五个页签：股票池 / 持仓 / 自选股 / 盘中提醒 / 设置
@@ -136,6 +171,11 @@ def test_window_renders_all_panels(window) -> None:
     assert [window.tabs.tabText(i) for i in range(5)] == [
         "股票池", "持仓", "自选股", "盘中提醒", "设置",
     ]
+    # 默认视图是卡片（"默认卡片"这条由 test_pool_view_toggle_writes_config 专门盯）
+    assert window.pool_scroll.isVisible() is True
+    assert window.pool_table.isVisible() is False
+    window.on_toggle_pool_view()          # 切到表格视图，接着断言表格内容
+    assert window.pool_table.isVisible() is True
     # 池子表格：代码/名称/来源策略/来源/备注/热门行业/分数/条件单参数/复制按钮
     assert window.pool_table.columnCount() == 9
     assert window.pool_table.item(0, 0).text() == "600002"
@@ -302,6 +342,419 @@ def test_pool_table_has_source_column(window) -> None:
     assert header[3] == "来源"
     assert header[4] == "备注"
     assert window.pool_table.item(0, 3).text() == "波段·T+10（T+10）"
+
+
+# ── 股票池：卡片视图（默认）与卡片/表格切换 ──
+
+
+def test_pool_cards_render_row_fields(window) -> None:
+    """卡片把池子行的字段暴露成属性（将来做"点卡片看详情"也按属性取值）。"""
+    from PySide6.QtWidgets import QLabel
+
+    card = window.pool_cards[0]
+    assert card.symbol == "600002"
+    assert card.name == "半导体甲"
+    assert card.label == "低价股"
+    assert card.source_label == "波段·T+10（T+10）"
+    assert card.note == ""                    # 纯策略标的：没有备注
+    assert card.industry == "半导体"
+    assert card.score_text == "3.000"         # 分数是格式化后的字符串
+    assert card.plan_text.startswith("触发 ")  # 条件单参数文本
+    assert card.copy_button.text() == "复制条件单"
+
+    # 文字确实画在卡片上（不是只存在属性里）
+    texts = [label.text() for label in card.findChildren(QLabel)]
+    assert any("600002" in t and "半导体甲" in t for t in texts)      # 第 1 行：代码 + 名称
+    assert card.title_label.font().bold() is True                     # 名称加粗
+    assert card.title_label.font().pointSize() >= window.font().pointSize()
+    assert "低价股" in texts                                          # 右侧：来源策略
+    assert "分数 3.000" in texts                                      # 右侧：分数
+    assert "波段·T+10（T+10）" in texts                                # 第 2 行：来源
+    assert any("热门行业：半导体" in t for t in texts)                 # 第 2 行：热门行业
+    assert any(t.startswith("触发 ") for t in texts)                   # 第 3 行：条件单参数
+
+
+def test_pool_card_is_compact_and_width_follows_window(window, qapp) -> None:
+    """卡片宽度跟着窗口走、高度紧凑（3 行文字 + 按钮，不该每张卡占半屏）。"""
+    card = window.pool_cards[0]
+    viewport_width = window.pool_scroll.viewport().width()
+    assert card.width() >= viewport_width - 40     # 宽度铺满滚动区，右侧不留大片空白
+    assert 40 <= card.height() <= 140              # 紧凑：3 行文字 + 一个按钮
+
+    window.resize(max(window.width() - 400, 400), window.height())
+    qapp.processEvents()
+    assert card.width() < viewport_width           # 跟着窗口变窄（setWidgetResizable）
+    assert card.width() >= window.pool_scroll.viewport().width() - 40
+
+
+def test_pool_card_copy_button_copies_plan(window, qapp) -> None:
+    """卡片右下角的【复制条件单】真的走 `_copy_plan`（剪贴板里得有真东西）。"""
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.clipboard().setText("")      # 先清空：免得读到上一条用例的残留
+    card = window.pool_cards[0]
+    card.copy_button.click()
+    qapp.processEvents()
+
+    text = QApplication.clipboard().text()
+    assert "【条件单｜买入】600002 半导体甲" in text
+    assert "止损" in text and "止盈" in text
+    assert "已复制 600002 的条件单参数" in window.status_label.text()
+
+
+def test_pool_cards_not_rebuilt_when_signature_unchanged(window) -> None:
+    """内容没变就**不重建**：每 5 秒重建一次会闪烁、丢焦点、白白吃 CPU。"""
+    card_before = window.pool_cards[0]
+    table_button_before = window.pool_table.cellWidget(0, 8)
+
+    window._refresh_pool()
+    window._refresh_pool()
+
+    assert len(window.pool_cards) == 1
+    assert window.pool_cards[0] is card_before          # 同一个控件对象
+    assert id(window.pool_cards[0]) == id(card_before)  # 对象 id 也没变
+    assert window.pool_table.cellWidget(0, 8) is table_button_before
+
+
+def test_pool_cards_hide_empty_fields(window, qapp, monkeypatch) -> None:
+    """没有分数/行业/备注时**不留空标签**（卡片上不该出现"备注："这种空壳）。"""
+    from PySide6.QtWidgets import QLabel
+
+    from laoa_trader import pool as pool_mod
+
+    bare = {
+        "symbol": "600002", "name": "半导体甲", "strategy": "LowPriceStrategy",
+        "strategies": "LowPriceStrategy", "reason": "低价股·热门行业半导体",
+        "label": "低价股", "source_label": "波段·T+10（T+10）",
+        "industry": "", "note": "", "score": None,
+    }
+    monkeypatch.setattr(pool_mod, "pool_table_rows", lambda db_path, day=None: [bare])
+    window._pool_signature = ()            # 强制重建
+    window._refresh_pool()
+    qapp.processEvents()
+
+    card = window.pool_cards[0]
+    assert card.score_text == "—"          # 没有分数：格式化结果就是"—"，但不显示
+    assert card.industry == "" and card.note == ""
+    texts = [label.text() for label in card.findChildren(QLabel)]
+    assert all(t.strip() for t in texts), f"卡片上留了空标签：{texts}"
+    assert not any(t.startswith("分数") for t in texts)
+    assert not any("热门行业" in t for t in texts)
+    assert not any("备注" in t for t in texts)
+    assert card.plan_text.startswith("触发 ")     # 条件单参数照常算
+
+
+def test_pool_empty_label_visible_only_when_pool_empty(window, seeded, qapp,
+                                                       monkeypatch) -> None:
+    """池子非空 → 提示收起；池子空 → 提示出现、卡片列表清空（表格视图下也要正确）。"""
+    from laoa_trader import pool as pool_mod
+
+    assert window.pool_empty_label.isVisible() is False      # seeded 的池子里有 1 只
+    assert window.pool_cards != []
+
+    monkeypatch.setattr(pool_mod, "pool_table_rows", lambda db_path, day=None: [])
+    window._refresh_pool()          # 签名从"有"变"无" → 重建
+    qapp.processEvents()
+
+    assert window.pool_cards == []
+    assert window.pool_table.rowCount() == 0
+    assert window.pool_empty_label.isVisible() is True
+    assert "今日没有入选标的（收盘后自动选股，或点【立即选股并建池】）" \
+        in window.pool_empty_label.text()
+
+    window.on_toggle_pool_view()    # 切到表格视图：提示照样得显示
+    qapp.processEvents()
+    assert window.pool_table.isVisible() is True
+    assert window.pool_empty_label.isVisible() is True
+
+    window.on_toggle_pool_view()    # 切回卡片
+    qapp.processEvents()
+    assert window.pool_empty_label.isVisible() is True
+
+
+def test_pool_view_toggle_writes_config(window, seeded, qapp) -> None:
+    """默认卡片 → 点一下变表格且写回 pool_view=table → 再点回卡片并写回 cards。"""
+    config_file = seeded.data_dir / "config.toml"
+
+    assert window.cfg.pool_view == "cards"                  # 默认卡片
+    assert window.pool_scroll.isVisible() is True
+    assert window.pool_table.isVisible() is False
+    assert window.btn_pool_view.text() == "切换为表格"       # 文字 = 点了会发生什么
+
+    window.btn_pool_view.click()
+    qapp.processEvents()
+    assert window.pool_table.isVisible() is True
+    assert window.pool_scroll.isVisible() is False
+    assert window.btn_pool_view.text() == "切换为卡片"
+    text = config_file.read_text(encoding="utf-8")
+    assert 'pool_view = "table"' in text
+    assert "# 用户自己的注释（保存设置后必须还在）" in text   # 只改这一个键
+    assert 'my_own_key = "别动我"' in text
+    assert window.cfg.pool_view == "table"
+
+    window.btn_pool_view.click()
+    qapp.processEvents()
+    assert window.pool_scroll.isVisible() is True
+    assert window.pool_table.isVisible() is False
+    assert window.btn_pool_view.text() == "切换为表格"
+    assert 'pool_view = "cards"' in config_file.read_text(encoding="utf-8")
+    assert window.cfg.pool_view == "cards"
+
+
+def test_pool_view_starts_from_config(seeded, qapp) -> None:
+    """启动时按配置决定视图与按钮文字；配置写错（手改 TOML）当卡片，不白屏。"""
+    from laoa_trader.ui import app as ui_app
+
+    def open_window():
+        win = ui_app.MainWindow(seeded)
+        win.show()
+        qapp.processEvents()
+        return win
+
+    seeded.pool_view = "table"
+    win = open_window()
+    try:
+        assert win.pool_table.isVisible() is True
+        assert win.pool_scroll.isVisible() is False
+        assert win.btn_pool_view.text() == "切换为卡片"
+    finally:
+        win.scheduler.stop()
+        win.tray.hide()
+        win.deleteLater()
+        qapp.processEvents()
+
+    seeded.pool_view = "手滑写错了"
+    win = open_window()
+    try:
+        assert win.pool_scroll.isVisible() is True       # 非法值 → 卡片
+        assert win.pool_table.isVisible() is False
+        assert win.btn_pool_view.text() == "切换为表格"
+    finally:
+        win.scheduler.stop()
+        win.tray.hide()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+# ── 输入行在各自页签里（不再挂在窗口底部）──
+
+
+def test_input_rows_live_in_their_own_tabs(window) -> None:
+    """持仓/自选的输入行在各自页签里，而且**不在**中央控件的顶层布局里（原来的全局行没了）。"""
+    from PySide6.QtWidgets import QPushButton
+
+    pos_page = _tab_page(window, "持仓")
+    watch_page = _tab_page(window, "自选股")
+
+    for widget in (window.pos_symbol, window.pos_qty, window.pos_cost):
+        assert pos_page.isAncestorOf(widget) is True
+    for widget in (window.watch_symbol, window.watch_note):
+        assert watch_page.isAncestorOf(widget) is True
+
+    # 输入行排在表格**上方**（先填再点，视线不用来回跳）
+    assert pos_page.layout().itemAt(0).layout().indexOf(window.pos_symbol) >= 0
+    assert pos_page.layout().itemAt(1).widget() is window.position_table
+    assert watch_page.layout().itemAt(0).layout().indexOf(window.watch_symbol) >= 0
+    assert watch_page.layout().itemAt(1).widget() is window.watch_table
+
+    # 全局行确实删掉了：中央控件顶层布局（含子布局）里不再挂着这些输入框
+    top_level = _layout_widgets(window.centralWidget().layout())
+    for widget in (window.pos_symbol, window.pos_qty, window.pos_cost,
+                   window.watch_symbol, window.watch_note):
+        assert widget not in top_level
+
+    # 按钮文字没变（用户肌肉记忆、文档与截图都按这几个字找按钮）
+    pos_texts = [b.text() for b in pos_page.findChildren(QPushButton)]
+    assert "添加持仓" in pos_texts and "删除持仓" in pos_texts
+    watch_texts = [b.text() for b in watch_page.findChildren(QPushButton)]
+    for text in ("加自选", "删除自选", "启用", "停用"):
+        assert text in watch_texts
+
+
+def test_watch_symbol_enter_adds_to_watchlist(window, seeded, qapp) -> None:
+    """自选股输入框回车 = 点【加自选】（加自选是"敲代码回车"的连击动作）。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    window.watch_symbol.setText("600001")
+    window.watch_note.setText("回车加的")
+    QTest.keyClick(window.watch_symbol, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    with storage.connect(seeded.db_path) as conn:
+        rows = storage.load_watchlist(conn)
+    assert rows[0]["symbol"] == "600001"
+    assert rows[0]["name"] == "低价样本"
+    assert rows[0]["note"] == "回车加的"
+    assert window.watch_table.rowCount() == 1
+    assert "已加自选：600001 低价样本" in window.status_label.text()
+
+
+def test_pos_symbol_enter_adds_position(window, seeded, qapp) -> None:
+    """持仓输入框回车 = 点【添加持仓】。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    window.pos_symbol.setText("600002")
+    window.pos_qty.setText("500")
+    window.pos_cost.setText("11.5")
+    QTest.keyClick(window.pos_symbol, Qt.Key.Key_Return)
+    qapp.processEvents()
+
+    with storage.connect(seeded.db_path) as conn:
+        positions = storage.load_positions(conn)
+    assert positions["600002"]["quantity"] == 500
+    assert positions["600002"]["avg_cost"] == 11.5
+    assert window.position_table.rowCount() == 2
+
+
+# ── 「关于」对话框（版本 / 版权 / 数据来源）──
+
+
+def test_window_title_shows_version_and_about_button(window) -> None:
+    import laoa_trader
+
+    assert window.windowTitle() == (
+        f"老A法师 · 交易终端 v{laoa_trader.__version__}（Windows 单机版 · 测试版）"
+    )
+    assert window.btn_about.text() == "关于"
+
+
+def test_about_dialog_shows_version_and_copyright(window, qapp) -> None:
+    """【关于】弹窗要能看到版本、作者、版权与数据来源（文字用 QLabel，不是链接）。"""
+    import laoa_trader
+    from PySide6.QtWidgets import QLabel, QPushButton
+
+    window.on_about()
+    qapp.processEvents()
+
+    dialog = window.about_dialog
+    assert dialog is not None
+    assert dialog.isVisible() is True
+    texts = [label.text() for label in dialog.findChildren(QLabel)]
+    blob = "\n".join(texts)
+    assert "老A法师 · 交易终端" in blob
+    assert f"版本：{laoa_trader.__version__}（测试版）" in blob
+    assert "作者 / 版权所有人：async-chen" in blob
+    assert "版权所有 © 2026 async-chen，保留所有权利。" in blob
+    assert "同花顺（fuyao.aicubes.cn）" in blob
+    assert "不构成任何投资建议" in blob
+    assert all("<a href" not in t for t in texts)          # 版本号不是富文本链接
+
+    buttons = [b.text() for b in dialog.findChildren(QPushButton)]
+    assert "复制版本信息" in buttons
+    assert "关闭" in buttons
+
+
+def test_about_copy_version_info_to_clipboard(window, qapp) -> None:
+    """【复制版本信息】把 名称 / 版本 / 版权 三行写进剪贴板（报障时直接粘贴）。"""
+    import laoa_trader
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.clipboard().setText("")
+    window.on_about()
+    qapp.processEvents()
+    window.about_copy_button.click()
+    qapp.processEvents()
+
+    lines = QApplication.clipboard().text().splitlines()
+    assert lines == [
+        "老A法师 · 交易终端",
+        f"版本：{laoa_trader.__version__}（测试版）",
+        "版权所有 © 2026 async-chen，保留所有权利。",
+    ]
+    assert "已复制版本信息" in window.status_label.text()
+
+
+def test_about_close_button_closes_dialog(window, qapp) -> None:
+    from PySide6.QtWidgets import QPushButton
+
+    window.on_about()
+    qapp.processEvents()
+    assert window.about_dialog.isVisible() is True
+
+    close_btn = next(b for b in window.about_dialog.findChildren(QPushButton)
+                     if b.text() == "关闭")
+    close_btn.click()
+    qapp.processEvents()
+    assert window.about_dialog.isVisible() is False
+
+
+# ── 图标接线（窗口 / 托盘 / 关于页）──
+
+
+def test_window_icon_comes_from_assets(window, qapp) -> None:
+    """窗口图标是随包那张 256 图（不是空图标，也不是系统默认图标）。
+
+    先清掉应用级图标：`QWidget.windowIcon()` 在窗口没设图标时会退回**应用**图标，
+    不清掉的话这条断言就分不清"窗口自己设上了"和"蹭了应用图标"。
+    """
+    from PySide6.QtGui import QIcon
+
+    qapp.setWindowIcon(QIcon())
+    assert window.windowIcon().isNull() is False
+    assert [size.width() for size in window.windowIcon().availableSizes()] == [256]
+
+
+def test_tray_icon_is_the_dedicated_small_png(window) -> None:
+    """托盘是 16~32px 的场景：必须取专门画的 32 那份（拿 256 缩下去会糊）。"""
+    assert window.tray.icon().isNull() is False
+    assert [size.width() for size in window.tray.icon().availableSizes()] == [32]
+
+
+def test_application_icon_is_set(qapp) -> None:
+    """QApplication 也要设一份：不设的话 Windows 任务栏有时会显示 python 的默认图标。"""
+    from PySide6.QtGui import QIcon
+
+    from laoa_trader.ui import app as ui_app
+
+    qapp.setWindowIcon(QIcon())
+    ui_app._set_app_icon(qapp)
+    assert qapp.windowIcon().isNull() is False
+    assert [size.width() for size in qapp.windowIcon().availableSizes()] == [256]
+
+
+def test_about_dialog_shows_icon(window, qapp) -> None:
+    """「关于」里程序名下面有 64×64 图标（按 objectName 也找得到，方便报障截图对位置）。"""
+    from PySide6.QtWidgets import QLabel
+
+    window.on_about()
+    qapp.processEvents()
+
+    assert window.about_icon is not None
+    assert window.about_icon.objectName() == "aboutIcon"
+    assert window.about_dialog.findChild(QLabel, "aboutIcon") is window.about_icon
+    pixmap = window.about_icon.pixmap()
+    assert pixmap.isNull() is False
+    assert (pixmap.width(), pixmap.height()) == (64, 64)
+
+
+def test_window_opens_without_icon_assets(seeded, qapp, monkeypatch) -> None:
+    """图标丢了也不能崩程序：`icon_png` 返回 None 时窗口照开、关于照弹、托盘照有图标。"""
+    from PySide6.QtWidgets import QLabel
+
+    from laoa_trader import assets
+    from laoa_trader.ui import app as ui_app
+
+    monkeypatch.setattr(assets, "icon_png", lambda size=None: None)
+    win = ui_app.MainWindow(seeded)
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.tray.icon().isNull() is False      # 退回系统标准图标，托盘不至于空着
+        win.on_about()
+        qapp.processEvents()
+        assert win.about_dialog is not None
+        assert win.about_icon is None                 # 没有图标就**不加**那个 QLabel，不留空位
+        texts = [lb.text() for lb in win.about_dialog.findChildren(QLabel)]
+        assert any(t.startswith("版本：") for t in texts)   # 正文不受图标影响
+    finally:
+        if win.about_dialog is not None:
+            win.about_dialog.close()
+        win.scheduler.stop()
+        win.tray.hide()
+        win.deleteLater()
+        qapp.processEvents()
 
 
 def test_save_groups_writes_config_keeps_comments(window, seeded, qapp) -> None:
@@ -570,7 +1023,7 @@ def test_watch_panel_shows_monitoring_off(window, seeded, qapp) -> None:
 
 
 def test_pool_table_shows_watchlist_source_and_note(window, seeded, qapp) -> None:
-    """自选股进池后：来源列能区分「自选」「策略+自选」，备注单独一列。"""
+    """自选股进池后：来源能区分「自选」「策略+自选」，备注单独一列（卡片同样如此）。"""
     from laoa_trader import pool as pool_mod
 
     # 600002 是策略选中的（seed 的池子），把它也加为自选 → 来源「策略+自选」
@@ -583,6 +1036,9 @@ def test_pool_table_shows_watchlist_source_and_note(window, seeded, qapp) -> Non
 
     assert window.pool_table.item(0, 3).text() == "波段·T+10（T+10） + 自选"
     assert window.pool_table.item(0, 4).text() == "龙头"
+    # 卡片用的是同一份数据（两套视图不该各说各话）
+    assert _card_of(window, "600002").source_label == "波段·T+10（T+10） + 自选"
+    assert _card_of(window, "600002").note == "龙头"
 
     # 纯自选（不在策略候选里）→ 来源「自选」，且能进池
     with storage.connect(seeded.db_path) as conn:
@@ -597,10 +1053,12 @@ def test_pool_table_shows_watchlist_source_and_note(window, seeded, qapp) -> Non
     assert "600100" in rows
     assert window.pool_table.item(rows["600100"], 3).text() == "自选"
     assert window.pool_table.item(rows["600100"], 4).text() == "消息面"
+    assert _card_of(window, "600100").source_label == "自选"
+    assert _card_of(window, "600100").note == "消息面"
 
 
 def test_pool_table_signature_includes_note(window, seeded) -> None:
-    """备注变了表格要重画（否则用户改完备注界面不刷新）。"""
+    """备注变了表格与卡片都要重画（否则用户改完备注界面不刷新）。"""
     from laoa_trader import pool as pool_mod
 
     with storage.connect(seeded.db_path) as conn:
@@ -617,10 +1075,15 @@ def test_pool_table_signature_includes_note(window, seeded) -> None:
         raise AssertionError(f"池子里没有 {code}")
 
     assert note_of("600002") == "备注一"
+    assert _card_of(window, "600002").note == "备注一"
+    card_before = _card_of(window, "600002")
+
     with storage.connect(seeded.db_path) as conn:
         storage.upsert_watchlist(conn, "600002", note="备注二")
     window._refresh_pool()
     assert note_of("600002") == "备注二"
+    assert _card_of(window, "600002").note == "备注二"
+    assert _card_of(window, "600002") is not card_before   # 内容变了 → 卡片重建
 
 
 def test_status_bar_shows_watchlist_count(window, seeded, qapp) -> None:

@@ -103,6 +103,21 @@ def first_symbol(title: str, lines: list[str]) -> str:
     return ""
 
 
+def toast_icon() -> str:
+    """Toast 左上角的小图标：**必须是绝对路径**（winotify 会把它交给系统去读盘，
+    相对路径在打包后的工作目录里会找不到）。
+
+    找不到图标就返回空串 —— winotify 用默认图标，不影响弹窗。
+    """
+    try:
+        from laoa_trader import assets
+
+        path = assets.icon_png(size=48) or assets.icon_png()
+    except Exception:  # noqa: BLE001 - 图标是"锦上添花"，绝不该拖垮通知
+        return ""
+    return str(path.resolve()) if path else ""
+
+
 def notify(
     title: str,
     lines: list[str],
@@ -152,7 +167,8 @@ def notify(
     body = "\n".join(str(line) for line in lines[:8])  # Toast 正文太长会被系统截断
     try:
         toast = Notification(
-            app_id=APP_ID, title=title, msg=body or "（无内容）", duration=shown_for
+            app_id=APP_ID, title=title, msg=body or "（无内容）", duration=shown_for,
+            icon=toast_icon(),
         )
         symbol = first_symbol(title, lines)
         if with_url and symbol:

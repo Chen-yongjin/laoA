@@ -19,7 +19,8 @@ import time
 import traceback
 from typing import Any
 
-from laoa_trader import intraday, pool, state
+import laoa_trader
+from laoa_trader import assets, intraday, pool, state
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import sync
 from laoa_trader.data.engine import DataEngine
@@ -30,12 +31,24 @@ from laoa_trader.strategy import rules as rules_mod
 
 logger = get_logger(__name__)
 
+#: 程序名 / 版权行 / 数据来源：「窗口标题」「关于」对话框、复制到剪贴板的版本信息
+#: **共用这一份** —— 分发出去之后用户看到的版本信息必须处处一致，不能各写各的
+APP_NAME = "老A法师 · 交易终端"
+COPYRIGHT_TEXT = "版权所有 © 2026 async-chen，保留所有权利。"
+SOURCE_TEXT = ("数据来源：同花顺（fuyao.aicubes.cn）。"
+               "本程序仅用于个人研究与学习，不构成任何投资建议。")
+
+#: 关于页里图标的显示边长（资源只有 256/128/48/32/16 这几档，这里由 QPixmap 平滑缩放）
+ABOUT_ICON_SIZE = 64
+
 try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
-    from PySide6.QtCore import QThread, QTimer, Signal
-    from PySide6.QtGui import QAction
+    from PySide6.QtCore import Qt, QThread, QTimer, Signal
+    from PySide6.QtGui import QAction, QGuiApplication, QIcon, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
+        QDialog,
+        QFrame,
         QHBoxLayout,
         QHeaderView,
         QInputDialog,
@@ -46,6 +59,8 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
         QMessageBox,
         QProgressBar,
         QPushButton,
+        QScrollArea,
+        QSizePolicy,
         QSpinBox,
         QSystemTrayIcon,
         QTableWidget,
@@ -69,6 +84,36 @@ def _fmt_float(value: Any, digits: int = 2) -> str:
 
 
 if QT_AVAILABLE:
+
+    def _load_icon(size: int | None = None) -> Any:
+        """按尺寸取程序图标；资源缺失/读不出来时返回**空 QIcon**（不是异常）。
+
+        为什么要包这一层：`assets.icon_png()` 在"图标没打进包 / 被误删"时返回 None，
+        而 `QIcon(None)` 会抛异常 —— 图标是锦上添花，绝不该让窗口起不来。
+        `size` 传了但那一档不存在时，`assets` 自己会退回主图（内部逻辑，见 assets.py）。
+        """
+        try:
+            path = assets.icon_png(size) if size else assets.icon_png()
+        except Exception as exc:  # noqa: BLE001 - 资源层任何毛病都不该影响开窗口
+            logger.debug(f"图标定位失败：{exc}")
+            return QIcon()
+        if not path:
+            return QIcon()
+        try:
+            return QIcon(str(path))
+        except Exception as exc:  # noqa: BLE001 - 文件坏了也一样降级
+            logger.debug(f"图标加载失败：{exc}")
+            return QIcon()
+
+    def _set_app_icon(app: Any) -> None:
+        """给 QApplication 也设一份图标。
+
+        只给窗口设是不够的：Windows 任务栏/Alt-Tab 在某些情况下取的是**应用**图标，
+        不设就会退回 python.exe 的默认图标（用户一眼就能看出"这是拿 Python 跑的"）。
+        """
+        icon = _load_icon()
+        if not icon.isNull():
+            app.setWindowIcon(icon)
 
     class Worker(QThread):
         """通用工作线程：把可调用对象丢到后台跑，结果通过信号回主线程。
@@ -137,12 +182,27 @@ if QT_AVAILABLE:
             self._message_at = 0.0
             #: 池子表格的内容指纹（内容没变就不重建控件）
             self._pool_signature: tuple = ()
+            #: 当前渲染出来的卡片（顺序与池子行一致）与当前视图（cards/table）
+            self.pool_cards: list[Any] = []
+            self._pool_view = "cards"
             #: 启动自检结果（三态）与首次向导
             self.preflight_result: dict | None = None
             self.wizard: Any = None
+            #: 「关于」对话框（测试与"重复点关于"都要能拿到它）
+            self.about_dialog: Any = None
+            #: 「关于」里的图标标签（资源缺失时为 None）
+            self.about_icon: Any = None
             self._cancel_download = False
 
-            self.setWindowTitle("老A法师 · 交易终端（Windows 单机版）")
+            # 标题带版本号：用户报障第一句就是"我这是哪个版本"
+            self.setWindowTitle(
+                f"{APP_NAME} v{laoa_trader.__version__}（Windows 单机版 · 测试版）"
+            )
+            # 窗口图标用 256 那份（任务栏/Alt-Tab/标题栏都会取它）。
+            # 拿不到图标就什么都不设，保持系统默认 —— 没有图标也要能用
+            window_icon = _load_icon()
+            if not window_icon.isNull():
+                self.setWindowIcon(window_icon)
             self.resize(1120, 720)
             self._build_ui()
             self._build_tray()
@@ -195,14 +255,21 @@ if QT_AVAILABLE:
             buttons.addWidget(self.btn_check)
 
             buttons.addStretch(1)
+            # 【关于】放最右：版本号 / 版权 / 数据来源都在里面（报障时用户第一句话就是版本）
+            self.btn_about = QPushButton("关于")
+            self.btn_about.clicked.connect(self.on_about)
+            buttons.addWidget(self.btn_about)
             layout.addLayout(buttons)
 
             self.progress = QProgressBar()
             self.progress.setValue(0)
             layout.addWidget(self.progress)
 
-            # 三个表：池子 / 持仓 / 提醒
+            # 四个表 + 五个页：池子 / 持仓 / 自选 / 提醒 / 设置
             self.tabs = QTabWidget()
+
+            # 股票池页 = 【卡片/表格】切换按钮 + 空池提示 + 卡片视图 + 表格视图。
+            # 两个视图**都留着**：卡片看得全，表格看得密，用户自己挑；切换只是 setVisible。
             self.pool_table = QTableWidget(0, 9)
             # 「来源」列把"策略组别"和"自选/策略+自选"合成一列（避免两列重复信息）
             self.pool_table.setHorizontalHeaderLabels(
@@ -210,14 +277,17 @@ if QT_AVAILABLE:
                  "条件单参数", "复制"]
             )
             self._stretch(self.pool_table)
-            self.tabs.addTab(self.pool_table, "股票池")
+            self.tabs.addTab(self._build_pool_page(), "股票池")
 
             self.position_table = QTableWidget(0, 6)
             self.position_table.setHorizontalHeaderLabels(
                 ["代码", "名称", "数量", "成本", "止损", "止盈"]
             )
             self._stretch(self.position_table)
-            self.tabs.addTab(self.position_table, "持仓")
+            self.tabs.addTab(
+                self._build_table_page(self._build_position_row(), self.position_table),
+                "持仓",
+            )
 
             self.alert_table = QTableWidget(0, 5)
             self.alert_table.setHorizontalHeaderLabels(["时间", "代码", "类型", "价格", "说明"])
@@ -227,7 +297,10 @@ if QT_AVAILABLE:
                 ["代码", "名称", "备注", "状态", "是否已进池"]
             )
             self._stretch(self.watch_table)
-            self.tabs.addTab(self.watch_table, "自选股")
+            self.tabs.addTab(
+                self._build_table_page(self._build_watch_row(), self.watch_table),
+                "自选股",
+            )
 
             self.tabs.addTab(self.alert_table, "盘中提醒")
 
@@ -236,10 +309,31 @@ if QT_AVAILABLE:
 
             layout.addWidget(self.tabs)
 
-            # 持仓操作行
-            pos_row = QHBoxLayout()
+            self.setCentralWidget(central)
+
+            # 启动时按配置决定股票池显示哪种视图（配置写错时 `Config` 已经归一成 cards）
+            self._apply_pool_view(self.cfg.pool_view)
+
+        def _build_table_page(self, row: Any, table: Any) -> Any:
+            """把"操作行 + 表格"装进同一个页签。
+
+            为什么要拆页：这两行原来是挂在**主窗口底部**的，切到「设置」页也照样看得见，
+            用户反馈"不知道在给哪一页录入"。输入行跟着它影响的表格走，视线不用来回跳。
+            """
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.addLayout(row)        # 输入行在上：先填再点，符合操作顺序
+            layout.addWidget(table)
+            return page
+
+        def _build_position_row(self) -> Any:
+            """持仓操作行（放在持仓页顶部）。"""
+            row = QHBoxLayout()
             self.pos_symbol = QLineEdit()
             self.pos_symbol.setPlaceholderText("代码（6 位）")
+            # 回车 = 点【添加持仓】。录持仓是"填完就想确认"的动作，
+            # 不该逼用户把鼠标挪到按钮上（手不离键盘更快，也不容易点错行）
+            self.pos_symbol.returnPressed.connect(self.on_add_position)
             self.pos_qty = QLineEdit()
             self.pos_qty.setPlaceholderText("数量（股）")
             self.pos_cost = QLineEdit()
@@ -249,16 +343,19 @@ if QT_AVAILABLE:
             btn_del = QPushButton("删除持仓")
             btn_del.clicked.connect(self.on_delete_position)
             for widget in (self.pos_symbol, self.pos_qty, self.pos_cost):
-                pos_row.addWidget(widget)
-            pos_row.addWidget(btn_add)
-            pos_row.addWidget(btn_del)
-            pos_row.addStretch(1)
-            layout.addLayout(pos_row)
+                row.addWidget(widget)
+            row.addWidget(btn_add)
+            row.addWidget(btn_del)
+            row.addStretch(1)
+            return row
 
-            # 自选股：代码 / 备注 / 添加·删除·启用·停用（与策略标的并列进池，一起盯）
-            watch_row = QHBoxLayout()
+        def _build_watch_row(self) -> Any:
+            """自选股操作行（代码 / 备注 / 添加·删除·启用·停用，放在自选股页顶部）。"""
+            row = QHBoxLayout()
             self.watch_symbol = QLineEdit()
             self.watch_symbol.setPlaceholderText("代码（6 位）")
+            # 回车 = 点【加自选】：加自选常常是"看到一只就敲代码回车"的连击动作
+            self.watch_symbol.returnPressed.connect(self.on_watch_add)
             self.watch_note = QLineEdit()
             self.watch_note.setPlaceholderText("备注（例如 龙头、消息面）")
             btn_watch_add = QPushButton("加自选")
@@ -270,13 +367,121 @@ if QT_AVAILABLE:
             btn_watch_off = QPushButton("停用")
             btn_watch_off.clicked.connect(lambda: self.on_watch_toggle(False))
             for widget in (self.watch_symbol, self.watch_note):
-                watch_row.addWidget(widget)
+                row.addWidget(widget)
             for btn in (btn_watch_add, btn_watch_del, btn_watch_on, btn_watch_off):
-                watch_row.addWidget(btn)
-            watch_row.addStretch(1)
-            layout.addLayout(watch_row)
+                row.addWidget(btn)
+            row.addStretch(1)
+            return row
 
-            self.setCentralWidget(central)
+        def _build_pool_page(self) -> Any:
+            """股票池页：切换按钮 + 空池提示 + 卡片视图（滚动区）+ 表格视图。
+
+            为什么两种视图都留着：卡片把"来源/行业/备注/条件单参数"这些长短不一的文字
+            完整显示出来，池子十几只时最好用；但表格一行一只、能一眼横扫，
+            池子大或想比对分数时更顺手 —— 这是两种习惯，不该替用户二选一。
+            """
+            page = QWidget()
+            layout = QVBoxLayout(page)
+
+            view_row = QHBoxLayout()
+            self.btn_pool_view = QPushButton("切换为表格")
+            self.btn_pool_view.setToolTip("在「卡片」与「表格」两种股票池视图之间切换（会记住选择）")
+            self.btn_pool_view.clicked.connect(self.on_toggle_pool_view)
+            view_row.addWidget(self.btn_pool_view)
+            view_row.addStretch(1)
+            layout.addLayout(view_row)
+
+            # 空池提示放在两个视图**之外**：这样切到表格视图时它照样显示/隐藏
+            self.pool_empty_label = QLabel(
+                "今日没有入选标的（收盘后自动选股，或点【立即选股并建池】）"
+            )
+            self.pool_empty_label.setWordWrap(True)
+            layout.addWidget(self.pool_empty_label)
+
+            self.pool_scroll = QScrollArea()
+            self.pool_scroll.setWidgetResizable(True)     # 卡片宽度跟着窗口走，不出现横向滚动
+            self.pool_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            container = QWidget()
+            self.pool_cards_layout = QVBoxLayout(container)
+            self.pool_cards_layout.setSpacing(6)
+            self.pool_cards_layout.addStretch(1)          # 卡片往上靠，不撑满整页
+            self.pool_scroll.setWidget(container)
+            layout.addWidget(self.pool_scroll)
+
+            layout.addWidget(self.pool_table)
+            return page
+
+        def _build_pool_card(self, row: dict, price: float | None) -> Any:
+            """一只股票一张卡片。
+
+            卡片上的字段都挂成**同名属性**（symbol/name/label/.../copy_button）：
+            测试按属性断言，将来做"点卡片看详情"也按属性取值，不用去爬控件层级。
+            """
+            card = QFrame()
+            card.setObjectName("poolCard")
+            card.setFrameShape(QFrame.Shape.StyledPanel)
+            # 只用调色板取色 + 细边框圆角：不引入图片/图标等外部资源（打包分发才不挑环境）
+            card.setStyleSheet(
+                "QFrame#poolCard { border: 1px solid palette(mid); border-radius: 6px; }"
+            )
+            # 高度按内容自适（3 行文字 + 按钮），宽度随滚动区拉伸 —— 别每张卡占半屏
+            card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+            card.symbol = str(row.get("symbol") or "")
+            card.name = str(row.get("name") or "")
+            card.label = str(row.get("label") or "")
+            card.source_label = str(row.get("source_label") or "")
+            card.note = str(row.get("note") or "")
+            card.industry = str(row.get("industry") or "")
+            card.score_text = _fmt_float(row.get("score"), 3)
+            card.plan_text = self._plan_summary(row, price)
+
+            layout = QVBoxLayout(card)
+            layout.setContentsMargins(10, 8, 10, 8)
+            layout.setSpacing(2)
+
+            # 第 1 行：代码 + 名称（加粗稍大，一眼能认出是哪只）｜右侧：来源策略 + 分数
+            head = QHBoxLayout()
+            title = QLabel(f"{card.symbol} {card.name}".strip())
+            font = title.font()
+            font.setBold(True)
+            if font.pointSize() > 0:      # 字号为像素指定时（-1）不能加减，跳过加粗就够了
+                font.setPointSize(font.pointSize() + 1)
+            title.setFont(font)
+            head.addWidget(title)
+            head.addStretch(1)
+            if card.label:
+                head.addWidget(QLabel(card.label))
+            if row.get("score") is not None:
+                # 没分数就不显示 —— 表格里那种"空单元格 + 一个 —"在卡片上很难看
+                head.addWidget(QLabel(f"分数 {card.score_text}"))
+            layout.addLayout(head)
+
+            # 第 2 行：来源 + 热门行业 + 备注（各段为空就整段不出现，不留空标签）
+            meta = QHBoxLayout()
+            if card.source_label:
+                meta.addWidget(QLabel(card.source_label))
+            if card.industry:
+                meta.addWidget(QLabel(f"热门行业：{card.industry}"))
+            if card.note:
+                meta.addWidget(QLabel(f"备注：{card.note}"))
+            meta.addStretch(1)
+            layout.addLayout(meta)
+
+            # 第 3 行：条件单参数 + 右下角【复制条件单】
+            plan = QHBoxLayout()
+            plan.addWidget(QLabel(card.plan_text))
+            plan.addStretch(1)
+            card.copy_button = QPushButton("复制条件单")
+            card.copy_button.clicked.connect(
+                lambda _=False, r=row, p=price: self._copy_plan(r, p)
+            )
+            plan.addWidget(card.copy_button)
+            layout.addLayout(plan)
+
+            # 卡片属性里留一份名称标签的引用：加粗/字号这类"看得见"的要求要测得到
+            card.title_label = title
+            return card
 
         def _build_settings_tab(self) -> Any:
             """设置页：策略组自选 + 通知方式自选 + 保存 + 发送测试提醒。
@@ -448,8 +653,17 @@ if QT_AVAILABLE:
             table.setSelectionBehavior(QTableWidget.SelectRows)
 
         def _build_tray(self) -> None:
-            """托盘图标：关闭窗口只最小化，不退出。"""
-            icon = self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon)
+            """托盘图标：关闭窗口只最小化，不退出。
+
+            托盘是 16~32px 的场景，所以**专门取 32 那一档**（小尺寸是单独画的，
+            拿 256 缩下去会糊）；`assets` 内部在缺这一档时会退回主图。
+            两样都没有才退回系统标准图标 —— 托盘图标空着就没法右键退出了。
+            """
+            icon = _load_icon(32)
+            if icon.isNull():
+                icon = self.style().standardIcon(
+                    self.style().StandardPixmap.SP_ComputerIcon
+                )
             self.tray = QSystemTrayIcon(icon, self)
             self.tray.setToolTip("老A法师 · 交易终端")
             menu = QMenu()
@@ -469,7 +683,8 @@ if QT_AVAILABLE:
                 if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None
             )
             self.tray.show()
-            self.setWindowIcon(icon)
+            # 这里**不再**用托盘图标去覆盖窗口图标：托盘那份是 32px，
+            # 拿去当窗口图标在任务栏/Alt-Tab 上会明显发虚（窗口图标在 __init__ 里设过 256 的）
             try:
                 from laoa_trader.notify import tray as tray_mod
 
@@ -757,10 +972,12 @@ if QT_AVAILABLE:
                 return "—"
 
         def _refresh_pool(self) -> None:
-            """刷新股票池表。
+            """刷新股票池：**卡片与表格两套视图一起填**（看当前显示哪一个）。
 
-            只在**内容真的变了**时重建：每行都带一个"复制条件单"按钮，每 5 秒重建一次
-            会不停销毁/创建控件（闪烁、丢焦点、白白吃 CPU）—— 桌面程序里这是很显眼的毛病。
+            只在**内容真的变了**时重建：每行/每张卡都带一个"复制条件单"按钮，每 5 秒重建
+            一次会不停销毁/创建控件（闪烁、丢焦点、白白吃 CPU）—— 桌面程序里这是很显眼的毛病。
+            两套视图都填的好处：切换视图只是 setVisible，不重建、不丢滚动位置与选中状态
+            （池子通常十几行，多画一份的代价可以忽略）。
             """
             rows = pool.pool_table_rows(self.cfg.db_path)
             signature = tuple(
@@ -771,9 +988,14 @@ if QT_AVAILABLE:
             if signature == self._pool_signature:
                 return
             self._pool_signature = signature
+
+            # 每只股票的最新价只查一次（表格与卡片共用，省掉一半数据库查询）
+            prices = {r["symbol"]: self._last_price(r["symbol"]) for r in rows}
+
+            # ── 表格视图 ──
             self.pool_table.setRowCount(len(rows))
             for i, row in enumerate(rows):
-                price = self._last_price(row["symbol"])
+                price = prices[row["symbol"]]
                 plan_text = self._plan_summary(row, price)
                 self.pool_table.setItem(i, 0, QTableWidgetItem(str(row["symbol"])))
                 self.pool_table.setItem(i, 1, QTableWidgetItem(str(row.get("name") or "")))
@@ -786,6 +1008,49 @@ if QT_AVAILABLE:
                 btn = QPushButton("复制条件单")
                 btn.clicked.connect(lambda _=False, r=row, p=price: self._copy_plan(r, p))
                 self.pool_table.setCellWidget(i, 8, btn)
+
+            # ── 卡片视图 ──
+            for card in self.pool_cards:
+                # 先脱离布局与父控件再删：否则 Qt 要等事件循环才真正销毁，
+                # 中间这一小段时间里旧卡片还挂在 container 上（看着像"重影"）
+                card.hide()
+                self.pool_cards_layout.removeWidget(card)
+                card.setParent(None)
+                card.deleteLater()
+            self.pool_cards = []
+            for i, row in enumerate(rows):
+                card = self._build_pool_card(row, prices[row["symbol"]])
+                # 插在底部弹簧之前（弹簧始终在最后，卡片才不会散在页面中间）
+                self.pool_cards_layout.insertWidget(i, card)
+                self.pool_cards.append(card)
+
+            # 空池提示：**两种视图下都要正确**（表格视图空着也一样要说明白为什么空）
+            self.pool_empty_label.setVisible(not rows)
+
+        def _apply_pool_view(self, view: str) -> None:
+            """按 view（`cards` / `table`）显示对应视图，并把按钮文字改成"点了会发生什么"。
+
+            按钮文字跟着**当前视图**走而不是固定一句"切换视图"：用户扫一眼就知道
+            点下去会得到什么，不用先点一次试试（这也是原始需求里点名的行为）。
+            """
+            show_cards = str(view or "").strip().lower() != "table"   # 写错的值当卡片
+            self._pool_view = "cards" if show_cards else "table"
+            self.pool_scroll.setVisible(show_cards)
+            self.pool_table.setVisible(not show_cards)
+            self.btn_pool_view.setText("切换为表格" if show_cards else "切换为卡片")
+
+        def on_toggle_pool_view(self) -> None:
+            """【切换为表格/卡片】：换视图并**写回配置**（键 `pool_view`）。
+
+            为什么写回：习惯用表格的人不该每次开程序都要再点一下；
+            整条写回走 `_save_updates` → `config.save_settings`（只改这一个键、保留注释）。
+            """
+            target = "table" if self._pool_view == "cards" else "cards"
+            self._apply_pool_view(target)
+            self._save_updates(
+                {"pool_view": target},
+                "股票池视图已切换为" + ("表格" if target == "table" else "卡片"),
+            )
 
         def _last_price(self, symbol: str) -> float | None:
             try:
@@ -1370,6 +1635,96 @@ if QT_AVAILABLE:
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"删除失败：{exc}")
 
+        # ── 关于（版本 / 版权 / 数据来源）──
+
+        def about_lines(self) -> list[str]:
+            """「关于」对话框的正文（显示与"复制版本信息"共用这一份文案）。
+
+            版本号**现场取** `laoa_trader.__version__`：发版只改一处，
+            不会出现"界面写着旧版本号、安装包是新版本"这种查半天的错位。
+            """
+            return [
+                APP_NAME,
+                f"版本：{laoa_trader.__version__}（测试版）",
+                "作者 / 版权所有人：async-chen",
+                COPYRIGHT_TEXT,
+                SOURCE_TEXT,
+            ]
+
+        def version_info_text(self) -> str:
+            """报障时要贴给作者的三行：名称 / 版本 / 版权。"""
+            lines = self.about_lines()
+            return "\n".join((lines[0], lines[1], lines[3]))
+
+        @staticmethod
+        def _about_icon_label() -> Any:
+            """「关于」对话框里的 64×64 图标；**拿不到图标就返回 None**（调用方不加这个控件）。
+
+            图标只有 256/128/48/32/16 这几档：256 那份是"详细版"（白 A + 红色上扬折线），
+            这里平滑缩到 64 显示（`icon_png(64)` 会先找 `icon-64.png`，没有就退回主图）。
+            """
+            try:
+                path = assets.icon_png(ABOUT_ICON_SIZE)
+            except Exception as exc:  # noqa: BLE001 - 资源层毛病不该让"关于"打不开
+                logger.debug(f"关于页图标定位失败：{exc}")
+                return None
+            if not path:
+                return None
+            pixmap = QPixmap(str(path))
+            if pixmap.isNull():          # 文件在但读不出来（截断/权限）：同样不放图标
+                return None
+            label = QLabel()
+            label.setObjectName("aboutIcon")     # 名字留着：测试与将来排障按名字找
+            label.setPixmap(pixmap.scaled(
+                ABOUT_ICON_SIZE, ABOUT_ICON_SIZE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+            return label
+
+        def on_about(self) -> None:
+            """【关于】：图标 + 版本号 + 版权 + 数据来源，外加一键复制（用户不必自己敲版本）。"""
+            if self.about_dialog is not None:
+                # 连点两次不该堆出一摞窗口
+                self.about_dialog.close()
+            dialog = QDialog(self)
+            dialog.setWindowTitle("关于 " + APP_NAME)
+            layout = QVBoxLayout(dialog)
+            lines = self.about_lines()
+            for i, text in enumerate(lines):
+                label = QLabel(text)          # 纯文本标签：版本号不需要做成链接
+                label.setWordWrap(True)
+                if i == 0:                    # 第一行是程序名，当标题用
+                    font = label.font()
+                    font.setBold(True)
+                    label.setFont(font)
+                layout.addWidget(label)
+                if i == 0:
+                    # 图标紧跟在程序名下面；没有图标就整段不加（不留一块空白）
+                    self.about_icon = self._about_icon_label()
+                    if self.about_icon is not None:
+                        layout.addWidget(self.about_icon)
+
+            buttons = QHBoxLayout()
+            copy_btn = QPushButton("复制版本信息")
+            copy_btn.clicked.connect(self.on_copy_version_info)
+            buttons.addWidget(copy_btn)
+            close_btn = QPushButton("关闭")
+            close_btn.clicked.connect(dialog.accept)
+            buttons.addWidget(close_btn)
+            buttons.addStretch(1)
+            layout.addLayout(buttons)
+
+            self.about_dialog = dialog
+            self.about_copy_button = copy_btn
+            dialog.show()        # 非模态：不挡住主窗口，也不会卡住自动化测试
+            dialog.raise_()
+
+        def on_copy_version_info(self) -> None:
+            """把版本信息写进剪贴板（报障时粘贴，比自己照着对话框敲准得多）。"""
+            QGuiApplication.clipboard().setText(self.version_info_text())
+            self._toast("已复制版本信息")
+
         # ── 窗口/托盘 ──
 
         def _restore_window(self) -> None:
@@ -1407,6 +1762,7 @@ def run_gui(cfg: Config | None = None) -> int:
         return 2
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # 关窗只是最小化到托盘
+    _set_app_icon(app)                    # 任务栏/Alt-Tab 取的是应用图标，不设会退回 python 默认图标
     window = MainWindow(cfg)
     window.show()
     return int(app.exec())

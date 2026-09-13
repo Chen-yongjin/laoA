@@ -273,3 +273,21 @@ def test_autorun_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert cfg.auto_run is False
     assert cfg.run_at == "17:45"
     assert cfg.run_at_fallback == "21:00"
+
+
+def test_pool_view_default_and_invalid_falls_back_to_cards(tmp_path: Path) -> None:
+    """股票池视图偏好：默认卡片；写错（手改 TOML）一律当卡片，不让界面白屏。"""
+    cfg = load_config(tmp_path / "none.toml", use_env=False)
+    assert cfg.pool_view == "cards"
+
+    path = _write(tmp_path, 'pool_view = "table"\n')
+    assert load_config(path, use_env=False).pool_view == "table"
+
+    # 大小写与空格也算合法写法（用户手改时很常见）
+    path = _write(tmp_path, 'pool_view = " TABLE "\n')
+    assert load_config(path, use_env=False).pool_view == "table"
+
+    for bad in ("card", "卡片", "", "tableau"):
+        path = _write(tmp_path, f'pool_view = "{bad}"\n')
+        assert load_config(path, use_env=False).pool_view == "cards", bad
+

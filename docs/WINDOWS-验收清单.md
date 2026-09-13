@@ -39,7 +39,7 @@
 - [ ] 在 `laoA/` 下执行：`py -3.11 -m venv .venv`
 - [ ] `.venv\Scripts\pip install -e ".[dev]"` —— 无报错
 - [ ] `copy config.example.toml config.toml`，填入同花顺 API Key（`hithink_api_key`）
-- [ ] `.venv\Scripts\python -m pytest tests -q` —— **全绿**（与我这边 Linux 结果一致：632 passed）
+- [ ] `.venv\Scripts\python -m pytest tests -q` —— **全绿**（与我这边 Linux 结果一致：666 passed）
 
       * 测试**不联网**：socket 层被 `tests/conftest.py` 的守卫封死，任何真实外呼都会直接失败
       * 日志里出现"限流/5001"字样是**假客户端合成的错误**，不是真实请求
