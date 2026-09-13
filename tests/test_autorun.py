@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 import pytest
@@ -301,13 +302,27 @@ def test_cli_run_at_override_is_temporary(capsys, cli_config) -> None:
     from laoa_trader.__main__ import cli
 
     before = cli_config.read_text(encoding="utf-8")
+    started = datetime.now()
     assert cli(["--cli", "--doctor", "--run-at", "16:30", "--config", str(cli_config)]) == 0
+    finished = datetime.now()
     out = capsys.readouterr().out
     assert "（临时）每天主跑时间：16:30" in out
     assert "每天 16:30（主跑）" in out
-    assert "下次自动运行: 明天 16:30" in out
+    # 「下次自动运行」是**今天还是明天**取决于跑这条用例的时刻（16:30 之前就是今天）。
+    # 原来这里写死"明天"→ CI 在 UTC 上午跑就红，是**与代码无关的假失败**
+    # （b7a5f31 那次 Windows 构建就是这么挂的）。这里按真实时刻算出允许值再断言：
+    # 既不放过错误答案，也不依赖机器在哪个时区、哪个点跑。
+    allowed = {_label_for(started), _label_for(finished)}
+    match = re.search(r"下次自动运行: (\S+) 16:30", out)
+    assert match is not None, out
+    assert match.group(1) in allowed, f"下次自动运行应是 {allowed}，实际 {out!r}"
     # 临时覆盖**不改配置文件**
     assert cli_config.read_text(encoding="utf-8") == before
+
+
+def _label_for(now: datetime) -> str:
+    """`scheduler.next_run_info` 的口径：16:30 没过就是今天，过了就是明天。"""
+    return "明天" if (now.hour, now.minute) >= (16, 30) else "今天"
 
 
 def test_cli_no_auto_run(capsys, cli_config) -> None:

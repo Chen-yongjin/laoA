@@ -13,6 +13,7 @@ import pytest
 
 from laoa_trader.config import (
     Config,
+    default_data_dir,
     load_config,
     render_config_updates,
     save_settings,
@@ -213,3 +214,91 @@ def test_writeback_escapes_windows_data_dir(tmp_path: Path) -> None:
     assert reloaded.config_error == ""                      # 没有"解析失败"
     assert str(reloaded.data_dir) == win                    # 值原样取回
     assert reloaded.data_dir == Path(win)
+
+# ── Windows 路径的"前移"回归：在 Linux 上就能抓到 CI 上才暴露的这类 bug ──
+#
+# 背景：CI 的 build-windows 连续两轮红在"测试自己拼 config.toml 时没转义"上
+# （`C:\Users\...` 里的 `\U` 被 tomllib 当成转义序列 → Invalid hex value →
+# 配置整体退回默认值 → data_dir 变成默认目录 → 空库 → 后续断言连锁崩）。
+# 本地 Linux 永远绿，因为 `tmp_path` 里没有反斜杠。下面这几条**显式用 Windows 路径**
+# 走一遍真实的写回/渲染流程，把那个失败模式钉在 Linux 上。
+
+#: 与 CI 上真实出现过的两种路径一致（GitHub 运行器的临时目录 / 仓库工作目录）
+WIN_TEMP_CONFIG = r"C:\Users\runneradmin\AppData\Local\Temp\pytest-of-x\config.toml"
+WIN_REPO_DATA = r"D:\a\laoA\laoA\data"
+
+
+@pytest.mark.parametrize("win_path", [WIN_TEMP_CONFIG, WIN_REPO_DATA])
+def test_render_config_updates_keeps_windows_path_readable(win_path: str) -> None:
+    r"""`render_config_updates()` 写回 Windows 路径后，重新 `load_config` 必须成功。
+
+    这条盯的是**产品代码**（`config._toml_value()` 的转义）：只要它被"优化"掉，
+    这里立刻红 —— 而且是 `config_error` 为空 + 路径一字不差这种强断言。
+    """
+    text = SAMPLE.format(data_dir=p(win_path))
+    out = render_config_updates(text, {"notify_channels": ["windows"]})
+
+    assert 'data_dir = "' + win_path.replace("\\", "\\\\") + '"' in out   # 落盘形态是转义过的
+    parsed = _load_text(out)
+    assert parsed.config_error == ""                    # 没有"解析失败（已退回默认值）"
+    assert str(parsed.data_dir) == win_path              # 一字不差（含反斜杠）
+    assert "notify_channels" in out
+
+
+@pytest.mark.parametrize("win_path", [WIN_TEMP_CONFIG, WIN_REPO_DATA])
+def test_update_config_file_roundtrips_windows_path(tmp_path: Path, win_path: str) -> None:
+    r"""真落盘再读回：`update_config_file()` → `load_config()` 往返一致。"""
+    target = tmp_path / "config.toml"
+    target.write_text(SAMPLE.format(data_dir=p(tmp_path)), encoding="utf-8")
+
+    update_config_file(target, {"data_dir": win_path})
+    cfg = load_config(target, use_env=False)
+
+    assert cfg.config_error == ""
+    assert str(cfg.data_dir) == win_path
+    assert cfg.source_path == target
+    # 注释与未知键照旧（写回没有因为转义而改坏文件结构）
+    raw = target.read_text(encoding="utf-8")
+    assert "# 老A法师配置（这些注释必须活下来）" in raw
+    assert "[my_own_section]" in raw
+
+
+def _load_text(text: str) -> Config:
+    """把 TOML 文本落成临时文件再 `load_config`（`load_config` 只吃路径）。"""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return load_config(path, use_env=False)
+
+
+def test_unescaped_windows_path_is_what_breaks_ci() -> None:
+    r"""反面证据：**不**转义时配置会**静默**退回默认值（CI 那 13 条失败就是这么来的）。
+
+    没有这条，上面那些"必须转义"的用例只是"怎么写过都能过"。
+    这里用的就是 CI 日志里的那条路径（`\U` 开头 → `Invalid hex value`）。
+    """
+    # 下面这行是**故意不转义**的：静态扫描按行尾标记放过它，其余地方一律不许这么写
+    text = SAMPLE.format(data_dir=WIN_TEMP_CONFIG)       # toml-guard: allow-unescaped
+
+    cfg = _load_text(text)
+    assert "解析失败" in cfg.config_error                # 配置整体解析失败
+    assert "Invalid hex value" in cfg.config_error       # 与 CI 日志逐字一致
+    assert cfg.data_dir == default_data_dir()            # **静默**退回默认值 → 空库 → 断言连锁崩
+    assert str(cfg.data_dir) != WIN_TEMP_CONFIG
+
+
+def test_unescaped_repo_path_also_breaks_config() -> None:
+    r"""同一类问题的另一种长相：`D:\a\laoA\laoA\data` 里的 `\a` 是非法转义。
+
+    断言只要求"解析失败 + 静默退回默认值"：具体报错文案随路径里第一个反斜杠的组合而变
+    （`\U` → Invalid hex value，`\a` → Unescaped '\\' in a string），但**后果一样**。
+    """
+    text = SAMPLE.format(data_dir=WIN_REPO_DATA)         # toml-guard: allow-unescaped
+
+    cfg = _load_text(text)
+    assert "解析失败" in cfg.config_error
+    assert cfg.config_error                          # 有明确的错误说明（不是静默吞掉）
+    assert cfg.data_dir == default_data_dir()        # 退回默认目录 = 后面"空库/needs_full"的根因
+    assert str(cfg.data_dir) != WIN_REPO_DATA

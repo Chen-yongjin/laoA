@@ -134,6 +134,14 @@ def messages(records) -> str:
     return "\n".join(r.getMessage() for r in records)
 
 
+# ── 测试自己拼 TOML 时的路径转义：**全仓唯一一份实现** ──
+# 为什么放在这里 re-export：写测试的人第一反应就是 `from tests.conftest import ...`，
+# 而历史上正因为"每个文件各写一份 _p()"，CI 上连续漏了 5 个文件没转义
+# （Windows 的 `C:\Users\...` 会让 tomllib 报 Invalid hex value，配置静默退回默认值）。
+# 现在实现只有 `tests/_toml.py` 一份，这里只是把它摆到最顺手的入口上。
+from tests._toml import escape, p, q, toml_str  # noqa: E402
+
+
 #: 让"小样本合成库"能通过自检的宽松阈值（真实默认值另有用例断言）
 READY_THRESHOLDS = (
     "min_history_years = 0\n"

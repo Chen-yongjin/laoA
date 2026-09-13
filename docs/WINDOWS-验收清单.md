@@ -39,7 +39,33 @@
 - [ ] 在 `laoA/` 下执行：`py -3.11 -m venv .venv`
 - [ ] `.venv\Scripts\pip install -e ".[dev]"` —— 无报错
 - [ ] `copy config.example.toml config.toml`，填入同花顺 API Key（`hithink_api_key`）
-- [ ] `.venv\Scripts\python -m pytest tests -q` —— **全绿**（与我这边 Linux 结果一致：575 passed）
+- [ ] `.venv\Scripts\python -m pytest tests -q` —— **全绿**（与我这边 Linux 结果一致：615 passed）
+
+#### 本地三连跑（把"只在 Windows / 只在某个时刻才红"的失败前移到 Linux）
+
+这三类失败都真的在 CI 上连续红过，而本地一直是绿的 —— 只跑一遍 `pytest tests -q` 抓不到：
+
+| 跑法 | 抓什么 | 为什么需要 |
+|---|---|---|
+| `python -m pytest tests -q` | 常规 | 基线 |
+| `TZ=UTC python -m pytest tests -q` | **与时刻有关**的断言（例如"下次自动运行：今天/明天"） | CI 在 UTC 上午跑时"还没到 16:30"，写死「明天」的断言必红 |
+| `python -m pytest tests -q --basetemp='/tmp/win\Users\x'` | **路径里有反斜杠**（Windows `tmp_path`）时的配置解析/转义 | Windows 的 `C:\Users\...` 会把 TOML 里的 `\U` 当转义序列 → `Invalid hex value` |
+
+命令行（Linux/macOS 本地前置检查，三条都跑）：
+
+```bash
+PYTHONPATH=src python -m pytest tests -q                    # 常规
+TZ=UTC PYTHONPATH=src python -m pytest tests -q            # 时钟
+PYTHONPATH=src python -m pytest tests -q \
+  --basetemp='/tmp/win\Users\runneradmin\AppData\Local\Temp\pytest-of-x'   # Windows 路径
+```
+
+另外两条**不需要特殊参数**就有效的护栏：
+
+- `tests/test_toml_paths.py::test_no_unescaped_paths_written_into_toml`
+  —— 静态扫描整个 `tests/`，谁把路径没转义地拼进 TOML，就在**普通 Linux 跑法**下点名到行号；
+- `tests/test_notify_channels.py` 里的**假 `winotify`**（照抄真库的 duration 校验）
+  —— 让"时长非法 → 原生通知永远弹不出来"这类只在 Windows 上出现的问题在 Linux 上也红。
       * 测试**不联网**：socket 层被 `tests/conftest.py` 的守卫封死，任何真实外呼都会直接失败
       * 日志里出现"限流/5001"字样是**假客户端合成的错误**，不是真实请求
       * Windows 路径（`C:\Users\...`）：测试自己拼 `config.toml` 时统一走

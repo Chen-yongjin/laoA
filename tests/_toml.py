@@ -32,7 +32,7 @@ Windows 上 pytest 的临时目录形如 ``C:\Users\runneradmin\AppData\Local\Te
 
 from __future__ import annotations
 
-__all__ = ["escape", "p", "q"]
+__all__ = ["escape", "p", "q", "toml_str"]
 
 
 def escape(value: object) -> str:
@@ -48,8 +48,13 @@ def escape(value: object) -> str:
     return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
 
+#: 全仓**唯一**一份转义实现。`p` / `toml_str` 是同一个东西的两个名字：
+#: `p` 短、调用点好看；`toml_str` 名字自带说明，也方便从 `tests.conftest` 统一 import。
+toml_str = escape
+
+
 def p(value: object) -> str:
-    """转义后**不带引号** —— 放进已有的 `"..."` 里用（与老代码里的 `_p` 同义）。"""
+    """转义后**不带引号** —— 放进已有的 `"..."` 里用（`toml_str` 的短名字）。"""
     return escape(value)
 
 

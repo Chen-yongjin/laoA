@@ -22,6 +22,7 @@ r"""Windows 路径写进 config.toml：**必须转义**（CI 上 18 条失败的
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 from laoa_trader.config import default_data_dir, load_config
@@ -122,8 +123,14 @@ def test_toml_literal_string_keeps_backslashes(tmp_path: Path) -> None:
     over_path = _write_config(tmp_path / "over" / "config.toml", over)
     over_cfg = load_config(over_path, use_env=False)
     assert over_cfg.config_error == ""                  # 依然"解析成功"
-    assert "\\\\" in str(over_cfg.data_dir)                 # 但多了反斜杠
-    assert str(over_cfg.data_dir) != WIN_PATH
+    # 看 **TOML 解析出来的原始字符串**，不看 `str(cfg.data_dir)`：
+    # Windows 上 `Path` 会把重复的反斜杠折叠掉（`C:\\Users` → `C:\Users`），
+    # 这个错误在那边就"看不见"了 —— 但用户拿到的路径确实是错的。
+    # （b7a5f31 的 Windows 构建就是这么挂的。）
+    raw_value = tomllib.loads(over_path.read_text(encoding="utf-8"))["data_dir"]
+    assert raw_value.count("\\") == 2 * WIN_PATH.count("\\")   # 每一道都变成了两道
+    assert "\\\\" in raw_value
+    assert raw_value != WIN_PATH
 
 
 # ── 3) 静态扫描：不许再手写没转义的 TOML 路径 ──
@@ -139,6 +146,9 @@ _FORMAT_ARG = re.compile(
 _LITERAL = re.compile(r"data_dir\s*=\s*'\{([^{}]*)\}'")
 #: 静态能认出来的"这个值已经处理过了"
 _ESCAPED = re.compile(r"\b(p|q|escape)\(")
+#: 显式豁免标记：**故意**写不转义的用例（例如"证明不转义确实会炸"的反面证据）。
+#: 目的是让豁免看得见、可 grep，而不是让扫描器对整类写法睁一只眼闭一只眼。
+_ALLOW_MARKER = "toml-guard: allow-unescaped"
 #: 裸标识符：str.format / % 模板的占位符（由 `_FORMAT_ARG` 那条规则兜住）
 _PLACEHOLDER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -148,6 +158,8 @@ def _scan_tests() -> list[str]:
     offenders: list[str] = []
     for path in sorted(TESTS_DIR.glob("*.py")):
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if _ALLOW_MARKER in line:
+                continue                       # 显式豁免（见 _ALLOW_MARKER 说明）
             for match in _INTERP.finditer(line):
                 expr = match.group(1).strip()
                 if _PLACEHOLDER.match(expr) or _ESCAPED.search(expr):
@@ -220,6 +232,15 @@ def test_scanner_actually_bites(monkeypatch, tmp_path: Path) -> None:
     assert any("test_bad.py:3" in o and "未转义" in o for o in offenders), offenders
     assert any("test_bad.py:4" in o and "data_dir" in o for o in offenders), offenders
     assert any("test_bad.py:5" in o and "字面量" in o for o in offenders), offenders
+
+    # 显式豁免标记：只放过那一行，别的地方照咬
+    (fake / "test_bad.py").write_text(
+        "def test_x(tmp_path):\n"
+        "    a = f'data_dir = " + quote + "{tmp_path.name}" + quote + "'  "
+        + "  # " + _ALLOW_MARKER + "\n",
+        encoding="utf-8",
+    )
+    assert _scan_tests() == []
 
     # 换成转义写法后必须干净（扫描器不会"见谁都咬"）
     (fake / "test_bad.py").write_text(

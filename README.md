@@ -310,7 +310,7 @@ laoA/
 ```
 
 > **详细打包教程（含分发与踩坑）见 [`docs/打包教程.md`](docs/打包教程.md)**
-> 一句话版本：`py -3.11 -m venv .venv` → `pip install -e ".[dev]"` → `pytest tests -q`（期望 575 passed）
+> 一句话版本：`py -3.11 -m venv .venv` → `pip install -e ".[dev]"` → `pytest tests -q`（期望 609 passed）
 > → `build\build.bat` → 产物 `dist\LaoATrader\LaoATrader.exe`。
 > **只运行 exe 的人不需要装 Python**；打包的人才需要 Python 3.11。
 
@@ -368,13 +368,20 @@ PYTHONPATH=src /tmp/laoa-venv/bin/python -m pytest tests -q
 
 > 装 `pyarrow` 不能省：dump 相关用例要么真跑（需要它读写 Parquet），要么整组跳过；
 > 装 `PySide6` 则让 47 条界面用例真跑（离屏），否则那一整个文件跳过。
-> 依赖装齐时是 **575 passed**；跑完记得把 `__pycache__` / `.pytest_cache` 删掉再打包
+> 依赖装齐时是 **609 passed**；跑完记得把 `__pycache__` / `.pytest_cache` 删掉再打包
 > （`.gitignore` 已列出，交付目录里不该出现这些）。
 
 > 测试自己拼 `config.toml` 时，**路径必须转义**（Windows 的 `C:\Users\...` 会让 `tomllib`
 > 报 `Invalid hex value`、配置静默退回默认值 → 断言连锁失败，CI 上正是这么翻车的）。
 > 统一用 `tests/_toml.py` 的 `p()` / `q()`；`tests/test_toml_paths.py` 里有静态用例盯着，
 > 漏了会直接把文件名和行号列出来。
+
+> CI 上连续红过、本地却全绿的三类"假失败"，现在本地也能抓（详见
+> [`docs/WINDOWS-验收清单.md`](docs/WINDOWS-验收清单.md) 的"本地三连跑"）：
+> `TZ=UTC pytest tests -q`（时刻相关的断言）、
+> `pytest tests -q --basetemp='/tmp/win\Users\x'`（Windows 反斜杠路径）、
+> 以及两个**不用特殊参数**就生效的护栏：`test_toml_paths.py` 的静态扫描、
+> `test_notify_channels.py` 里照抄真库校验的假 `winotify`。
 
 > 测试套件在 **socket 层封死了 IPv4/IPv6**（`tests/conftest.py` 的 `_block_network`，autouse）：
 > 任何漏网的客户端都会**报错**而不是悄悄打真实接口。`tests/test_offline.py` 还会验证这把锁
