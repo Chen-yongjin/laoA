@@ -9,7 +9,7 @@
 # - 测试不过就不出包（pytest 失败即整轮失败），避免把坏版本发出去
 # - 产物是 onedir 目录版（启动快、杀软误报少），压缩后通常 200~400MB
 # - 构建失败时会额外上传 pytest-log 产物（里面是完整测试输出），报错时先看它
-# - 关于 "Node.js 20 is deprecated" 的告警：官方 action 自身的运行时提示，不影响构建结果
+# - action 版本已升到 v7（Node 24 运行时），不会再出现 Node.js 20 deprecated 告警
 name: build-windows
 
 on:
@@ -37,10 +37,10 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 安装 Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -65,7 +65,7 @@ jobs:
 
       - name: 失败时上传测试日志
         if: failure() && hashFiles('pytest.log') != '' 
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-log
           path: pytest.log
@@ -94,7 +94,7 @@ jobs:
           }
 
       - name: 上传产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: LaoATrader-Windows
           path: dist/LaoATrader/
