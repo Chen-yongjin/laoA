@@ -1,0 +1,32 @@
+[project]
+name = "laoa-trader"
+version = "0.1.0"
+description = "老A法师 · 交易终端（Windows 单机版）：A 股选股 + 盯盘 + 提醒"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "pandas>=2.2",
+    "pyarrow>=16",              # 读同花顺全市场 Parquet dump
+    "PySide6>=6.6",             # 桌面界面
+    "winotify>=1.1; sys_platform=='win32'",   # Windows 原生通知
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6.6"]
+
+[project.scripts]
+laoa-trader = "laoa_trader.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 让 `pytest laoA/tests`（或 `pytest tests`，在 laoA/ 下）无需先 pip install -e 就能 import laoa_trader
+pythonpath = ["src"]
+# 不改项目目录：不写 .pytest_cache（交付/打包要求目录干净）
+addopts = "-p no:cacheprovider"

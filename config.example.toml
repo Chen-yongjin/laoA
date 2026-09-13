@@ -1,0 +1,107 @@
+# 老A法师 · 交易终端（Windows 单机版）配置文件示例
+#
+# 用法：把本文件复制成 config.toml 放在程序（或 exe）同级目录，然后按需修改。
+#   copy config.example.toml config.toml
+#
+# 优先级：环境变量 > config.toml > 内置默认值。
+# 也就是说，同名的环境变量（如 HITHINK_FINANCE_API_KEY）会覆盖这里的值 ——
+# 不想把 Key 写进磁盘文件时，用环境变量即可。
+
+# ── 数据源 ─────────────────────────────────────────────────────────
+# 同花顺金融数据服务 API Key（https://fuyao.aicubes.cn/admin 获取）。
+# 留空则只能用已有本地库选股，无法下载/更新数据。
+# 也可用环境变量 HITHINK_FINANCE_API_KEY 覆盖。
+hithink_api_key = ""
+
+# 本地数据目录。默认 %LOCALAPPDATA%\LaoATrader\data（Windows）。
+# 数据库 trader.db、dump 缓存都在这里；数据约 1~2 GB，建议放在 SSD 上。
+# data_dir = "D:\\LaoATrader\\data"
+
+# ── 策略组（跑哪几组策略）──────────────────────────────────────────
+# 按"持有期 + 证据强度"分三组，可任选（至少留一个）：
+#   ultra  超短·隔日  T+2   连板回踩低吸             T+2 α +0.47%（t=2.02）
+#   short  短线·T+3   T+3   短期反转/地量后放量变盘/首板缩量整理   t≈1.7~2.1
+#   swing  波段·T+10  T+10  低价股                   T+10 +0.32%（t=4.43）
+enabled_groups = ["ultra", "short", "swing"]
+
+# 只跑列出的策略（中文名或类名都认）；**留空 = 该组全选**。
+# 与 enabled_groups 同时非空时取交集；两者都空 = 全选。
+# enabled_strategies = ["低价股", "连板回踩低吸"]
+enabled_strategies = []
+
+# ── 自选股（手动加的标的：与策略标的并列进池、一起盯）────────────────
+# 怎么加：界面「自选股」页，或命令行
+#   python -m laoa_trader --cli --watchlist add 600519 --note 龙头
+#   python -m laoa_trader --cli --watchlist list
+#   python -m laoa_trader --cli --watchlist enable|disable|remove 600519
+#
+# 规则：
+#   * **不受热门行业过滤**（自己选的，就是要盯）；
+#   * **不占策略名额**（下面的池子大小只作用于策略标的）；
+#   * 同一标的既是策略选中又是自选 → 池子里只出现一行，来源标成「策略+自选」；
+#   * 名称在添加时自动从本地库补（查不到也允许加，只是提示一下）。
+watchlist_max = 20        # 自选股上限；超出的会提示（不静默丢弃）
+
+# 关掉 = 只记录不监控：自选股不进池、盘中也不提醒（列表里仍然保留）
+watchlist_in_pool = true
+
+# ── 通知方式（频道自选；空列表 = 只入库不推送）──────────────────────
+# 可选频道：windows（Windows 原生弹窗）/ feishu（飞书卡片）/ tray（托盘气泡）
+# 三个都不勾（= []）也能用：数据、信号与股票池照常落库，只是不推送。
+notify_channels = ["windows", "feishu", "tray"]
+
+# Windows 弹窗参数
+notify_windows_sound = true      # 是否带提示音（开会时建议 false）
+notify_windows_open_url = true   # 弹窗按钮点击是否打开雪球页面
+
+# 托盘气泡显示时长（毫秒）
+notify_tray_duration_ms = 8000
+
+# 飞书频道：自建应用的 App ID / App Secret / 目标会话 ID。
+# 没配凭证时：勾了飞书也只会提示「未配置飞书凭证，已跳过」，不影响其它频道。
+feishu_on = true
+feishu_app_id = ""
+feishu_app_secret = ""
+feishu_chat_id = ""
+# 目标类型：chat_id（群）| open_id | email | user_id | union_id
+receive_id_type = "chat_id"
+
+# 单频道开关（老配置沿用；与 notify_channels 同时生效，任一为 false 就不发）
+notify_feishu = true
+notify_windows = true
+notify_tray = true
+
+# ── 交易参数（只用于生成条件单文本，本程序不含任何下单功能）─────────
+trade_capital = 100000.0     # 账户可用资金（元），仅用于算整手数量
+trade_position_pct = 0.2     # 单票最大仓位占比
+trade_max_positions = 5      # 最多同时持有只数（超过只提示不加仓）
+buy_slippage = 0.005         # 买入委托价相对触发价的上浮（留滑点，避免挂不上）
+sell_slippage = 0.005        # 卖出委托价相对触发价的下降
+
+# ── 盘中提醒 ───────────────────────────────────────────────────────
+intraday_interval = 60       # 交易时段内的轮询间隔（秒）
+stop_loss = 0.05             # 止损比例（相对成本价）
+take_profit = 0.10           # 止盈比例（相对成本价）
+
+# ── 自动运行（分发后每个人都可以在界面「设置」页自己改）────────────────
+# 界面改完**立即生效，不用重启**；状态栏会显示"下次自动运行：今天/明天 HH:MM"。
+#
+# 主跑时间：每天跑一次"数据增量 + 策略 + 建池 + 推送"（24 小时制 HH:MM，本地时间）。
+# 默认 16:00 —— A 股 15:00 收盘，收盘后当天行情与涨停池才齐（早于 15:00 会提示你）。
+run_at = "16:00"
+
+# 补跑时间：**主跑没成功时**到这个点再试一次（留空则不做补跑）。
+# 必须晚于主跑时间，否则保存会被拒绝。
+run_at_fallback = "19:15"
+
+# 是否每天自动运行：关掉则只在你点【立即选股并建池】（或命令行 --once）时跑。
+auto_run = true
+
+# ── 启动自检（判定本地数据是否可用；纯本地、不联网、秒级）──
+# 三态：ready（不下载） / needs_incremental（落后 ≤10 个交易日，只下增量） / needs_full（下 10 年全量）
+auto_download_on_start = true    # needs_incremental 时是否自动在后台跑增量；needs_full 始终需要你确认（或 CLI 加 --auto-download）
+min_history_years = 9            # 历史跨度低于此值算"缺数据"（10 年库约 10.0）
+min_symbols = 4000               # 股票数低于此值算"缺数据"（全市场约 5200）
+max_stale_trading_days = 0       # 允许落后的交易日数（0=必须是最新）；落后 >10 个交易日一律判 needs_full
+
+# 自选股相关开关见上面「自选股（手动加的标的：与策略标的并列进池、一起盯）」一节

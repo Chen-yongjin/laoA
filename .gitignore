@@ -1,0 +1,34 @@
+# 虚拟环境与构建产物（打包分发时不要带上，体积会从几 MB 涨到几百 MB）
+.venv/
+__pycache__/
+*.pyc
+build/build/
+build/__pycache__/
+dist/
+*.spec.bak
+*.egg-info/
+.venv-*/
+
+# 测试与静态检查缓存
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+
+# 本地配置与数据（含凭据，绝不入库）
+config.toml
+data/
+*.db
+*.db-wal
+*.db-shm
+logs/
+
+# 下载的同花顺 dump（几十 MB~几百 MB，运行时自己下）
+*.parquet
+
+# 编辑器
+.vscode/
+.idea/
+
+# 测试产生的临时目录（打包时必须排除，否则会把测试垃圾带进 zip）
+*.tmpdir
+.pytest_cache/

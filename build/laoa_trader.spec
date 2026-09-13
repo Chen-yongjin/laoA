@@ -1,0 +1,185 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""PyInstaller 打包配置（Windows 单机版）。
+
+用法（在 Windows 上）：
+    build\\build.bat                       # 一键：建 venv → 装依赖 → 打包
+    pyinstaller --noconfirm --clean build\\laoa_trader.spec
+
+产出：`dist\\LaoATrader\\LaoATrader.exe`（**onedir** 目录版）。
+
+为什么是 onedir 而不是 onefile
+------------------------------
+onefile 每次启动都要把几百 MB 依赖解压到临时目录：启动要 5~15 秒，
+杀软（尤其国产安全软件）几乎必然误报。onedir 启动 1~2 秒，且便于增量更新。
+
+为什么 --noconsole（windowed）
+------------------------------
+这是桌面程序，双击运行时不该弹黑框。副作用是**看不到 stdout** ——
+所以 `log.py` 会同时把日志写进 `<data_dir>/logs/laoa-trader.log`，
+出问题时让用户把那个文件发过来即可。
+
+打包要点
+--------
+- `hiddenimports`：pandas / numpy / pyarrow 有大量**动态导入**（例如
+  `pandas._libs.tslibs.*`、pyarrow 的压缩编解码器），PyInstaller 静态分析常常漏掉；
+  `winotify` 是条件依赖（`sys_platform=='win32'`），也必须显式列上。
+- `datas`：`config.example.toml` 要随包分发（首次运行向导让用户复制成 config.toml）。
+- `excludes`：把开发期依赖（pytest / PySide6 的 QtWebEngine 等）排掉，能省几百 MB。
+"""
+
+import sys
+from pathlib import Path
+
+# spec 文件在 build/ 下，项目根是它的上一级
+PROJECT_ROOT = Path(SPECPATH).parent  # noqa: F821 - SPECPATH 由 PyInstaller 注入
+SRC = PROJECT_ROOT / "src"
+
+# ── 隐藏导入：静态分析抓不到的动态导入 ──
+HIDDEN = [
+    # pandas / numpy 的动态子模块
+    "pandas",
+    "pandas._libs.tslibs.base",
+    "pandas._libs.tslibs.conversion",
+    "pandas._libs.tslibs.period",
+    "pandas._libs.tslibs.timedeltas",
+    "pandas._libs.tslibs.timestamps",
+    "pandas._libs.tslibs.offsets",
+    "pandas._libs.tslibs.parsing",
+    "pandas._libs.tslibs.strptime",
+    "pandas.io.formats.style",
+    "numpy",
+    "numpy.core._multiarray_umath",
+    # Parquet 读取：pyarrow 及其压缩/编码后端都是动态加载的
+    "pyarrow",
+    "pyarrow.parquet",
+    "pyarrow._parquet",
+    "pyarrow.lib",
+    "pyarrow.fs",
+    "pyarrow.compute",
+    "pyarrow.csv",
+    "pyarrow.json",
+    "pyarrow.dataset",
+    "pyarrow._compute",
+    "pyarrow._dataset",
+    "pyarrow._fs",
+    # 压缩编解码器（dump 里的 snappy/zstd 列）
+    "snappy",
+    "zstandard",
+    "lz4.frame",
+    "brotli",
+    # 通知
+    "winotify",
+    "winrt",
+    "winrt.windows.ui.notifications",
+    # 网络
+    "requests",
+    "urllib3",
+    "charset_normalizer",
+    "idna",
+    "certifi",
+    # 本项目
+    "laoa_trader",
+    "laoa_trader.config",
+    "laoa_trader.log",
+    "laoa_trader.pool",
+    "laoa_trader.intraday",
+    "laoa_trader.scheduler",
+    "laoa_trader.data",
+    "laoa_trader.data.engine",
+    "laoa_trader.data.hithink",
+    "laoa_trader.data.storage",
+    "laoa_trader.data.sync",
+    "laoa_trader.notify",
+    "laoa_trader.notify.feishu",
+    "laoa_trader.notify.tray",
+    "laoa_trader.notify.windows",
+    "laoa_trader.strategy",
+    "laoa_trader.strategy.base",
+    "laoa_trader.strategy.factors",
+    "laoa_trader.strategy.rules",
+    "laoa_trader.ui",
+    "laoa_trader.ui.app",
+    # PySide6 里被动态加载的插件模块
+    "PySide6.QtCore",
+    "PySide6.QtGui",
+    "PySide6.QtWidgets",
+]
+
+# ── 随包分发的数据文件（目标路径 → 源路径）──
+DATAS = [
+    (str(PROJECT_ROOT / "config.example.toml"), "."),
+    (str(PROJECT_ROOT / "README.md"), "."),
+]
+
+# ── 排除：省体积（这些包被打进去会多几百 MB）──
+EXCLUDES = [
+    "pytest",
+    "PyInstaller",
+    "matplotlib",
+    "scipy",
+    "IPython",
+    "notebook",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
+    "PySide6.Qt3DCore",
+    "PySide6.QtMultimedia",
+    "PySide6.QtQuick",
+    "PySide6.QtQml",
+    "tkinter",
+    "test",
+    "unittest",
+]
+
+
+a = Analysis(  # noqa: F821 - PyInstaller 注入
+    [str(SRC / "laoa_trader" / "__main__.py")],
+    pathex=[str(SRC)],
+    binaries=[],
+    datas=DATAS,
+    hiddenimports=HIDDEN,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=EXCLUDES,
+    noarchive=False,
+    optimize=0,
+)
+
+pyz = PYZ(a.pure)  # noqa: F821
+
+exe = EXE(  # noqa: F821
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="LaoATrader",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,          # UPX 压缩极易被杀软误报，关掉
+    console=False,      # --noconsole：桌面程序不该弹黑框
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=None,          # 有图标时填 .ico 路径
+)
+
+coll = COLLECT(  # noqa: F821
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="LaoATrader",   # 产出 dist/LaoATrader/LaoATrader.exe
+)
+
+if sys.platform != "win32":
+    # 在 Linux/macOS 上只能打包出本平台的产物（PyInstaller 不支持交叉编译）。
+    # 这里不报错，只是提醒：Windows 的 exe 必须在 Windows 上打。
+    print(
+        "提示：当前平台是 %s，PyInstaller 不能交叉编译 —— "
+        "请把源码拷到 Windows 上执行 build\\build.bat 生成 exe。" % sys.platform
+    )

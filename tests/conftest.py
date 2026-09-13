@@ -1,0 +1,401 @@
+"""测试公共设施：离线、不联网、不需要 API Key。
+
+关键 fixture：
+
+- `_block_network`（autouse）：**在 socket 层封死一切真实网络访问** ——
+  任何漏网的 client 都会立刻报错，而不是悄悄打真实接口（消耗配额、被限流、结果不稳定）；
+- `cfg`：临时数据目录的配置（不碰用户真实目录）；
+- `db`：**合成行情库** —— 造出"能过策略条件"的数据，覆盖后复权、行业、涨停池、交易日历；
+- `FakeClient` / `FakeSession`：假的同花顺客户端与假 HTTP 会话（记录调用、可编程返回/报错），
+  用来测"网络失败也要返回结构化结果"这条硬性要求。
+
+为什么必须在 socket 层封：只靠"记得注入假 client"是不够的 —— 一次疏忽就会让
+测试套件联网。封死之后，这个疏忽会变成一条**失败**，而不是一次静默的真实请求。
+"""
+
+from __future__ import annotations
+
+import socket
+import sqlite3
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+# 保证 `pytest laoA/tests` 在未安装包时也能 import（与 pyproject 的 pythonpath 双保险）
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from laoa_trader.config import Config  # noqa: E402
+from laoa_trader.data import hithink as hx  # noqa: E402
+from laoa_trader.data import storage  # noqa: E402
+from laoa_trader.data.engine import DataEngine  # noqa: E402
+
+#: 允许解析的主机名（本机回环不算联网）
+_LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+class NetworkBlocked(RuntimeError):
+    """测试里试图发起真实网络访问（IPv4/IPv6）。"""
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_config(monkeypatch: pytest.MonkeyPatch):
+    """每个测试都用一份干净的全局配置（无凭据、默认值）。
+
+    为什么要这样：`save_settings()` / `set_config()` 会改进程级单例，
+    如果不隔离，前一个测试保存的 "abc123" 会被后面的测试读到 ——
+    表现为"测试之间互相串味"（实测就是这样炸过：某个用例突然去解析真实域名）。
+    用 monkeypatch 设置，pytest 会在测试结束自动还原。
+    """
+    from laoa_trader import config as config_mod
+
+    monkeypatch.setattr(config_mod, "_config", Config())
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _block_network(monkeypatch: pytest.MonkeyPatch):
+    """封死 IPv4/IPv6 的连接与域名解析；放行 AF_UNIX（Qt/DBus 等本地 IPC 需要）。
+
+    AF_UNIX 特意放行：Qt 的托盘/D-Bus 在本机走 unix socket，那不是"联网"；
+    而 TCP/UDP 一律拒绝 —— 单元测试不该有任何真实外呼。
+    """
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    real_getaddrinfo = socket.getaddrinfo
+
+    def _refuse(address) -> None:
+        raise NetworkBlocked(
+            f"测试不允许联网，但检测到对 {address!r} 的连接尝试；"
+            "请把该调用改成注入假 client / 假 Session（见 tests/conftest.py）"
+        )
+
+    def connect(self, address, *args, **kwargs):
+        if self.family in (socket.AF_INET, socket.AF_INET6):
+            _refuse(address)
+        return real_connect(self, address, *args, **kwargs)
+
+    def connect_ex(self, address, *args, **kwargs):
+        if self.family in (socket.AF_INET, socket.AF_INET6):
+            _refuse(address)
+        return real_connect_ex(self, address, *args, **kwargs)
+
+    def create_connection(address, *args, **kwargs):  # 替代 socket.create_connection
+        _refuse(address)
+
+    def getaddrinfo(host, *args, **kwargs):
+        if host not in _LOCAL_HOSTS:
+            raise NetworkBlocked(f"测试不允许做域名解析，但检测到 {host!r}")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(socket, "create_connection", create_connection)
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    yield
+
+
+#: 让"小样本合成库"能通过自检的宽松阈值（真实默认值另有用例断言）
+READY_THRESHOLDS = (
+    "min_history_years = 0\n"
+    "min_symbols = 1\n"
+    "max_stale_trading_days = 0\n"
+)
+
+
+def workdays_ending(day: str, count: int) -> list[str]:
+    """截至 `day`（含）的 count 个工作日，升序（跳过周末）。"""
+    last = datetime.strptime(day, "%Y-%m-%d").date()
+    out: list[str] = []
+    cursor = last
+    while len(out) < count:
+        if cursor.weekday() < 5:
+            out.append(cursor.isoformat())
+        cursor -= timedelta(days=1)
+    return sorted(out)
+
+
+def seed_ready_db(
+    cfg: Config,
+    symbols: tuple[tuple[str, str, str], ...] = (
+        ("600001", "低价样本", "银行"),
+        ("600002", "高价样本", "白酒"),
+    ),
+    days: int = 30,
+    *,
+    with_events: bool = True,
+    trading_days: list[str] | None = None,
+) -> list[str]:
+    """把库写成**自检判定为 ready** 的状态，返回交易日列表。
+
+    自检要求：行情非空 + 跨度达标 + 股票数达标 + **有复权事件** + 行业覆盖 ≥90%
+    + 交易日历非空 + 不落后。小样本库靠 `READY_THRESHOLDS` 放低跨度/股票数门槛，
+    其余各项都要如实造出来，否则测出来的就是"自检失败"而不是被测功能。
+
+    Args:
+        with_events: 是否写复权事件（False 用来构造"缺复权事件 → needs_full"）。
+    """
+    storage.init_db(cfg.db_path)
+    trading = list(trading_days) if trading_days else _trading_days(days)
+    with storage.connect(cfg.db_path) as conn:
+        storage.write_stock_basic(conn, [(s, n, ind) for s, n, ind in symbols])
+        rows = []
+        for i, (symbol, _name, _ind) in enumerate(symbols):
+            for d_i, day in enumerate(trading):
+                close = 10.0 + i + d_i * 0.01
+                rows.append((symbol, day, close, close, close, close, 2e7, 2e7 * close, 1.0))
+        storage.write_daily_raw(conn, rows)
+        storage.write_calendar(conn, trading)
+        if with_events:
+            storage.write_adjust_events(conn, [
+                (symbols[0][0], trading[len(trading) // 2], 0.1, 0.0, 0.0, 0.0),
+            ])
+    return trading
+
+
+@pytest.fixture()
+def ready_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
+    """一份**已就绪**的库（自检 ready），CLI 用例直接拿它跑正题。"""
+    for name in ("HITHINK_FINANCE_API_KEY", "FUYAO_TOKEN", "API_KEY",
+                 "MIN_HISTORY_YEARS", "MIN_SYMBOLS", "MAX_STALE_TRADING_DAYS",
+                 "AUTO_DOWNLOAD_ON_START"):
+        monkeypatch.delenv(name, raising=False)
+    config = Config(data_dir=tmp_path / "data", hithink_api_key="")
+    config.min_history_years = 0.0
+    config.min_symbols = 1
+    config.ensure_dirs()
+    seed_ready_db(config, days=40)
+    return config
+
+
+@pytest.fixture()
+def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
+    """临时配置：数据目录在 tmp_path 下，三路通知全关（测试不发真实通知）。"""
+    # 清掉可能存在的宿主环境变量，避免"环境变量覆盖"把测试搞乱
+    for name in (
+        "HITHINK_FINANCE_API_KEY", "FUYAO_TOKEN", "API_KEY",
+        "FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_CHAT_ID",
+        "NOTIFY_FEISHU", "NOTIFY_WINDOWS", "NOTIFY_TRAY",
+        "TRADE_CAPITAL", "TRADE_POSITION_PCT", "TRADE_MAX_POSITIONS",
+        "INTRADAY_STOP_LOSS", "INTRADAY_TAKE_PROFIT", "INTRADAY_POOL_ONLY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    config = Config(data_dir=tmp_path / "data", hithink_api_key="test-key")
+    config.ensure_dirs()
+    return config
+
+
+def _trading_days(count: int, end: str | None = None) -> list[str]:
+    """生成 count 个"工作日"日期（跳过周末，不查真实日历）。"""
+    end_date = datetime.strptime(end or "2026-09-11", "%Y-%m-%d").date()
+    days: list[str] = []
+    cursor = end_date
+    while len(days) < count:
+        if cursor.weekday() < 5:
+            days.append(cursor.isoformat())
+        cursor -= timedelta(days=1)
+    return sorted(days)
+
+
+@pytest.fixture()
+def trading_days() -> list[str]:
+    return _trading_days(40)
+
+
+@pytest.fixture()
+def db(cfg: Config, trading_days: list[str]) -> str:
+    """合成一个可用的行情库。
+
+    数据设计（刻意让 5 条策略都能出候选）：
+    - 6 只股票分属 3 个行业；半导体 2 只当日涨停（用来验证"热门行业"排序）；
+    - 价格走势：`600001` 一路阴跌（满足短期反转）、`000001` 低位横盘（满足低价股）；
+    - 成交量：`300001` 前 3 日地量、最后一日放量（满足地量后放量）。
+    """
+    path = storage.init_db(cfg.db_path)
+    symbols = {
+        "600001": ("浦发样本", "银行", 3.0),
+        "600002": ("半导体甲", "半导体", 12.0),
+        "600003": ("半导体乙", "半导体", 18.0),
+        "000001": ("平安样本", "银行", 6.0),
+        "300001": ("创业样本", "白酒", 25.0),
+        "000002": ("地产样本", "房地产", 9.0),
+    }
+    with storage.connect(path) as conn:
+        storage.write_stock_basic(
+            conn,
+            [(s, meta[0], meta[1]) for s, meta in symbols.items()],
+        )
+        rows = []
+        for i, (symbol, (_, _, base)) in enumerate(symbols.items()):
+            price = base
+            for d_i, day in enumerate(trading_days):
+                # 每只股票不同的走势：600001 缓慢阴跌（-1.2%/日），其余微涨
+                drift = -0.012 if symbol == "600001" else 0.001
+                price = price * (1 + drift)
+                volume = 1_000_000.0
+                volume *= 1.0 + (i * 0.1)
+                if symbol == "300001":
+                    # 前 3 日地量、最后一日 3 倍放量
+                    if d_i >= len(trading_days) - 4:
+                        volume = 200_000.0 if d_i < len(trading_days) - 1 else 3_000_000.0
+                rows.append((
+                    symbol, day, price * 0.99, price * 1.01, price * 0.98, price,
+                    volume, volume * price,
+                ))
+        storage.write_daily_raw(conn, rows)
+        storage.write_calendar(conn, trading_days)
+        last = trading_days[-1]
+        storage.write_limit_up_pool(conn, [
+            (last, "600002", "半导体甲", 1, "首板", "09:35:00", "09:35:00",
+             8e7, 0, "芯片", 5.0, 10.0, 1e9, 0, 1, "首板", 9e7, 12.0, 0, "hithink", "t"),
+            (last, "600003", "半导体乙", 2, "二连板", "09:31:00", "09:45:00",
+             6e7, 1, "芯片", 6.0, 10.0, 2e9, 1, 0, "2连板", 7e7, 18.0, 0, "hithink", "t"),
+            (last, "600001", "浦发样本", 1, "首板", "10:10:00", "10:20:00",
+             3e7, 0, "银行", 1.0, 10.0, 5e8, 0, 1, "首板", 3e7, 3.0, 0, "hithink", "t"),
+        ])
+    return str(path)
+
+
+@pytest.fixture()
+def engine(db: str) -> DataEngine:
+    return DataEngine(db)
+
+
+class FakeResponse:
+    """最小可用的响应对象（requests.Response 的替身）。"""
+
+    def __init__(self, payload: dict, status_code: int = 200, text: str = "") -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.text = text or str(payload)
+
+    def json(self) -> dict:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise hx.requests.HTTPError(f"HTTP {self.status_code}")
+
+
+class FakeSession:
+    """假的 requests.Session：按 URL 关键词返回预置响应，并记录调用。"""
+
+    def __init__(self, routes: dict[str, object] | None = None) -> None:
+        self.routes = routes or {}
+        self.calls: list[tuple[str, dict]] = []
+
+    def _resolve(self, url: str, params: dict | None):
+        for key, value in self.routes.items():
+            if key in url:
+                if callable(value):
+                    return value(params or {})
+                return value
+        return FakeResponse({"code": 0, "data": {"item": []}})
+
+    def get(self, url, params=None, headers=None, timeout=None, **kwargs):
+        self.calls.append((url, dict(params or {})))
+        return self._resolve(url, params)
+
+    def post(self, url, json=None, data=None, headers=None, timeout=None, **kwargs):
+        # 飞书接口用 data=<JSON 字符串> 提交（不是 json=），测试里要能看到真实载荷
+        payload = json
+        if payload is None and isinstance(data, (str, bytes)):
+            try:
+                payload = __import__("json").loads(data)
+            except ValueError:
+                payload = {"_raw": data}
+        self.calls.append((url, dict(payload or {})))
+        return self._resolve(url, payload)
+
+
+class FakeClient:
+    """假的同花顺客户端（用于 sync / intraday 的离线测试）。
+
+    **它抛出的所有错误都是合成的**（消息里带"测试假客户端"字样），
+    日志里看到 "4001/5001/限流" 之类的字样是测试在模拟服务端错误，
+    不是真的打到了同花顺接口 —— socket 层已被 `_block_network` 封死。
+
+    可编程：
+    - `snapshots`：snapshot() 返回的行情快照；
+    - `limit_up`：limit_up_pool() 返回的涨停池；
+    - `dump_files`：{tag: 本地 parquet 路径} —— download_dump() 直接"复制"过来，
+      这样既模拟了真实下载（含 force 重下路径），又不需要联网；
+    - `fail_with`：任何调用都抛这个异常（测"失败要返回结构化结果"）。
+    """
+
+    def __init__(
+        self,
+        snapshots: list[dict] | None = None,
+        limit_up: list[dict] | None = None,
+        fail_with: Exception | None = None,
+        trading_days: list[str] | None = None,
+        dump_files: dict[str, Path] | None = None,
+    ) -> None:
+        self.snapshots = snapshots or []
+        self.limit_up = limit_up or []
+        self.fail_with = fail_with
+        self.trading = trading_days
+        self.dump_files = dump_files or {}
+        self.calls: list[tuple[str, object]] = []
+
+    def _check(self, name: str, arg=None):
+        self.calls.append((name, arg))
+        if self.fail_with is not None:
+            raise self.fail_with
+
+    def snapshot(self, thscodes=None, **kwargs):
+        self._check("snapshot", thscodes)
+        return [s for s in self.snapshots if not thscodes or s.get("ticker") in thscodes]
+
+    def limit_up_pool(self, day=None, size=200):
+        self._check("limit_up_pool", day)
+        return self.limit_up
+
+    def trading_days(self):
+        self._check("trading_days")
+        return self.trading or []
+
+    def ths_index_list(self, tag="industry"):
+        self._check("ths_index_list", tag)
+        return []
+
+    def ths_constituents(self, thscode):
+        self._check("ths_constituents", thscode)
+        return []
+
+    def index_historical(self, thscode, start, end, interval="1d"):
+        self._check("index_historical", thscode)
+        return []
+
+    def tickers(self, **kwargs):
+        self._check("tickers")
+        return []
+
+    def valuations(self, symbols, chunk=100):
+        self._check("valuations", symbols)
+        return []
+
+    def download_dump(self, tag="daily-k-10d", dest=None):
+        self._check("download_dump", tag)
+        source = self.dump_files.get(tag)
+        if source is None:
+            raise AssertionError(
+                f"测试未注入 {tag} 的 dump 文件（请给 FakeClient 传 dump_files）"
+            )
+        import shutil
+
+        target = Path(dest) if dest else Path("/tmp") / f"{tag}.parquet"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        return target
+
+
+@pytest.fixture()
+def sqlite_conn(db: str):
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    yield conn
+    conn.close()
