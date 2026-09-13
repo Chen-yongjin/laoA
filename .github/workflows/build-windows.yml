@@ -26,7 +26,7 @@ on:
       - "**.md"
 
 permissions:
-  contents: read
+  contents: write   # 失败时把 pytest.log 推回 ci-log 分支，便于本地直接 git fetch 查看
 
 jobs:
   build:
@@ -78,6 +78,19 @@ jobs:
           foreach ($b in $buf | Select-Object -First 20) { Write-Host "::error::$b" }
           $summary = ($lines | Where-Object { $_ -match 'passed|failed|error' } | Select-Object -Last 1)
           Write-Host "::error::测试汇总：$summary"
+
+      - name: 把失败日志推回 ci-log 分支（便于本地 git fetch 查看）
+        if: failure() && hashFiles('pytest.log') != ''
+        shell: pwsh
+        run: |
+          git config user.name "ci-log-bot"
+          git config user.email "ci-log-bot@users.noreply.github.com"
+          New-Item -ItemType Directory -Force -Path ci-log | Out-Null
+          Copy-Item pytest.log ci-log/pytest.log -Force
+          "run=$env:GITHUB_RUN_ID`nsha=$env:GITHUB_SHA`nref=$env:GITHUB_REF_NAME`njob=$env:GITHUB_JOB" | Set-Content ci-log/meta.txt
+          git add -f ci-log
+          git commit -m "CI 失败日志（run $env:GITHUB_RUN_ID）" --no-verify
+          git push -f origin HEAD:ci-log
 
       - name: 失败时上传测试日志
         if: failure() && hashFiles('pytest.log') != '' 
