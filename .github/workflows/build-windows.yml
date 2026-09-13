@@ -14,6 +14,11 @@ name: build-windows
 
 on:
   workflow_dispatch:          # 手动触发（推荐：想发包时点一下）
+    inputs:
+      skip_tests:
+        description: "跳过测试直接打包（仅在 CI 平台问题未解决时用）"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths-ignore:             # 只改文档就不必跑构建，省额度
@@ -46,6 +51,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: 跑测试（不通过就不出包）
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_tests != true }}
         shell: pwsh
         run: |
           # 完整输出落盘并在失败时上传成产物，方便定位（Windows 上的失败多半是本机看不出来的平台差异）
@@ -58,7 +64,7 @@ jobs:
           Get-Content pytest.log | Select-Object -Last 3
 
       - name: 失败时上传测试日志
-        if: failure()
+        if: failure() && hashFiles('pytest.log') != '' 
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log
