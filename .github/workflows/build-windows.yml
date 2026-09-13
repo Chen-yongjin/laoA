@@ -63,6 +63,22 @@ jobs:
           # 顺便报告条数（便于和本地对比）
           Get-Content pytest.log | Select-Object -Last 3
 
+      - name: 失败摘要（直接变成 GitHub 注解，便于复制定位）
+        if: failure() && hashFiles('pytest.log') != ''
+        shell: pwsh
+        run: |
+          # 把每条失败用例 + 紧随其后的错误行，输出成 ::error:: 注解
+          # 这样在 Actions 页面的 "Annotations" 区域就能看到，不必下载产物
+          $lines = Get-Content pytest.log
+          $buf = @()
+          foreach ($l in $lines) {
+            if ($l -match '^FAILED ') { $buf += $l }
+            elseif ($l -match '^E\s+' -and $buf.Count -gt 0 -and $buf[-1] -notmatch '^\s*E') { $buf[-1] = "$($buf[-1]) || $($l.Trim())" }
+          }
+          foreach ($b in $buf | Select-Object -First 20) { Write-Host "::error::$b" }
+          $summary = ($lines | Where-Object { $_ -match 'passed|failed|error' } | Select-Object -Last 1)
+          Write-Host "::error::测试汇总：$summary"
+
       - name: 失败时上传测试日志
         if: failure() && hashFiles('pytest.log') != '' 
         uses: actions/upload-artifact@v7
