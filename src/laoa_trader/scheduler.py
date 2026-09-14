@@ -140,7 +140,7 @@ def next_run_info(
          "label": "今天 16:00" / "明天 16:00" / "已关闭（每天自动运行）"}
     """
     cfg = cfg or get_config()
-    now = now or datetime.now()
+    now = now or intraday.now_shanghai()
     if not getattr(cfg, "auto_run", True):
         return {"kind": "disabled", "at": None, "label": "已关闭（每天自动运行）"}
 
@@ -357,7 +357,7 @@ def run_daily(
         title = f"📈 老A选股助手-选股池 | {report['data_date']}"
         lines = pool.format_pool_lines(pool_rows)
         lines.extend(_pool_plan_lines(pool_rows, cfg))
-        day = report["data_date"] or datetime.now().strftime("%Y-%m-%d")
+        day = report["data_date"] or intraday.now_shanghai().strftime("%Y-%m-%d")
         fingerprint = pool_fingerprint(title, lines)
         try:
             with storage.connect(cfg.db_path) as conn:
@@ -503,7 +503,7 @@ class Scheduler:
 
     def status(self, now: datetime | None = None) -> dict:
         """运行状态（界面状态栏与 CLI 输出用）。"""
-        now = now or datetime.now()
+        now = now or intraday.now_shanghai()
         hour, minute = parse_run_at(self.cfg.run_at)
         fallback = parse_hhmm(getattr(self.cfg, "run_at_fallback", "") or "")
         today = now.strftime("%Y-%m-%d")
@@ -580,18 +580,18 @@ class Scheduler:
         定时任务还会替你试一次，符合"主跑没成功就补跑"的语义。
         """
         if report is not None and not self._report_succeeded(report):
-            self._daily_failed_date = datetime.now().strftime("%Y-%m-%d")
+            self._daily_failed_date = intraday.now_shanghai().strftime("%Y-%m-%d")
             self._last_daily_date = None
             logger.info("手动跑未成功：不写成功标记（定时补跑仍会尝试）")
             return
-        self._last_daily_date = datetime.now().strftime("%Y-%m-%d")
+        self._last_daily_date = intraday.now_shanghai().strftime("%Y-%m-%d")
         self._daily_failed_date = None
         if report is not None:
             self._last_daily_report = {
                 "pool": len(report.get("pool") or []),
                 "picks": report.get("picks", 0),
                 "pushed": bool(report.get("pushed")),
-                "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "at": intraday.now_shanghai().strftime("%Y-%m-%d %H:%M:%S"),
             }
 
     def run_intraday_now(self, *, dry_run: bool = False, ignore_session: bool = True) -> dict:
@@ -608,7 +608,7 @@ class Scheduler:
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                now = datetime.now()
+                now = intraday.now_shanghai()
                 # 每轮都从 cfg 现读 run_at / auto_run —— 界面改完时间**下一轮就生效**，
                 # 不需要重启（这是"分发后各人自定运行时间"能用的前提）
                 self._maybe_daily(now)
@@ -632,7 +632,7 @@ class Scheduler:
                数据 `needs_full` → 跳过。两种情况都**不写成功标记**，
                所以下载/补数据完成后，当天仍会正常补跑一次。
         """
-        now = now or datetime.now()
+        now = now or intraday.now_shanghai()
         today = now.strftime("%Y-%m-%d")
 
         if not getattr(self.cfg, "auto_run", True):

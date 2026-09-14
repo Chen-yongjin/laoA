@@ -300,11 +300,14 @@ def cli_config(tmp_path, cfg):
 
 def test_cli_run_at_override_is_temporary(capsys, cli_config) -> None:
     from laoa_trader.__main__ import cli
+    from laoa_trader.intraday import now_shanghai
 
     before = cli_config.read_text(encoding="utf-8")
-    started = datetime.now()
+    # 用**程序自己的时钟**（北京时间）取"现在"：机器时区不一定是北京（CI 的 runner 是 UTC），
+    # 拿本地时间去算"下次自动运行是今天还是明天"会在 UTC 机器上判错。
+    started = now_shanghai()
     assert cli(["--cli", "--doctor", "--run-at", "16:30", "--config", str(cli_config)]) == 0
-    finished = datetime.now()
+    finished = now_shanghai()
     out = capsys.readouterr().out
     assert "（临时）每天主跑时间：16:30" in out
     assert "每天 16:30（主跑）" in out

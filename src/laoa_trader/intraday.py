@@ -210,14 +210,20 @@ _TZ_SHANGHAI = timezone(timedelta(hours=8))
 
 
 def now_shanghai(now: datetime | None = None) -> datetime:
-    """取北京时间（传入的 `now` 原样使用，便于测试注入确定时刻）。
+    """取"北京时间的墙上时间"；传入的 `now` 原样返回（便于测试注入确定时刻）。
 
     为什么不用 `datetime.now()`：那台机器的时区不一定是北京 —— CI 的 Windows runner 就是
-    UTC，下午 13:45 UTC 会被判成"交易时段中"（而北京此刻是 21:45，早已收盘）。
-    交易时段、交易日、提醒时间戳这些**全部**要与机器时区解耦，否则换台机器/出国就错，
-    而且错得很安静（状态栏显示"时段中"、提醒被逻辑开关挡住）。
+    UTC，当地 13:45 会被判成"交易时段中"（而北京此刻是 21:45，早已收盘）。交易时段、
+    交易日、提醒时间戳这些**全部**要与机器时区解耦，否则换台机器/出国就错，而且错得很安静。
+
+    **返回值是朴素的（不带 tzinfo）**：项目里所有时间比较（交易日历、run_at、补跑）
+    都是"墙上时间"的朴素比较，塞一个 aware 的 datetime 进去会直接
+    `TypeError: can't compare offset-naive and offset-aware`。所以这里把北京时间的
+    墙上钟面值取出来、丢掉 tzinfo —— 语义就是"现在是北京几点"，与既有代码天然一致。
     """
-    return now if now is not None else datetime.now(_TZ_SHANGHAI)
+    if now is not None:
+        return now
+    return datetime.now(_TZ_SHANGHAI).replace(tzinfo=None)
 
 
 def in_session(now: datetime | None = None) -> bool:
