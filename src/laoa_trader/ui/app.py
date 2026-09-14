@@ -20,7 +20,7 @@ import traceback
 from typing import Any
 
 import laoa_trader
-from laoa_trader import assets, intraday, pool, state
+from laoa_trader import assets, intraday, market, pool, state
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import sync
 from laoa_trader.data.engine import DataEngine
@@ -40,6 +40,10 @@ SOURCE_TEXT = ("数据来源：同花顺（fuyao.aicubes.cn）。"
 
 #: 关于页里图标的显示边长（资源只有 256/128/48/32/16 这几档，这里由 QPixmap 平滑缩放）
 ABOUT_ICON_SIZE = 64
+
+#: 「大盘概览」页自己的刷新周期（毫秒）—— 每分钟一次，与 5 秒的界面刷新解耦。
+#: 取数另有 55 秒 TTL（`market_overview_ttl`），所以这一分钟里最多真打一次接口。
+MARKET_REFRESH_MS = 60_000
 
 try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
     from PySide6.QtCore import Qt, QThread, QTimer, Signal
@@ -176,6 +180,9 @@ if QT_AVAILABLE:
             self.engine = DataEngine(self.cfg.db_path)
             self.scheduler = Scheduler(self.cfg, self.engine)
             self._worker: Worker | None = None
+            #: 概览页自己的后台取数线程（与 `_worker` 分开：那个是"有任务在跑"的判据，
+            #: 概览每分钟都取一次，混进去会让下载/选股被误判成"忙"
+            self._market_worker: Worker | None = None
             self._tray_notified = 0
             #: 状态栏的瞬时消息（任务完成/失败提示），与实时状态分两层显示
             self._message = ""
@@ -188,6 +195,8 @@ if QT_AVAILABLE:
             #: 启动自检结果（三态）与首次向导
             self.preflight_result: dict | None = None
             self.wizard: Any = None
+            #: 最近一次的大盘概览（拿不到就是 None）——测试与"复制/追查原因"都从它取值
+            self.market_overview: dict | None = None
             #: 「关于」对话框（测试与"重复点关于"都要能拿到它）
             self.about_dialog: Any = None
             #: 「关于」里的图标标签（资源缺失时为 None）
@@ -212,6 +221,22 @@ if QT_AVAILABLE:
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._tick)
             self._timer.start(5000)
+
+            # 「大盘概览」页**自己的**定时器：每分钟一次。
+            # 为什么不搭上面那个 5 秒的顺风车：概览是 4~6 个接口请求，
+            # 5 秒一轮等于每分钟打 48 次（配额与限流都吃不消）；而且这一页
+            # 只在"用户正看着它"时才需要新鲜数（见 `_market_tick`）。
+            self._market_timer = QTimer(self)
+            self._market_timer.timeout.connect(self._market_tick)
+            self._market_timer.start(MARKET_REFRESH_MS)
+            # 切到这一页时立刻刷一次（定时器是整分钟对齐的，切过来时可能差几十秒到点）
+            self.tabs.currentChanged.connect(self._on_tab_changed)
+            # 启动第一屏就是概览页（它是第一个页签）：起来后立刻取一次，
+            # 别让用户对着 — 等满一分钟。放 singleShot(0) 里是**先让窗口画出来**，
+            # 真正的请求在后台线程（见 request_market_overview）——
+            # 启动时数据自检也在跑，两条都压在主线程上界面就会"出来了但点不动"
+            QTimer.singleShot(0, self._market_tick)
+
             self._tick()
             if self._startup_problem:
                 self._set_status("⚠️ " + self._startup_problem.replace("\n", " "))
@@ -277,6 +302,9 @@ if QT_AVAILABLE:
                  "条件单参数", "复制"]
             )
             self._stretch(self.pool_table)
+            # 概览放**第一个**（Qt 启动就显示第一个页签）：看盘第一眼要扫到，
+            # 而且它是只读的一页，进来就能看，不需要先选股
+            self.tabs.addTab(self._build_market_page(), "大盘概览")
             self.tabs.addTab(self._build_pool_page(), "股票池")
 
             self.position_table = QTableWidget(0, 6)
@@ -372,6 +400,214 @@ if QT_AVAILABLE:
                 row.addWidget(btn)
             row.addStretch(1)
             return row
+
+        # ── 大盘概览页（独立 tab；数据口径见 market.py）──
+
+        def _build_market_page(self) -> Any:
+            """「大盘概览」页：摘要 / 涨跌家数 / 三组指数 / 底部来源与【立即刷新】。
+
+            为什么单独成页而不是塞进股票池页顶部：这是"看盘第一眼要扫到"的东西，
+            独立一页才能给足留白与字号（摘要行加粗放大、组与组之间留空），
+            股票池页也就不会被这几行挤掉高度。
+
+            为什么一行一个 QLabel：用户明确要求"涨=红、跌=绿"用 `QLabel.setStyleSheet`
+            上色 —— 一行一个控件才谈得上"整行同向时才上色"，也才能做到
+            "某组没配就整行不显示"。`market_labels` 的下标含义见 `market.lines()`。
+            """
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(16, 16, 16, 12)
+            layout.setSpacing(10)          # 整页而不是一行：留白放宽一点
+
+            title = QLabel("大盘概览")
+            font = title.font()
+            font.setBold(True)
+            if font.pointSize() > 0:
+                font.setPointSize(font.pointSize() + 2)
+            title.setFont(font)
+            layout.addWidget(title)
+
+            #: 摘要 / 涨跌家数 / 宽基 / 情绪 / 板块（顺序与 market.lines() 一致）
+            self.market_labels: list[Any] = []
+            for index in range(market.LINE_COUNT):
+                label = QLabel(market.DASH)
+                label.setWordWrap(True)
+                # 可选中复制：这几行数常被贴到群里或笔记里
+                label.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                )
+                label_font = label.font()
+                if index == 0:
+                    # 摘要行是"一眼看大盘"的那行，加大一号并加粗
+                    if label_font.pointSize() > 0:
+                        label_font.setPointSize(label_font.pointSize() + 3)
+                    label_font.setBold(True)
+                elif index == 1:
+                    if label_font.pointSize() > 0:
+                        label_font.setPointSize(label_font.pointSize() + 1)
+                label.setFont(label_font)
+                layout.addWidget(label)
+                self.market_labels.append(label)
+
+            # 取不到数据时的原因写在这里（正常时隐藏）：光看一排 — 用户猜不出为什么
+            self.market_hint = QLabel("")
+            self.market_hint.setWordWrap(True)
+            self.market_hint.setVisible(False)
+            layout.addWidget(self.market_hint)
+
+            layout.addStretch(1)
+
+            footer = QHBoxLayout()
+            self.market_as_of_label = QLabel(market.footer_text(None))
+            self.market_as_of_label.setWordWrap(True)
+            self.market_as_of_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            footer.addWidget(self.market_as_of_label)
+            footer.addStretch(1)
+            self.btn_market_refresh = QPushButton("立即刷新")
+            self.btn_market_refresh.setToolTip(
+                "立刻重新取一次（平时每分钟自动刷新一次；本按钮会忽略缓存）"
+            )
+            self.btn_market_refresh.clicked.connect(self.on_market_refresh_clicked)
+            footer.addWidget(self.btn_market_refresh)
+            layout.addLayout(footer)
+
+            self.market_page = page
+            self._render_market_overview()   # 先画空骨架：第一秒就是"能看"的样子
+            return page
+
+        def on_market_refresh_clicked(self) -> None:
+            """【立即刷新】：**忽略 TTL 缓存**重取一次（用户手点的按钮就该立刻见效）。"""
+            self.request_market_overview(force=True)
+
+        def _market_page_visible(self) -> bool:
+            """概览页此刻是不是真的"在用户眼前"（当前页 + 窗口没被最小化/隐藏）。
+
+            为什么要判这么细：取数是 4~6 个请求，在别的页面上、或窗口缩到托盘里
+            每分钟白刷一轮纯属浪费配额，也更容易撞上限流。
+            """
+            try:
+                return bool(self.tabs.currentWidget() is self.market_page and self.isVisible())
+            except Exception:  # noqa: BLE001 - 界面还没搭完时问这些也算"不可见"
+                return False
+
+        def _market_tick(self) -> None:
+            """概览页自己的定时器（**每 60 秒**一次，与 5 秒的界面刷新解耦）。
+
+            只有"页面在眼前"时才真去取；取不取由 `market` 层的 TTL（55 秒）决定，
+            所以这一分钟里如果刚切过页、刚点过刷新，这里只是读缓存。
+            启动那一次也走它（见 `__init__` 里的 `QTimer.singleShot(0, ...)`）。
+            """
+            if not self._market_page_visible():
+                return
+            self.request_market_overview()
+
+        def _on_tab_changed(self, _index: int) -> None:
+            """切到概览页时立刻刷一次（缓存没过期就只是重画缓存）。
+
+            为什么必要：定时器是整分钟对齐的，用户切过来时可能正好差几十秒到点 ——
+            看盘的人不该盯着"一分钟前的旧数"。
+            """
+            if self.tabs.currentWidget() is self.market_page:
+                self.request_market_overview()
+
+        def request_market_overview(self, force: bool = False) -> None:
+            """界面路径取数：**丢到后台线程**，取回来再回主线程渲染。
+
+            为什么必须后台（而不是在主线程里直接取）：
+            - 启动时数据自检（`run_preflight`）也在主线程上跑，两件事叠在一起会让
+              "窗口已经出来了却点不动"；
+            - 断网/服务端不响应时每个请求要等满超时（4~6 个请求叠起来很可观），
+              主线程被它按住就是整个界面卡住。
+            这也和程序里其它联网动作（下载 / 只刷新数据 / 盘中检查）保持一致。
+
+            同时只允许一轮在飞：上一轮还没回来就跳过这一轮（60 秒定时器与切页动作
+            可能挨得很近，各起一个线程会把请求数凭空翻倍）。
+
+            Args:
+                force: 忽略 TTL 缓存（【立即刷新】用）。
+            """
+            if self._market_worker is not None and self._market_worker.isRunning():
+                return
+            worker = Worker(market.fetch_overview, self.cfg, force=force)
+            self._market_worker = worker
+            worker.finished_ok.connect(self._on_market_overview_ready)
+            worker.failed.connect(self._on_market_overview_failed)
+            worker.start()
+
+        def _on_market_overview_ready(self, overview: Any) -> None:
+            """后台取回来了（回主线程执行）：记下结果并重画页面。"""
+            self.market_overview = overview if isinstance(overview, dict) else None
+            self._render_market_overview()
+
+        def _on_market_overview_failed(self, message: str) -> None:
+            """后台取数抛异常（`market` 层已"绝不抛"，这里是双保险）：原因写在页面上。"""
+            first = str(message).splitlines()[0] if message else "未知错误"
+            logger.warning(f"大盘概览取数失败：{first}")
+            self.market_hint.setText(f"⚠️ 大盘概览取数失败：{first}")
+            self.market_hint.setToolTip(str(message))
+            self.market_hint.setVisible(True)
+
+        def refresh_market_overview(
+            self, force: bool = False, client: Any = None
+        ) -> dict | None:
+            """**同步**取一次大盘概览并刷到页面上（`force=True` 忽略 TTL 缓存）。
+
+            与 `request_market_overview()` 的分工：
+            - 界面自己发起的取数（启动 / 定时器 / 切页 / 【立即刷新】）走**后台线程**那条，
+              主线程一次都不阻塞；
+            - 这个方法在调用者线程里同步跑完，给"已经拿着取数对象"的场景用：
+              自动化测试（注入假客户端，保证完全离线且即时可断言）与将来可能的命令行复用。
+
+            Args:
+                force: 忽略缓存。
+                client: 注入的取数对象（测试注入假客户端）。
+
+            Returns:
+                最近一次的概览 dict（同时写进 `self.market_overview`）；拿不到是 None。
+            """
+            try:
+                overview = market.fetch_overview(self.cfg, client=client, force=force)
+            except Exception as exc:  # noqa: BLE001 - market 层已"绝不抛"，这里再兜一层
+                logger.warning(f"大盘概览取数异常：{type(exc).__name__}: {exc}")
+                overview = None
+            self.market_overview = overview
+            self._render_market_overview()
+            return overview
+
+        def _render_market_overview(self) -> None:
+            """把 `self.market_overview` 画到页面上（五行文本 + 按行上色 + 来源与原因）。
+
+            涨跌按 **A 股习惯**配色（涨=红、跌=绿、平=默认色）；一行里所有涨跌幅同向才
+            上色，有涨有跌就用默认色 —— 一个 QLabel 只有一种颜色，
+            硬取其中一个值去上色反而会误导人。
+
+            `lines()` 里空串表示"这一组在配置里是空的"→ **整行隐藏**，不留一个空的"情绪："。
+            """
+            overview = self.market_overview
+            texts = market.lines(overview)
+            colors = market.line_colors(overview)
+            for label, text, color in zip(self.market_labels, texts, colors):
+                label.setText(text)
+                label.setStyleSheet(f"color:{color}" if color else "")
+                label.setVisible(bool(text))     # 组没配 → 那一行整行不显示
+
+            self.market_as_of_label.setText(market.footer_text(overview))
+
+            # 原因写进 tooltip（鼠标一停就能看到）与 hint（当前两句话，太长就省略）
+            detail = market.summary_text(overview)
+            tooltip = ("大盘概览：" + detail) if detail else "大盘概览：暂无数据"
+            for label in [*self.market_labels, self.market_as_of_label, self.market_page]:
+                label.setToolTip(tooltip)
+            errors = [str(e) for e in ((overview or {}).get("errors") or [])]
+            if errors:
+                text = "；".join(errors[:2]) + ("…" if len(errors) > 2 else "")
+                self.market_hint.setText("⚠️ " + text)
+                self.market_hint.setToolTip("；".join(errors))
+            else:
+                self.market_hint.setText("")
+            self.market_hint.setVisible(bool(errors))
 
         def _build_pool_page(self) -> Any:
             """股票池页：切换按钮 + 空池提示 + 卡片视图（滚动区）+ 表格视图。
@@ -900,6 +1136,8 @@ if QT_AVAILABLE:
                 self._refresh_watchlist()
                 self._refresh_positions()
                 self._refresh_alerts()
+                # 概览**不在这里刷**：它有自己的 60 秒定时器与 55 秒 TTL
+                # （见 `_market_tick`）—— 5 秒一轮会把配额刷掉
                 self._drain_tray()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"界面刷新异常：{exc}")

@@ -118,8 +118,12 @@ def window(seeded, qapp):
     qapp.processEvents()
     win._tick()
     qapp.processEvents()
+    # 概览是**第一个页签**（启动就停在它上面），它会立刻在后台取一次数：
+    # 先等它落地，免得它的结果跟用例自己的断言抢同一个 `market_overview`
+    _wait_market(win, qapp)
     yield win
     win.scheduler.stop()
+    _wait_market(win, qapp)
     if win.wizard is not None:      # 首次向导（非模态）不要留给下一个用例
         win.wizard.close()
     if win.about_dialog is not None:
@@ -160,17 +164,22 @@ def _card_of(window, symbol: str):
     raise AssertionError(f"卡片视图里没有 {symbol}")
 
 
-def test_window_renders_all_panels(window) -> None:
+def test_window_renders_all_panels(window, qapp) -> None:
     # 池子两套视图（卡片 / 表格）都填好了：切换视图只是 setVisible，不重建
     assert window.pool_table.rowCount() == 1
     assert len(window.pool_cards) == 1
     assert window.position_table.rowCount() == 1
     assert window.alert_table.rowCount() == 1
-    # 五个页签：股票池 / 持仓 / 自选股 / 盘中提醒 / 设置
-    assert window.tabs.count() == 5
-    assert [window.tabs.tabText(i) for i in range(5)] == [
-        "股票池", "持仓", "自选股", "盘中提醒", "设置",
+    # 六个页签：**大盘概览放第一个**（启动就停在它上面），股票池紧跟其后
+    assert window.tabs.count() == 6
+    assert [window.tabs.tabText(i) for i in range(6)] == [
+        "大盘概览", "股票池", "持仓", "自选股", "盘中提醒", "设置",
     ]
+    assert window.tabs.widget(0) is window.market_page
+    assert window.tabs.currentWidget() is window.market_page      # 启动默认页
+    # 池子两款视图的可见性要**在池子页是当前页**时才谈得上（先切过去）
+    window.tabs.setCurrentWidget(_tab_page(window, "股票池"))
+    qapp.processEvents()
     # 默认视图是卡片（"默认卡片"这条由 test_pool_view_toggle_writes_config 专门盯）
     assert window.pool_scroll.isVisible() is True
     assert window.pool_table.isVisible() is False
@@ -374,8 +383,9 @@ def test_pool_cards_render_row_fields(window) -> None:
     assert any(t.startswith("触发 ") for t in texts)                   # 第 3 行：条件单参数
 
 
-def test_pool_card_is_compact_and_width_follows_window(window, qapp) -> None:
+def test_pool_card_is_compact_and_width_follows_window(pool_window, qapp) -> None:
     """卡片宽度跟着窗口走、高度紧凑（3 行文字 + 按钮，不该每张卡占半屏）。"""
+    window = pool_window
     card = window.pool_cards[0]
     viewport_width = window.pool_scroll.viewport().width()
     assert card.width() >= viewport_width - 40     # 宽度铺满滚动区，右侧不留大片空白
@@ -444,11 +454,12 @@ def test_pool_cards_hide_empty_fields(window, qapp, monkeypatch) -> None:
     assert card.plan_text.startswith("触发 ")     # 条件单参数照常算
 
 
-def test_pool_empty_label_visible_only_when_pool_empty(window, seeded, qapp,
+def test_pool_empty_label_visible_only_when_pool_empty(pool_window, seeded, qapp,
                                                        monkeypatch) -> None:
     """池子非空 → 提示收起；池子空 → 提示出现、卡片列表清空（表格视图下也要正确）。"""
     from laoa_trader import pool as pool_mod
 
+    window = pool_window
     assert window.pool_empty_label.isVisible() is False      # seeded 的池子里有 1 只
     assert window.pool_cards != []
 
@@ -472,9 +483,10 @@ def test_pool_empty_label_visible_only_when_pool_empty(window, seeded, qapp,
     assert window.pool_empty_label.isVisible() is True
 
 
-def test_pool_view_toggle_writes_config(window, seeded, qapp) -> None:
+def test_pool_view_toggle_writes_config(pool_window, seeded, qapp) -> None:
     """默认卡片 → 点一下变表格且写回 pool_view=table → 再点回卡片并写回 cards。"""
     config_file = seeded.data_dir / "config.toml"
+    window = pool_window
 
     assert window.cfg.pool_view == "cards"                  # 默认卡片
     assert window.pool_scroll.isVisible() is True
@@ -508,6 +520,9 @@ def test_pool_view_starts_from_config(seeded, qapp) -> None:
     def open_window():
         win = ui_app.MainWindow(seeded)
         win.show()
+        qapp.processEvents()
+        # 启动默认停在第一个页签（大盘概览），池子那两款视图要先切过去才可见
+        win.tabs.setCurrentWidget(_tab_page(win, "股票池"))
         qapp.processEvents()
         return win
 
@@ -1635,3 +1650,402 @@ def test_download_ok_but_still_not_ready_does_not_run_pipeline(qapp, wizard_wind
     assert "数据仍不可用" in win.status_label.text()
     assert win.preflight_result is not None
     assert win.preflight_result["status"] == "needs_full"
+
+
+# ── 「大盘概览」页（独立 tab）──
+
+
+def _market_fake(**kwargs):
+    """概览用假客户端：概览层已经单独测过，界面这边只关心"接线对了没有"。"""
+    from laoa_trader import market
+    from tests.test_market import FakeMarketClient, SAMPLE_ROWS
+
+    kwargs.setdefault("totals", {
+        market.LIMIT_UP_PATH: 55,
+        market.LIMIT_DOWN_PATH: 16,
+        market.LIMIT_BREAK_PATH: 30,
+    })
+    kwargs.setdefault("rows", SAMPLE_ROWS)
+    kwargs.setdefault("pages", _market_pages())
+    return FakeMarketClient(**kwargs)
+
+
+def _market_pages() -> list[dict]:
+    """一页全市场快照：一行代表一类（涨 / 跌 / 平盘 + 一只北交所）。
+
+    真实口径是 5571 只 / 6 页，翻页循环与真实数字由 `tests/test_market.py` 覆盖；
+    界面这边只验证"汇总结果接到了页面上"。假客户端的页大小是 1000，所以一页就结束。
+    """
+    return [{"item": [
+        {"thscode": "600519.SH", "turnover": 1e11, "volume": 1e6,
+         "price_change_ratio_pct": 1.0},          # 上涨
+        {"thscode": "000001.SZ", "turnover": 4e11, "volume": 2e6,
+         "price_change_ratio_pct": -0.5},         # 下跌
+        {"thscode": "830799.BJ", "turnover": 140.1e8, "volume": 3e5,
+         "price_change_ratio_pct": 0.0},          # 平盘 + 北交所成交额
+    ], "total": 3}]
+
+
+def _inject_market_client(monkeypatch, injected):
+    """让窗口自己发起的取数（定时器 / 切页 / 【立即刷新】）也走假客户端。
+
+    为什么用 patch 最底层取数函数、而不是给 MainWindow 加注入口：
+    这几条路径的意义正是"界面自己决定什么时候取数"，注入点越少越接近真实行为。
+    """
+    from laoa_trader import market
+
+    real = market.fetch_overview
+
+    def fake(cfg, client=None, force=False):    # noqa: ANN001 - 与真实签名保持一致
+        # 界面自己造客户端的路径会传 None：这里换成假客户端，测试才不会联网
+        return real(cfg, client=client or injected, force=force)
+
+    monkeypatch.setattr(market, "fetch_overview", fake)
+
+
+def _wait_market(window, qapp, timeout_ms: int = 10_000) -> None:
+    """等概览页那一轮**后台**取数结束，并把结果送到界面上。
+
+    界面路径（启动 / 定时器 / 切页 / 【立即刷新】）都跑在 QThread 里，
+    而 `finished_ok` 是排队信号 —— 不 wait + processEvents 就断言，会读到上一轮的值。
+    """
+    worker = getattr(window, "_market_worker", None)
+    if worker is not None:
+        worker.wait(timeout_ms)
+    qapp.processEvents()
+
+
+@pytest.fixture()
+def market_window(window, qapp):
+    """把窗口切到「大盘概览」页（并等切页触发的那一轮后台取数落地）。
+
+    为什么需要：Qt 里非当前页签里的子控件 `isVisible()` 恒为 False，
+    不切过去就断言不了"整行隐藏"这类行为（虽然概览是第一个页签、启动就在它上面，
+    但别的用例可能先把页签切走了）。切页会触发一轮后台取数，这里等它落地并清一次缓存，
+    让用例从干净状态开始。
+    """
+    from laoa_trader import market
+
+    window.tabs.setCurrentWidget(window.market_page)
+    qapp.processEvents()
+    _wait_market(window, qapp)
+    market.clear_cache()
+    yield window
+
+
+@pytest.fixture()
+def pool_window(window, qapp):
+    """把窗口切到「股票池」页（那几行控件要在当前页才谈得上可见性与几何尺寸）。"""
+    window.tabs.setCurrentWidget(_tab_page(window, "股票池"))
+    qapp.processEvents()
+    yield window
+
+
+def test_market_page_is_a_tab_of_its_own(window) -> None:
+    """概览是**独立一页、而且是第一个页签**（启动就停在这一页），池子是第二页。"""
+    pool_page = _tab_page(window, "股票池")
+    assert window.tabs.widget(0) is window.market_page
+    assert window.tabs.widget(1) is pool_page
+    assert window.tabs.currentWidget() is window.market_page
+    assert window.market_page is not pool_page
+    assert pool_page.isAncestorOf(window.market_page) is False
+
+    # 页面自上而下：标题 / 五行（摘要、涨跌家数、宽基、情绪、板块）/ 底部来源与刷新按钮
+    layout = window.market_page.layout()
+    assert len(window.market_labels) == 5
+    for label in window.market_labels:
+        assert window.market_page.isAncestorOf(label) is True
+    assert window.market_page.isAncestorOf(window.btn_market_refresh) is True
+    assert window.market_page.isAncestorOf(window.market_as_of_label) is True
+    assert window.btn_market_refresh.text() == "立即刷新"
+    # 底部那行小字排在最后（上面留白、下面收口）
+    assert layout.itemAt(layout.count() - 1).layout().indexOf(
+        window.btn_market_refresh) >= 0
+
+
+def test_market_page_refreshes_right_after_startup(seeded, qapp, monkeypatch) -> None:
+    """概览是**第一个页签**：窗口一起来就自动取一次，不干等 60 秒的定时器。
+
+    取数在后台线程（启动时数据自检也在跑，两条都压主线程界面就"出来了却点不动"），
+    所以这里等它落地再看页面。
+    """
+    from laoa_trader import market
+    from laoa_trader.ui import app as ui_app
+
+    market.clear_cache()
+    client = _market_fake()
+    _inject_market_client(monkeypatch, client)      # 必须在建窗口**之前**注入
+    win = ui_app.MainWindow(seeded)
+    win.show()
+    qapp.processEvents()                            # singleShot(0) 在这里触发
+    _wait_market(win, qapp)
+    try:
+        assert win.tabs.currentWidget() is win.market_page   # 第一屏就是概览
+        assert client.calls                                  # 启动那一次确实去取了
+        assert win.market_overview is not None
+        assert win.market_labels[0].text().startswith("涨停 55 · 跌停 16 · 炸板 30")
+        assert win.market_labels[2].text().startswith("宽基：上证 ")
+        assert "更新于 —" not in win.market_as_of_label.text()   # 底部已经是真实取数时间
+    finally:
+        win.scheduler.stop()
+        if win.wizard is not None:
+            win.wizard.close()
+        win.tray.hide()
+        win.deleteLater()
+        qapp.processEvents()
+        market.clear_cache()
+
+
+def test_market_page_renders_lines_colors_and_footer(market_window, qapp) -> None:
+    """五行内容 + 涨红跌绿 + 底部来源的时间与刷新节奏。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    try:
+        market_window.refresh_market_overview(force=True, client=_market_fake())
+        qapp.processEvents()
+
+        assert market_window.market_overview is not None
+        texts = [label.text() for label in market_window.market_labels]
+        assert texts[0] == "涨停 55 · 跌停 16 · 炸板 30 ｜ 沪 7792亿 · 深 8499亿 · 北 140亿"
+        assert texts[1] == "上涨 1 · 下跌 1 · 平盘 1"      # 上面那页假数据的小样本
+        assert texts[2].startswith("宽基：上证 3885.33 -0.07% ｜ ")
+        assert texts[3].startswith("情绪：同花顺情绪 885.53 -0.18% ｜ ")
+        assert texts[4] == "板块：银行 1408.77 +0.88% ｜ 证券 1428.64 -0.27%"
+        assert all(label.isVisible() for label in market_window.market_labels)
+
+        # 这一天宽基全跌 → 宽基行绿色；情绪/板块有涨有跌 → 默认色；前两行没有涨跌幅
+        assert market_window.market_labels[2].styleSheet() == "color:#2e7d32"
+        assert market_window.market_labels[3].styleSheet() == ""
+        assert market_window.market_labels[4].styleSheet() == ""
+        assert market_window.market_labels[0].styleSheet() == ""
+        assert market_window.market_labels[1].styleSheet() == ""
+        assert market_window.market_hint.isVisible() is False      # 一切正常不留提示
+
+        # 底部小字：数据来源 + 取数时间 + 刷新节奏（breadth 开着要注明它慢一档）
+        footer = market_window.market_as_of_label.text()
+        assert footer.startswith("数据来源：同花顺金融数据服务 · 更新于 ")
+        assert "每分钟自动刷新" in footer
+        assert "涨跌家数与北交所成交额每 5 分钟更新" in footer
+        assert market_window.market_overview["as_of"] in footer
+
+        # 全线上涨的行用红色
+        up_rows = [
+            {"thscode": "000001.SH", "last_price": 3900.0,
+             "price_change_ratio_pct": 0.86, "turnover": 8e11},
+            {"thscode": "399001.SZ", "last_price": 13400.0,
+             "price_change_ratio_pct": 0.12, "turnover": 9e11},
+        ]
+        market_window.refresh_market_overview(force=True, client=_market_fake(rows=up_rows))
+        qapp.processEvents()
+        assert "+0.86%" in market_window.market_labels[2].text()
+        assert market_window.market_labels[2].styleSheet() == "color:#d32f2f"
+    finally:
+        market.clear_cache()
+
+
+def test_market_page_hides_lines_of_empty_groups(market_window, qapp) -> None:
+    """某组配置为空 → 那一行**整行隐藏**（不留一个空的"板块："）。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    try:
+        market_window.cfg.market_sector_indices = []
+        market_window.refresh_market_overview(force=True, client=_market_fake())
+        qapp.processEvents()
+
+        assert market_window.market_labels[4].text() == ""
+        assert market_window.market_labels[4].isVisible() is False
+        assert market_window.market_labels[2].isVisible() is True     # 其它行照常
+        assert "银行" not in "".join(l.text() for l in market_window.market_labels)
+    finally:
+        market.clear_cache()
+
+
+def test_market_page_drops_only_the_bad_code(market_window, qapp) -> None:
+    """**重点**：配置里混一个取不到的代码（这里用 932000.TI）→ 页面上**只少那一项**。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    try:
+        market_window.cfg.market_sentiment_indices = [
+            "883404.TI", "883958.TI", "883994.TI", "932000.TI", "883418.TI",
+        ]
+        market_window.refresh_market_overview(
+            force=True, client=_market_fake(index_fail=("932000.TI",))
+        )
+        qapp.processEvents()
+
+        texts = [label.text() for label in market_window.market_labels]
+        assert "932000" not in "".join(texts)
+        assert texts[3].count("｜") == 3          # 情绪行只剩 4 项
+        assert "昨日连板" in texts[3] and "微盘股" in texts[3]
+        assert texts[2].startswith("宽基：上证 ")  # 其它行一字不动
+        assert market_window.market_overview["failed"] == ["932000.TI"]
+        assert "932000.TI" in market_window.market_hint.text()
+    finally:
+        market.clear_cache()
+
+
+def test_market_page_shows_dash_and_reason_without_data(market_window, qapp) -> None:
+    """拿不到数据：该显示 `—` 的地方显示 `—`、原因写在页面上，界面照常可用。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    try:
+        market_window.cfg.hithink_api_key = ""              # 没配 Key：真实路径直接降级
+        market_window.refresh_market_overview(force=True)
+        qapp.processEvents()
+
+        assert market_window.market_overview is not None    # 拿不到 ≠ 抛异常，而是"有结构没数据"
+        assert market.has_data(market_window.market_overview) is False
+        texts = [label.text() for label in market_window.market_labels]
+        assert texts[0] == "涨停 — · 跌停 — · 炸板 — ｜ 沪 — · 深 — · 北 —"
+        assert texts[1] == "上涨 — · 下跌 — · 平盘 —"
+        assert texts[2:] == ["宽基：—", "情绪：—", "板块：—"]
+        assert market_window.market_hint.isVisible() is True
+        assert "同花顺 Key" in market_window.market_hint.text()
+        assert "同花顺 Key" in market_window.market_page.toolTip()
+        # 底部那行小字照样有（时间是—）
+        assert "更新于 —" in market_window.market_as_of_label.text()
+
+        market_window._tick()                                # 界面其它部分照常刷新
+        qapp.processEvents()
+        assert market_window.pool_table.rowCount() == 1
+        assert "引擎" in market_window.status_label.text()
+    finally:
+        market.clear_cache()
+
+
+def test_market_breadth_off_sends_no_page_request(market_window, qapp) -> None:
+    """`market_breadth = false`：北交所与涨跌家数显示 `—`，且**一个分页请求都不发**。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    try:
+        market_window.cfg.market_breadth = False
+        client = _market_fake()
+        market_window.refresh_market_overview(force=True, client=client)
+        qapp.processEvents()
+
+        assert client.count("request") == 0
+        assert market_window.market_labels[0].text().endswith("北 —")
+        assert market_window.market_labels[1].text() == "上涨 — · 下跌 — · 平盘 —"
+        # 关掉时底部就不该再提"每 5 分钟更新"
+        assert "每 5 分钟" not in market_window.market_as_of_label.text()
+    finally:
+        market.clear_cache()
+
+
+def test_market_refresh_button_forces_refetch(market_window, qapp, monkeypatch) -> None:
+    """【立即刷新】忽略 TTL 缓存，一定重打接口（与 `force=True` 同义）。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    try:
+        client = _market_fake()
+        _inject_market_client(monkeypatch, client)
+        market_window.refresh_market_overview(force=True, client=client)
+        calls = len(client.calls)
+        assert calls > 0
+
+        market_window.btn_market_refresh.click()          # 真点按钮（信号接线也要测到）
+        _wait_market(market_window, qapp)                 # 界面路径在后台线程里取
+        assert len(client.calls) == calls * 2
+        assert market_window.market_overview["stale"] is False
+    finally:
+        market.clear_cache()
+
+
+def test_market_timer_is_one_minute_and_only_when_page_visible(
+    window, qapp, monkeypatch
+) -> None:
+    """每分钟刷一次，且**只在概览页可见时**才真刷（别的页面/最小化时一次都不打）。"""
+    from laoa_trader import market
+    from laoa_trader.ui import app as ui_app
+
+    market.clear_cache()
+    try:
+        client = _market_fake()
+        _inject_market_client(monkeypatch, client)
+        assert window._market_timer.interval() == ui_app.MARKET_REFRESH_MS == 60_000
+
+        # 当前在股票池页（概览是第一个页签）→ 定时器空转，一次接口都不打
+        window.tabs.setCurrentIndex(1)
+        window._market_tick()
+        _wait_market(window, qapp)
+        assert client.calls == []
+
+        # 切回概览页 → 立刻刷（用户不该看到一分钟前的旧数）
+        window.tabs.setCurrentIndex(0)
+        _wait_market(window, qapp)
+        calls = len(client.calls)
+        assert calls > 0
+
+        # 窗口隐藏（最小化到托盘）→ 定时器不刷
+        window.hide()
+        window._market_tick()
+        _wait_market(window, qapp)
+        assert len(client.calls) == calls
+        window.show()
+        qapp.processEvents()
+
+        # 回到概览页且概览缓存过期 → 定时器这次真刷；
+        # 但**全市场汇总走它自己的 5 分钟缓存**，不会跟着每分钟重翻页
+        index_calls, page_calls = client.count("index"), client.count("request")
+        market._CACHE["at"] = market._CACHE["at"] - 60      # 模拟 55 秒已过
+        window._market_tick()
+        _wait_market(window, qapp)
+        assert client.count("index") == index_calls + 1
+        assert client.count("request") == page_calls        # 一页都没重翻
+    finally:
+        market.clear_cache()
+
+
+def test_switching_to_market_tab_refreshes_when_cache_expired(
+    window, qapp, monkeypatch
+) -> None:
+    """切到概览页：缓存没过期只是重画（不重复打接口），过期了立刻取新的。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    try:
+        client = _market_fake()
+        _inject_market_client(monkeypatch, client)
+        window.tabs.setCurrentIndex(0)              # 概览页（第一个页签）
+        window.refresh_market_overview(force=True, client=client)
+        calls = len(client.calls)
+
+        window.tabs.setCurrentIndex(1)              # 走开到股票池
+        window.tabs.setCurrentIndex(0)              # 再切回来：TTL 内，不该重复取
+        _wait_market(window, qapp)
+        assert len(client.calls) == calls
+        assert window.market_overview["stale"] is True
+
+        index_calls = client.count("index")
+        market._CACHE["at"] = market._CACHE["at"] - 60      # 模拟 TTL 过期
+        window.tabs.setCurrentIndex(1)
+        window.tabs.setCurrentIndex(0)
+        _wait_market(window, qapp)
+        assert client.count("index") == index_calls + 1     # 指数这一路立刻取新的
+        assert window.market_overview["stale"] is False
+    finally:
+        market.clear_cache()
+
+
+def test_market_overview_off_shows_hint_and_makes_no_request(market_window, qapp) -> None:
+    """总开关关掉：页面显示 `—` 并说明原因，且**一个请求都不发**。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    try:
+        market_window.cfg.market_overview = False
+        client = _market_fake()
+        market_window.refresh_market_overview(force=True, client=client)
+        qapp.processEvents()
+        assert client.calls == []
+        assert market_window.market_labels[2].text() == "宽基：—"
+        assert market_window.market_labels[2].isVisible() is True
+        assert "market_overview" in market_window.market_hint.text()
+    finally:
+        market.clear_cache()

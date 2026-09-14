@@ -13,8 +13,8 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -308,21 +308,20 @@ def test_cli_run_at_override_is_temporary(capsys, cli_config) -> None:
     out = capsys.readouterr().out
     assert "（临时）每天主跑时间：16:30" in out
     assert "每天 16:30（主跑）" in out
-    # 「下次自动运行」是**今天还是明天**取决于跑这条用例的时刻（16:30 之前就是今天）。
-    # 原来这里写死"明天"→ CI 在 UTC 上午跑就红，是**与代码无关的假失败**
-    # （b7a5f31 那次 Windows 构建就是这么挂的）。这里按真实时刻算出允许值再断言：
-    # 既不放过错误答案，也不依赖机器在哪个时区、哪个点跑。
-    allowed = {_label_for(started), _label_for(finished)}
-    match = re.search(r"下次自动运行: (\S+) 16:30", out)
-    assert match is not None, out
-    assert match.group(1) in allowed, f"下次自动运行应是 {allowed}，实际 {out!r}"
+    # 「下次自动运行」是几点**取决于当前时刻**，而且有三种形态：
+    #   16:30 之前 → 今天 16:30；16:30~19:15 之间（今天还没跑成功）→ 今天 19:15 补跑；
+    #   19:15 之后 → 明天 16:30。
+    # 这条断言以前写死"明天"，CI 在 UTC 上午跑就红；后来改成只按"今天/明天"算，
+    # 又漏了**补跑分支**（16:30~19:15 之间会红）—— 两次都是与代码无关的假失败。
+    # 现在直接调 `scheduler.next_run_info`（CLI 用的就是它）算出期望值：
+    # 既不放过错误答案，也不依赖机器时区与跑用例的时刻。
+    stub = SimpleNamespace(auto_run=True, run_at="16:30", run_at_fallback="19:15")
+    allowed = {next_run_info(stub, None, now=moment)["label"] for moment in (started, finished)}
+    assert any(f"下次自动运行: {label}" in out for label in allowed), (
+        f"下次自动运行应是 {allowed} 之一，实际输出：{out!r}"
+    )
     # 临时覆盖**不改配置文件**
     assert cli_config.read_text(encoding="utf-8") == before
-
-
-def _label_for(now: datetime) -> str:
-    """`scheduler.next_run_info` 的口径：16:30 没过就是今天，过了就是明天。"""
-    return "明天" if (now.hour, now.minute) >= (16, 30) else "今天"
 
 
 def test_cli_no_auto_run(capsys, cli_config) -> None:

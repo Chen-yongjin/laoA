@@ -40,6 +40,39 @@ CHANNELS: tuple[str, ...] = ("windows", "feishu", "tray")
 #: 股票池的两种视图（界面右上角【切换为卡片/表格】）；写错的值当 `cards`
 POOL_VIEWS: tuple[str, ...] = ("cards", "table")
 
+#: 大盘概览默认盯的宽基指数（同花顺代码）。实测这五个都能取到；
+#: `899050.BJ`（北证50）**不存在**，混进去会让整批快照失败，别往这里加。
+DEFAULT_MARKET_INDICES: tuple[str, ...] = (
+    "000001.SH",    # 上证指数（它的成交额就是沪市成交额）
+    "399001.SZ",    # 深证成指（它的成交额就是深市成交额）
+    "399006.SZ",    # 创业板指
+    "000688.SH",    # 科创50
+    "000300.SH",    # 沪深300
+)
+
+#: 市场情绪指数默认值（这组是**给用户自己换的**：同一个端点，换个代码就换一套心情指标）。
+DEFAULT_MARKET_SENTIMENT: tuple[str, ...] = (
+    "883404.TI",    # 同花顺情绪指数
+    "883958.TI",    # 昨日连板
+    "883994.TI",    # 昨日打首板表现
+    "883418.TI",    # 微盘股
+)
+
+#: 板块指数默认值（同花顺一级行业指数，目录 tag=industry）：银行、证券
+DEFAULT_MARKET_SECTOR: tuple[str, ...] = ("881155.TI", "881157.TI")
+
+#: 概览默认 TTL（秒）：界面 5 秒刷一次状态栏，但概览到点才真的打接口
+DEFAULT_MARKET_OVERVIEW_TTL = 55
+
+#: 这些布尔键写错时**回到默认值**（而不是像其它布尔键那样按 False 处理）。
+#: 为什么单独一群：概览是"看一眼"的辅助信息，把 `market_overview` 手滑写成
+#: `"maybe"` 应该是"没生效、仍是默认开着"，而不是"功能被悄悄关掉了"。
+_STRICT_BOOL_FIELDS = frozenset({"market_overview", "market_breadth"})
+
+#: 严格布尔键认的真值 / 假值（与 `_as_bool` 的真值表保持一致）
+_TRUE_WORDS: tuple[str, ...] = ("1", "true", "yes", "on", "y", "是")
+_FALSE_WORDS: tuple[str, ...] = ("0", "false", "no", "off", "n", "否")
+
 
 def default_data_dir() -> Path:
     """默认数据目录：Windows `%LOCALAPPDATA%\\LaoATrader\\data`，其它平台同构。"""
@@ -133,6 +166,38 @@ def _as_bool(value: Any, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in ("1", "true", "yes", "on", "y", "是")
     return default
+
+
+def _as_bool_strict(value: Any, default: bool) -> bool:
+    """认得出来的真假值才转布尔，**认不出来就回到默认**（见 `_STRICT_BOOL_FIELDS`）。
+
+    与 `_as_bool` 的区别只有一处：手滑写成 `"maybe"` 这类字符串时，
+    `_as_bool` 会当 False（= 把功能关掉），这里回到默认值。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE_WORDS:
+            return True
+        if text in _FALSE_WORDS:
+            return False
+    return default
+
+
+def _ttl_seconds(value: Any) -> int:
+    """概览 TTL 收紧成**正整数秒**；非法值（0 / 负数 / 乱码）回到默认 55。
+
+    为什么不让 0 表示"不缓存"：这个键的值是"多久打一次接口"，写 0 会让界面
+    每 5 秒打一轮（配额和限流都吃不消）—— 这几乎不可能是本意，按默认值处理更安全。
+    """
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError):
+        return DEFAULT_MARKET_OVERVIEW_TTL
+    return seconds if seconds > 0 else DEFAULT_MARKET_OVERVIEW_TTL
 
 
 def _as_float(value: Any, default: float) -> float:
@@ -249,20 +314,45 @@ class Config:
     #: 股票池默认视图：`cards` = 卡片（默认，信息完整）/ `table` = 9 列表格（更密）
     pool_view: str = "cards"
 
+    # ── 大盘概览（启动默认页：涨跌停家数 / 成交额 / 涨跌家数 / 三组指数）──
+    #: 总开关：关掉则概览**一个请求都不发**（卡片显示 `—` 并说明原因）
+    market_overview: bool = True
+    #: 宽基指数（同花顺代码；也接受 `000001.SH=我的上证` 自定义显示名）
+    market_indices: list[str] = field(
+        default_factory=lambda: list(DEFAULT_MARKET_INDICES)
+    )
+    #: 市场情绪指数（与宽基**同一个端点**，单独一组就是为了让你自己换口径）
+    market_sentiment_indices: list[str] = field(
+        default_factory=lambda: list(DEFAULT_MARKET_SENTIMENT)
+    )
+    #: 板块指数（同花顺一级行业指数，例如 881155.TI 银行 / 881157.TI 证券）
+    market_sector_indices: list[str] = field(
+        default_factory=lambda: list(DEFAULT_MARKET_SECTOR)
+    )
+    #: 全市场快照汇总（北交所成交额 + 涨跌家数）：**默认开** —— 涨跌家数是概览页里
+    #: 最直观的一项，整页只显示沪深两市成交额会显得空。代价是 6 个分页请求，
+    #: 所以它有独立的 5 分钟缓存（见 `market._BREADTH_TTL`），不跟着页面每分钟的刷新跑。
+    market_breadth: bool = True
+    #: 概览的 TTL 缓存（秒）：到点才真的打接口，不跟着 5 秒的界面定时器跑
+    market_overview_ttl: int = DEFAULT_MARKET_OVERVIEW_TTL
+
     #: 记录配置实际来自哪个文件（状态栏展示用）
     source_path: Path | None = None
     #: 配置文件解析/读取失败的原因（空 = 一切正常）
     config_error: str = ""
 
     def __post_init__(self) -> None:
-        """把界面偏好收紧到合法取值。
+        """把界面偏好与概览参数收紧到合法取值。
 
         为什么要在这里做：`pool_view` 是给界面看的，手改 config.toml 写错一个字母
         （"card" / "Cards" / 中文）不该表现成"股票池页打不开/空白"——
         统一按 `cards` 处理，用户看到的仍然是一个能用的界面。
+        概览的 TTL 同理：写 0/负数会让"到点才打接口"这条规矩失效，
+        退回默认 55 秒，界面不会被自己的定时器打死。
         """
         value = str(self.pool_view or "").strip().lower()
         self.pool_view = value if value in POOL_VIEWS else "cards"
+        self.market_overview_ttl = _ttl_seconds(self.market_overview_ttl)
 
     # -- 派生属性 --
 
@@ -400,7 +490,12 @@ def _coerce(section: dict[str, Any], name: str) -> Any:
     if isinstance(default, list):
         return _as_list(value, default)
     if isinstance(default, bool):
-        return _as_bool(value, default)
+        # 概览那两个开关"写错 = 回到默认"，其余布尔键沿用原语义（写错 = 假）
+        return (
+            _as_bool_strict(value, default)
+            if name in _STRICT_BOOL_FIELDS
+            else _as_bool(value, default)
+        )
     if isinstance(default, float):
         return _as_float(value, default)
     if isinstance(default, int):
@@ -492,6 +587,9 @@ def _apply_env(cfg: Config) -> Config:
         ("LAOA_ENABLED_GROUPS", "enabled_groups"),
         ("LAOA_ENABLED_STRATEGIES", "enabled_strategies"),
         ("NOTIFY_CHANNELS", "notify_channels"),
+        ("MARKET_INDICES", "market_indices"),
+        ("MARKET_SENTIMENT_INDICES", "market_sentiment_indices"),
+        ("MARKET_SECTOR_INDICES", "market_sector_indices"),
     )
     for env_name, attr in env_list:
         raw = _env_str(env_name)
@@ -502,6 +600,18 @@ def _apply_env(cfg: Config) -> Config:
     duration = _env_str("NOTIFY_TRAY_DURATION_MS")
     if duration is not None:
         cfg.notify_tray_duration_ms = _as_int(duration, cfg.notify_tray_duration_ms)
+
+    # 概览的 TTL 与两个开关：TTL 走"正整数秒"，开关走严格布尔（环境变量写错也回默认）
+    ttl = _env_str("MARKET_OVERVIEW_TTL")
+    if ttl is not None:
+        cfg.market_overview_ttl = _ttl_seconds(ttl)
+    for env_name, attr in (
+        ("MARKET_OVERVIEW", "market_overview"),
+        ("MARKET_BREADTH", "market_breadth"),
+    ):
+        raw = _env_str(env_name)
+        if raw is not None:
+            setattr(cfg, attr, _as_bool_strict(raw, getattr(cfg, attr)))
 
     for env_name, attr in (
         ("FEISHU_ON", "feishu_on"),

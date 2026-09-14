@@ -5,6 +5,7 @@
     python -m laoa_trader --cli --download     # 下载 10 年历史数据（含进度）
     python -m laoa_trader --cli --once         # 跑一次：数据增量 + 选股 + 建池
     python -m laoa_trader --cli --pool         # 只看当前股票池
+    python -m laoa_trader --cli --market       # 只看大盘概览（与页面同一份：家数/成交额/涨跌家数/三组指数）
     python -m laoa_trader --cli --serve        # 常驻：定时日更 + 盘中提醒
 
 界面不可用（例如没装 PySide6）时**自动降级为 CLI**，不会直接崩。
@@ -420,6 +421,34 @@ def _note(text: str) -> None:
     print(f"  ↻ {text}", flush=True)
 
 
+def _market_command(cfg) -> int:
+    """`--market`：打印大盘概览页那几行后退出（与界面共用 `market.lines` 的同一份口径）。
+
+    为什么要这个出口：界面上"看一眼大盘"得开窗口，而脚本、远程维护、以及
+    "为什么卡片上全是 —"的排障，都需要一个纯文本的说法；退出码用它来决定
+    "有没有取到东西"，所以取不到时必须是**非 0**，不能打印几行 `—` 就算成功。
+    """
+    from laoa_trader import market
+
+    # 命令行总是取最新的：不吃界面/上一次运行留下的 TTL 缓存
+    overview = market.fetch_overview(cfg, force=True)
+    # 空串 = "这一组在配置里是空的"，界面会把那行隐藏，这里就别打空行
+    for line in market.lines(overview):
+        if line:
+            print(line)
+    if overview.get("as_of"):
+        print(f"（取数时间 {overview['as_of']}"
+              + ("；来自缓存" if overview.get("stale") else "") + "）")
+    errors = [str(e) for e in (overview.get("errors") or [])]
+    for message in errors:
+        print(f"⚠️ {message}")
+    if not market.has_data(overview):
+        print("❌ 没取到任何数据：先按上面的原因处理"
+              "（未配置同花顺 Key / 网络不通 / 被限流 / 代码写错）。")
+        return 1
+    return 0
+
+
 def cli(argv: list[str] | None = None) -> int:
     """命令行模式。"""
     parser = argparse.ArgumentParser(
@@ -430,6 +459,11 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--download", action="store_true", help="下载/更新历史数据")
     parser.add_argument("--once", action="store_true", help="跑一次：数据增量 + 选股 + 建池")
     parser.add_argument("--pool", action="store_true", help="显示当前股票池")
+    parser.add_argument(
+        "--market", action="store_true",
+        help="只看大盘概览：打印概览页那几行（涨跌停家数 + 沪深北成交额、涨跌家数、宽基/情绪/板块三组指数）后退出；"
+             "取不到数据时退出码非 0 并说明原因",
+    )
     parser.add_argument(
         "--groups",
         help="临时只跑这些策略组（逗号分隔，覆盖 config.toml 的 enabled_groups）："
@@ -503,6 +537,9 @@ def cli(argv: list[str] | None = None) -> int:
     if args.doctor:
         _doctor(cfg, startup_problem=problem)
         return 0
+
+    if args.market:
+        return _market_command(cfg)
 
     if args.pool:
         try:
@@ -608,6 +645,7 @@ def main(argv: list[str] | None = None) -> int:
                   "--groups", "--strategies", "--list-groups", "--watchlist",
                   "--note", "--config", "--auto-download", "--force-download",
                   "--run-at", "--run-at-fallback", "--no-auto-run",
+                  "--market",
                   "--help", "-h")
     )
     if wants_cli:

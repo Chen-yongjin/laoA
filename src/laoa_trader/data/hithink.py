@@ -760,6 +760,100 @@ class HithinkClient:
         )
         return list(data.get("item") or [])
 
+    def special_pool_total(self, path: str, day: str | None = None) -> int:
+        """涨跌停/炸板池的**家数**（只取总数，不拉明细）。
+
+        为什么单独写一个：`size=1` 时信封里的 `pagination.total` 就是全量家数，
+        而 `limit_up_pool()` 会为了明细自动翻页到几十上百条 —— 大盘概览只要一个数字，
+        把整页明细拉回来纯粹浪费配额（这几路是每 55 秒就可能跑一次的）。
+
+        Args:
+            path: 池子端点，见 `laoa_trader.market.LIMIT_UP_PATH` 等常量。
+            day: `YYYY-MM-DD` 指定交易日；None = 服务器今日（盘中就是实时值）。
+
+        Returns:
+            家数；服务端没给 `pagination` 时退回"本页条数"（契约变化也不至于抛异常）。
+        """
+        data = self.request(
+            path, {"size": 1, "date_ms": date_to_ms(day) if day else None}
+        )
+        pagination = data.get("pagination") or {}
+        try:
+            return int(pagination.get("total"))
+        except (TypeError, ValueError):
+            return len(data.get("item") or [])
+
+    def index_snapshot(self, thscodes: list[str]) -> dict:
+        """指数/板块的实时点位与涨跌幅（一次批量取回）。
+
+        ⚠️ 契约要点（实测踩过）：`thscodes` 里**只要有一个不存在的代码，整批都返回
+        1002 Unknown thscode** —— 连上证指数都一起拿不到。而代码是用户写在配置里的，
+        写错一个不该让整张大盘概览变空，所以这里批量失败后**逐只重试**：
+        保留能取到的，取不到的放进 `failed`。
+
+        Args:
+            thscodes: 同花顺代码（`000001.SH` / `399006.SZ` / `883404.TI`），
+                也接受项目内部写法（`sh.000001` / 裸 6 位）。
+
+        Returns:
+            `{"item": [快照行...], "failed": [取不到的代码...]}`；
+            `item` 的行就是服务端原样返回的字段（`thscode` / `last_price` /
+            `price_change_ratio_pct` / `turnover` ...）。
+
+        Raises:
+            HithinkError: 批量失败**且**逐只重试也一只都没取到（Key 无效 / 限流 /
+                服务端故障）—— 此时抛出原始的批量错误（比 N 个单只错误更好定位）。
+        """
+        wanted: list[str] = []
+        failed: list[str] = []
+        for raw in thscodes or []:
+            text = str(raw).strip()
+            if not text:
+                continue
+            try:
+                code = to_thscode(text)
+            except ValueError:
+                # 连格式都不对（例如填了个中文名）：不发请求，直接记成"取不到"
+                failed.append(text)
+                continue
+            if code not in wanted:      # 同一个代码配两遍只请求一次（顺序按配置来）
+                wanted.append(code)
+        if not wanted:
+            return {"item": [], "failed": failed}
+
+        try:
+            data = self.request(
+                "/a-share-index/prices/snapshot", {"thscodes": ",".join(wanted)}
+            )
+            return {"item": list(data.get("item") or []), "failed": failed}
+        except (HithinkAuthError, HithinkNotReadyError):
+            # 与"哪个代码"无关（Key 无效 / 数据未就绪）：逐只重试也是白打，直接抛
+            raise
+        except Exception as exc:
+            batch_error = exc
+            logger.warning(
+                f"指数批量快照失败（{exc}），改为逐只重试：{'、'.join(wanted)}"
+            )
+
+        items: list[dict] = []
+        for code in wanted:
+            try:
+                data = self.request(
+                    "/a-share-index/prices/snapshot", {"thscodes": code}
+                )
+            except Exception as exc:  # noqa: BLE001 - 单只失败必须让其余照常
+                logger.info(f"指数 {code} 取数失败（已跳过）：{exc}")
+                failed.append(code)
+                continue
+            batch = list(data.get("item") or [])
+            if batch:
+                items.extend(batch)
+            else:
+                failed.append(code)     # 请求成功但没这一只：同样按"取不到"处理
+        if not items:
+            raise batch_error
+        return {"item": items, "failed": failed}
+
     def limit_up_ladder(self) -> list[dict]:
         """近 30 个交易日的连板梯队矩阵。"""
         data = self.request("/a-share/special-data/limit-up-ladder")

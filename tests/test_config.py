@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from laoa_trader import config as config_mod
-from laoa_trader.config import load_config
+from laoa_trader.config import Config, load_config
 
 from tests._toml import p
 
@@ -291,3 +291,136 @@ def test_pool_view_default_and_invalid_falls_back_to_cards(tmp_path: Path) -> No
         path = _write(tmp_path, f'pool_view = "{bad}"\n')
         assert load_config(path, use_env=False).pool_view == "cards", bad
 
+
+
+# ── 大盘概览（market_overview / market_indices / market_sentiment_indices /
+#               market_breadth / market_overview_ttl）──
+
+
+def test_market_overview_defaults() -> None:
+    """默认三组：五个宽基 / 四个情绪 / 两个板块；宽度汇总关、TTL 55。"""
+    cfg = load_config(use_env=False)
+    assert cfg.market_overview is True
+    assert cfg.market_indices == [
+        "000001.SH", "399001.SZ", "399006.SZ", "000688.SH", "000300.SH",
+    ]
+    # 899050.BJ（北证50）**不存在**：混进 thscodes 会让整批快照失败，默认里不能有它
+    assert "899050.BJ" not in cfg.market_indices
+    assert cfg.market_sentiment_indices == [
+        "883404.TI", "883958.TI", "883994.TI", "883418.TI",
+    ]
+    # 默认情绪组必须是这一组（顺序也是）
+    assert "932000.TI" not in cfg.market_sentiment_indices
+    assert cfg.market_sector_indices == ["881155.TI", "881157.TI"]   # 银行 / 证券
+    # 全市场汇总（涨跌家数 + 北交所成交额）**默认开**：整页只显示沪深两市会显得空，
+    # 代价是 6 个分页请求 —— 所以它有独立的 5 分钟缓存，不跟着每分钟的页面刷新跑
+    assert cfg.market_breadth is True
+    assert cfg.market_overview_ttl == 55
+
+
+def test_market_overview_from_toml_with_comma_string(tmp_path: Path) -> None:
+    """逗号分隔的字符串手写最省事（TOML 数组写起来啰嗦），两种写法都要认。"""
+    path = _write(
+        tmp_path,
+        'market_indices = "000001.SH, 399006.SZ"\n'
+        'market_sentiment_indices = "883958.TI=昨日连板，883409.TI"\n'
+        'market_sector_indices = ["881155.TI", "881157.TI"]\n'
+        "market_breadth = true\n"
+        "market_overview_ttl = 90\n",
+    )
+    cfg = load_config(path, use_env=False)
+    assert cfg.market_indices == ["000001.SH", "399006.SZ"]
+    # 中文逗号也认；`代码=名称` 的自定义名原样保留（取数时解析）
+    assert cfg.market_sentiment_indices == ["883958.TI=昨日连板", "883409.TI"]
+    assert cfg.market_sector_indices == ["881155.TI", "881157.TI"]
+    assert cfg.market_breadth is True
+    assert cfg.market_overview_ttl == 90
+
+    # 组配成空列表 = 这一组整行不显示（不是"回退默认"）
+    path = _write(tmp_path, "market_sector_indices = []\n")
+    assert load_config(path, use_env=False).market_sector_indices == []
+
+    path = _write(tmp_path, 'market_indices = ["000300.SH"]\nmarket_overview = false\n')
+    cfg2 = load_config(path, use_env=False)
+    assert cfg2.market_indices == ["000300.SH"]
+    assert cfg2.market_overview is False
+
+
+def test_market_overview_invalid_values_fall_back(tmp_path: Path) -> None:
+    """写错就回默认：**不要**因为配置写坏把概览关掉或变成每 5 秒打一轮接口。"""
+    path = _write(
+        tmp_path,
+        'market_overview = "maybe"\n'          # 认不出来的真假值 → 回默认（开着）
+        "market_breadth = 3\n"                 # 数字 → 按真值处理（3 = 开）
+        'market_overview_ttl = "abc"\n'        # 乱码 → 回默认 55
+        "market_indices = 123\n",              # 不是列表也不是字符串 → 回默认
+    )
+    cfg = load_config(path, use_env=False)
+    assert cfg.market_overview is True
+    assert cfg.market_breadth is True
+    assert cfg.market_overview_ttl == 55
+    assert cfg.market_indices == [
+        "000001.SH", "399001.SZ", "399006.SZ", "000688.SH", "000300.SH",
+    ]
+
+    # TTL 写成 0/负数同样回默认：0 会让界面每 5 秒打一轮接口（配额与限流都吃不消）
+    for bad in ("0", "-30"):
+        path = _write(tmp_path, f"market_overview_ttl = {bad}\n")
+        assert load_config(path, use_env=False).market_overview_ttl == 55, bad
+    assert Config(market_overview_ttl=0).market_overview_ttl == 55
+
+
+def test_market_overview_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """环境变量覆盖（临时换一组指数、或临时关掉概览，不必改文件）。"""
+    monkeypatch.setenv("MARKET_OVERVIEW", "0")
+    monkeypatch.setenv("MARKET_BREADTH", "yes")
+    monkeypatch.setenv("MARKET_INDICES", "000300.SH,399006.SZ")
+    monkeypatch.setenv("MARKET_SENTIMENT_INDICES", "883958.TI")
+    monkeypatch.setenv("MARKET_SECTOR_INDICES", "881155.TI")
+    monkeypatch.setenv("MARKET_OVERVIEW_TTL", "120")
+    cfg = load_config(tmp_path / "none.toml")
+    assert cfg.market_overview is False
+    assert cfg.market_breadth is True
+    assert cfg.market_indices == ["000300.SH", "399006.SZ"]
+    assert cfg.market_sentiment_indices == ["883958.TI"]
+    assert cfg.market_sector_indices == ["881155.TI"]
+    assert cfg.market_overview_ttl == 120
+
+    # 环境变量写错也一样回默认（不会把概览悄悄关掉）
+    monkeypatch.setenv("MARKET_OVERVIEW", "maybe")
+    monkeypatch.setenv("MARKET_OVERVIEW_TTL", "-1")
+    cfg2 = load_config(tmp_path / "none.toml")
+    assert cfg2.market_overview is True
+    assert cfg2.market_overview_ttl == 55
+
+
+def test_example_config_documents_market_overview() -> None:
+    """config.example.toml 里要能看懂这张卡是什么、怎么换情绪指数。"""
+    import tomllib
+    from pathlib import Path as P
+
+    example = P(__file__).resolve().parents[1] / "config.example.toml"
+    data = tomllib.loads(example.read_text(encoding="utf-8"))
+    assert data["market_overview"] is True
+    assert data["market_indices"] == [
+        "000001.SH", "399001.SZ", "399006.SZ", "000688.SH", "000300.SH",
+    ]
+    assert data["market_sentiment_indices"] == [
+        "883404.TI", "883958.TI", "883994.TI", "883418.TI",
+    ]
+    assert data["market_sector_indices"] == ["881155.TI", "881157.TI"]
+    assert data["market_breadth"] is True        # 默认开，且要说明"每 5 分钟才更新"
+    assert data["market_overview_ttl"] == 55
+
+    text = example.read_text(encoding="utf-8")
+    assert "给你自己换" in text                   # 情绪指数是留给用户换的
+    assert "883958.TI" in text                   # 备选口径列出来
+    assert "899050.BJ" in text and "不存在" in text   # 别写这个不存在的代码
+    assert "6 页" in text                         # 全市场汇总要翻几页（为什么它慢一档）
+    assert "每 5 分钟" in text                    # 页面上也会这么写：它明显比指数慢一档
+    assert "每分钟刷一次" in text                  # 独立的 60 秒定时器（不是 5 秒那个）
+    # 情绪组默认值要在示例里能看到（含微盘股），并且**不写任何"某代码取不到"的备注**：
+    # 用户明确说过不需要这类备注，代码里直接给可用的代码。
+    assert "883404.TI" in text and "883958.TI" in text
+    assert "883994.TI" in text and "883418.TI" in text and "微盘股" in text
+    assert "932000" not in text and "中证2000" not in text
