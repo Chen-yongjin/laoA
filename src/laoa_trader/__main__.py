@@ -1,4 +1,4 @@
-"""老A法师 · 交易终端（Windows 单机版）。
+"""老A选股助手（Windows 单机版）。
 
 入口：`python -m laoa_trader`（无参数启动 GUI），或 `--cli` 走命令行：
 
@@ -53,7 +53,7 @@ def _doctor(cfg, startup_problem: str = "") -> None:
 
     import laoa_trader
 
-    print("老A法师 · 交易终端 —— 自检")
+    print("老A选股助手 —— 自检")
     print("=" * 56)
     print(f"程序版本    : {laoa_trader.__version__}")
     print(f"Python      : {sys.version.split()[0]}（{platform.system()} {platform.release()}）")
@@ -208,7 +208,7 @@ def _preflight_gate(cfg, auto_download: bool) -> int | None:
         print("数据没下好之前**不会跑策略**（否则会选出错的票）。请先下载：")
         print("    python -m laoa_trader --cli --download        # 下载历史数据")
         print("或在 config.toml 里填好 hithink_api_key 后加 --auto-download 自动下载；")
-        print("界面版点【下载/更新历史数据】按钮同样可以（支持断点续传）。")
+        print("界面版点【下载数据】按钮同样可以（支持断点续传）。")
         return 1
     print("需要下载 10 年全量历史（约 10~20 分钟，有进度显示，可中断后重跑续传）…")
     ok, after, results = preflight.ensure_ready(
@@ -452,7 +452,7 @@ def _market_command(cfg) -> int:
 def cli(argv: list[str] | None = None) -> int:
     """命令行模式。"""
     parser = argparse.ArgumentParser(
-        prog="laoa_trader", description="老A法师 · 交易终端（命令行）"
+        prog="laoa_trader", description="老A选股助手（命令行）"
     )
     parser.add_argument("--cli", action="store_true", help="强制命令行模式")
     parser.add_argument("--config", help="config.toml 路径")
@@ -588,7 +588,7 @@ def cli(argv: list[str] | None = None) -> int:
 
         from laoa_trader.strategy import groups as groups_mod
 
-        # 数据闸门（与界面【立即选股并建池】、调度线程同一口径）：
+        # 数据闸门（与界面【选股建池】、调度线程同一口径）：
         # 没数据就跑策略 = 选出错的票，所以这里明确拒绝并返回非零退出码
         gate = data_gate(cfg, DataEngine(cfg.db_path))
         if not gate["ok"]:

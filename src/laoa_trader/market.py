@@ -2,17 +2,24 @@
 
 这一层**刻意不碰界面**：`fetch_overview()` 只吃一份 `Config` 和一个"能取数的对象"
 （真实 `HithinkClient` 或测试用的假客户端），把结果整理成一个普通 dict，
-再由 `lines()` 统一排版成"一行一组、组名在前"的文本。「大盘概览」页与
-`--cli --market` 用的都是这一份实现 —— 两处口径必须一致，
+再由 `kpi_values()` / `entry_fields()` / `lines()` 统一排版成文本：
+「大盘概览」页与 `--cli --market` 用的都是这一份实现 —— 两处口径必须一致，
 否则用户会看到"界面和命令行对不上"。
 
-「大盘概览」页长这样（组在配置里为空时，那一行整行不显示）：
+「大盘概览」页长这样（组在配置里为空时，**整组连标题一起隐藏**）：
 
-    涨停 55 · 跌停 16 · 炸板 30 ｜ 沪 7792亿 · 深 8499亿 · 北 140亿
-    上涨 3126 · 下跌 2224 · 平盘 221
-    宽基：上证 3885.33 -0.07% ｜ 深成 13384.57 -0.64% ｜ …
-    情绪：同花顺情绪 885.53 -0.18% ｜ 昨日连板 6928.17 +3.53% ｜ …
-    板块：银行 1408.77 +0.88% ｜ 证券 1428.64 -0.27%
+    大盘概览
+    ┌ 涨停 55 ┬ 跌停 16 ┬ 炸板 30 ┬ 成交额 沪 7792亿 · 深 8499亿 · 北 140亿 ┐
+    └ 上涨 3126 ┴ 下跌 2224 ┴ 平盘 221 ┴────────────────────────────────┘
+    宽基   上证 3885.33  -0.07%     深成 13384.57  -0.64%    …
+    情绪   同花顺情绪 885.53  -0.18%     昨日连板 6928.17  +3.53%    …
+    板块   银行 1408.77  +0.88%      证券 1428.64  -0.27%
+    数据来源：同花顺金融数据服务 · 更新于 17:50（每分钟自动刷新）      [立即刷新]
+
+`--cli --market` 打印的还是"一行一组"的老样子（`lines()` 把同一批值按老口径拼起来），
+所以这个模块里**取数与格式化只有一份**：界面拿"一个指标一个值"（`kpi_values()`）、
+"一个指数三个字段"（`entry_fields()`），命令行拿拼好的整行。两处口径必须一致，
+否则用户会看到"界面和命令行对不上"。
 
 三条硬性规矩（都是踩过坑才写下来的）
 ------------------------------------
@@ -57,17 +64,18 @@ LIMIT_BREAK_PATH = "/a-share/special-data/limit-break-pool"
 INDEX_SNAPSHOT_PATH = "/a-share-index/prices/snapshot"
 MARKET_SNAPSHOT_PATH = "/a-share/prices/snapshot"
 
-# ── 分组（卡片一行一组，组名在前）──
-#: 每组配一个配置键、一个行内组名、一个结果字典里的键。
-#: 顺序 = 卡片显示顺序；**某组配置为空时整行不显示**（不留一个空的"情绪："）。
+# ── 分组（界面上每组一个小标题 + 条目网格）──
+#: 每组配一个配置键、一个展示用组名、一个结果字典里的键。
+#: 顺序 = 界面显示顺序；**某组配置为空时整组（连标题）隐藏**（不留一个空的"情绪："）。
 GROUPS: tuple[tuple[str, str, str], ...] = (
     ("market_indices", "宽基", "indices"),
     ("market_sentiment_indices", "情绪", "sentiment"),
     ("market_sector_indices", "板块", "sector"),
 )
 
-#: 概览页的总行数：前两行固定（摘要 / 涨跌家数），之后每组一行。
-#: 界面按它建 QLabel，测试按它断言（下标即行含义，某组为空时那一行隐藏）。
+#: 概览的总行数：前两行固定（摘要 / 涨跌家数），之后每组一行。
+#: `lines()` 按它出文本、`--cli --market` 与测试按它断言；
+#: 界面**不再**按它建 5 个 QLabel —— 现在是"KPI 卡片 + 每组一个条目网格"。
 LINE_COUNT = 2 + len(GROUPS)
 
 #: 底部那行小字的固定前缀（数据来源与刷新节奏，界面与命令行口径一致）
@@ -77,10 +85,10 @@ FOOTER_PREFIX = "数据来源：同花顺金融数据服务"
 SH_TURNOVER_CODE = "000001.SH"
 SZ_TURNOVER_CODE = "399001.SZ"
 
-# ── 排版分隔符（照需求给的样例）──
+# ── 排版分隔符（只给 `lines()` 拼命令行文本用；界面是"一个数一个控件"，不拼长文本）──
 #: 摘要行里两段之间（涨跌停家数 ｜ 沪深北成交额）
 _BLOCK_SEP = " ｜ "
-#: 同一组里各条目之间（样例用的全角竖线，比逗号更不容易和数据混在一起）
+#: 同一组里各条目之间（全角竖线，比逗号更不容易和数据混在一起）
 _ITEM_SEP = " ｜ "
 
 # ── 取数客户端的节奏 ──
@@ -98,9 +106,14 @@ BREADTH_PAGE_PAUSE = 0.3
 #: 全市场汇总自己的 TTL（秒）：它是 6 个请求，不该跟着 55 秒的概览 TTL 跑
 _BREADTH_TTL = 300.0
 
-# ── A 股习惯配色：涨=红、跌=绿、平=默认色（**不要**欧美的绿涨红跌）──
+# ── A 股习惯配色：涨=红、跌=绿、平/缺=默认色（**不要**欧美的绿涨红跌）──
+#: 全仓**只有这一处**定义涨跌颜色：界面与测试都从这里取（`app.py` 里不许再写死色值，
+#: 否则哪天调色调一半会出现"界面显示的和测试断言的"是两种红）。
 COLOR_UP = "#d32f2f"
 COLOR_DOWN = "#2e7d32"
+#: 平盘/缺数据 = 不上色（用界面默认前景色）—— 空串比 None 好：调用方直接 f"color:{c}"
+#: 前判一下真值就行，不用再区分两种"没有颜色"
+COLOR_FLAT = ""
 
 #: 缺数据时的占位符（界面与命令行统一用它，免得两处一个用 "-" 一个用 "N/A"）
 DASH = "—"
@@ -579,47 +592,81 @@ def _pct_text(value: Any) -> str:
     return DASH if number is None else f"{number:+.2f}%"
 
 
-def _entry_text(item: dict) -> str:
-    """一个指数/情绪条目 → `上证 3885.33 -0.07%`（缺哪段就把哪段显示成 `—`）。"""
+def entry_fields(item: dict) -> tuple[str, str, str]:
+    """一个指数条目 → `(名称, 点位文本, 涨跌幅文本)`（缺哪段哪段是 `—`）。
+
+    为什么拆成三个字段而不是直接给一行文本：界面上每一个指数是一个**独立控件**，
+    里面"名称（灰）/ 点位（右对齐）/ 涨跌幅（右对齐）"三列各是一个 QLabel ——
+    点位与涨跌幅要**各自**按自己的涨跌上色（见 `value_color()`），
+    一行文本做不到这件事（一个 QLabel 只有一种颜色）。
+    """
     name = str(item.get("name") or item.get("thscode") or DASH)
     if item.get("last") is None:
+        # 没点位就不报涨跌幅：只报一个"涨跌幅"而点位是 `—`，会让人以为拿到的是一半数据
+        return name, DASH, DASH
+    return name, _price_text(item.get("last")), _pct_text(item.get("change_pct"))
+
+
+def _entry_text(item: dict) -> str:
+    """一个指数/情绪条目 → `上证 3885.33 -0.07%`（缺哪段就把哪段显示成 `—`）。
+
+    实现上就是 `entry_fields()` 三段的拼接 —— 命令行（`lines()`）与界面
+    （"名称｜点位｜涨跌幅"三个 QLabel）共用同一份字段口径。
+    """
+    name, value, pct = entry_fields(item)
+    if value == DASH:
         return f"{name} {DASH}"
-    if item.get("change_pct") is None:
-        return f"{name} {_price_text(item.get('last'))} {DASH}"
-    return f"{name} {_price_text(item.get('last'))} {_pct_text(item.get('change_pct'))}"
+    return f"{name} {value} {pct}"
+
+
+def kpi_values(overview: dict | None) -> dict[str, str]:
+    """KPI 区的**每一个**数值（界面一张卡一个数；`lines()` 再把它们拼成老口径的一行）。
+
+    为什么要有这一层：界面上"涨停 55"是**一张卡片**里的两个控件（小号灰标签 + 大一号加粗数值），
+    不是一长串文本里的一段；长文本靠自动换行折出来的行对不齐，一眼就不专业。
+    键的顺序就是界面上的显示顺序（涨停/跌停/炸板 一组，成交额一张，涨跌家数 一组）。
+    """
+    data = overview or {}
+    limits = data.get("limits") or {}
+    turnover = data.get("turnover") or {}
+    breadth = data.get("breadth") or {}
+    return {
+        "涨停": _count_text(limits.get("up")),
+        "跌停": _count_text(limits.get("down")),
+        "炸板": _count_text(limits.get("break")),
+        "成交额": (
+            f"沪 {_amount_text(turnover.get('sh'))} · "
+            f"深 {_amount_text(turnover.get('sz'))} · "
+            f"北 {_amount_text(turnover.get('bj'))}"
+        ),
+        "上涨": _count_text(breadth.get("up")),
+        "下跌": _count_text(breadth.get("down")),
+        "平盘": _count_text(breadth.get("flat")),
+    }
 
 
 def lines(overview: dict | None) -> list[str]:
-    """概览页文本（界面页面与 `--cli --market` 用同一份）。
+    """概览页文本（`--cli --market` 用；界面用的是 `kpi_values()` / `entry_fields()`）。
 
     下标固定对应：
         [0] 摘要：`涨停 N · 跌停 N · 炸板 N ｜ 沪 N亿 · 深 N亿 · 北 N亿`
         [1] 涨跌家数：`上涨 N · 下跌 N · 平盘 N`
         [2] 宽基  [3] 情绪  [4] 板块   ← 顺序就是 `GROUPS` 的顺序
 
-    **配置为空的那一组返回空串**（界面据此把那行整行隐藏，命令行跳过它）——
+    **配置为空的那一组返回空串**（命令行跳过它；界面上是整组连标题一起隐藏）——
     不留一个空的"情绪："吊在那里。拼不出来的段位一律 `—`：宁可让用户看到"这里没数"，
     也不显示 0 或空白（0 家涨停和"没取到"是完全不同的两件事）。
     `market_breadth` 关掉时北交所与涨跌家数是 `—`（这两项只在打开时才取）。
     """
     data = overview or {}
-    limits = data.get("limits") or {}
-    turnover = data.get("turnover") or {}
-    breadth = data.get("breadth") or {}
-
+    values = kpi_values(overview)
     summary = (
-        f"涨停 {_count_text(limits.get('up'))} · "
-        f"跌停 {_count_text(limits.get('down'))} · "
-        f"炸板 {_count_text(limits.get('break'))}"
+        f"涨停 {values['涨停']} · 跌停 {values['跌停']} · 炸板 {values['炸板']}"
         + _BLOCK_SEP
-        + f"沪 {_amount_text(turnover.get('sh'))} · "
-        f"深 {_amount_text(turnover.get('sz'))} · "
-        f"北 {_amount_text(turnover.get('bj'))}"
+        + values["成交额"]
     )
     counts = (
-        f"上涨 {_count_text(breadth.get('up'))} · "
-        f"下跌 {_count_text(breadth.get('down'))} · "
-        f"平盘 {_count_text(breadth.get('flat'))}"
+        f"上涨 {values['上涨']} · 下跌 {values['下跌']} · 平盘 {values['平盘']}"
     )
 
     configured = set(data.get("configured_groups") or [])
@@ -650,31 +697,20 @@ def footer_text(overview: dict | None) -> str:
     return f"{FOOTER_PREFIX} · 更新于 {as_of}（{tail}）"
 
 
-def _line_color(items: list[dict]) -> str:
-    """一行里所有涨跌幅**同向**时才上色（涨红跌绿），否则用默认色。
+def value_color(change_pct: Any) -> str:
+    """**单个**涨跌幅 → 颜色（`""` = 用界面默认色）。
 
-    为什么按行而不是按数值上色：用户明确要求用 `QLabel.setStyleSheet("color:...")`，
-    而一行是一个 QLabel、里面可能同时有涨有跌（真实行情里很常见）——
-    那种情况下强行取一个颜色反而误导人，保持默认色最诚实。
+    为什么按值而不是按组：用户明确要求"既然涨跌分颜色了，那情绪/板块的数字和涨跌幅
+    也分一下颜色"。情绪与板块那几组**经常同时有涨有跌**，而一个"整组一行"的控件
+    只有一种颜色 —— 按组取色必然出现"要么全都染成红、要么全都不染"，
+    两种情况都在骗人。界面改成"每个指数一个条目控件"之后，点位与涨跌幅各自
+    按自己的涨跌上色：涨=红、跌=绿、平盘与没取到=默认色。
     """
-    values = [item.get("change_pct") for item in items]
-    values = [v for v in values if v is not None]
-    if not values:
-        return ""
-    if all(v > 0 for v in values):
-        return COLOR_UP
-    if all(v < 0 for v in values):
-        return COLOR_DOWN
-    return ""
-
-
-def line_colors(overview: dict | None) -> list[str]:
-    """与 `lines()` 一一对应的每行颜色（空串 = 用默认色）。
-
-    前两行（摘要 / 涨跌家数）没有涨跌幅，恒为默认色；之后每组按组内涨跌幅是否同向决定。
-    """
-    data = overview or {}
-    return ["", ""] + [_line_color(data.get(key) or []) for _, _, key in GROUPS]
+    number = _to_float(change_pct)
+    if number is None or number == 0:
+        # 平盘（0.00%）与"没取到"（None）都不上色：A 股看盘里 0 既不算涨也不算跌
+        return COLOR_FLAT
+    return COLOR_UP if number > 0 else COLOR_DOWN
 
 
 def has_data(overview: dict | None) -> bool:

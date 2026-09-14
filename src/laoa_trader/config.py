@@ -32,6 +32,9 @@ from pathlib import Path
 from typing import Any
 
 #: 默认数据目录（Windows 用 LOCALAPPDATA，其它平台退回 ~/.local/share）
+#: 数据/配置目录名（`%LOCALAPPDATA%\LaoATrader`）。**故意保持旧名**：它是老用户
+#: 已经下好的历史数据库所在目录，改成新名字会让程序去空目录里找、逼用户重下 180MB。
+#: 产品显示名是「老A选股助手」（见 `ui/app.py` 的 `APP_NAME`），两者不必一致。
 DEFAULT_APP_NAME = "LaoATrader"
 
 #: 支持的通知频道（顺序 = 界面与 --doctor 的展示顺序）
@@ -39,6 +42,13 @@ CHANNELS: tuple[str, ...] = ("windows", "feishu", "tray")
 
 #: 股票池的两种视图（界面右上角【切换为卡片/表格】）；写错的值当 `cards`
 POOL_VIEWS: tuple[str, ...] = ("cards", "table")
+
+#: 界面主题：`silver` = 银色金属感（默认）/ `system` = 系统默认皮肤（安全绳）。
+#: 为什么常量放在 config 里而不是 `ui/theme.py`：配置层要在**没有任何 Qt** 的环境下
+#: 也能 import（CLI、服务器版共存、打包前的静态检查），而 theme.py 会用到 Qt。
+#: 取值只有这一处，`theme.normalize_theme` 也读它，不会出现两份定义。
+UI_THEMES: tuple[str, ...] = ("silver", "system")
+DEFAULT_UI_THEME = "silver"
 
 #: 大盘概览默认盯的宽基指数（同花顺代码）。实测这五个都能取到；
 #: `899050.BJ`（北证50）**不存在**，混进去会让整批快照失败，别往这里加。
@@ -313,6 +323,9 @@ class Config:
     # ── 界面偏好（只影响"怎么显示"，不影响任何计算）──
     #: 股票池默认视图：`cards` = 卡片（默认，信息完整）/ `table` = 9 列表格（更密）
     pool_view: str = "cards"
+    #: 界面主题：`silver` = 银色金属感（默认）/ `system` = 系统默认皮肤。
+    #: 设置页下拉框可切换，**改完立即生效**（不用重启）；写错一个字母就回默认。
+    ui_theme: str = DEFAULT_UI_THEME
 
     # ── 大盘概览（启动默认页：涨跌停家数 / 成交额 / 涨跌家数 / 三组指数）──
     #: 总开关：关掉则概览**一个请求都不发**（卡片显示 `—` 并说明原因）
@@ -352,6 +365,9 @@ class Config:
         """
         value = str(self.pool_view or "").strip().lower()
         self.pool_view = value if value in POOL_VIEWS else "cards"
+        # 主题同理：写错（"Silver " / "银色" / 少个字母）不该让界面起不来 —— 回默认
+        theme = str(self.ui_theme or "").strip().lower()
+        self.ui_theme = theme if theme in UI_THEMES else DEFAULT_UI_THEME
         self.market_overview_ttl = _ttl_seconds(self.market_overview_ttl)
 
     # -- 派生属性 --
@@ -562,6 +578,7 @@ def _apply_env(cfg: Config) -> Config:
         ("INTRADAY_INTERVAL", "intraday_interval"),
         ("INTRADAY_STOP_LOSS", "stop_loss"),
         ("INTRADAY_TAKE_PROFIT", "take_profit"),
+        ("UI_THEME", "ui_theme"),           # 界面主题（分发后可临时切回系统皮肤）
         ("RUN_AT", "run_at"),
         ("LAOA_RUN_AT", "run_at"),          # 旧名，兼容早期配置
         ("RUN_AT_FALLBACK", "run_at_fallback"),
@@ -582,6 +599,10 @@ def _apply_env(cfg: Config) -> Config:
             setattr(cfg, attr, Path(os.path.expandvars(raw)).expanduser())
         else:
             setattr(cfg, attr, raw)
+
+    # 字符串类字段（含主题、视图）在 __post_init__ 里做过归一，而环境变量是在
+    # 构造**之后**才盖上去的 —— 所以这里再跑一次归一，非法值才会退回默认
+    cfg.__post_init__()
 
     env_list = (
         ("LAOA_ENABLED_GROUPS", "enabled_groups"),

@@ -25,7 +25,7 @@ from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
 
-APP_ID = "老A法师 · 交易终端"
+APP_ID = "老A选股助手"
 SUPPORTED = sys.platform == "win32"
 
 #: winotify 的 `Notification(duration=…)` **只认这两个值**。

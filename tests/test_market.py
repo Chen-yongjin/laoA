@@ -454,22 +454,61 @@ def test_turnover_is_rounded_to_yi(mcfg) -> None:
     assert market.lines(overview)[0].endswith("沪 7793亿 · 深 140亿 · 北 —")
 
 
-def test_line_colors_follow_a_share_convention() -> None:
-    """涨=红、跌=绿、平（或涨跌混合）=默认色 —— A 股习惯，不是欧美的绿涨红跌。"""
-    down = market.line_colors({"indices": [{"change_pct": -0.5}, {"change_pct": -1.2}]})
-    assert down[2] == market.COLOR_DOWN == "#2e7d32"
-    up = market.line_colors({"sentiment": [{"change_pct": 0.5}, {"change_pct": 3.2}]})
-    assert up[3] == market.COLOR_UP == "#d32f2f"
-    sector = market.line_colors({"sector": [{"change_pct": 0.88}, {"change_pct": 1.2}]})
-    assert sector[4] == market.COLOR_UP              # 板块组在第四行
-    mixed = market.line_colors({"sentiment": [{"change_pct": -0.18},
-                                              {"change_pct": 3.21}]})
-    assert mixed[3] == ""                          # 一行里涨跌都有：默认色最诚实
-    flat = market.line_colors({"indices": [{"change_pct": 0.0}]})
-    assert flat[2] == ""
-    assert market.line_colors(None) == ["", "", "", "", ""]
-    # 摘要与涨跌家数那两行没有涨跌幅，恒为默认色
-    assert market.line_colors(None)[:2] == ["", ""]
+def test_value_color_follows_a_share_convention() -> None:
+    """涨=红、跌=绿、平盘或缺数据=默认色 —— A 股习惯，不是欧美的绿涨红跌。
+
+    逐**值**取色（不再是"整组同向才上色"）：情绪与板块那几组经常同时有涨有跌，
+    按组取色只能"要么全染红、要么全不染"，两种都在骗人。
+    """
+    assert market.value_color(0.5) == market.COLOR_UP == "#d32f2f"
+    assert market.value_color(3.21) == market.COLOR_UP
+    assert market.value_color(-0.18) == market.COLOR_DOWN == "#2e7d32"
+    assert market.value_color(-1.2) == market.COLOR_DOWN
+    # 平盘（0.00%）既不算涨也不算跌；缺数据同样不上色
+    assert market.value_color(0.0) == market.COLOR_FLAT == ""
+    assert market.value_color(None) == ""
+    assert market.value_color("") == ""
+    assert market.value_color("不是数字") == ""
+
+
+def test_kpi_values_and_entry_fields_are_the_single_source() -> None:
+    """界面用的"一个指标一个值""一个指数三个字段"与命令行那几行**同源**。
+
+    为什么钉这一条：界面改成"卡片 + 条目网格"之后，`lines()` 与界面各算各的话，
+    同一个数在两处显示成不同样子（例如界面 `+0.07%`、命令行 `0.07%`）就没人发现。
+    """
+    overview = {
+        "limits": {"up": 55, "down": 16, "break": 30},
+        "turnover": {"sh": 7792.4e8, "sz": 8498.9e8, "bj": 140.1e8},
+        "breadth": {"up": 3126, "down": 2224, "flat": 221},
+        "configured_groups": ["indices", "sentiment", "sector"],
+        "indices": [{"thscode": "000001.SH", "name": "上证", "last": 3885.33,
+                     "change_pct": -0.07}],
+        "sentiment": [], "sector": [],
+    }
+    values = market.kpi_values(overview)
+    # 键的顺序 = 界面上卡片的显示顺序（涨停/跌停/炸板 → 成交额 → 涨跌家数）
+    assert list(values) == ["涨停", "跌停", "炸板", "成交额", "上涨", "下跌", "平盘"]
+    assert values["涨停"] == "55" and values["平盘"] == "221"
+    assert values["成交额"] == "沪 7792亿 · 深 8499亿 · 北 140亿"
+
+    name, value, pct = market.entry_fields(overview["indices"][0])
+    assert (name, value, pct) == ("上证", "3885.33", "-0.07%")
+    # 没点位就连涨跌幅一起显示 `—`（只报一半数据会让人以为接口坏了）
+    assert market.entry_fields({"thscode": "X", "last": None,
+                                "change_pct": 1.0}) == ("X", market.DASH, market.DASH)
+
+    # 与 `lines()` 的口径一致：命令行那行就是这些值拼起来的
+    lines = market.lines(overview)
+    assert lines[0] == f"涨停 {values['涨停']} · 跌停 {values['跌停']} · " \
+                       f"炸板 {values['炸板']} ｜ {values['成交额']}"
+    assert lines[1] == f"上涨 {values['上涨']} · 下跌 {values['下跌']} · 平盘 {values['平盘']}"
+    assert lines[2] == "宽基：上证 3885.33 -0.07%"
+    # 配了但没有数据的组 → `—`（不是空标题、也不是 0）
+    assert lines[3] == "情绪：—"
+    # 拿不到任何东西时也不抛：全部是 `—`
+    assert market.kpi_values(None)["成交额"] == "沪 — · 深 — · 北 —"
+    assert market.entry_fields({"thscode": "X"}) == ("X", market.DASH, market.DASH)
 
 
 # ── 3) TTL 缓存 ──

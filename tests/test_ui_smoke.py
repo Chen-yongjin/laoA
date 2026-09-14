@@ -23,6 +23,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过界面冒烟测试")
 
+from PySide6.QtCore import QEvent  # noqa: E402
 from laoa_trader.data import storage  # noqa: E402
 from laoa_trader.data.engine import DataEngine  # noqa: E402
 from laoa_trader.notify import KINDS  # noqa: E402
@@ -122,14 +123,30 @@ def window(seeded, qapp):
     # 先等它落地，免得它的结果跟用例自己的断言抢同一个 `market_overview`
     _wait_market(win, qapp)
     yield win
+    # ── 收尾必须**彻底**：不然会跨用例累积 ──
+    # 这堆控件每个都带定时器（5 秒界面刷新 / 60 秒概览），窗口没被真正销毁时它们会一直
+    # 在事件循环里触发；用例一多，后面每个 `processEvents()` 都越来越慢 ——
+    # 实测整套界面用例从 ~60 秒劣化到 9 分钟（每个用例 +9 秒）。
+    # 所以要：停定时器 → 停调度线程 → 等概览后台线程落地 → 关闭窗口 → **强制处理
+    # DeferredDelete**（`deleteLater()` 只是排队，不跑 `sendPostedEvents` 就不会真删）。
+    win._timer.stop()
+    win._market_timer.stop()
     win.scheduler.stop()
     _wait_market(win, qapp)
+    worker = getattr(win, "_market_worker", None)
+    if worker is not None and worker.isRunning():
+        worker.wait(3_000)
     if win.wizard is not None:      # 首次向导（非模态）不要留给下一个用例
         win.wizard.close()
     if win.about_dialog is not None:
         win.about_dialog.close()    # 「关于」窗口同理
+    if win.status_dialog is not None:
+        win.status_dialog.close()   # 「状态详情」窗口同理
     win.tray.hide()
+    win.close()
     win.deleteLater()
+    qapp.processEvents()
+    qapp.sendPostedEvents(None, QEvent.DeferredDelete)   # 真正执行删除
     qapp.processEvents()
 
 
@@ -198,25 +215,415 @@ def test_window_renders_all_panels(window, qapp) -> None:
     assert window.pool_table.cellWidget(0, 8).text() == "复制条件单"
 
 
-def test_status_bar_shows_engine_state(window) -> None:
-    text = window.status_label.text()
-    assert "引擎：在线" in text
-    assert "最新数据日期：2026-09-11" in text
-    assert "今日池子：1 只" in text
-    assert "持仓浮动" in text
-    assert "定时：16:00" in text                       # 新默认：收盘后主跑
-    assert "补跑 19:15" in text
-    assert "下次自动运行：" in text                    # 一眼看出设定生效了
+def test_status_bar_shows_one_line_main_status_and_tags(window) -> None:
+    """顶部状态区：主状态**只讲一件事**，细节（行数/补跑/引擎）挪进短标签与详情。"""
+    text = window.status_label.fullText()
+    # 正常状态那一句：数据就绪 + 股票数 + 更新到哪天（不再塞 8 项、不再用竖线）
+    assert text.startswith("✅ 数据就绪 · ")
+    assert "更新到 09-11" in text
+    assert "｜" not in text
+    assert "引擎：" not in text                        # 内部词只许出现在详情里
+
+    # 右侧短标签：每项 2~6 个字 + 一个短值
+    assert window.status_tags["今日池子"].text() == "今日池子 1"
+    assert window.status_tags["持仓"].text().startswith("持仓 +")
+    assert window.status_tags["下次选股"].text().startswith("下次选股 ")
+    assert "16:00" in window.status_tags["下次选股"].text()      # 新默认：收盘后主跑
+    assert window.status_tags["盘中提醒"].text() == "盘中提醒 未在时段"
+    for name, tag in window.status_tags.items():
+        assert "｜" not in tag.text(), name
+
+    # 细节进详情：行数 / 补跑时间 / 后台任务状态 / 日志路径 / 自检阈值都在 tooltip 里
+    details = window.status_label.toolTip()
+    assert "\n" in details                            # 多行
+    assert "后台任务：" in details
+    assert "本地行情行数：" in details
+    assert "补跑 19:15" in details
+    assert "日志文件：" in details
+    assert "自检阈值：" in details
+    assert "最新数据日期：2026-09-11" in details
+
+
+# ── 顶部状态区：一行主状态 + 右侧短标签 + 【详情】弹窗 ──
+
+
+def test_status_main_line_shows_exactly_one_thing(window, qapp) -> None:
+    """主状态**一次只讲一件事**：四种优先级各来一条，且都不许串 `｜` / 出现内部词。
+
+    用户原话"太啰嗦、很多词看不懂"：状态栏回答的应该是"现在要我注意什么"，
+    所以下面四种情况各自只出一句话。
+    """
+    from laoa_trader import state
+    from laoa_trader.data import preflight
+
+    win = window
+
+    def main_line() -> str:
+        win._refresh_status()
+        qapp.processEvents()
+        text = win.status_label.fullText()
+        assert "｜" not in text
+        assert "引擎：" not in text
+        return text
+
+    # ① 瞬时消息（刚点过的动作 / 任务完成失败）—— 优先级最高
+    win._set_status("✅ 下载数据完成：写入 10 行")
+    assert main_line() == "✅ 下载数据完成：写入 10 行"
+
+    # ② 正在下载：即使手头只有一条**旧的进度回传**，也显示会动的下载进度
+    win._set_status("下载 daily-k 45%（81/181 MB）", progress=True)
+    state.begin_download()
+    try:
+        win.progress.setRange(0, 100)
+        win.progress.setValue(48)
+        assert main_line().startswith("⏬ 正在下载历史数据 48%")
+        # 但"重签 URL 继续下载"这种真正的提示不会被下载进度吞掉（它是给用户看的）
+        win._on_worker_note("下载历史数据", "正在重签 URL 继续下载（第 2 次）")
+        assert "正在重签 URL 继续下载" in main_line()
+    finally:
+        state.end_download()
+        win.progress.setRange(0, 100)
+        win.progress.setValue(0)
+
+    # ③ 本地数据落后 / 不可用 → 一句"点哪个按钮能解决"（按钮名与按钮上的字一模一样）
+    win._clear_status_message()
+    ready_result = win.preflight_result
+    win.preflight_result = {"status": preflight.NEEDS_INCREMENTAL, "stale_trading_days": 3}
+    assert main_line() == "⚠️ 本地数据落后 3 个交易日 · 点【下载数据】补齐"
+    win.preflight_result = {"status": preflight.NEEDS_FULL, "reason": "行情表是空的"}
+    assert main_line() == "⚠️ 本地数据还没准备好 · 点【下载数据】下载历史数据"
+    assert "行情表是空的" in win._status_details()      # 原始原因在详情里（状态栏只给"做什么"）
+
+    # ④ 一切正常 → 就一句"数据就绪"，股票数与日期都是短的
+    win.preflight_result = ready_result
+    assert main_line().startswith("✅ 数据就绪 · ")
+
+
+def test_status_main_line_shows_why_daily_was_skipped(window, qapp, monkeypatch) -> None:
+    """今天该自动跑却被数据闸门拦下 / 上次出错 → 主状态直接说那句中文原因。"""
+    win = window
+    st = win.scheduler.status()
+    monkeypatch.setattr(win.scheduler, "status", lambda *a, **k: {
+        **st, "skipped_reason": "本地数据不可用：已跳过本次自动选股",
+        "last_error": None,
+    })
+    win._clear_status_message()
+    win._refresh_status()
+    qapp.processEvents()
+    text = win.status_label.fullText()
+    assert text == "⚠️ 本地数据不可用：已跳过本次自动选股"
+    assert "｜" not in text
+    # 详情里也留着（用户想核对时查得到）
+    assert "今天没自动跑：本地数据不可用：已跳过本次自动选股" in win._status_details()
+
+
+def test_status_tags_show_short_values_and_hide_without_position(
+    window, seeded, qapp, monkeypatch
+) -> None:
+    """短标签：2~6 个字 + 一个短值；**没有持仓就整项不显示**；盘中提醒三种取值。"""
+    from laoa_trader.data import storage
+    from laoa_trader.ui import app as ui_app
+
+    win = window
+    win._refresh_status()
+    qapp.processEvents()
+    assert win.status_tags["今日池子"].text() == "今日池子 1"
+    assert win.status_tags["今日池子"].isVisible() is True
+    # 有持仓 → "持仓 +x.x%"（seeded：成本 3.0、最新收盘 3.174 → +5.8%）
+    assert win.status_tags["持仓"].text() == "持仓 +5.8%"
+    assert win.status_tags["持仓"].isVisible() is True
+    assert win.status_tags["下次选股"].text().startswith("下次选股 ")
+    assert "｜" not in "".join(tag.text() for tag in win.status_tags.values())
+
+    # 盘中提醒：未在时段（当前）/ 已暂停（点按钮后）
+    assert win.status_tags["盘中提醒"].text() == "盘中提醒 未在时段"
+    win.on_toggle_intraday()
+    assert win.status_tags["盘中提醒"].text() == "盘中提醒 已暂停"
+    win.on_toggle_intraday()
+    # 三种取值本身（时段中 只能靠构造调度状态来触发）
+    assert win._intraday_text({"in_session": True}) \
+        == ui_app.INTRADAY_IN_SESSION == "时段中"
+    assert win._intraday_text({"intraday_paused": True}) == ui_app.INTRADAY_PAUSED
+    assert win._intraday_text({}) == ui_app.INTRADAY_OUT_SESSION == "未在时段"
+    st = win.scheduler.status()
+    monkeypatch.setattr(win.scheduler, "status", lambda *a, **k: {**st, "in_session": True})
+    win._refresh_status()
+    qapp.processEvents()
+    assert win.status_tags["盘中提醒"].text() == "盘中提醒 时段中"
+
+    # 没有持仓 → 整项不显示（不是显示成"持仓 —"）
+    with storage.connect(seeded.db_path) as conn:
+        storage.delete_position(conn, "600001")
+    win._refresh_status()
+    qapp.processEvents()
+    assert win.status_tags["持仓"].text() == ""
+    assert win.status_tags["持仓"].isVisible() is False
+    assert win.status_tags["今日池子"].isVisible() is True     # 别的标签照常
+
+
+def test_status_area_never_shows_pipes_or_internal_terms(window, qapp, monkeypatch) -> None:
+    """把"啰嗦"这件事钉死：任何状态下都不许再串 `｜`，也不许出现"引擎：在线"这类内部词。"""
+    from laoa_trader import state
+
+    win = window
+    st = win.scheduler.status()
+    cases = {
+        "正常": lambda: None,
+        "瞬时消息": lambda: win._set_status("✅ 选股建池完成：池子 18 只"),
+        "下载中": lambda: (state.begin_download(), win.progress.setValue(42)),
+        "落后": lambda: setattr(
+            win, "preflight_result",
+            {"status": "needs_incremental", "stale_trading_days": 3},
+        ),
+    }
+    try:
+        for name, setup in cases.items():
+            setup()
+            win._refresh_status()
+            qapp.processEvents()
+            text = win.status_label.fullText()
+            assert "｜" not in text, name
+            assert "引擎" not in text, name
+            for tag in win.status_tags.values():
+                assert "｜" not in tag.text(), name
+    finally:
+        state.end_download()
+        win.progress.setValue(0)
+        win.preflight_result = None
+        win._clear_status_message()
+        monkeypatch.undo()
+        win._refresh_status()
+        qapp.processEvents()
+        assert "｜" not in win.status_label.fullText()
+
+
+def test_long_transient_message_is_elided_not_wrapped(window, qapp) -> None:
+    """太长的瞬时消息：**省略成一行**（不换行），全文仍在 tooltip / 详情里，状态区不顶高。"""
+    win = window
+    win._refresh_status()
+    qapp.processEvents()
+    area_height = win.status_area.height()
+    min_height = win.minimumSizeHint().height()
+
+    long_text = "⚠️ 下载失败：" + "网络断开了，请检查网线或稍后再点【下载数据】；" * 6
+    win._set_status(long_text)
+    qapp.processEvents()
+
+    assert win.status_label.fullText() == long_text      # 完整消息没丢
+    shown = win.status_label.text()
+    assert len(shown) < len(long_text)
+    assert shown.endswith("…")                           # 省略号：看得出"这里被截了"
+    assert "\n" not in shown                             # 没有换行
+    # 一行的高度：状态区与整窗的最小高度都不变（底部不会被顶出屏幕）
+    assert win.status_area.height() <= area_height + 2
+    assert win.minimumSizeHint().height() <= min_height
+    assert win.status_label.height() \
+        <= win.status_label.fontMetrics().height() * 2
+
+
+def test_status_details_dialog_opens_and_copies(window, qapp) -> None:
+    """【详情】弹窗：内容含行数 / 日志路径，可复制，而且与 tooltip 是**同一份文本**。"""
+    from PySide6.QtWidgets import QApplication
+
+    win = window
+    assert win.status_dialog is None                      # 没点之前不开
+    win.btn_details.click()
+    qapp.processEvents()
+    dialog = win.status_dialog
+    assert dialog is not None and dialog.isVisible() is True
+    assert dialog.windowTitle() == "状态详情"
+
+    text = win.status_details_text.toPlainText()
+    assert win.status_label.toolTip() == text             # tooltip 与弹窗同一份（口径不会分叉）
+    assert text.startswith("状态详情")
+    for expect in ("后台任务：", "本地行情行数：", "今日池子：1 只（含自选 0 只）",
+                   "主跑时间：16:00（补跑 19:15）", "自检阈值：", "数据目录：", "日志文件："):
+        assert expect in text, expect
+    assert "laoa-trader.log" in text                      # 日志路径要能照着找到
+    assert "10,283,203" not in text                       # 长串数字压成"万"
+    assert win.status_details_text.isReadOnly() is True
+
+    win.btn_copy_details.click()
+    qapp.processEvents()
+    assert "本地行情行数：" in QApplication.clipboard().text()
+    assert "已复制状态详情" in win.status_label.fullText()
+    dialog.close()
+
+
+def test_top_buttons_are_short_with_full_tooltips(window, qapp) -> None:
+    """顶部按钮文字精简到 2~4 字（1440 逻辑宽也不挤），完整说明进 tooltip。"""
+    from laoa_trader.ui import app as ui_app
+
+    win = window
+    buttons = [win.btn_download, win.btn_run, win.btn_refresh, win.btn_pause,
+               win.btn_check, win.btn_details, win.btn_about]
+    assert [b.text() for b in buttons] == [
+        "下载数据", "选股建池", "刷新数据", "暂停提醒", "检查盘面", "详情", "关于",
+    ]
+    for button in buttons:
+        assert 2 <= len(button.text()) <= 4, button.text()
+        assert len(button.toolTip()) >= 10, button.text()     # 完整说明在 tooltip 里
+        assert button.toolTip() != button.text()
+        assert win.top_buttons_layout.indexOf(button) >= 0    # 都在同一行里
+    # 按钮文字与"指路"文案同一份常量（不然用户按提示找不到按钮）
+    assert (win.btn_download.text(), win.btn_details.text()) \
+        == (ui_app.BTN_DOWNLOAD_TEXT, ui_app.BTN_DETAILS_TEXT)
+    # 【详情】【关于】排在这一行的最右（右对齐）
+    qapp.processEvents()
+    assert win.btn_details.x() > win.btn_check.x()
+    assert win.btn_about.x() > win.btn_details.x()
+    assert win.btn_about.geometry().right() <= win.status_area.width() + 1
+
+def test_status_line_is_fully_visible_at_960_logical_width(screen_window, qapp) -> None:
+    """≈用户那台机器（逻辑可用 960×900 → 窗口 920×760）：主状态**完整显示**，一行、不被切。
+
+    主状态是"省略不换行"的单行控件：宽度够就原样显示，不够才省略。
+    这一档必须够 —— 用户看到的第一行字不能被截掉。
+    """
+    win = screen_window(960, 900)
+    win._refresh_status()
+    qapp.processEvents()
+    assert (win.width(), win.height()) == (920, 760)
+
+    shown = win.status_label.text()
+    assert shown == win.status_label.fullText()          # 没被省略
+    assert shown.startswith("✅ 数据就绪 · ")
+    assert "…" not in shown
+    # 一行的高度（没有折成两三行把状态区顶高）
+    assert win.status_label.height() \
+        <= win.status_label.fontMetrics().height() * 2
+    assert "\n" not in shown
+    # 右侧短标签也都在（没有被挤掉/换行）
+    for name in ("今日池子", "下次选股", "盘中提醒"):
+        assert win.status_tags[name].isVisible() is True, name
+        assert win.status_tags[name].text() != ""
+    # 状态区整块在窗口内（没被下沿切掉）
+    assert _bottom_of(win.status_area, win) <= win.height()
+
+
+# ── 界面主题（皮肤）：银色 / 系统默认，一键切回 ──
+
+
+def test_silver_theme_is_applied_when_the_window_opens(window, qapp) -> None:
+    """默认皮肤是银色（金属感）：窗口一建起来，应用级样式表就已经是它了。"""
+    from laoa_trader.ui import theme as theme_mod
+
+    qss = qapp.styleSheet()
+    assert theme_mod.current_theme() == "silver"
+    assert window.cfg.ui_theme == "silver"
+    assert "qlineargradient" in qss                       # 按钮/表头是渐变（金属感）
+    assert "QPushButton#primaryAction" in qss             # 主操作按钮按 objectName 命中
+    assert window.btn_run.objectName() == "primaryAction"
+    assert "#f4f5f7" in qss                               # 窗口底：浅银灰
+    # 拉丝纹理只铺在"背景条"上（状态区 / 页脚 / 表头），且是绝对路径
+    assert window.status_area.objectName() == "statusArea"
+    assert window.market_footer.objectName() == "marketFooter"
+    assert "assets/ui/brushed-metal" in qss
+    assert "background-repeat: repeat-x" in qss
+
+
+def test_settings_theme_combo_switches_and_writes_back(window, qapp, seeded) -> None:
+    """设置页「界面主题」下拉框：切换**立即生效** + 写回 config.toml（保留注释与未知键）。"""
+    from laoa_trader.ui import theme as theme_mod
+
+    box = window.theme_box
+    assert [box.itemText(i) for i in range(box.count())] == ["银色（金属感）", "系统默认"]
+    assert box.currentData() == "silver"
+    silver_qss = qapp.styleSheet()
+    assert silver_qss                                     # 银色：有样式表
+
+    # 切到"系统默认" → 样式表被清空（安全绳：一键回到原生外观）
+    box.setCurrentIndex(box.findData("system"))
+    qapp.processEvents()
+    assert qapp.styleSheet() == ""
+    assert theme_mod.current_theme() == "system"
+    assert window.cfg.ui_theme == "system"
+    text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
+    assert 'ui_theme = "system"' in text
+    assert "# 用户自己的注释（保存设置后必须还在）" in text        # 只改这一个键
+    assert 'my_own_key = "别动我"' in text
+
+    # 切回银色 → 样式表回来，界面照常刷新（换皮肤不许把界面换坏）
+    box.setCurrentIndex(box.findData("silver"))
+    qapp.processEvents()
+    assert qapp.styleSheet() == silver_qss
+    assert window.cfg.ui_theme == "silver"
+    assert 'ui_theme = "silver"' in (seeded.data_dir / "config.toml").read_text(
+        encoding="utf-8"
+    )
+    window._tick()
+    qapp.processEvents()
+    assert window.pool_table.rowCount() == 1              # 池子还在、刷新没出异常
+    # 状态栏给出"已切换"的瞬时消息（主状态一次只讲一件事）
+    assert "界面主题已切换为「银色（金属感）」" in window.status_label.fullText()
+
+
+def test_window_builds_and_refreshes_in_every_theme(seeded, qapp) -> None:
+    """两种主题各建一次窗口 + 来回切三次：都要能建起来、能刷新、能取数。"""
+    from laoa_trader import market
+    from laoa_trader.ui import app as ui_app
+    from laoa_trader.ui import theme as theme_mod
+
+    market.clear_cache()
+    try:
+        for name in ("silver", "system", "silver"):
+            seeded.ui_theme = name
+            win = ui_app.MainWindow(seeded)
+            win.show()
+            qapp.processEvents()
+            try:
+                assert theme_mod.current_theme() == name
+                assert bool(qapp.styleSheet()) is (name == "silver")
+                win._tick()                                # 刷一轮：不许抛异常
+                win._refresh_status()
+                qapp.processEvents()
+                assert win.pool_table.rowCount() == 1
+                assert win.theme_box.currentData() == name  # 下拉框跟着配置走
+            finally:
+                win.scheduler.stop()
+                win.tray.hide()
+                win.deleteLater()
+                qapp.processEvents()
+    finally:
+        market.clear_cache()
+
+
+def test_illegal_theme_in_config_still_opens_window(seeded, qapp) -> None:
+    """配置里写错主题（例如中文/少个字母）：按默认银色走，界面照常能用。"""
+    from laoa_trader.ui import app as ui_app
+    from laoa_trader.ui import theme as theme_mod
+
+    seeded.ui_theme = "银色金属"
+    win = ui_app.MainWindow(seeded)
+    win.show()
+    qapp.processEvents()
+    try:
+        assert theme_mod.current_theme() == "silver"
+        assert qapp.styleSheet()                               # 仍然是银色皮肤
+        assert win.theme_box.currentData() == "silver"         # 下拉框显示默认
+        win._tick()
+        qapp.processEvents()
+        assert win.position_table.rowCount() == 1
+    finally:
+        win.scheduler.stop()
+        win.tray.hide()
+        win.deleteLater()
+        qapp.processEvents()
+        seeded.ui_theme = "silver"
 
 
 def test_intraday_pause_button_toggles(window) -> None:
-    assert window.btn_pause.text() == "暂停盘中提醒"
+    assert window.btn_pause.text() == "暂停提醒"
     window.on_toggle_intraday()
-    assert window.btn_pause.text() == "恢复盘中提醒"
+    assert window.btn_pause.text() == "恢复提醒"
     assert window.scheduler.status()["intraday_paused"] is True
+    # 短标签跟着变成"已暂停"（三种取值之一）
+    assert window.status_tags["盘中提醒"].text() == "盘中提醒 已暂停"
     window.on_toggle_intraday()
-    assert window.btn_pause.text() == "暂停盘中提醒"
+    assert window.btn_pause.text() == "暂停提醒"
     assert window.scheduler.status()["intraday_paused"] is False
+    assert window.status_tags["盘中提醒"].text() == "盘中提醒 未在时段"
+
 
 
 def test_copy_plan_puts_text_on_clipboard(window, qapp) -> None:
@@ -246,12 +653,12 @@ def test_add_position_rejects_bad_input(window) -> None:
     window.pos_qty.setText("10")
     window.pos_cost.setText("1")
     window.on_add_position()
-    assert "6 位股票代码" in window.status_label.text()
+    assert "6 位股票代码" in window.status_label.fullText()
 
     window.pos_symbol.setText("600001")
     window.pos_qty.setText("不是数字")
     window.on_add_position()
-    assert "必须是数字" in window.status_label.text()
+    assert "必须是数字" in window.status_label.fullText()
 
 
 def test_tray_messages_drain_into_balloon(window) -> None:
@@ -271,11 +678,11 @@ def test_worker_reports_progress_and_failure(window, qapp) -> None:
 
     result = sync.SyncResult(stage="下载", ok=True, rows=10, detail="写入 10 行")
     window._on_worker_done("下载", result)
-    assert "写入 10 行" in window.status_label.text()
+    assert "写入 10 行" in window.status_label.fullText()
 
     window._on_worker_failed("下载", "RuntimeError: 断网了\n堆栈……")
-    assert "下载失败" in window.status_label.text()
-    assert "断网了" in window.status_label.text()
+    assert "下载失败" in window.status_label.fullText()
+    assert "断网了" in window.status_label.fullText()
 
     window._on_progress("写入行情", 50, 100)
     assert window.progress.value() == 50
@@ -306,7 +713,7 @@ def test_test_notify_button_reports_results(window, qapp, monkeypatch) -> None:
     assert window._worker is not None
     window._worker.wait(10_000)          # 等后台完成
     qapp.processEvents()
-    text = window.status_label.text()
+    text = window.status_label.fullText()
     assert "飞书已跳过" in text
     assert "弹窗失败" in text
     assert "托盘成功" in text
@@ -320,7 +727,7 @@ def test_doctor_command_prints_report(cfg, capsys, tmp_path) -> None:
     config_file.write_text(f'data_dir = "{p(cfg.data_dir)}"', encoding="utf-8")
     assert cli(["--cli", "--doctor", "--config", str(config_file)]) == 0
     out = capsys.readouterr().out
-    assert "老A法师 · 交易终端 —— 自检" in out
+    assert "老A选股助手 —— 自检" in out
     assert "数据目录" in out and "数据库" in out
     assert "同花顺 Key" in out
     assert "行情行数" in out
@@ -409,7 +816,7 @@ def test_pool_card_copy_button_copies_plan(window, qapp) -> None:
     text = QApplication.clipboard().text()
     assert "【条件单｜买入】600002 半导体甲" in text
     assert "止损" in text and "止盈" in text
-    assert "已复制 600002 的条件单参数" in window.status_label.text()
+    assert "已复制 600002 的条件单参数" in window.status_label.fullText()
 
 
 def test_pool_cards_not_rebuilt_when_signature_unchanged(window) -> None:
@@ -470,7 +877,7 @@ def test_pool_empty_label_visible_only_when_pool_empty(pool_window, seeded, qapp
     assert window.pool_cards == []
     assert window.pool_table.rowCount() == 0
     assert window.pool_empty_label.isVisible() is True
-    assert "今日没有入选标的（收盘后自动选股，或点【立即选股并建池】）" \
+    assert "今日没有入选标的（收盘后自动选股，或点【选股建池】）" \
         in window.pool_empty_label.text()
 
     window.on_toggle_pool_view()    # 切到表格视图：提示照样得显示
@@ -602,7 +1009,7 @@ def test_watch_symbol_enter_adds_to_watchlist(window, seeded, qapp) -> None:
     assert rows[0]["name"] == "低价样本"
     assert rows[0]["note"] == "回车加的"
     assert window.watch_table.rowCount() == 1
-    assert "已加自选：600001 低价样本" in window.status_label.text()
+    assert "已加自选：600001 低价样本" in window.status_label.fullText()
 
 
 def test_pos_symbol_enter_adds_position(window, seeded, qapp) -> None:
@@ -630,7 +1037,7 @@ def test_window_title_shows_version_and_about_button(window) -> None:
     import laoa_trader
 
     assert window.windowTitle() == (
-        f"老A法师 · 交易终端 v{laoa_trader.__version__}（Windows 单机版 · 测试版）"
+        f"老A选股助手 v{laoa_trader.__version__}（Windows 单机版 · 测试版）"
     )
     assert window.btn_about.text() == "关于"
 
@@ -648,7 +1055,7 @@ def test_about_dialog_shows_version_and_copyright(window, qapp) -> None:
     assert dialog.isVisible() is True
     texts = [label.text() for label in dialog.findChildren(QLabel)]
     blob = "\n".join(texts)
-    assert "老A法师 · 交易终端" in blob
+    assert "老A选股助手" in blob
     assert f"版本：{laoa_trader.__version__}（测试版）" in blob
     assert "作者 / 版权所有人：async-chen" in blob
     assert "版权所有 © 2026 async-chen，保留所有权利。" in blob
@@ -674,11 +1081,11 @@ def test_about_copy_version_info_to_clipboard(window, qapp) -> None:
 
     lines = QApplication.clipboard().text().splitlines()
     assert lines == [
-        "老A法师 · 交易终端",
+        "老A选股助手",
         f"版本：{laoa_trader.__version__}（测试版）",
         "版权所有 © 2026 async-chen，保留所有权利。",
     ]
-    assert "已复制版本信息" in window.status_label.text()
+    assert "已复制版本信息" in window.status_label.fullText()
 
 
 def test_about_close_button_closes_dialog(window, qapp) -> None:
@@ -783,7 +1190,7 @@ def test_save_groups_writes_config_keeps_comments(window, seeded, qapp) -> None:
     assert 'enabled_groups = ["swing"]' in text
     assert "# 用户自己的注释（保存设置后必须还在）" in text
     assert 'my_own_key = "别动我"' in text
-    assert "已写入 config.toml" in window.status_label.text()
+    assert "已写入 config.toml" in window.status_label.fullText()
     # 内存里的配置同步更新
     assert window.cfg.enabled_groups == ["swing"]
 
@@ -803,7 +1210,7 @@ def test_save_groups_requires_at_least_one_group(window, seeded) -> None:
     for box in window.group_boxes.values():
         box.setChecked(False)
     window.on_save_groups()
-    assert "至少要勾一个策略组" in window.status_label.text()
+    assert "至少要勾一个策略组" in window.status_label.fullText()
     # 没有写坏配置文件
     assert 'enabled_groups = ["ultra", "short", "swing"]' in (
         seeded.data_dir / "config.toml").read_text(encoding="utf-8")
@@ -831,7 +1238,7 @@ def test_save_notify_empty_channels_warns_but_saves(window, seeded, qapp) -> Non
         box.setChecked(False)
     window.on_save_notify()
     qapp.processEvents()
-    assert "不推送（只入库）" in window.status_label.text()
+    assert "不推送（只入库）" in window.status_label.fullText()
     assert 'notify_channels = []' in (seeded.data_dir / "config.toml").read_text(
         encoding="utf-8")
 
@@ -843,8 +1250,8 @@ def test_save_notify_feishu_without_credentials_hints(window, seeded, qapp) -> N
     window.feishu_secret.setText("")
     window.on_save_notify()
     qapp.processEvents()
-    assert "飞书未配置凭证" in window.status_label.text()
-    assert "winotify" not in window.status_label.text()   # 不是那句平台不支持的提示
+    assert "飞书未配置凭证" in window.status_label.fullText()
+    assert "winotify" not in window.status_label.fullText()   # 不是那句平台不支持的提示
 
 
 def test_feishu_hint_shown_when_checked_without_credentials(window) -> None:
@@ -883,8 +1290,8 @@ def test_test_notify_uses_current_widgets_without_saving(window, qapp, monkeypat
 
     assert seen["channels"] == ["windows", "tray"]
     assert seen["sound"] is False
-    assert "测试通知" in window.status_label.text()
-    assert "飞书已跳过" in window.status_label.text()
+    assert "测试通知" in window.status_label.fullText()
+    assert "飞书已跳过" in window.status_label.fullText()
     # 测试提醒只是"实发一条"，不该顺手改配置
     assert (seeded.data_dir / "config.toml").read_text(encoding="utf-8") == before
 
@@ -908,8 +1315,8 @@ def test_run_pipeline_button_runs_in_background_and_is_idempotent(window, qapp,
         signals = conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0]
         pool_rows = conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0]
     assert signals > 0 and pool_rows > 0
-    assert "立即选股并建池完成" in window.status_label.text()
-    assert "池子" in window.status_label.text()
+    assert "立即选股并建池完成" in window.status_label.fullText()
+    assert "池子" in window.status_label.fullText()
 
     # 第二次点：幂等（行数不变），且不重复推送
     window.on_run_pipeline()
@@ -918,7 +1325,7 @@ def test_run_pipeline_button_runs_in_background_and_is_idempotent(window, qapp,
     with storage.connect(seeded.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0] == signals
         assert conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0] == pool_rows
-    assert "未重复推送" in window.status_label.text()
+    assert "未重复推送" in window.status_label.fullText()
 
 
 def test_refresh_data_button_only_syncs(window, qapp, monkeypatch, seeded) -> None:
@@ -938,8 +1345,8 @@ def test_refresh_data_button_only_syncs(window, qapp, monkeypatch, seeded) -> No
     window._worker.wait(30_000)
     qapp.processEvents()
     assert calls == ["sync"]
-    assert "刷新数据完成" in window.status_label.text()
-    assert "写入 3 行" in window.status_label.text()
+    assert "刷新数据完成" in window.status_label.fullText()
+    assert "写入 3 行" in window.status_label.fullText()
 
 
 def test_refresh_data_failure_shows_reason_without_crash(window, qapp, monkeypatch) -> None:
@@ -951,8 +1358,8 @@ def test_refresh_data_failure_shows_reason_without_crash(window, qapp, monkeypat
     window.on_refresh_data()
     window._worker.wait(30_000)
     qapp.processEvents()
-    assert "刷新数据完成" in window.status_label.text()
-    assert "模拟断网" in window.status_label.text()
+    assert "刷新数据完成" in window.status_label.fullText()
+    assert "模拟断网" in window.status_label.fullText()
 
 
 # ── 自选股面板 ──
@@ -981,7 +1388,7 @@ def test_watch_panel_add_autofills_name_and_notes(window, seeded, qapp) -> None:
     assert window.watch_table.item(0, 1).text() == "半导体甲"
     assert window.watch_table.item(0, 2).text() == "龙头"
     assert window.watch_table.item(0, 3).text() == "启用"
-    assert "已加自选：600002 半导体甲" in window.status_label.text()
+    assert "已加自选：600002 半导体甲" in window.status_label.fullText()
 
 
 def test_watch_panel_add_unknown_symbol_warns_but_adds(window, seeded, qapp) -> None:
@@ -990,13 +1397,13 @@ def test_watch_panel_add_unknown_symbol_warns_but_adds(window, seeded, qapp) -> 
     qapp.processEvents()
     with storage.connect(seeded.db_path) as conn:
         assert storage.watchlist_symbols(conn) == ["601999"]
-    assert "本地库没有它的名称" in window.status_label.text()
+    assert "本地库没有它的名称" in window.status_label.fullText()
 
 
 def test_watch_panel_rejects_bad_code(window, seeded) -> None:
     window.watch_symbol.setText("abc")
     window.on_watch_add()
-    assert "6 位数字" in window.status_label.text()
+    assert "6 位数字" in window.status_label.fullText()
     with storage.connect(seeded.db_path) as conn:
         assert storage.load_watchlist(conn) == []
 
@@ -1013,7 +1420,7 @@ def test_watch_panel_toggle_and_remove(window, seeded, qapp) -> None:
         assert storage.watchlist_symbols(conn) == []           # 停了就不启用
         assert len(storage.load_watchlist(conn)) == 1           # 但还在列表里
     assert window.watch_table.item(0, 3).text() == "已停用"
-    assert "不进池、不监控" in window.status_label.text()
+    assert "不进池、不监控" in window.status_label.fullText()
 
     window.on_watch_toggle(True)
     qapp.processEvents()
@@ -1106,7 +1513,9 @@ def test_status_bar_shows_watchlist_count(window, seeded, qapp) -> None:
         storage.upsert_watchlist(conn, "600001", name="低价样本")
     window._tick()
     qapp.processEvents()
-    assert "含自选 1 只" in window.status_label.text()
+    # 状态栏只给"今日池子几只"；"含自选几只"是细节 → 进详情（用户反馈"状态栏太啰嗦"）
+    assert window.status_tags["今日池子"].text() == "今日池子 1"
+    assert "含自选 1 只" in window._status_details()
 
 
 # ── 启动自检与首次向导 ──
@@ -1147,7 +1556,7 @@ def test_wizard_appears_when_needs_full(wizard_window) -> None:
     assert win.wizard_start.text() == "开始下载"
     assert "下载历史数据" in win.wizard.windowTitle()
     assert str(win.cfg.data_dir) in win.wizard_dir.text()
-    assert "正在检查本地数据" not in win.status_label.text()   # 已给出结论
+    assert "正在检查本地数据" not in win.status_label.fullText()   # 已给出结论
 
 
 def test_wizard_start_triggers_download_and_progress(qapp, wizard_window, monkeypatch) -> None:
@@ -1246,7 +1655,9 @@ def test_no_wizard_when_data_ready(seeded, qapp) -> None:
     qapp.processEvents()
     assert win.preflight_result["status"] == preflight.READY
     assert win.wizard is None
-    assert "本地数据就绪" in win.status_label.text()
+    # 主状态那句就是"数据就绪"（不再把 summary_line 的"…行 / 最新 …"塞进状态栏）
+    assert win.status_label.fullText().startswith("✅ 数据就绪 · ")
+    assert "行" not in win.status_label.fullText()
     win.scheduler.stop()
     win.deleteLater()
     qapp.processEvents()
@@ -1309,7 +1720,7 @@ def test_incremental_no_autodownload_when_config_off(cfg, qapp, monkeypatch) -> 
     win.run_preflight()
     qapp.processEvents()
     assert win._worker is None                     # 没有后台任务
-    assert "落后" in win.status_label.text() or "落后" in win._message
+    assert "落后" in win.status_label.fullText() or "落后" in win._message
     win.scheduler.stop()
     win.deleteLater()
     qapp.processEvents()
@@ -1324,7 +1735,10 @@ def test_autorun_widgets_reflect_config(window) -> None:
     assert window.run_at_edit.text() == "16:00"
     assert window.run_at_fallback_edit.text() == "19:15"
     assert "下次自动运行" in window.run_hint.text()
-    assert "下次自动运行：" in window.status_label.text()
+    # 状态栏那一行只留短标签"下次选股 …"；完整说法在详情里
+    assert window.status_tags["下次选股"].text().startswith("下次选股 ")
+    assert "16:00" in window.status_tags["下次选股"].text()
+    assert "下次自动运行：" in window._status_details()
 
 
 def test_save_run_at_writes_config_and_keeps_comments(window, seeded, qapp) -> None:
@@ -1340,7 +1754,7 @@ def test_save_run_at_writes_config_and_keeps_comments(window, seeded, qapp) -> N
     assert "# 用户自己的注释（保存设置后必须还在）" in text
     assert 'my_own_key = "别动我"' in text
     assert window.cfg.run_at == "16:30"                # 内存配置同步
-    assert "自动运行已保存" in window.status_label.text()
+    assert "自动运行已保存" in window.status_label.fullText()
 
 
 def test_save_run_at_rejects_bad_format(window, seeded, qapp) -> None:
@@ -1349,8 +1763,8 @@ def test_save_run_at_rejects_bad_format(window, seeded, qapp) -> None:
     window.run_at_edit.setText("25:99")
     window.on_save_run_at()
     qapp.processEvents()
-    assert "格式不对" in window.status_label.text()
-    assert "未写入配置" in window.status_label.text()
+    assert "格式不对" in window.status_label.fullText()
+    assert "未写入配置" in window.status_label.fullText()
     assert (seeded.data_dir / "config.toml").read_text(encoding="utf-8") == before
     assert window.cfg.run_at == "16:00"                # 内存也没被改
 
@@ -1361,7 +1775,7 @@ def test_save_run_at_rejects_fallback_not_later(window, seeded, qapp) -> None:
     window.run_at_fallback_edit.setText("15:30")
     window.on_save_run_at()
     qapp.processEvents()
-    assert "必须**晚于**主跑时间" in window.status_label.text()
+    assert "必须**晚于**主跑时间" in window.status_label.fullText()
     assert (seeded.data_dir / "config.toml").read_text(encoding="utf-8") == before
 
 
@@ -1370,7 +1784,7 @@ def test_save_run_at_warns_before_market_close(window, seeded, qapp) -> None:
     window.run_at_edit.setText("09:30")
     window.on_save_run_at()
     qapp.processEvents()
-    text = window.status_label.text()
+    text = window.status_label.fullText()
     assert "自动运行已保存" in text
     assert "早于 A 股收盘" in text
     assert "16:00 之后" in text
@@ -1383,7 +1797,10 @@ def test_toggle_auto_run_off_from_ui(window, seeded, qapp) -> None:
     qapp.processEvents()
     assert window.cfg.auto_run is False
     assert "auto_run = false" in (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
-    assert "自动运行已关闭" in window.status_label.text()     # 状态栏说清楚
+    # 状态区说清楚：保存消息 + 短标签直接写"自动运行 已关"（详情里保留完整说法）
+    assert "自动运行已保存：关" in window.status_label.fullText()
+    assert window.status_tags["下次选股"].text() == "自动运行 已关"
+    assert "下次自动运行：已关闭" in window._status_details()   # 详情里保留完整说法
 
 
 def test_saved_time_takes_effect_without_restart(window, seeded, qapp, monkeypatch) -> None:
@@ -1419,7 +1836,7 @@ def test_progress_shows_mb_and_percent_in_status_bar(window) -> None:
     assert window.progress.maximum() == 180_700_000
     assert window.progress.value() == 81_000_000        # 不是 -1（不是"不确定进度"）
     assert "MB" in window.progress.format()
-    status = window.status_label.text()
+    status = window.status_label.fullText()
     assert "下载 daily-k" in status
     assert "45%" in status or "44%" in status           # 81/180.7 ≈ 44.8%
     assert "81" in status and "181" in status or "180" in status
@@ -1439,11 +1856,11 @@ def test_progress_reaches_full_and_reports_downloading_flag(window, monkeypatch)
     state.begin_download()
     try:
         window._tick()                                   # 定时刷新也要体现"在下载"
-        assert "正在下载" in window.status_label.text()
+        assert "正在下载" in window.status_label.fullText()
     finally:
         state.end_download()
     window._tick()
-    assert "正在下载" not in window.status_label.text()   # 结束后切回正常状态
+    assert "正在下载" not in window.status_label.fullText()   # 结束后切回正常状态
 
 
 def test_wizard_progress_bar_moves_during_download(wizard_window, qapp) -> None:
@@ -1469,7 +1886,7 @@ def test_wizard_progress_bar_moves_during_download(wizard_window, qapp) -> None:
 def test_worker_note_updates_status(window) -> None:
     """下载状态（"正在重签 URL 继续下载（第 2 次）"）要显示出来，不被进度覆盖。"""
     window._on_worker_note("下载历史数据", "正在重签 URL 继续下载（第 2 次，从 87.0 MB 处接着下）")
-    assert "正在重签 URL 继续下载（第 2 次" in window.status_label.text()
+    assert "正在重签 URL 继续下载（第 2 次" in window.status_label.fullText()
 
 
 # ── 状态栏要能说清"今天为什么没自动跑"（用户不必翻日志）──
@@ -1489,6 +1906,9 @@ def test_status_bar_shows_why_daily_was_skipped(cfg, qapp, monkeypatch) -> None:
     ran: list[str] = []
     monkeypatch.setattr(win.scheduler, "run_daily_now", lambda **k: ran.append("ran"))
     win.scheduler._maybe_daily(datetime.now().replace(hour=16, minute=30))
+    # 主状态一次只讲一件事（见 test_status_bar_shows_one_line_main_status_and_tags）：
+    # 先让出启动自检留下的那条更早的消息，看的才是"被闸门跳过"这件事本身
+    win._message = ""
     win._tick()
     qapp.processEvents()
 
@@ -1496,9 +1916,10 @@ def test_status_bar_shows_why_daily_was_skipped(cfg, qapp, monkeypatch) -> None:
     st = win.scheduler.status()
     assert st["preflight_status"] == "needs_full"
     assert st["daily_skipped_today"] is True
-    text = win.status_label.text()
+    text = win.status_label.fullText()
     assert st["skipped_reason"] in text                     # 状态栏确实把它显示出来了
     assert "跳过本次自动选股" in text
+    assert "｜" not in text
 
     win.scheduler.stop()
     win.deleteLater()
@@ -1525,7 +1946,7 @@ def test_run_pipeline_refuses_when_data_not_ready(cfg, qapp, monkeypatch) -> Non
 
     assert ran == []                                   # 策略一次都没跑
     assert win._worker is None                          # 也没起后台任务
-    text = win.status_label.text()
+    text = win.status_label.fullText()
     assert "本地无可用历史数据" in text
     assert "下载" in text                               # 指路到下载按钮
 
@@ -1550,7 +1971,7 @@ def test_run_pipeline_refuses_while_downloading(window, qapp, monkeypatch) -> No
 
     assert ran == []
     assert window._worker is None
-    assert "正在下载历史数据" in window.status_label.text()
+    assert "正在下载历史数据" in window.status_label.fullText()
 
 
 def test_wizard_download_done_runs_pipeline(cfg, qapp, monkeypatch) -> None:
@@ -1609,7 +2030,7 @@ def test_wizard_download_done_runs_pipeline(cfg, qapp, monkeypatch) -> None:
     with storage.connect(cfg.db_path) as conn:
         pool_rows = conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0]
     assert pool_rows > 0, "下载完成后应当自动选出池子"
-    status = win.status_label.text()
+    status = win.status_label.fullText()
     assert "本地无可用历史数据" not in status
     assert win.preflight_result is not None                    # 缓存的是"下载后"的新结论
     assert win.preflight_result["status"] == "ready"           # 数据确实到位了
@@ -1647,7 +2068,7 @@ def test_download_ok_but_still_not_ready_does_not_run_pipeline(qapp, wizard_wind
     qapp.processEvents()
 
     assert pipeline_calls == []                      # 数据不可用 → 绝不跑策略
-    assert "数据仍不可用" in win.status_label.text()
+    assert "数据仍不可用" in win.status_label.fullText()
     assert win.preflight_result is not None
     assert win.preflight_result["status"] == "needs_full"
 
@@ -1703,6 +2124,8 @@ def _inject_market_client(monkeypatch, injected):
     monkeypatch.setattr(market, "fetch_overview", fake)
 
 
+
+
 def _wait_market(window, qapp, timeout_ms: int = 10_000) -> None:
     """等概览页那一轮**后台**取数结束，并把结果送到界面上。
 
@@ -1742,7 +2165,9 @@ def pool_window(window, qapp):
 
 
 def test_market_page_is_a_tab_of_its_own(window) -> None:
-    """概览是**独立一页、而且是第一个页签**（启动就停在这一页），池子是第二页。"""
+    """概览是**独立一页、而且是第一个页签**，页面是"分区 + 网格"，不再是一团长文本。"""
+    from PySide6.QtWidgets import QScrollArea
+
     pool_page = _tab_page(window, "股票池")
     assert window.tabs.widget(0) is window.market_page
     assert window.tabs.widget(1) is pool_page
@@ -1750,17 +2175,65 @@ def test_market_page_is_a_tab_of_its_own(window) -> None:
     assert window.market_page is not pool_page
     assert pool_page.isAncestorOf(window.market_page) is False
 
-    # 页面自上而下：标题 / 五行（摘要、涨跌家数、宽基、情绪、板块）/ 底部来源与刷新按钮
-    layout = window.market_page.layout()
-    assert len(window.market_labels) == 5
-    for label in window.market_labels:
-        assert window.market_page.isAncestorOf(label) is True
-    assert window.market_page.isAncestorOf(window.btn_market_refresh) is True
-    assert window.market_page.isAncestorOf(window.market_as_of_label) is True
+    page = window.market_page
+    # KPI 区：七个指标各一个**独立控件**（不是一个长字符串里的一段）
+    assert set(window.market_kpis) == {
+        "涨停", "跌停", "炸板", "成交额", "上涨", "下跌", "平盘",
+    }
+    assert len(set(window.market_kpis.values())) == 7        # 七个互不相同的数值标签
+    for name, label in window.market_kpis.items():
+        card = window.market_kpi_cards[name]
+        assert card.value_label is label
+        assert card.title_label.text() == name               # 卡片里带小号灰标签
+        assert page.isAncestorOf(card) is True
+
+    # 三组指数：各一个"整组容器"（`宽基/情绪/板块` → 用于整组隐藏）+ 组内网格
+    assert set(window.market_group_boxes) == {"宽基", "情绪", "板块"}
+    for label, box in window.market_group_boxes.items():
+        assert box.title_label.text() == label
+        assert page.isAncestorOf(box) is True
+        assert page.isAncestorOf(box.title_label) is True
+
+    # 页脚 / 提示 / 【立即刷新】都在这一页里
+    assert page.isAncestorOf(window.market_footer) is True
+    assert page.isAncestorOf(window.market_as_of_label) is True
+    assert page.isAncestorOf(window.market_hint) is True
+    assert page.isAncestorOf(window.btn_market_refresh) is True
     assert window.btn_market_refresh.text() == "立即刷新"
-    # 底部那行小字排在最后（上面留白、下面收口）
-    assert layout.itemAt(layout.count() - 1).layout().indexOf(
-        window.btn_market_refresh) >= 0
+
+    # 页面自上而下：标题行 / 可滚动的内容区 / 出错提示 / **最后一行**页脚
+    layout = page.layout()
+    assert layout.itemAt(0).layout().indexOf(window.market_title) >= 0
+    assert layout.itemAt(1).widget() is window.market_scroll
+    assert layout.itemAt(2).widget() is window.market_hint
+    assert layout.itemAt(3).widget() is window.market_footer
+    assert layout.itemAt(layout.count() - 1).widget() is window.market_footer
+
+    # 内容区可滚动：窗口变矮时它自己吸收高度变化，页脚不会被顶出窗口
+    assert isinstance(window.market_scroll, QScrollArea)
+    assert window.market_scroll.widgetResizable() is True
+    assert window.market_scroll.horizontalScrollBar().isVisible() is False
+
+
+def test_settings_tab_is_scrollable_so_the_window_can_shrink(window, qapp) -> None:
+    """设置页控件最多，**整页套了滚动区**，否则它会把"窗口最小高度"顶到屏幕外面去。
+
+    为什么这条值得测：设置页十几个勾选框的最小高度加起来 750+，而页签的最小高度取
+    所有页的最大值 —— 不套滚动区时窗口最小高度是 887（1366×768 的笔记本上根本放不下，
+    表现就是"一打开最下边看不见"）。这条盯的是那个根因别再加回来。
+    """
+    from PySide6.QtWidgets import QScrollArea
+
+    page = _tab_page(window, "设置")
+    scrolls = page.findChildren(QScrollArea)
+    assert scrolls, "设置页需要一层滚动区（小屏才缩得下来）"
+    assert scrolls[0].widgetResizable() is True
+    assert scrolls[0].isAncestorOf(window.save_notify_button) is True
+    # 控件还在、顺序没动（只是外面多了一层容器）
+    assert page.isAncestorOf(window.group_boxes["ultra"]) is True
+    assert page.isAncestorOf(window.channel_boxes["tray"]) is True
+    # 窗口的最小高度收得住（小于 1366×768 那档的可用高度）
+    assert window.minimumSizeHint().height() < 600
 
 
 def test_market_page_refreshes_right_after_startup(seeded, qapp, monkeypatch) -> None:
@@ -1783,9 +2256,10 @@ def test_market_page_refreshes_right_after_startup(seeded, qapp, monkeypatch) ->
         assert win.tabs.currentWidget() is win.market_page   # 第一屏就是概览
         assert client.calls                                  # 启动那一次确实去取了
         assert win.market_overview is not None
-        assert win.market_labels[0].text().startswith("涨停 55 · 跌停 16 · 炸板 30")
-        assert win.market_labels[2].text().startswith("宽基：上证 ")
-        assert "更新于 —" not in win.market_as_of_label.text()   # 底部已经是真实取数时间
+        assert win.market_kpis["涨停"].text() == "55"
+        assert win.market_kpis["成交额"].text() == "沪 7792亿 · 深 8499亿 · 北 140亿"
+        assert win.market_group_boxes["宽基"].entries[0].name_label.text() == "上证"
+        assert "更新于 —" not in win.market_as_of_label.fullText()   # 页脚已是真实取数时间
     finally:
         win.scheduler.stop()
         if win.wizard is not None:
@@ -1796,8 +2270,46 @@ def test_market_page_refreshes_right_after_startup(seeded, qapp, monkeypatch) ->
         market.clear_cache()
 
 
-def test_market_page_renders_lines_colors_and_footer(market_window, qapp) -> None:
-    """五行内容 + 涨红跌绿 + 底部来源的时间与刷新节奏。"""
+#: 概览页三组条目应当长成的样子（顺序 = 配置顺序，数值照抄 `SAMPLE_ROWS` 的当日在值）。
+#: 与 `tests/test_market.py` 的 `SAMPLE_LINES` 是同一批数字：界面与命令行口径必须一致。
+MARKET_EXPECTED_ENTRIES: dict[str, list[tuple[str, str, str, str]]] = {
+    "宽基": [
+        ("000001.SH", "上证", "3885.33", "-0.07%"),
+        ("399001.SZ", "深成", "13384.57", "-0.64%"),
+        ("399006.SZ", "创业板", "3285.58", "-1.10%"),
+        ("000688.SH", "科创50", "1528.27", "-1.62%"),
+        ("000300.SH", "沪深300", "4480.08", "-0.67%"),
+    ],
+    "情绪": [
+        ("883404.TI", "同花顺情绪", "885.53", "-0.18%"),
+        ("883958.TI", "昨日连板", "6928.17", "+3.53%"),
+        ("883994.TI", "昨日打首板", "1551.88", "+1.69%"),
+        ("883418.TI", "微盘股", "2131.00", "+0.95%"),
+    ],
+    "板块": [
+        ("881155.TI", "银行", "1408.77", "+0.88%"),
+        ("881157.TI", "证券", "1428.64", "-0.27%"),
+    ],
+}
+
+
+def _entry_fields(entry) -> tuple[str, str, str, str]:
+    """一个条目控件的四段可断言文本：代码 / 名称 / 点位 / 涨跌幅。"""
+    return (
+        entry.thscode,
+        entry.name_label.text(),
+        entry.value_label.text(),
+        entry.pct_label.text(),
+    )
+
+
+def _entry_colors(entry) -> tuple[str, str]:
+    """一个条目的两个颜色（点位、涨跌幅）——逐值上色时这两个都由**自己**的涨跌决定。"""
+    return entry.value_label.styleSheet(), entry.pct_label.styleSheet()
+
+
+def test_market_page_renders_kpis_entries_colors_and_footer(market_window, qapp) -> None:
+    """KPI 数值 + 三组每一项的名称/点位/涨跌幅 + 逐值颜色 + 页脚来源，一次全钉住。"""
     from laoa_trader import market
 
     market.clear_cache()
@@ -1806,30 +2318,42 @@ def test_market_page_renders_lines_colors_and_footer(market_window, qapp) -> Non
         qapp.processEvents()
 
         assert market_window.market_overview is not None
-        texts = [label.text() for label in market_window.market_labels]
-        assert texts[0] == "涨停 55 · 跌停 16 · 炸板 30 ｜ 沪 7792亿 · 深 8499亿 · 北 140亿"
-        assert texts[1] == "上涨 1 · 下跌 1 · 平盘 1"      # 上面那页假数据的小样本
-        assert texts[2].startswith("宽基：上证 3885.33 -0.07% ｜ ")
-        assert texts[3].startswith("情绪：同花顺情绪 885.53 -0.18% ｜ ")
-        assert texts[4] == "板块：银行 1408.77 +0.88% ｜ 证券 1428.64 -0.27%"
-        assert all(label.isVisible() for label in market_window.market_labels)
+        # KPI：与 `market.kpi_values()` 同源（取数口径与命令行共用一份）
+        values = market.kpi_values(market_window.market_overview)
+        assert {name: label.text() for name, label in market_window.market_kpis.items()} \
+            == values
+        assert (values["涨停"], values["跌停"], values["炸板"]) == ("55", "16", "30")
+        assert values["成交额"] == "沪 7792亿 · 深 8499亿 · 北 140亿"
+        assert (values["上涨"], values["下跌"], values["平盘"]) == ("1", "1", "1")
 
-        # 这一天宽基全跌 → 宽基行绿色；情绪/板块有涨有跌 → 默认色；前两行没有涨跌幅
-        assert market_window.market_labels[2].styleSheet() == "color:#2e7d32"
-        assert market_window.market_labels[3].styleSheet() == ""
-        assert market_window.market_labels[4].styleSheet() == ""
-        assert market_window.market_labels[0].styleSheet() == ""
-        assert market_window.market_labels[1].styleSheet() == ""
-        assert market_window.market_hint.isVisible() is False      # 一切正常不留提示
+        # 三组条目：一个指数一个控件，三项文本逐项对齐
+        for label, expected in MARKET_EXPECTED_ENTRIES.items():
+            box = market_window.market_group_boxes[label]
+            assert box.isVisible() is True
+            assert box.placeholder_label.isVisible() is False   # 有数据就不要 `—` 占位
+            assert [_entry_fields(entry) for entry in box.entries] == expected
+        assert [entry.thscode for entry in market_window.market_entries] == [
+            code for rows in MARKET_EXPECTED_ENTRIES.values() for code, *_ in rows
+        ]
 
-        # 底部小字：数据来源 + 取数时间 + 刷新节奏（breadth 开着要注明它慢一档）
-        footer = market_window.market_as_of_label.text()
+        # 逐值上色：宽基全跌（绿）、情绪有涨有跌（红绿各自）、板块银行红证券绿
+        up, down = f"color:{market.COLOR_UP}", f"color:{market.COLOR_DOWN}"
+        assert [_entry_colors(e) for e in market_window.market_group_boxes["宽基"].entries] \
+            == [(down, down)] * 5
+        assert [_entry_colors(e) for e in market_window.market_group_boxes["情绪"].entries] \
+            == [(down, down)] + [(up, up)] * 3
+        assert [_entry_colors(e) for e in market_window.market_group_boxes["板块"].entries] \
+            == [(up, up), (down, down)]
+        assert market_window.market_hint.isVisible() is False       # 一切正常不留提示
+
+        # 页脚：数据来源 + 取数时间 + 刷新节奏（breadth 开着要注明它慢一档）
+        footer = market_window.market_as_of_label.fullText()
         assert footer.startswith("数据来源：同花顺金融数据服务 · 更新于 ")
         assert "每分钟自动刷新" in footer
         assert "涨跌家数与北交所成交额每 5 分钟更新" in footer
         assert market_window.market_overview["as_of"] in footer
 
-        # 全线上涨的行用红色
+        # 全线上涨 → 点位与涨跌幅都变红（颜色跟着新数据走，不是建页面时定死的）
         up_rows = [
             {"thscode": "000001.SH", "last_price": 3900.0,
              "price_change_ratio_pct": 0.86, "turnover": 8e11},
@@ -1838,14 +2362,89 @@ def test_market_page_renders_lines_colors_and_footer(market_window, qapp) -> Non
         ]
         market_window.refresh_market_overview(force=True, client=_market_fake(rows=up_rows))
         qapp.processEvents()
-        assert "+0.86%" in market_window.market_labels[2].text()
-        assert market_window.market_labels[2].styleSheet() == "color:#d32f2f"
+        wide = market_window.market_group_boxes["宽基"].entries
+        assert [e.value_label.text() for e in wide] == ["3900.00", "13400.00"]
+        assert [e.pct_label.text() for e in wide] == ["+0.86%", "+0.12%"]
+        assert [_entry_colors(e) for e in wide] == [(up, up)] * 2
     finally:
         market.clear_cache()
 
 
-def test_market_page_hides_lines_of_empty_groups(market_window, qapp) -> None:
-    """某组配置为空 → 那一行**整行隐藏**（不留一个空的"板块："）。"""
+def test_market_colors_each_value_on_its_own_move(market_window, qapp) -> None:
+    """**重点**：同一组里一涨一跌一平 → 每一项按自己的涨跌上色（不再是"整组同色"）。
+
+    这正是"一行一个 QLabel"做不到的事：情绪/板块经常同时有涨有跌，
+    按组取色只能"要么全染红、要么全不染"，两种都在骗人。
+    """
+    from laoa_trader import market
+
+    market.clear_cache()
+    try:
+        rows = [
+            {"thscode": "883404.TI", "last_price": 900.0, "price_change_ratio_pct": 1.20},
+            {"thscode": "883958.TI", "last_price": 6800.0, "price_change_ratio_pct": -0.80},
+            {"thscode": "883994.TI", "last_price": 1551.0, "price_change_ratio_pct": 0.0},
+        ]
+        market_window.refresh_market_overview(force=True, client=_market_fake(rows=rows))
+        qapp.processEvents()
+
+        by_code = {e.thscode: e for e in market_window.market_group_boxes["情绪"].entries}
+        up = by_code["883404.TI"]
+        down = by_code["883958.TI"]
+        flat = by_code["883994.TI"]
+
+        assert (up.value_label.text(), up.pct_label.text()) == ("900.00", "+1.20%")
+        assert _entry_colors(up) == (f"color:{market.COLOR_UP}",) * 2
+        assert _entry_colors(down) == (f"color:{market.COLOR_DOWN}",) * 2
+        # 平盘：两个 label 都没有 color 样式（用界面默认色，不硬塞一个颜色）
+        assert _entry_colors(flat) == ("", "")
+        assert flat.pct_label.text() == "+0.00%"
+        # 同一组里既有红又有绿 —— 逐值上色才做得到
+        assert {_entry_colors(up)[0], _entry_colors(down)[0]} == {
+            f"color:{market.COLOR_UP}", f"color:{market.COLOR_DOWN}",
+        }
+        # 颜色只在 `market` 里定义一次，界面与测试都从那里取
+        assert (market.COLOR_UP, market.COLOR_DOWN) == ("#d32f2f", "#2e7d32")
+    finally:
+        market.clear_cache()
+
+
+def test_market_footer_is_exactly_one_row(market_window, qapp) -> None:
+    """页脚只能**一行**：左边数据来源、右边【立即刷新】；只有出错提示才占"第二行"。"""
+    from PySide6.QtCore import QPoint
+    from laoa_trader import market
+
+    win = market_window
+    market.clear_cache()
+    try:
+        win.refresh_market_overview(force=True, client=_market_fake())
+        qapp.processEvents()
+
+        label = win.market_as_of_label
+        button = win.btn_market_refresh
+        footer = win.market_footer
+        layout = win.market_footer_layout
+        # 两个控件在**同一个**布局里（按钮没有另起一行）
+        assert footer.layout() is layout
+        assert layout.indexOf(label) >= 0
+        assert layout.indexOf(button) >= 0
+        # 纵向中心在同一条线上：按钮确实在第一行里
+        label_middle = label.mapTo(win, QPoint(0, 0)).y() + label.height() / 2
+        button_middle = button.mapTo(win, QPoint(0, 0)).y() + button.height() / 2
+        assert abs(label_middle - button_middle) <= 4
+        # 页脚高度就是"一行"的高度（多出一行的话这里会明显变高）
+        assert footer.height() <= max(label.height(), button.height()) + 8
+        # 左标签、右按钮，且都在页脚里（按钮没被挤出去）
+        assert button.x() >= label.x() + label.width() - 1
+        assert button.geometry().right() <= footer.width() + 1
+        # 正常状态页面上只有这一行页脚（提示不占位）
+        assert win.market_hint.isVisible() is False
+    finally:
+        market.clear_cache()
+
+
+def test_market_page_hides_whole_group_when_config_is_empty(market_window, qapp) -> None:
+    """某组配置为空 → 那一组**连标题一起隐藏**（不留一个空的"板块："）。"""
     from laoa_trader import market
 
     market.clear_cache()
@@ -1854,10 +2453,14 @@ def test_market_page_hides_lines_of_empty_groups(market_window, qapp) -> None:
         market_window.refresh_market_overview(force=True, client=_market_fake())
         qapp.processEvents()
 
-        assert market_window.market_labels[4].text() == ""
-        assert market_window.market_labels[4].isVisible() is False
-        assert market_window.market_labels[2].isVisible() is True     # 其它行照常
-        assert "银行" not in "".join(l.text() for l in market_window.market_labels)
+        sector = market_window.market_group_boxes["板块"]
+        assert sector.isVisible() is False
+        assert sector.title_label.isVisible() is False      # 标题也跟着收掉，不留空标题
+        assert sector.entries == []
+        assert market_window.market_group_boxes["宽基"].isVisible() is True   # 其它组照常
+        assert market_window.market_group_boxes["情绪"].isVisible() is True
+        assert "银行" not in "".join(e.name_label.text() for e in market_window.market_entries)
+        assert all(e.thscode != "881155.TI" for e in market_window.market_entries)
     finally:
         market.clear_cache()
 
@@ -1876,11 +2479,17 @@ def test_market_page_drops_only_the_bad_code(market_window, qapp) -> None:
         )
         qapp.processEvents()
 
-        texts = [label.text() for label in market_window.market_labels]
-        assert "932000" not in "".join(texts)
-        assert texts[3].count("｜") == 3          # 情绪行只剩 4 项
-        assert "昨日连板" in texts[3] and "微盘股" in texts[3]
-        assert texts[2].startswith("宽基：上证 ")  # 其它行一字不动
+        sentiment = market_window.market_group_boxes["情绪"]
+        assert [e.thscode for e in sentiment.entries] == [
+            "883404.TI", "883958.TI", "883994.TI", "883418.TI",
+        ]
+        assert "932000" not in "".join(
+            e.name_label.text() + e.value_label.text() for e in market_window.market_entries
+        )
+        assert "昨日连板" in [e.name_label.text() for e in sentiment.entries]
+        # 其它组一字不动
+        assert [_entry_fields(e) for e in market_window.market_group_boxes["宽基"].entries] \
+            == MARKET_EXPECTED_ENTRIES["宽基"]
         assert market_window.market_overview["failed"] == ["932000.TI"]
         assert "932000.TI" in market_window.market_hint.text()
     finally:
@@ -1899,20 +2508,29 @@ def test_market_page_shows_dash_and_reason_without_data(market_window, qapp) -> 
 
         assert market_window.market_overview is not None    # 拿不到 ≠ 抛异常，而是"有结构没数据"
         assert market.has_data(market_window.market_overview) is False
-        texts = [label.text() for label in market_window.market_labels]
-        assert texts[0] == "涨停 — · 跌停 — · 炸板 — ｜ 沪 — · 深 — · 北 —"
-        assert texts[1] == "上涨 — · 下跌 — · 平盘 —"
-        assert texts[2:] == ["宽基：—", "情绪：—", "板块：—"]
+        assert {name: label.text() for name, label in market_window.market_kpis.items()} == {
+            "涨停": market.DASH, "跌停": market.DASH, "炸板": market.DASH,
+            "成交额": f"沪 {market.DASH} · 深 {market.DASH} · 北 {market.DASH}",
+            "上涨": market.DASH, "下跌": market.DASH, "平盘": market.DASH,
+        }
+        # 配了的组还在（用户才知道自己配的东西在哪一行），只是没数据 → 一个 `—` 占位
+        for label, box in market_window.market_group_boxes.items():
+            assert box.isVisible() is True, label
+            assert box.title_label.isVisible() is True
+            assert box.entries == []
+            assert box.placeholder_label.text() == market.DASH
+            assert box.placeholder_label.isVisible() is True
+        assert market_window.market_entries == []
         assert market_window.market_hint.isVisible() is True
         assert "同花顺 Key" in market_window.market_hint.text()
         assert "同花顺 Key" in market_window.market_page.toolTip()
-        # 底部那行小字照样有（时间是—）
-        assert "更新于 —" in market_window.market_as_of_label.text()
+        # 页脚那行小字照样有（时间是 —）
+        assert "更新于 —" in market_window.market_as_of_label.fullText()
 
         market_window._tick()                                # 界面其它部分照常刷新
         qapp.processEvents()
         assert market_window.pool_table.rowCount() == 1
-        assert "引擎" in market_window.status_label.text()
+        assert market_window.status_tags["今日池子"].text() == "今日池子 1"
     finally:
         market.clear_cache()
 
@@ -1929,12 +2547,56 @@ def test_market_breadth_off_sends_no_page_request(market_window, qapp) -> None:
         qapp.processEvents()
 
         assert client.count("request") == 0
-        assert market_window.market_labels[0].text().endswith("北 —")
-        assert market_window.market_labels[1].text() == "上涨 — · 下跌 — · 平盘 —"
-        # 关掉时底部就不该再提"每 5 分钟更新"
-        assert "每 5 分钟" not in market_window.market_as_of_label.text()
+        assert market_window.market_kpis["成交额"].text().endswith("北 —")
+        for name in ("上涨", "下跌", "平盘"):
+            assert market_window.market_kpis[name].text() == market.DASH
+        # 关掉时页脚就不该再提"每 5 分钟更新"
+        assert "每 5 分钟" not in market_window.market_as_of_label.fullText()
     finally:
         market.clear_cache()
+
+
+def test_market_page_font_hierarchy_and_alignment(market_window, qapp) -> None:
+    """字号只有三级（页面标题 > 分区标题 = 正文），数值比标签大一号加粗，数字右对齐。
+
+    先注入假客户端刷一轮：**有数据才谈得上"数字竖着对齐"**（没数据时条目是 `—` 占位）。
+    """
+    from laoa_trader import market
+
+    win = market_window
+    market.clear_cache()
+    try:
+        win.refresh_market_overview(force=True, client=_market_fake())
+        qapp.processEvents()
+        _assert_market_fonts_and_alignment(win)
+    finally:
+        market.clear_cache()
+
+
+def _assert_market_fonts_and_alignment(win) -> None:
+    """字号层级 / 加粗 / 右对齐 / 列宽一致 —— 从上面那条用例里拆出来只是为了让主用例短一点。"""
+    from PySide6.QtCore import Qt
+
+    title_font = win.market_title.font()
+    group_font = win.market_group_boxes["宽基"].title_label.font()
+    card = win.market_kpi_cards["涨停"]
+    assert title_font.bold() is True
+    assert title_font.pointSize() > group_font.pointSize()          # 页面标题最大
+    assert card.value_label.font().bold() is True                   # 数值加粗
+    # "大一号"：数值比它自己的标签大一号（标签保持正文号，只是变灰）
+    assert card.value_label.font().pointSize() == card.title_label.font().pointSize() + 1
+    assert card.value_label.alignment() & Qt.AlignmentFlag.AlignRight
+    # 条目里点位与涨跌幅都右对齐；两列的列宽对所有条目都一样 → 数字落在同一条竖线上
+    entries = win.market_group_boxes["宽基"].entries
+    assert entries, "需要有数据才谈得上对齐"
+    for entry in entries:
+        assert entry.value_label.alignment() & Qt.AlignmentFlag.AlignRight
+        assert entry.pct_label.alignment() & Qt.AlignmentFlag.AlignRight
+    tracks = {
+        (e.value_label.minimumWidth(), e.pct_label.minimumWidth()) for e in entries
+    }
+    assert len(tracks) == 1
+    assert tracks.pop()[0] > 0
 
 
 def test_market_refresh_button_forces_refetch(market_window, qapp, monkeypatch) -> None:
@@ -2044,8 +2706,328 @@ def test_market_overview_off_shows_hint_and_makes_no_request(market_window, qapp
         market_window.refresh_market_overview(force=True, client=client)
         qapp.processEvents()
         assert client.calls == []
-        assert market_window.market_labels[2].text() == "宽基：—"
-        assert market_window.market_labels[2].isVisible() is True
+        # 配了的组照样显示（只是没数据，占位是 `—`）
+        assert market_window.market_group_boxes["宽基"].isVisible() is True
+        assert market_window.market_group_boxes["宽基"].placeholder_label.isVisible() is True
+        assert market_window.market_kpis["涨停"].text() == market.DASH
         assert "market_overview" in market_window.market_hint.text()
+    finally:
+        market.clear_cache()
+
+
+# ── 窗口尺寸：按屏幕可用区域算，最底部那一行不许被切掉 ──
+
+
+@pytest.fixture()
+def screen_window(seeded, qapp, monkeypatch):
+    """按**模拟的屏幕可用区域**开窗口。
+
+    为什么要模拟：离屏平台报的"真屏幕"是 800×800，只测它测不出 1366×768 / 1024×600
+    这两档笔记本屏幕上的行为 —— 而那正是用户反馈"一打开最下边看不见"的场景。
+    这里把 `_available_geometry` 换成一个假的可用区域，走的还是真实代码路径。
+    """
+    from PySide6.QtCore import QRect
+
+    from laoa_trader.ui import app as ui_app
+
+    opened: list = []
+
+    def _open(width: int, height: int):
+        monkeypatch.setattr(
+            ui_app, "_available_geometry", lambda: QRect(0, 0, width, height)
+        )
+        win = ui_app.MainWindow(seeded)
+        win.show()
+        qapp.processEvents()
+        _wait_market(win, qapp)          # 启动那一轮后台取数先落地，别跟断言抢数
+        opened.append(win)
+        return win
+
+    yield _open
+
+    for win in opened:
+        win.scheduler.stop()
+        _wait_market(win, qapp)
+        if win.wizard is not None:
+            win.wizard.close()
+        win.tray.hide()
+        win.deleteLater()
+    qapp.processEvents()
+
+
+def _bottom_of(widget, window) -> int:
+    """控件换算到窗口坐标后的**底边** y（用来断言"没被窗口下沿切掉"）。"""
+    from PySide6.QtCore import QPoint
+
+    return widget.mapTo(window, QPoint(0, 0)).y() + widget.height()
+
+
+def test_fit_window_geometry_rules() -> None:
+    """尺寸规则：`min(1120, 可用宽-40) × min(760, 可用高-40)`、最小尺寸收到 760×540、按可用区域居中。"""
+    from PySide6.QtCore import QRect
+
+    from laoa_trader.ui import app as ui_app
+
+    # 用户那台：2160×1440 物理分辨率 + 150% 缩放 → 逻辑 1440×960，扣掉任务栏约 900
+    size, minimum, pos = ui_app.fit_window_geometry(QRect(0, 0, 1440, 900))
+    assert (size.width(), size.height()) == (1120, 760)
+    assert (minimum.width(), minimum.height()) == (760, 540)
+    assert (pos.x(), pos.y()) == ((1440 - 1120) // 2, (900 - 760) // 2)
+    assert size.height() <= 900 and minimum.height() <= 900        # 整窗在可用区域里
+
+    # 逻辑宽度只有 960（更苛刻的那种 DPI 组合）：默认尺寸跟着让位，最小尺寸仍然 760×540
+    size, minimum, pos = ui_app.fit_window_geometry(QRect(0, 0, 960, 900))
+    assert (size.width(), size.height()) == (920, 760)
+    assert (minimum.width(), minimum.height()) == (760, 540)
+    assert (pos.x(), pos.y()) == ((960 - 920) // 2, (900 - 760) // 2)
+    assert minimum.width() <= size.width() and minimum.height() <= size.height()
+
+    # 常见笔记本档
+    size, minimum, _ = ui_app.fit_window_geometry(QRect(0, 0, 1280, 720))
+    assert (size.width(), size.height()) == (1120, 680)
+    assert minimum.width() <= size.width() and minimum.height() <= size.height()
+
+    # 极窄的屏上"最小"与"默认"会撞到一起：必须收敛成 `最小 <= 默认`，
+    # 否则窗口一开出来就是最小尺寸、还一点都拖不大
+    size, minimum, _ = ui_app.fit_window_geometry(QRect(0, 0, 800, 600))
+    assert (size.width(), size.height()) == (760, 560)
+    assert minimum.width() <= size.width() and minimum.height() <= size.height()
+
+    # 多显示器：可用区域不在原点时，居中要相对**那块**屏幕算
+    _, _, pos = ui_app.fit_window_geometry(QRect(1920, 0, 1440, 900))
+    assert pos.x() == 1920 + (1440 - 1120) // 2
+    # 传进来的不是可用区域（拿不到屏幕时上层可能传了奇怪的东西）→ 返回 None，不抛
+    assert ui_app.fit_window_geometry("不是矩形") is None
+
+
+@pytest.mark.parametrize(
+    "avail",
+    [
+        (960, 900),     # ≈2160×1440 + 150% 缩放（逻辑 1440×960，扣任务栏 ~900）—— 用户那台
+        (1280, 720),    # 另一档常见笔记本（也是一堆 150% 缩放机器缩放后的逻辑尺寸）
+    ],
+)
+def test_window_fits_the_screen_and_keeps_the_bottom_row(
+    screen_window, qapp, avail
+) -> None:
+    """**核心回归**：窗口不许比屏幕可用区域大，最底部那一行必须留在窗口内。
+
+    这两档就是用户真实会遇到的尺寸：150% 缩放把逻辑可用区域压到 900 高左右，
+    写死 `resize(1120, 720)`（再加标题栏）正好把底边顶出屏幕 ——
+    用户看到的症状就是"一打开，最下边看不见"。
+    其中"`minimumSizeHint` 不超出可用区域"这条最关键：最小尺寸一旦超标，
+    `resize()` 会被 Qt 顶回去，窗口就永远缩不进屏幕里。
+    """
+    width, height = avail
+    win = screen_window(width, height)
+    qapp.processEvents()
+
+    # 1) 尺寸按可用区域算，且不超过它（写死 1120×720 的实现会在这里红）
+    assert win.width() == min(1120, width - 40)
+    assert win.height() == min(760, height - 40)
+    assert win.width() <= width and win.height() <= height
+    # 2) 最小尺寸也收住了：否则用户拖不动窗口，底边永远在屏幕外
+    assert win.minimumSizeHint().width() <= width
+    assert win.minimumSizeHint().height() <= height
+    assert win.minimumSize().width() <= win.width()
+    assert win.minimumSize().height() <= win.height()
+    # 3) 居中
+    assert abs(win.x() - (width - win.width()) // 2) <= 2
+    assert abs(win.y() - (height - win.height()) // 2) <= 2
+    # 4) 最下面的东西（页脚 / 进度条 / 页签区 / 出错提示）都在窗口里
+    for widget in (win.status_label, win.progress, win.tabs, win.market_hint,
+                   win.market_footer):
+        assert _bottom_of(widget, win) <= win.height(), widget
+    # 5) 横向不溢出：内容最小宽度放得进视口，也不出现横向滚动条
+    assert win.market_scroll.horizontalScrollBar().isVisible() is False
+    assert win.market_content.minimumSizeHint().width() \
+        <= win.market_scroll.viewport().width()
+
+
+def test_window_falls_back_to_the_default_size_without_screen(seeded, qapp,
+                                                              monkeypatch) -> None:
+    """拿不到屏幕信息（极端环境）→ 退回 1120×760，而不是开出一个 0×0 的窗口。"""
+    from laoa_trader.ui import app as ui_app
+
+    monkeypatch.setattr(ui_app, "_available_geometry", lambda: None)
+    win = ui_app.MainWindow(seeded)
+    win.show()
+    qapp.processEvents()
+    try:
+        assert ui_app.WINDOW_PREFERRED_SIZE == (1120, 760)
+        assert (win.width(), win.height()) == (1120, 760)
+    finally:
+        win.scheduler.stop()
+        win.tray.hide()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_window_stays_usable_when_dragged_down_to_the_minimum(
+    screen_window, qapp
+) -> None:
+    """**用户那台机器上的关键一条**：把窗口拖到 800×560 / 760×540 也还能用。
+
+    为什么要单独测：最小尺寸如果被"股票池表格 9 列"或"概览三组条目"顶大，
+    窗口就缩不进去；缩进去之后又可能出现"底部被切 / 横向溢出"。
+    这里两件事一起钉：最小宽度确实能到 760、缩小后页脚还在窗口里、
+    概览内容与股票池表格都不会把窗口顶宽（表格自己横向滚动）。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QAbstractScrollArea
+
+    from laoa_trader import market
+
+    market.clear_cache()
+    win = screen_window(960, 900)          # ≈ 用户那台（150% 缩放）
+    try:
+        win.refresh_market_overview(force=True, client=_market_fake())
+        qapp.processEvents()
+        assert win.minimumSize().width() <= 760        # 真的能拖到 760 宽
+        assert win.minimumSize().height() <= 540
+
+        for size in ((800, 560), (760, 540)):
+            win.resize(*size)
+            qapp.processEvents()
+            assert (win.width(), win.height()) == size       # 没被最小尺寸顶回去
+            # 最底部那一行（页脚）与进度条都还在窗口里
+            for widget in (win.progress, win.tabs, win.market_footer):
+                assert _bottom_of(widget, win) <= win.height(), (size, widget)
+            # 概览页不横向溢出（内容最小宽度放得进视口，滚动条关着也看得全）
+            assert win.market_content.minimumSizeHint().width() \
+                <= win.market_scroll.viewport().width(), size
+            assert win.market_scroll.horizontalScrollBar().isVisible() is False
+
+        # 股票池页：9 列表格不许把窗口顶宽 —— 它自己在内部横向滚动
+        win.tabs.setCurrentWidget(_tab_page(win, "股票池"))
+        qapp.processEvents()
+        assert win.pool_table.minimumSizeHint().width() <= win.pool_table.width()
+        # 表格的横向滚动条是"需要时出现"（9 列放不下就自己滚，而不是把窗口顶宽）
+        assert win.pool_table.horizontalScrollBarPolicy() \
+            != Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        assert win.minimumSizeHint().width() <= 760
+        # 卡片视图是滚动区：宽度跟着视口走，不会横向溢出
+        assert isinstance(win.pool_scroll, QAbstractScrollArea)
+        assert win.pool_scroll.viewport().width() <= win.width()
+    finally:
+        market.clear_cache()
+
+
+def test_kpi_grid_is_two_rows_of_three_plus_a_spanning_amount_card(
+    market_window, qapp
+) -> None:
+    """KPI 排布：2 行 × 3 个 + 成交额跨两行（**不许**挤成一行六个）。
+
+    900 逻辑宽上下是最常见的实际宽度，六个块挤一行会又扁又难看；
+    3+3 两组对齐、成交额横着够宽，才是"整齐"的那一种。
+    """
+    from laoa_trader import market
+
+    market.clear_cache()
+    win = market_window
+    try:
+        win.refresh_market_overview(force=True, client=_market_fake())
+        qapp.processEvents()
+        grid = win.market_kpi_grid
+        expected = {
+            "涨停": (0, 0, 1, 1), "跌停": (0, 1, 1, 1), "炸板": (0, 2, 1, 1),
+            "上涨": (1, 0, 1, 1), "下跌": (1, 1, 1, 1), "平盘": (1, 2, 1, 1),
+            "成交额": (0, 3, 2, 1),        # 跨两行、贴右侧
+        }
+        for name, card in win.market_kpi_cards.items():
+            index = grid.indexOf(card)
+            assert index >= 0, name
+            assert grid.getItemPosition(index) == expected[name], name
+        # 同一个网格位置不会有两个卡片（"挤成一行六个"在这种情况下会被抓出来）
+        positions = [
+            grid.getItemPosition(grid.indexOf(card))[:2]
+            for card in win.market_kpi_cards.values()
+        ]
+        assert len(set(positions)) == len(positions) == 7
+    finally:
+        market.clear_cache()
+
+
+def test_overview_uses_three_columns_on_a_150pct_scaled_screen(
+    screen_window, qapp
+) -> None:
+    """≈用户那台机器（逻辑可用 960×900 → 窗口 920×760）：概览页正好 **3 列**，整齐不挤不截断。
+
+    3 列是那一档的主力形态（920 ÷ 260 ≈ 3）：三五只宽基排成 3+2、四项情绪排成 3+1，
+    每一项的"名称/点位/涨跌幅"三列都要完整显示（不许被列宽截掉半个数字）。
+    """
+    from laoa_trader import market
+
+    market.clear_cache()
+    win = screen_window(960, 900)
+    try:
+        assert (win.width(), win.height()) == (920, 760)
+        win.refresh_market_overview(force=True, client=_market_fake())
+        qapp.processEvents()
+        assert win._market_columns == 3
+        assert _grid_rows(win.market_group_boxes["宽基"]) == [
+            [c for c, *_ in MARKET_EXPECTED_ENTRIES["宽基"]][:3],
+            [c for c, *_ in MARKET_EXPECTED_ENTRIES["宽基"]][3:],
+        ]
+        assert [len(row) for row in _grid_rows(win.market_group_boxes["情绪"])] == [3, 1]
+        assert [len(row) for row in _grid_rows(win.market_group_boxes["板块"])] == [2]
+
+        # 每一项三个标签都完整显示：宽度不少于自己的"需要宽度"（截断/挤压会小于它）
+        for entry in win.market_entries:
+            assert entry.name_label.text() not in ("", market.DASH)
+            assert entry.name_label.width() >= entry.name_label.sizeHint().width(), \
+                entry.thscode
+            for label in (entry.value_label, entry.pct_label):
+                assert label.width() >= label.sizeHint().width(), entry.thscode
+        # KPI 数值也不许被卡片的宽度截掉
+        for name, card in win.market_kpi_cards.items():
+            assert card.value_label.width() >= card.value_label.sizeHint().width(), name
+        # 一行页脚照样成立
+        assert win.market_footer.height() \
+            <= max(win.market_as_of_label.height(), win.btn_market_refresh.height()) + 8
+    finally:
+        market.clear_cache()
+
+
+def _grid_rows(box) -> list[list[str]]:
+    """按网格位置把条目排成"行"（每行是若干 thscode）—— 用来断言响应式列数。"""
+    placed: dict[int, list[tuple[int, str]]] = {}
+    for entry in box.entries:
+        row, column, _, _ = box.grid.getItemPosition(box.grid.indexOf(entry))
+        placed.setdefault(row, []).append((column, entry.thscode))
+    return [[code for _, code in sorted(cells)] for _, cells in sorted(placed.items())]
+
+
+def test_market_entry_columns_shrink_with_the_window(screen_window, qapp) -> None:
+    """窗口变窄 → 每组每行的条目数跟着降（4 → 3 → 5 列），且始终不出现横向溢出。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    win = screen_window(1600, 1000)      # 窗口 = min(1120, 1560) = 1120 宽 → 4 列
+    try:
+        win.refresh_market_overview(force=True, client=_market_fake())
+        qapp.processEvents()
+        wide = win.market_group_boxes["宽基"]
+        codes = [code for code, *_ in MARKET_EXPECTED_ENTRIES["宽基"]]
+        assert win._market_columns == 4
+        assert _grid_rows(wide) == [codes[:4], codes[4:]]
+
+        # 缩到 800 宽（现在最小宽度是 760，缩得下去）：列数掉到 2，条目往下排
+        win.resize(800, win.height())
+        qapp.processEvents()
+        assert win._market_columns == 2
+        assert _grid_rows(wide) == [codes[:2], codes[2:4], codes[4:]]
+        assert [c for row in _grid_rows(wide) for c in row] == codes
+        assert win.market_scroll.horizontalScrollBar().isVisible() is False
+        assert win.market_content.minimumSizeHint().width() \
+            <= win.market_scroll.viewport().width()
+
+        # 再放大：列数涨到 5（一行装下五只宽基）
+        win.resize(1500, win.height())
+        qapp.processEvents()
+        assert win._market_columns == 5
+        assert _grid_rows(wide) == [codes]
+        assert win.market_content.minimumSizeHint().width() \
+            <= win.market_scroll.viewport().width()
     finally:
         market.clear_cache()

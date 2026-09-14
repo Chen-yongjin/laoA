@@ -175,7 +175,7 @@ def test_run_daily_notifies_pool_with_plan_params(cfg, db, monkeypatch) -> None:
 
     report = scheduler.run_daily(cfg, DataEngine(db), notify=True)
     assert report["pool"]
-    assert "老A法师-选股池" in captured["title"]
+    assert "老A选股助手-选股池" in captured["title"]
     body = "\n".join(captured["lines"])
     assert "600001" in body
     assert "条件单参数" in body          # 附带触发价/委托价/止损止盈

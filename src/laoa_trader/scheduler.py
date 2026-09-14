@@ -186,7 +186,7 @@ def pool_fingerprint(title: str, lines: list[str]) -> str:
 
 
 #: 数据闸门拦住时给用户看的中文下一步指引（界面与 CLI 共用同一句话）
-DOWNLOAD_HINT = "请先下载：点界面上的【下载/更新历史数据】，或命令行运行 --download"
+DOWNLOAD_HINT = "请先下载：点界面上的【下载数据】，或命令行运行 --download"
 
 
 def data_gate(
@@ -259,7 +259,7 @@ def run_daily(
 ) -> dict:
     """跑一次完整的日更流程：数据增量（可选）→ 策略 → 建池 → 推送。
 
-    **界面上的【立即选股并建池】与 19:15 的定时任务共用这一个函数** ——
+    **界面上的【选股建池】与 19:15 的定时任务共用这一个函数** ——
     口径一致才谈得上幂等：信号按 (行情日, 策略, 代码) upsert、池子按
     (行情日, 代码) upsert、推送按内容指纹去重（同一天同一批内容只推一次）。
 
@@ -354,7 +354,7 @@ def run_daily(
         from laoa_trader.data import storage
         from laoa_trader.notify import notify_all, summarize
 
-        title = f"📈 老A法师-选股池 | {report['data_date']}"
+        title = f"📈 老A选股助手-选股池 | {report['data_date']}"
         lines = pool.format_pool_lines(pool_rows)
         lines.extend(_pool_plan_lines(pool_rows, cfg))
         day = report["data_date"] or datetime.now().strftime("%Y-%m-%d")
@@ -561,7 +561,7 @@ class Scheduler:
         progress_cb: sync.ProgressCb | None = None,
         stage_cb: Any = None,
     ) -> dict:
-        """立刻跑一次（不受时间限制）：界面【立即选股并建池】与 CLI --once 用。"""
+        """立刻跑一次（不受时间限制）：界面【选股建池】与 CLI --once 用。"""
         report = run_daily(
             self.cfg, self.engine, notify=notify, with_data=with_data,
             selection=selection, progress_cb=progress_cb, stage_cb=stage_cb,
@@ -665,7 +665,7 @@ class Scheduler:
         if state.is_downloading():
             self._block_daily(
                 "正在下载历史数据：已跳过本次自动选股；"
-                "下载完成后当天仍会自动补跑一次（也可以点【立即选股并建池】）",
+                "下载完成后当天仍会自动补跑一次（也可以点【选股建池】）",
                 now,
             )
             return
@@ -676,7 +676,7 @@ class Scheduler:
         if not gate["ok"]:
             self._block_daily(
                 f"本地数据不可用（{gate['reason']}）：已跳过本次自动选股；"
-                "请先下载历史数据（界面【下载/更新历史数据】或命令行 --download）",
+                "请先下载历史数据（界面【下载数据】或命令行 --download）",
                 now,
             )
             return

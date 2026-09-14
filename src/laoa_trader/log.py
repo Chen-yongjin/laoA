@@ -67,3 +67,13 @@ def get_logger(name: str) -> logging.Logger:
     """取带命名空间的 logger（与服务器版 `get_logger` 用法一致）。"""
     short = name.replace("laoa_trader.", "")
     return logging.getLogger(f"laoa_trader.{short}")
+
+
+def log_file_path() -> Path | None:
+    """当前日志文件路径（**只读、无副作用**）；还没写过文件时返回 None。
+
+    为什么要单独开一个"只读"的口：状态详情里要告诉用户"日志在哪"，而
+    `setup_logging()` 是**会建目录、建文件、挂 handler** 的（有副作用）——
+    界面只是想把这个路径**显示**出来，不该顺手去改日志配置。
+    """
+    return getattr(logging.getLogger("laoa_trader"), "_laoa_log_path", None)

@@ -17,23 +17,26 @@ from __future__ import annotations
 import sys
 import time
 import traceback
+from pathlib import Path
 from typing import Any
 
 import laoa_trader
 from laoa_trader import assets, intraday, market, pool, state
+from laoa_trader import config
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import sync
 from laoa_trader.data.engine import DataEngine
-from laoa_trader.log import get_logger
+from laoa_trader.log import get_logger, log_file_path
 from laoa_trader.notify import KINDS, summarize
 from laoa_trader.scheduler import Scheduler, data_gate, refresh_data, run_daily
 from laoa_trader.strategy import rules as rules_mod
+from laoa_trader.ui import theme as theme_mod
 
 logger = get_logger(__name__)
 
 #: 程序名 / 版权行 / 数据来源：「窗口标题」「关于」对话框、复制到剪贴板的版本信息
 #: **共用这一份** —— 分发出去之后用户看到的版本信息必须处处一致，不能各写各的
-APP_NAME = "老A法师 · 交易终端"
+APP_NAME = "老A选股助手"
 COPYRIGHT_TEXT = "版权所有 © 2026 async-chen，保留所有权利。"
 SOURCE_TEXT = ("数据来源：同花顺（fuyao.aicubes.cn）。"
                "本程序仅用于个人研究与学习，不构成任何投资建议。")
@@ -45,14 +48,80 @@ ABOUT_ICON_SIZE = 64
 #: 取数另有 55 秒 TTL（`market_overview_ttl`），所以这一分钟里最多真打一次接口。
 MARKET_REFRESH_MS = 60_000
 
+# ── 窗口尺寸 ──
+#: 窗口**期望**尺寸（可用区域够大时就用它）与**最小**尺寸上限。
+#: 这两个值只是"上限"：真正的尺寸按屏幕可用区域算（见 `fit_window_geometry`）。
+#: 高 760 而不是 720：现在多了一行 KPI 卡片区，720 在 150% 缩放的机器上正好压线。
+WINDOW_PREFERRED_SIZE = (1120, 760)
+#: 最小尺寸收到 760×540 —— 比"表格 9 列 + 概览三组条目"需要的宽度小得多，
+#: 用户能把它拖小（内容区/表格自己滚动），而不是被一个虚高的最小尺寸顶出屏幕。
+WINDOW_MIN_SIZE = (760, 540)
+#: 与屏幕可用区域边缘留的余量（默认尺寸与最小尺寸同一档）。
+#: 为什么要留：Windows 上任务栏、"贴边自动吸附"、非 100% 的 DPI 缩放都会让
+#: "刚好等于可用高"的窗口贴边或压到任务栏上；留 40 像素，窗口四周才有呼吸空间。
+WINDOW_MARGIN = 40
+WINDOW_MIN_MARGIN = 40
+#: 极端小屏兜底：屏幕窄到算出来是 0 或负数时，也不能开出一个点不动的窗口
+WINDOW_FLOOR_SIZE = (400, 320)
+WINDOW_MIN_FLOOR_SIZE = (360, 280)
+
+#: 概览页里"每个指数条目"的参考宽度（像素）：每行放几个 = 可用宽 // 这个数。
+#: 260 是"名称（5 个汉字）+ 点位（8 位数字）+ 涨跌幅"还能舒服排下的宽度。
+MARKET_ENTRY_MIN_WIDTH = 260
+#: 一行最多几个条目（再多就只有"稀"没有"密"了）
+MARKET_MAX_COLUMNS = 5
+#: 点位 / 涨跌幅两列的**轨道宽度取样串**：取"最宽的那种数字"量出列宽，
+#: 让不同条目的两列落在同一条竖线上（`-88888.88` 覆盖负号 + 5 位整数 + 2 位小数，
+#: 涨跌幅多一个 `%`）。取样串只用来量宽度，不当占位文本显示。
+MARKET_VALUE_TRACK = "-88888.88"
+MARKET_PCT_TRACK = "-888.88%"
+
+#: 界面里唯一的三种字号层级：页面标题 +2、KPI 数值 +1 加粗、其余都是基准字号。
+#: 为什么卡死在三种：字号一多，页面看着就"花"，用户要的是层级分明不是字号丰富。
+FONT_TITLE_DELTA = 2
+FONT_VALUE_DELTA = 1
+
+# ── 统一间距（整窗只用这两组值，别有的地方 16 有的地方 4）──
+#: 每个页面的内边距（左、上、右、下）：下方略小一点，视觉上不会觉得"下面空了一块"
+PAGE_MARGINS = (14, 14, 14, 12)
+#: 同一页里控件之间的间距
+PAGE_SPACING = 8
+#: 主窗口中央区的内边距（比页面再紧一点：外层套内层，太厚就浪费屏幕）
+WINDOW_MARGINS = (12, 12, 12, 12)
+
+# ── 顶部状态区 ──
+#: 瞬时消息（任务完成/失败、刚点过的动作）在状态栏停留多久（秒）。
+#: 10 分钟：够用户看见，又不会永远盖住实时状态。
+STATUS_MESSAGE_TTL = 600.0
+#: 右侧短标签的名字（顺序即显示顺序）。标签文本 = 名字 + 一个短值，
+#: 每项 2~6 个字；没有值的项**整项隐藏**（例如没有持仓就不显示"持仓"）。
+STATUS_TAGS: tuple[str, ...] = ("今日池子", "持仓", "下次选股", "盘中提醒")
+#: 「盘中提醒」标签的三种取值（界面、测试、详情共用一份，不各写各的）
+INTRADAY_PAUSED = "已暂停"
+INTRADAY_IN_SESSION = "时段中"
+INTRADAY_OUT_SESSION = "未在时段"
+#: 顶部按钮文字（2~4 字）与"指路"时引用的名字 —— **必须只有这一份**：
+#: 主状态里写"点【下载数据】补齐"，按钮上就必须真的写着【下载数据】，
+#: 否则用户拿着这句话去找一个不存在的按钮。
+BTN_DOWNLOAD_TEXT = "下载数据"
+BTN_RUN_TEXT = "选股建池"
+BTN_REFRESH_TEXT = "刷新数据"
+BTN_PAUSE_TEXT = "暂停提醒"
+BTN_RESUME_TEXT = "恢复提醒"
+BTN_CHECK_TEXT = "检查盘面"
+BTN_DETAILS_TEXT = "详情"
+BTN_ABOUT_TEXT = "关于"
+
 try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
-    from PySide6.QtCore import Qt, QThread, QTimer, Signal
-    from PySide6.QtGui import QAction, QGuiApplication, QIcon, QPixmap
+    from PySide6.QtCore import QPoint, QSize, Qt, QThread, QTimer, Signal
+    from PySide6.QtGui import QAction, QFont, QGuiApplication, QIcon, QPalette, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
+        QComboBox,
         QDialog,
         QFrame,
+        QGridLayout,
         QHBoxLayout,
         QHeaderView,
         QInputDialog,
@@ -62,6 +131,7 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
         QMenu,
         QMessageBox,
         QProgressBar,
+        QPlainTextEdit,
         QPushButton,
         QScrollArea,
         QSizePolicy,
@@ -87,7 +157,335 @@ def _fmt_float(value: Any, digits: int = 2) -> str:
         return "—"
 
 
+def _short_number(value: Any) -> str:
+    """大数字压成"万 / 亿"：`10,283,203` → `1028 万`。
+
+    用户反馈"10,283,203 行"这种既长又看不懂 —— 状态详情里要的是**量级**，
+    不是账目数字（真要精确到个位，库和日志里都查得到）。
+    """
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if abs(number) >= 1e8:
+        text = f"{number / 1e8:.1f}"
+        return text.rstrip("0").rstrip(".") + " 亿"
+    if abs(number) >= 1e4:
+        return f"{number / 1e4:.0f} 万"
+    return f"{number:.0f}"
+
+
 if QT_AVAILABLE:
+
+    def _scaled_font(font: Any, delta: int = 0, *, bold: bool | None = None) -> Any:
+        """在现成字体上做字号加减与加粗，返回**新对象**（不改调用方那份）。
+
+        为什么要判断 `pointSize() > 0`：字号也可能是按像素设的（那时 `pointSize()` 是 -1），
+        负数上再加加减减会得到"字号 0"，界面直接糊成一团。
+        """
+        out = QFont(font)
+        if delta and out.pointSize() > 0:
+            out.setPointSize(max(1, out.pointSize() + delta))
+        if bold is not None:
+            out.setBold(bold)
+        return out
+
+    def _available_geometry() -> Any:
+        """主屏的**可用区域**（逻辑像素，已经扣掉任务栏）；拿不到屏幕信息时返回 None。
+
+        为什么必须用 availableGeometry 而不是 geometry：1366×768 的笔记本上任务栏
+        能占掉 40 像素左右，而 DPI 缩放 125% 时"逻辑可用高度"还要再减一截 ——
+        照着整屏尺寸开窗，窗口底边正好被任务栏或屏幕下沿吃掉，
+        用户看到的就是"软件一打开，最下边就看不见"。
+        """
+        try:
+            screen = QGuiApplication.primaryScreen()
+        except Exception as exc:  # noqa: BLE001 - 无显示环境/插件异常都要能降级
+            logger.debug(f"取屏幕信息失败：{exc}")
+            return None
+        if screen is None:
+            return None
+        try:
+            return screen.availableGeometry()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"取可用区域失败：{exc}")
+            return None
+
+    def fit_window_geometry(avail: Any = None) -> tuple[Any, Any, Any] | None:
+        """按屏幕可用区域算 `(默认尺寸, 最小尺寸, 居中位置)`；拿不到屏幕信息时返回 None。
+
+        规则（宽/高各自算，屏幕小就让位）：
+        - 默认尺寸 = `min(1120, 可用宽 - 40) × min(760, 可用高 - 40)`；
+        - 最小尺寸 = `min(760, 可用宽 - 40) × min(540, 可用高 - 40)`；
+        - 位置 = 可用区域居中（别顶在左上角，也别让窗口一半在屏幕外）。
+
+        **为什么是"按可用区域"而不是写死**：Windows 上真正决定窗口能看到多少的是
+        *逻辑*像素 —— 2160×1440 的屏在 150% 缩放下只剩 1440×960 逻辑像素，
+        再扣掉任务栏，可用高度只有 900 左右。写死 720 高（加标题栏）正好被切掉底边，
+        用户看到的就是"打开软件最下边看不见"。按可用区域算，这台机器上会得到
+        `min(1120, 1400) × min(760, 860) = 1120×760`，整窗都在屏幕内。
+
+        **为什么最小尺寸也一起收**：窗口的最小尺寸如果大于可用高度，用户**缩不动**它 ——
+        底边永远在屏幕外（`resize()` 会被 Qt 按最小尺寸顶回去），这是"最下边看不见"
+        最隐蔽的那一半原因。收到 760×540 之后，即使用户把窗口拖到很小，
+        内容区（概览的可滚动区、股票池的卡片区与表格）也都会自己滚动，
+        不会有"表格 9 列顶出来的虚高最小宽度"把窗口撑出屏幕。
+        最小尺寸还做了一次 `min(最小, 默认)` 的收敛：屏幕很窄时
+        `min(760, 宽-40)` 会等于 `min(1120, 宽-40)`，那样窗口一开出来就是最小尺寸、
+        用户一点都拖不大，也不合理。
+
+        Args:
+            avail: 可用区域（QRect）；缺省时自己去问主屏。测试注入一个假的 960×900
+                （≈2160×1440 + 150% 缩放）也走这条路 —— 离屏平台的"真屏幕"是 800×800，
+                只用它测不出真实机器上的行为。
+
+        Returns:
+            `(QSize 默认, QSize 最小, QPoint 位置)`；拿不到屏幕信息时 None（调用方退回固定尺寸）。
+        """
+        if avail is None:
+            avail = _available_geometry()
+        if avail is None:
+            return None
+        try:
+            avail_width, avail_height = int(avail.width()), int(avail.height())
+            avail_x, avail_y = int(avail.x()), int(avail.y())
+        except Exception:  # noqa: BLE001 - 传进来的不是 QRect 就当拿不到
+            return None
+        if avail_width <= 0 or avail_height <= 0:
+            return None
+
+        width = min(WINDOW_PREFERRED_SIZE[0], avail_width - WINDOW_MARGIN)
+        height = min(WINDOW_PREFERRED_SIZE[1], avail_height - WINDOW_MARGIN)
+        min_width = min(WINDOW_MIN_SIZE[0], avail_width - WINDOW_MIN_MARGIN)
+        min_height = min(WINDOW_MIN_SIZE[1], avail_height - WINDOW_MIN_MARGIN)
+        width = max(width, WINDOW_FLOOR_SIZE[0])
+        height = max(height, WINDOW_FLOOR_SIZE[1])
+        min_width = max(min_width, WINDOW_MIN_FLOOR_SIZE[0])
+        min_height = max(min_height, WINDOW_MIN_FLOOR_SIZE[1])
+        min_width = min(min_width, width)
+        min_height = min(min_height, height)
+
+        x = avail_x + max(0, (avail_width - width) // 2)
+        y = avail_y + max(0, (avail_height - height) // 2)
+        return QSize(width, height), QSize(min_width, min_height), QPoint(x, y)
+
+    class ElidedLabel(QLabel):
+        """单行小字：宽度不够时**省略**（全文用 `fullText()` 取，鼠标停上去也能看全）。
+
+        为什么不用 `setWordWrap(True)`：页脚必须只占一行（用户要求"数据说明和刷新
+        改成一行或者两行显示"，正常状态就一行），一换行就等于把页脚变成了两行，
+        刷新按钮还可能被挤到下一行去。省略号也比"半截字"更能让人看出"这里被截了"。
+
+        横向 SizePolicy 用 `Ignored`：文本再长也不会把窗口的**最小宽度**顶大 ——
+        最小宽度一旦被一行小字顶起来，小屏上就会横向溢出（用户看不到右侧内容）。
+        """
+
+        def __init__(self, text: str = "") -> None:
+            super().__init__()
+            self._full_text = ""
+            self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            self.setFullText(text)
+
+        def fullText(self) -> str:
+            """完整文本（界面上显示的是它按当前宽度省略后的样子）。"""
+            return self._full_text
+
+        def setText(self, text: str) -> None:  # noqa: D102 - 与 setFullText 同义
+            """外部只管给完整文本；**省略由本类按当前宽度自己算**。
+
+            为什么要覆盖 `setText`：如果调用方直接走 QLabel 的 `setText`，
+            本类记着的"完整文本"就与显示内容脱节了 —— 下一次 resize 会把
+            之前设的文本**换成那句旧的完整文本**（真踩过：状态栏刷成"正在初始化…"）。
+            """
+            self.setFullText(text)
+
+        def setFullText(self, text: str) -> None:
+            """设置完整文本并立刻按当前宽度重算显示（tooltip 里放全文，方便核对）。"""
+            self._full_text = str(text or "")
+            self.setToolTip(self._full_text)
+            self._apply_elide()
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: D102 - 见类注释
+            super().resizeEvent(event)
+            self._apply_elide()
+
+        def _apply_elide(self) -> None:
+            metrics = self.fontMetrics()
+            width = max(0, self.width())
+            text = self._full_text
+            if width and metrics.horizontalAdvance(text) > width:
+                text = metrics.elidedText(
+                    self._full_text, Qt.TextElideMode.ElideRight, width
+                )
+            # QLabel.setText 对相同文本会直接返回，所以这里不会和 resize 打循环
+            super().setText(text)
+
+    class MarketKpiCard(QFrame):
+        """一个指标一张卡：标签小号灰字 + 数值大一号加粗。
+
+        为什么不做成"一行长文本"：长文本靠自动换行折出来的行对不齐（数字有的在行尾、
+        有的在行中），一眼就是"没排版"；一张卡一个指标之后卡片等宽等高、数值右对齐，
+        扫一眼就能比大小，窄屏时也是卡片自己收缩而不是文字折行。
+
+        属性：`name`（指标名）、`title_label`（小号灰标签）、`value_label`（大一号加粗数值）。
+        取色只用 palette + 一条细边框，不引图片/图标（打包与 DPI 缩放才不会挑环境）。
+        """
+
+        def __init__(self, name: str) -> None:
+            super().__init__()
+            self.name = name
+            self.setObjectName("marketKpiCard")
+            self.setFrameShape(QFrame.Shape.StyledPanel)
+            # 细边框圆角：与股票池卡片同一套做法（palette 取色，主题换了也不会撞色）
+            self.setStyleSheet(
+                "QFrame#marketKpiCard { border: 1px solid palette(mid);"
+                " border-radius: 6px; }"
+            )
+            row = QHBoxLayout(self)
+            row.setContentsMargins(10, 6, 10, 6)
+            row.setSpacing(PAGE_SPACING)
+            self.title_label = QLabel(name)
+            # "小号灰字"靠**灰**与**不加粗**表达（字号层级只有三级，见 FONT_* 常量）
+            self.title_label.setObjectName("marketKpiTitle")
+            self.title_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+            row.addWidget(self.title_label)
+            row.addStretch(1)
+            self.value_label = QLabel(market.DASH)
+            self.value_label.setFont(
+                _scaled_font(self.value_label.font(), FONT_VALUE_DELTA, bold=True)
+            )
+            self.value_label.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            row.addWidget(self.value_label)
+
+    class MarketEntry(QFrame):
+        """一个指数条目：`名称（灰） ｜ 点位 ｜ 涨跌幅`（后两列右对齐、**逐值**上色）。
+
+        为什么要拆成三个 QLabel：用户要求"既然涨跌分颜色了，那情绪/板块的数字和涨跌幅
+        也分一下颜色"。一行一个 QLabel 只有**一种**颜色，而情绪/板块经常同时有涨有跌，
+        按行取色必然要么"全染红"要么"全不染"，两种都在骗人；拆成条目之后
+        每一项按自己的涨跌上色（见 `market.value_color`）。
+
+        数字竖着对齐的办法（两种里选一种 —— 选"固定列宽 + 右对齐"）：
+        - 数值/涨跌幅两个标签都用"最宽数字串"（`MARKET_VALUE_TRACK` / `MARKET_PCT_TRACK`）
+          量出来的宽度做 `setMinimumWidth`，再 `AlignRight`。列宽与字体无关，
+          用户系统上装的是哪款中文字体都不影响对齐；
+        - **没有**改用它 `QFont.setStyleHint(Monospace)`：那只是个"提示"，Windows 上
+          Qt 未必真能找到等宽字体（中文界面下尤其如此），对齐会随字体漂移 ——
+          固定列宽是确定性更强的做法。
+        """
+
+        def __init__(self, item: dict | None = None) -> None:
+            super().__init__()
+            self.setObjectName("marketEntry")
+            self.thscode = ""
+            self.name_label = QLabel(market.DASH)
+            self.name_label.setObjectName("marketEntryName")
+            self.name_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+            self.value_label = QLabel(market.DASH)
+            self.pct_label = QLabel(market.DASH)
+            row = QHBoxLayout(self)
+            row.setContentsMargins(8, 2, 8, 2)
+            row.setSpacing(10)
+            row.addWidget(self.name_label, 1)     # 名称吃掉多余宽度，两列数字始终靠右
+            for label, track in (
+                (self.value_label, MARKET_VALUE_TRACK),
+                (self.pct_label, MARKET_PCT_TRACK),
+            ):
+                label.setAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+                label.setMinimumWidth(label.fontMetrics().horizontalAdvance(track))
+                row.addWidget(label, 0)
+            if item is not None:
+                self.update_item(item)
+
+        def update_item(self, item: dict) -> None:
+            """按一个条目 dict 更新三个文本与**逐值**颜色（点位与涨跌幅各自上色）。"""
+            self.thscode = str(item.get("thscode") or "")
+            name, value, pct = market.entry_fields(item)
+            self.name_label.setText(name)
+            self.value_label.setText(value)
+            self.pct_label.setText(pct)
+            color = market.value_color(item.get("change_pct"))
+            # 用 setStyleSheet 上色而不是富文本 HTML：`text()` 里带标签会让断言变脆，
+            # 而且颜色只有一个用途（前景色），样式表是最直接的一层
+            style = f"color:{color}" if color else ""
+            self.value_label.setStyleSheet(style)
+            self.pct_label.setStyleSheet(style)
+
+    class MarketGroupBox(QFrame):
+        """一组指数 = 小标题 + 条目网格（**整组就是这一个控件**）。
+
+        为什么要一整组一个控件：配置里没配这一组时，`setVisible(False)` 一下
+        就能"连标题带网格"一起收掉，不会留一个空的"情绪："吊在那里。
+        属性：`key`（结果字典里的键）、`grid`（QGridLayout）、`entries`（条目控件列表）、
+        `placeholder_label`（配了这一组但没取到数时显示的 `—`）。
+        """
+
+        def __init__(self, label: str, key: str) -> None:
+            super().__init__()
+            self.label = label
+            self.key = key
+            self._codes: tuple = ()
+            self._columns = 0
+            box = QVBoxLayout(self)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(6)
+            self.title_label = QLabel(label)
+            self.title_label.setObjectName("marketSectionTitle")   # 分区标题：小号灰字
+            self.title_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+            box.addWidget(self.title_label)
+            self.grid = QGridLayout()
+            self.grid.setContentsMargins(0, 0, 0, 0)
+            self.grid.setSpacing(6)
+            box.addLayout(self.grid)
+            self.entries: list[Any] = []
+            self.placeholder_label = QLabel(market.DASH)
+            self.placeholder_label.setForegroundRole(
+                QPalette.ColorRole.PlaceholderText
+            )
+            box.addWidget(self.placeholder_label)
+            self.placeholder_label.setVisible(False)
+
+        def set_items(self, items: list[dict]) -> None:
+            """按最新的条目列表更新网格：代码没变就只改文本/颜色，不重建控件。
+
+            为什么不每次都重建：概览每分钟刷一次，重建会把焦点、选中与
+            "鼠标正停在哪一项上"全部清掉；只在**代码列表真的变了**（换配置、加了一只）
+            时重建，界面才稳。
+            """
+            codes = tuple(str(item.get("thscode") or "") for item in items)
+            if codes != self._codes:
+                self._codes = codes
+                self.clear_entries()
+                self.entries = [MarketEntry(item) for item in items]
+                for column, entry in enumerate(self.entries):
+                    self.grid.addWidget(entry, 0, column)
+                self._columns = 0                 # 强制下一次重排列数
+            for entry, item in zip(self.entries, items):
+                entry.update_item(item)
+            self.placeholder_label.setVisible(not items)
+
+        def clear_entries(self) -> None:
+            """把网格里的条目全部摘掉并销毁（换配置/换数据源时用）。"""
+            for entry in self.entries:
+                self.grid.removeWidget(entry)
+                entry.setParent(None)
+                entry.deleteLater()
+            self.entries = []
+
+        def set_columns(self, columns: int) -> None:
+            """按列数把条目重排成网格（窄屏自动换行，绝不出现横向滚动）。"""
+            if columns == self._columns:
+                return
+            self._columns = columns
+            for index, entry in enumerate(self.entries):
+                self.grid.removeWidget(entry)
+                self.grid.addWidget(entry, index // columns, index % columns)
+            for column in range(MARKET_MAX_COLUMNS):
+                self.grid.setColumnStretch(column, 1 if column < columns else 0)
 
     def _load_icon(size: int | None = None) -> Any:
         """按尺寸取程序图标；资源缺失/读不出来时返回**空 QIcon**（不是异常）。
@@ -170,6 +568,11 @@ if QT_AVAILABLE:
         def __init__(self, cfg: Config | None = None) -> None:
             super().__init__()
             self.cfg = cfg or get_config()
+            # 界面主题（皮肤）：在搭界面**之前**应用 —— 控件一出生就带着皮肤，
+            # 不会出现"先按原生画一遍、再被样式表刷一遍"的闪动。
+            # 主题名非法/素材缺失都在 `theme` 层兜住（退回默认主题 / 纯色背景条）
+            theme_mod.apply_theme(QApplication.instance(),
+                                  getattr(self.cfg, "ui_theme", None))
             # 数据目录可能在只读盘/权限不足：界面照开，状态栏挂提示（别直接崩）
             self._startup_problem = self.cfg.ensure_dirs_message()
             if not self._startup_problem and self.cfg.config_warning():
@@ -184,9 +587,17 @@ if QT_AVAILABLE:
             #: 概览每分钟都取一次，混进去会让下载/选股被误判成"忙"
             self._market_worker: Worker | None = None
             self._tray_notified = 0
-            #: 状态栏的瞬时消息（任务完成/失败提示），与实时状态分两层显示
+            #: 状态栏的瞬时消息（任务完成/失败提示），与主状态分两层显示
             self._message = ""
             self._message_at = 0.0
+            #: 这条消息是不是"进度回传"（下载中让位给会动的下载进度，见 `_compose_status`）
+            self._message_is_progress = False
+            #: 最近一次进度回传的"阶段 + 数量"（`下载 daily-k 81/181 MB`），补在下载进度后面
+            self._progress_stage_text = ""
+            #: 「状态详情」弹窗与它里面的文本（测试与"重复点详情"都要能拿到）
+            self.status_dialog: Any = None
+            self.status_details_text: Any = None
+            self.status_details_cache = ""
             #: 池子表格的内容指纹（内容没变就不重建控件）
             self._pool_signature: tuple = ()
             #: 当前渲染出来的卡片（顺序与池子行一致）与当前视图（cards/table）
@@ -212,7 +623,7 @@ if QT_AVAILABLE:
             window_icon = _load_icon()
             if not window_icon.isNull():
                 self.setWindowIcon(window_icon)
-            self.resize(1120, 720)
+            self._apply_screen_geometry()
             self._build_ui()
             self._build_tray()
             self._start_scheduler()
@@ -246,49 +657,45 @@ if QT_AVAILABLE:
 
         # ── 界面搭建 ──
 
+        def _apply_screen_geometry(self) -> None:
+            """按屏幕可用区域定默认尺寸、收最小尺寸、把窗口居中（见 `fit_window_geometry`）。
+
+            为什么不能写死 `resize(1120, 720)`：1366×768 的笔记本（外加任务栏与 125%
+            DPI 缩放）逻辑可用高度只有 680 上下，写死 720 就是"一打开最下边就被切掉"。
+            拿不到屏幕信息（极端环境）时才退回 `WINDOW_PREFERRED_SIZE`。
+            """
+            geometry = fit_window_geometry()
+            if geometry is None:
+                self.resize(*WINDOW_PREFERRED_SIZE)
+                return
+            size, minimum, position = geometry
+            # 先设最小尺寸再 resize：反过来的话 Qt 会先按"布局的最小值"把窗口顶大，
+            # 之后再 resize 也收不回来（这正是用户遇到的那个 bug 的机制）
+            self.setMinimumSize(minimum)
+            self.resize(size)
+            self.move(position)
+
+        def resizeEvent(self, event: Any) -> None:
+            """窗口尺寸变了 → 重排概览页每个组的条目列数（5 列 → 3/2/1 列）。
+
+            放在窗口这一层算的理由：概览页在页签里，宽度由窗口决定；
+            在窗口这里算一次就够，页面不用自己猜可用宽度。窗口还没搭完时
+            （`__init__` 里先 resize 再 `_build_ui`）直接跳过。
+            """
+            super().resizeEvent(event)
+            if getattr(self, "market_scroll", None) is not None:
+                self._apply_market_columns()
+
         def _build_ui(self) -> None:
             central = QWidget()
             layout = QVBoxLayout(central)
+            # 统一间距：整窗只有这两组值（页面外边距 14/12、控件间距 8），
+            # 不再出现"这里 16、那里 4"的参差
+            layout.setContentsMargins(*WINDOW_MARGINS)
+            layout.setSpacing(PAGE_SPACING)
 
-            # 顶部状态栏
-            self.status_label = QLabel("正在初始化…")
-            self.status_label.setWordWrap(True)
-            layout.addWidget(self.status_label)
-
-            # 按钮行
-            buttons = QHBoxLayout()
-            self.btn_download = QPushButton("下载/更新历史数据")
-            self.btn_download.clicked.connect(self.on_download)
-            buttons.addWidget(self.btn_download)
-
-            # 【立即选股并建池】：跑完整流程（增量数据 → 策略 → 建池 → 按通知设置推送）
-            self.btn_run = QPushButton("立即选股并建池")
-            self.btn_run.clicked.connect(self.on_run_pipeline)
-            buttons.addWidget(self.btn_run)
-
-            # 【只刷新数据】：只补数据（行情/涨停池/日历/行业/指数），不选股、不推送
-            self.btn_refresh = QPushButton("只刷新数据")
-            self.btn_refresh.clicked.connect(self.on_refresh_data)
-            buttons.addWidget(self.btn_refresh)
-
-            self.btn_pause = QPushButton("暂停盘中提醒")
-            self.btn_pause.clicked.connect(self.on_toggle_intraday)
-            buttons.addWidget(self.btn_pause)
-
-            self.btn_check = QPushButton("立即检查盘面")
-            self.btn_check.clicked.connect(self.on_intraday_once)
-            buttons.addWidget(self.btn_check)
-
-            buttons.addStretch(1)
-            # 【关于】放最右：版本号 / 版权 / 数据来源都在里面（报障时用户第一句话就是版本）
-            self.btn_about = QPushButton("关于")
-            self.btn_about.clicked.connect(self.on_about)
-            buttons.addWidget(self.btn_about)
-            layout.addLayout(buttons)
-
-            self.progress = QProgressBar()
-            self.progress.setValue(0)
-            layout.addWidget(self.progress)
+            # 顶部状态区：一行主状态 + 右侧短标签、按钮行、进度条（见 `_build_status_area`）
+            layout.addWidget(self._build_status_area())
 
             # 四个表 + 五个页：池子 / 持仓 / 自选 / 提醒 / 设置
             self.tabs = QTabWidget()
@@ -335,12 +742,117 @@ if QT_AVAILABLE:
             # 设置页：策略组自选 + 通知方式自选（都写回 config.toml，保留注释）
             self.tabs.addTab(self._build_settings_tab(), "设置")
 
-            layout.addWidget(self.tabs)
+            # stretch=1：多余的高度**全部给页签区**（页签里的表格/滚动区自己吸收高度变化），
+            # 上面的状态栏、按钮行、进度条与页面内的页脚都拿固定高度。
+            # 这样窗口高度变小的时候，是"列表少显示几行"，而不是"底部被切到屏幕外"。
+            layout.addWidget(self.tabs, 1)
 
             self.setCentralWidget(central)
 
             # 启动时按配置决定股票池显示哪种视图（配置写错时 `Config` 已经归一成 cards）
             self._apply_pool_view(self.cfg.pool_view)
+
+        def _build_status_area(self) -> Any:
+            """顶部状态区：**一行主状态 + 右侧几个短标签**，下面是按钮行与进度条。
+
+            为什么不再把 8 项用 `｜` 串成一大条：用户反馈"太啰嗦、很多词看不懂"。
+            状态栏回答的是"**现在要我注意什么**"，只讲一件事；行数、股票数、补跑时间、
+            引擎状态、日志路径这些"查得到就行"的东西全部挪进 tooltip 与【详情】弹窗
+            （同一份多行文本，两处口径一致）。
+
+            布局要点：
+            - 主状态 `ElidedLabel`：单行、太长就省略（**不换行**），
+              所以状态区高度恒定，永远不会把窗口顶高、把底部挤出屏幕；
+            - 短标签：小号灰字、固定宽度、用布局间距分隔（**不用 `｜`**）；
+            - 【详情】【关于】排在按钮行最右（页面级/全局操作放右边，符合习惯）。
+            """
+            area = QWidget()
+            # 背景条（铺拉丝纹理的那一条）：顶部状态区 + 概览页页脚，见 theme.py
+            area.setObjectName("statusArea")
+            area_layout = QVBoxLayout(area)
+            area_layout.setContentsMargins(0, 0, 0, 0)
+            area_layout.setSpacing(6)
+
+            # ── 第 1 行：主状态（左）+ 短标签（右）──
+            row = QHBoxLayout()
+            row.setSpacing(12)          # 标签之间也用间距分隔，不用竖线
+            self.status_row_layout = row
+            self.status_label = ElidedLabel("正在初始化…")
+            # 主状态比正文大一号（层级只有三级：页面标题 +2 / 数值与主状态 +1 / 其余基准）
+            self.status_label.setFont(
+                _scaled_font(self.status_label.font(), FONT_VALUE_DELTA)
+            )
+            row.addWidget(self.status_label, 1)
+            self.status_tags: dict[str, Any] = {}
+            for name in STATUS_TAGS:
+                tag = QLabel(name)
+                tag.setObjectName("statusTag")                              # 小号灰字
+                tag.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+                tag.setVisible(False)                                      # 没值就先不显示
+                self.status_tags[name] = tag
+                row.addWidget(tag, 0)
+            area_layout.addLayout(row)
+
+            # ── 第 2 行：按钮（文字 2~4 字，完整说明放 tooltip）──
+            buttons = QHBoxLayout()
+            buttons.setSpacing(PAGE_SPACING)
+            self.top_buttons_layout = buttons
+            self.btn_download = QPushButton(BTN_DOWNLOAD_TEXT)
+            self.btn_download.setToolTip(
+                "下载 / 更新历史数据：首次建库或补历史行情（可中断，下次接着传）"
+            )
+            self.btn_download.clicked.connect(self.on_download)
+            buttons.addWidget(self.btn_download)
+
+            # 【选股建池】：跑完整流程（增量数据 → 策略 → 建池 → 按通知设置推送）
+            self.btn_run = QPushButton(BTN_RUN_TEXT)
+            # 银色主题里的"主操作按钮"用 objectName 精确命中（见 theme.py 的
+            # `QPushButton#primaryAction`）—— 不靠按钮顺序这种位置关系
+            self.btn_run.setObjectName("primaryAction")
+            self.btn_run.setToolTip(
+                "立即选股并建池：增量数据 → 跑策略 → 建池 → 按「设置」里的通知方式推送"
+            )
+            self.btn_run.clicked.connect(self.on_run_pipeline)
+            buttons.addWidget(self.btn_run)
+
+            # 【刷新数据】：只补数据（行情/涨停池/日历/行业/指数），不选股、不推送
+            self.btn_refresh = QPushButton(BTN_REFRESH_TEXT)
+            self.btn_refresh.setToolTip(
+                "只刷新数据：补行情 / 涨停池 / 交易日历 / 行业 / 指数，不选股、不推送"
+            )
+            self.btn_refresh.clicked.connect(self.on_refresh_data)
+            buttons.addWidget(self.btn_refresh)
+
+            self.btn_pause = QPushButton(BTN_PAUSE_TEXT)
+            self.btn_pause.setToolTip("暂停盘中提醒（日更照跑）；再点一次恢复")
+            self.btn_pause.clicked.connect(self.on_toggle_intraday)
+            buttons.addWidget(self.btn_pause)
+
+            self.btn_check = QPushButton(BTN_CHECK_TEXT)
+            self.btn_check.setToolTip("立即检查盘面：按当前池子 / 持仓 / 自选跑一次盘中提醒")
+            self.btn_check.clicked.connect(self.on_intraday_once)
+            buttons.addWidget(self.btn_check)
+
+            buttons.addStretch(1)
+            # 【详情】与【关于】放最右：一个回答"这些数是什么"，一个放版本与版权
+            self.btn_details = QPushButton(BTN_DETAILS_TEXT)
+            self.btn_details.setToolTip(
+                "状态详情：本地行数、股票数、补跑时间、日志文件、自检阈值（可复制）"
+            )
+            self.btn_details.clicked.connect(self.on_show_status_details)
+            buttons.addWidget(self.btn_details)
+            self.btn_about = QPushButton(BTN_ABOUT_TEXT)
+            self.btn_about.setToolTip("版本号 / 作者 / 版权 / 数据来源（报障时先看这里）")
+            self.btn_about.clicked.connect(self.on_about)
+            buttons.addWidget(self.btn_about)
+            area_layout.addLayout(buttons)
+
+            # ── 第 3 行：进度条（下载/同步/选股时的进度）──
+            self.progress = QProgressBar()
+            self.progress.setValue(0)
+            area_layout.addWidget(self.progress)
+            self.status_area = area
+            return area
 
         def _build_table_page(self, row: Any, table: Any) -> Any:
             """把"操作行 + 表格"装进同一个页签。
@@ -350,8 +862,11 @@ if QT_AVAILABLE:
             """
             page = QWidget()
             layout = QVBoxLayout(page)
+            # 统一间距（只动边距与间距，不动结构、不动表格列）
+            layout.setContentsMargins(*PAGE_MARGINS)
+            layout.setSpacing(PAGE_SPACING)
             layout.addLayout(row)        # 输入行在上：先填再点，符合操作顺序
-            layout.addWidget(table)
+            layout.addWidget(table, 1)   # 表格吃掉多余高度（窗口变矮时少显示几行，不被切掉）
             return page
 
         def _build_position_row(self) -> Any:
@@ -403,79 +918,161 @@ if QT_AVAILABLE:
 
         # ── 大盘概览页（独立 tab；数据口径见 market.py）──
 
+        #: KPI 区的排布：前两行各三张卡（涨跌停家数 / 涨跌家数），成交额那张**跨两行**贴在右侧。
+        #: 常量写在这里而不是散在方法里：测试与将来调整都只改这一处。
+        MARKET_KPI_ROWS = (("涨停", "跌停", "炸板"), ("上涨", "下跌", "平盘"))
+        MARKET_KPI_AMOUNT = "成交额"
+
         def _build_market_page(self) -> Any:
-            """「大盘概览」页：摘要 / 涨跌家数 / 三组指数 / 底部来源与【立即刷新】。
+            """「大盘概览」页：标题行 / KPI 卡片区 / 三组指数 / 单行页脚（含【立即刷新】）。
 
-            为什么单独成页而不是塞进股票池页顶部：这是"看盘第一眼要扫到"的东西，
-            独立一页才能给足留白与字号（摘要行加粗放大、组与组之间留空），
-            股票池页也就不会被这几行挤掉高度。
+            为什么整页重排：原来一页是"五行自动换行的长文本"，折行位置随窗口宽度变，
+            折出来的行头参差不齐，一眼就是"没排版"。现在改成**分区 + 网格**：
+            KPI 一张卡一个指标（等宽等高、数值右对齐），三组指数各一个小标题 + 条目网格
+            （每个指数一个条目控件，名称/点位/涨跌幅三列对齐），页脚只占一行。
 
-            为什么一行一个 QLabel：用户明确要求"涨=红、跌=绿"用 `QLabel.setStyleSheet`
-            上色 —— 一行一个控件才谈得上"整行同向时才上色"，也才能做到
-            "某组没配就整行不显示"。`market_labels` 的下标含义见 `market.lines()`。
+            结构（也是测试的断言对象）：
+                page ─┬─ 标题行（页面标题 + 右侧【立即刷新】）
+                      ├─ market_scroll（可伸缩：窗口变矮时它自己滚动，页面底部那行不会被挤出去）
+                      │    └─ KPI 网格 + 宽基/情绪/板块三组
+                      ├─ market_hint（**只在出错时出现**，算"第二行"）
+                      └─ market_footer（一行：数据来源小字 + 右对齐【立即刷新】）
+
+            为什么内容区套滚动区：概览的条目数由配置决定（可能十几项），
+            如果不给滚动区，窗口一矮就是"页面被切掉"；给滚动区之后，
+            可伸缩的部分自己吸收高度变化，**页脚与窗口底部永远在屏幕内**。
             """
             page = QWidget()
             layout = QVBoxLayout(page)
-            layout.setContentsMargins(16, 16, 16, 12)
-            layout.setSpacing(10)          # 整页而不是一行：留白放宽一点
+            layout.setContentsMargins(*PAGE_MARGINS)
+            layout.setSpacing(PAGE_SPACING)
 
-            title = QLabel("大盘概览")
-            font = title.font()
-            font.setBold(True)
-            if font.pointSize() > 0:
-                font.setPointSize(font.pointSize() + 2)
-            title.setFont(font)
-            layout.addWidget(title)
+            header = QHBoxLayout()
+            header.setSpacing(PAGE_SPACING)
+            self.market_title = QLabel("大盘概览")
+            # 页面标题 = 最大一级字号（层级：页面标题 > 分区标题 = 正文；数值比标签大一号）
+            self.market_title.setFont(
+                _scaled_font(self.market_title.font(), FONT_TITLE_DELTA, bold=True)
+            )
+            header.addWidget(self.market_title)
+            header.addStretch(1)
+            layout.addLayout(header)
 
-            #: 摘要 / 涨跌家数 / 宽基 / 情绪 / 板块（顺序与 market.lines() 一致）
-            self.market_labels: list[Any] = []
-            for index in range(market.LINE_COUNT):
-                label = QLabel(market.DASH)
-                label.setWordWrap(True)
-                # 可选中复制：这几行数常被贴到群里或笔记里
-                label.setTextInteractionFlags(
-                    Qt.TextInteractionFlag.TextSelectableByMouse
-                )
-                label_font = label.font()
-                if index == 0:
-                    # 摘要行是"一眼看大盘"的那行，加大一号并加粗
-                    if label_font.pointSize() > 0:
-                        label_font.setPointSize(label_font.pointSize() + 3)
-                    label_font.setBold(True)
-                elif index == 1:
-                    if label_font.pointSize() > 0:
-                        label_font.setPointSize(label_font.pointSize() + 1)
-                label.setFont(label_font)
-                layout.addWidget(label)
-                self.market_labels.append(label)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)      # 内容宽度跟着窗口走
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            # 概览页永远不该出现横向滚动条（用户明确要求）：条目列数会跟着宽度收缩，
+            # 真出现"横向拖着看"就说明列数算错了 —— 直接禁用，宁可纵向滚动
+            scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            content = QWidget()
+            content_layout = QVBoxLayout(content)
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(10)
+            content_layout.addWidget(self._build_market_kpi_grid())
+            #: `宽基/情绪/板块` → 整组容器（"整组隐藏"就靠它，见 MarketGroupBox）
+            self.market_group_boxes: dict[str, Any] = {}
+            for _, label, key in market.GROUPS:
+                box = MarketGroupBox(label, key)
+                self.market_group_boxes[label] = box
+                content_layout.addWidget(box)
+            content_layout.addStretch(1)         # 条目少时靠上排，不散在页面中间
+            scroll.setWidget(content)
+            self.market_scroll = scroll
+            self.market_content = content
+            layout.addWidget(scroll, 1)
 
-            # 取不到数据时的原因写在这里（正常时隐藏）：光看一排 — 用户猜不出为什么
+            # 取不到数据时的原因写在这里（正常时**隐藏**）：光看一排 `—` 用户猜不出为什么
             self.market_hint = QLabel("")
             self.market_hint.setWordWrap(True)
             self.market_hint.setVisible(False)
             layout.addWidget(self.market_hint)
 
-            layout.addStretch(1)
-
-            footer = QHBoxLayout()
-            self.market_as_of_label = QLabel(market.footer_text(None))
-            self.market_as_of_label.setWordWrap(True)
+            # 页脚：**一行**（左边数据来源小字、右边【立即刷新】），按钮不另起一行。
+            # 做成独立控件（`market_footer`）是为了让"只有一行"这件事可断言：
+            # 布局项数、以及按钮与标签的 y 中心是否在同一条线上。
+            self.market_footer = QWidget()
+            self.market_footer.setObjectName("marketFooter")   # 页脚也是一条背景条
+            footer = QHBoxLayout(self.market_footer)
+            footer.setContentsMargins(0, 0, 0, 0)
+            footer.setSpacing(PAGE_SPACING)
+            self.market_as_of_label = ElidedLabel(market.footer_text(None))
+            # 可选中复制：这行常被贴到群里（宽度不够时显示成省略号，tooltip 里是全文）
             self.market_as_of_label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            footer.addWidget(self.market_as_of_label)
-            footer.addStretch(1)
+            footer.addWidget(self.market_as_of_label, 1)   # 占满剩余宽度，按钮固定靠右
             self.btn_market_refresh = QPushButton("立即刷新")
             self.btn_market_refresh.setToolTip(
                 "立刻重新取一次（平时每分钟自动刷新一次；本按钮会忽略缓存）"
             )
             self.btn_market_refresh.clicked.connect(self.on_market_refresh_clicked)
-            footer.addWidget(self.btn_market_refresh)
-            layout.addLayout(footer)
+            footer.addWidget(self.btn_market_refresh, 0)
+            self.market_footer_layout = footer
+            layout.addWidget(self.market_footer, 0)
 
             self.market_page = page
+            #: 每个指数的条目控件（`thscode` / `name_label` / `value_label` / `pct_label`）
+            self.market_entries: list[Any] = []
+            self._market_columns = 0
             self._render_market_overview()   # 先画空骨架：第一秒就是"能看"的样子
             return page
+
+        def _build_market_kpi_grid(self) -> Any:
+            """KPI 区：**每个指标一个独立小控件**（等宽等高，用 QGridLayout 排）。
+
+            为什么一个指标一个控件：原来"涨停 55 · 跌停 16 · 炸板 30"是一长串文本，
+            窗口一窄就自动换行，折出来的行头和上一行的数字对不齐；拆成等宽卡片之后
+            每张卡里是"小号灰标签 + 大一号加粗数值（右对齐）"，
+            涨跌停三张、涨跌家数三张各自成行，成交额那张跨两行贴在右侧 —— 整齐且能比大小。
+            """
+            frame = QFrame()
+            frame.setObjectName("marketKpiArea")
+            grid = QGridLayout(frame)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setSpacing(PAGE_SPACING)
+            #: 指标名 → 卡片控件（`title_label` / `value_label` 都挂在卡片上）
+            self.market_kpi_cards: dict[str, Any] = {}
+            #: 指标名 → **数值标签**（断言文本最直接的一层）
+            self.market_kpis: dict[str, Any] = {}
+            for row_index, names in enumerate(self.MARKET_KPI_ROWS):
+                for column, name in enumerate(names):
+                    card = MarketKpiCard(name)
+                    self.market_kpi_cards[name] = card
+                    self.market_kpis[name] = card.value_label
+                    grid.addWidget(card, row_index, column)
+                    grid.setColumnStretch(column, 1)
+            amount_column = len(self.MARKET_KPI_ROWS[0])
+            amount = MarketKpiCard(self.MARKET_KPI_AMOUNT)
+            self.market_kpi_cards[self.MARKET_KPI_AMOUNT] = amount
+            self.market_kpis[self.MARKET_KPI_AMOUNT] = amount.value_label
+            # 跨两行：成交额是"三个数一行"，横着放得比别的卡宽（stretch=2）
+            grid.addWidget(amount, 0, amount_column, len(self.MARKET_KPI_ROWS), 1)
+            grid.setColumnStretch(amount_column, 2)
+            self.market_kpi_grid = grid
+            return frame
+
+        def _apply_market_columns(self) -> None:
+            """按可用宽度决定每组每行放几个条目（`clamp(可用宽 // 260, 1, 5)`）。
+
+            为什么要响应式列数：用户要求"不出现横向滚动条或被截断"。
+            窗口变窄时列数自动从 5 降到 3/2/1，条目自己往下排（纵向滚动），
+            而不是把第三列挤没或者让文字被裁掉。
+            """
+            scroll = getattr(self, "market_scroll", None)
+            boxes = getattr(self, "market_group_boxes", None)
+            if scroll is None or not boxes:
+                return
+            # 用**滚动区**的宽度而不是视口宽度：视口宽度会随着纵向滚动条出现而少十几像素，
+            # 拿它算列数容易出现"滚动条一出现列数就掉一档"的抖动
+            width = max(scroll.width(), self.market_page.width()) - 2 * PAGE_MARGINS[0]
+            columns = max(1, min(MARKET_MAX_COLUMNS, width // MARKET_ENTRY_MIN_WIDTH))
+            if columns == self._market_columns:
+                return
+            self._market_columns = columns
+            for box in boxes.values():
+                box.set_columns(columns)
 
         def on_market_refresh_clicked(self) -> None:
             """【立即刷新】：**忽略 TTL 缓存**重取一次（用户手点的按钮就该立刻见效）。"""
@@ -507,9 +1104,11 @@ if QT_AVAILABLE:
             """切到概览页时立刻刷一次（缓存没过期就只是重画缓存）。
 
             为什么必要：定时器是整分钟对齐的，用户切过来时可能正好差几十秒到点 ——
-            看盘的人不该盯着"一分钟前的旧数"。
+            看盘的人不该盯着"一分钟前的旧数"。顺便重排一次条目列数：
+            非当前页签里的控件宽度不参与布局，切过来之后宽度才作数。
             """
             if self.tabs.currentWidget() is self.market_page:
+                self._apply_market_columns()
                 self.request_market_overview()
 
         def request_market_overview(self, force: bool = False) -> None:
@@ -577,29 +1176,44 @@ if QT_AVAILABLE:
             return overview
 
         def _render_market_overview(self) -> None:
-            """把 `self.market_overview` 画到页面上（五行文本 + 按行上色 + 来源与原因）。
+            """把 `self.market_overview` 画到页面上（KPI 卡片 + 三组条目 + 单行来源页脚）。
 
-            涨跌按 **A 股习惯**配色（涨=红、跌=绿、平=默认色）；一行里所有涨跌幅同向才
-            上色，有涨有跌就用默认色 —— 一个 QLabel 只有一种颜色，
-            硬取其中一个值去上色反而会误导人。
+            三件事：
+            - **KPI**：一个指标一张卡的数值文本（`market.kpi_values()`，取数口径与命令行同一份）；
+            - **三组条目**：每个指数一个条目控件，点位与涨跌幅**各按自己的涨跌上色**
+              （涨=红、跌=绿、平/缺=默认色，色值只在 `market.py` 里定义一次）；
+            - **空组**：配置里没这一组 → **整组连标题一起隐藏**，不留一个空的"情绪："。
 
-            `lines()` 里空串表示"这一组在配置里是空的"→ **整行隐藏**，不留一个空的"情绪："。
+            用 `setStyleSheet("color:…")` 上色而不是富文本 HTML：`text()` 里带标签会让断言
+            变脆，而这里只改前景色，样式表是最直接的一层。
             """
             overview = self.market_overview
-            texts = market.lines(overview)
-            colors = market.line_colors(overview)
-            for label, text, color in zip(self.market_labels, texts, colors):
-                label.setText(text)
-                label.setStyleSheet(f"color:{color}" if color else "")
-                label.setVisible(bool(text))     # 组没配 → 那一行整行不显示
+            values = market.kpi_values(overview)
+            for name, label in self.market_kpis.items():
+                label.setText(values.get(name, market.DASH))
 
-            self.market_as_of_label.setText(market.footer_text(overview))
+            configured = set((overview or {}).get("configured_groups") or [])
+            entries: list[Any] = []
+            for _, group_label, key in market.GROUPS:
+                box = self.market_group_boxes[group_label]
+                # 没配这一组 → 整组隐藏（连标题），而不是留一个空标题在那吊着
+                box.setVisible(key in configured)
+                box.set_items(list((overview or {}).get(key) or []))
+                if self._market_columns:
+                    # `set_items` 重建条目后列数会归零：这里按当前列数重排一次，
+                    # 否则新建出来的条目会全挤在同一行上（右边被裁掉）
+                    box.set_columns(self._market_columns)
+                entries.extend(box.entries)
+            self.market_entries = entries
 
-            # 原因写进 tooltip（鼠标一停就能看到）与 hint（当前两句话，太长就省略）
+            self.market_as_of_label.setFullText(market.footer_text(overview))
+
+            # 原因写进 tooltip（鼠标一停就能看到）与 hint（只在出错时出现，算"第二行"）
             detail = market.summary_text(overview)
             tooltip = ("大盘概览：" + detail) if detail else "大盘概览：暂无数据"
-            for label in [*self.market_labels, self.market_as_of_label, self.market_page]:
-                label.setToolTip(tooltip)
+            for widget in [*self.market_kpi_cards.values(), *self.market_group_boxes.values()]:
+                widget.setToolTip(tooltip)
+            self.market_page.setToolTip(tooltip)
             errors = [str(e) for e in ((overview or {}).get("errors") or [])]
             if errors:
                 text = "；".join(errors[:2]) + ("…" if len(errors) > 2 else "")
@@ -608,6 +1222,9 @@ if QT_AVAILABLE:
             else:
                 self.market_hint.setText("")
             self.market_hint.setVisible(bool(errors))
+
+            # 数据到位之后按当前宽度再排一次列数（首屏宽度可能与建好时不同）
+            self._apply_market_columns()
 
         def _build_pool_page(self) -> Any:
             """股票池页：切换按钮 + 空池提示 + 卡片视图（滚动区）+ 表格视图。
@@ -618,6 +1235,9 @@ if QT_AVAILABLE:
             """
             page = QWidget()
             layout = QVBoxLayout(page)
+            # 统一间距（只动边距与间距：结构、卡片布局、表格列都不动）
+            layout.setContentsMargins(*PAGE_MARGINS)
+            layout.setSpacing(PAGE_SPACING)
 
             view_row = QHBoxLayout()
             self.btn_pool_view = QPushButton("切换为表格")
@@ -629,7 +1249,7 @@ if QT_AVAILABLE:
 
             # 空池提示放在两个视图**之外**：这样切到表格视图时它照样显示/隐藏
             self.pool_empty_label = QLabel(
-                "今日没有入选标的（收盘后自动选股，或点【立即选股并建池】）"
+                "今日没有入选标的（收盘后自动选股，或点【选股建池】）"
             )
             self.pool_empty_label.setWordWrap(True)
             layout.addWidget(self.pool_empty_label)
@@ -642,7 +1262,7 @@ if QT_AVAILABLE:
             self.pool_cards_layout.setSpacing(6)
             self.pool_cards_layout.addStretch(1)          # 卡片往上靠，不撑满整页
             self.pool_scroll.setWidget(container)
-            layout.addWidget(self.pool_scroll)
+            layout.addWidget(self.pool_scroll, 1)     # 卡片区吃掉多余高度
 
             layout.addWidget(self.pool_table)
             return page
@@ -725,28 +1345,66 @@ if QT_AVAILABLE:
             为什么要做这一页：Windows 用户不该为了"只做隔日"或"关掉飞书"
             去手改 TOML。保存时**只就地改那几个键**，用户自己写的注释与
             未知键全部保留（见 `config.render_config_updates`）。
+
+            为什么整页套一层滚动区（**只加容器，不动任何一项的顺序与层级**）：
+            这一页控件最多（20 多个勾选框 + 若干输入框），它们的"最小高度"合起来有
+            750 像素以上；页签的最小高度取所有页的最大值，于是**整窗的最小高度**
+            被这一页顶到 887 像素 —— 1366×768 的笔记本（可用高约 680）上窗口缩不小，
+            底边直接被屏幕切掉（用户反馈的"最下边看不见"）。套上滚动区之后，
+            页面能跟着窗口收缩，够不到的那几项滚动一下就看到了。
             """
             from laoa_trader.strategy import groups as groups_mod
 
-            page = QWidget()
-            layout = QVBoxLayout(page)
+            inner = QWidget()
+            layout = QVBoxLayout(inner)
+            # 统一间距（只动边距与间距）
+            layout.setContentsMargins(*PAGE_MARGINS)
+            layout.setSpacing(PAGE_SPACING)
+
+            # ── 界面主题（外观偏好：改完立即生效，不用重启）──
+            theme_row = QHBoxLayout()
+            theme_row.addWidget(QLabel("界面主题："))
+            self.theme_box = QComboBox()
+            self.theme_box.setToolTip(
+                "银色 = 金属感皮肤；系统默认 = 回到 Windows 原生外观（随时可切回）"
+            )
+            for name in config.UI_THEMES:
+                self.theme_box.addItem(theme_mod.theme_label(name), name)
+            self.theme_box.setCurrentIndex(
+                max(0, self.theme_box.findData(
+                    theme_mod.normalize_theme(self.cfg.ui_theme)))
+            )
+            # 先设好当前值**再**接信号：否则建页面时就会触发一次"保存设置"
+            self.theme_box.currentIndexChanged.connect(self.on_theme_changed)
+            theme_row.addWidget(self.theme_box)
+            theme_row.addStretch(1)
+            layout.addLayout(theme_row)
+            theme_hint = QLabel("换主题立即生效（不用重启），选择会写回 config.toml")
+            theme_hint.setObjectName("statusTag")     # 小号灰字（与状态区同一个样式）
+            layout.addWidget(theme_hint)
 
             # ── 自动运行（分发后每个人自己设；保存后立即生效，不用重启）──
             layout.addWidget(QLabel("自动运行（每天几点自动跑「数据增量 + 选股建池 + 通知」）"))
             run_row = QHBoxLayout()
             self.auto_run_box = QCheckBox("每天自动运行")
             self.auto_run_box.setChecked(bool(self.cfg.auto_run))
-            self.auto_run_box.setToolTip("关掉则只在点【立即选股并建池】时跑")
+            self.auto_run_box.setToolTip("关掉则只在点【选股建池】时跑")
             run_row.addWidget(self.auto_run_box)
             run_row.addWidget(QLabel("主跑时间："))
             self.run_at_edit = QLineEdit(self.cfg.run_at)
             self.run_at_edit.setPlaceholderText("HH:MM，例如 16:00")
-            self.run_at_edit.setFixedWidth(80)
+            # 宽度按**当前字体**量出来（"HH:MM" 五个字符 + 内边距），不写死像素：
+            # 用户把 Windows 的"文本大小"调大之后，写死的 80 会把时间截掉一半
+            self.run_at_edit.setFixedWidth(
+                self.run_at_edit.fontMetrics().horizontalAdvance("00:00") + 24
+            )
             run_row.addWidget(self.run_at_edit)
             run_row.addWidget(QLabel("补跑时间："))
             self.run_at_fallback_edit = QLineEdit(getattr(self.cfg, "run_at_fallback", ""))
             self.run_at_fallback_edit.setPlaceholderText("HH:MM，例如 19:15")
-            self.run_at_fallback_edit.setFixedWidth(80)
+            self.run_at_fallback_edit.setFixedWidth(
+                self.run_at_fallback_edit.fontMetrics().horizontalAdvance("00:00") + 24
+            )
             run_row.addWidget(self.run_at_fallback_edit)
             run_row.addStretch(1)
             layout.addLayout(run_row)
@@ -862,7 +1520,35 @@ if QT_AVAILABLE:
             layout.addStretch(1)
             self._refresh_channel_hints()
             self._refresh_run_hint()
+
+            # 滚动区只是"外套"：里层控件、顺序、层级都与原来完全一致
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            # 横向不出滚动条：这一页的最低宽度（约 640）在 1024 宽的屏上也装得下，
+            # 真出现横向条说明哪里出了问题，宁可让它纵向滚动
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setWidget(inner)
+            page = QWidget()
+            outer = QVBoxLayout(page)
+            outer.setContentsMargins(0, 0, 0, 0)
+            outer.addWidget(scroll, 1)
             return page
+
+        def on_theme_changed(self, index: int = -1) -> None:
+            """下拉框换主题：**立即生效**（不用重启）并写回 config.toml。
+
+            为什么先应用再保存：换皮肤是"立刻想看效果"的操作，不能等写盘成功；
+            写盘失败（只读盘/权限）时 `_save_updates` 会给出中文原因，皮肤已经换好了。
+            """
+            name = self.theme_box.itemData(index) if index >= 0 else None
+            if name is None:
+                name = self.theme_box.currentData()
+            applied = theme_mod.apply_theme(QApplication.instance(), name)
+            self._save_updates(
+                {"ui_theme": applied},
+                f"界面主题已切换为「{theme_mod.theme_label(applied)}」",
+            )
 
         def _refresh_channel_hints(self) -> None:
             """把"飞书没配凭证"这类提示显示出来（勾了才提示，不弹错误框）。
@@ -887,6 +1573,9 @@ if QT_AVAILABLE:
             table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
             table.setEditTriggers(QTableWidget.NoEditTriggers)
             table.setSelectionBehavior(QTableWidget.SelectRows)
+            # 隔行浅底（主题里 `alternate-background-color` 靠这个开关才生效）：
+            # 一行一只股票时，隔行底色比网格线更不容易看串行
+            table.setAlternatingRowColors(True)
 
         def _build_tray(self) -> None:
             """托盘图标：关闭窗口只最小化，不退出。
@@ -901,7 +1590,7 @@ if QT_AVAILABLE:
                     self.style().StandardPixmap.SP_ComputerIcon
                 )
             self.tray = QSystemTrayIcon(icon, self)
-            self.tray.setToolTip("老A法师 · 交易终端")
+            self.tray.setToolTip("老A选股助手")
             menu = QMenu()
             act_show = QAction("显示主窗口", self)
             act_show.triggered.connect(self._restore_window)
@@ -946,7 +1635,9 @@ if QT_AVAILABLE:
 
             if not force and self.preflight_result is not None:
                 return
-            self._set_status("正在检查本地数据…")
+            # 这条是"进度"性质的消息：自检出结论之后要撤掉，
+            # 否则状态栏会在十分钟里一直挂着"正在检查本地数据…"（用户会以为卡住了）
+            self._set_status("正在检查本地数据…", progress=True)
             QApplication.processEvents()
             try:
                 result = preflight.check(self.cfg.db_path, self.cfg)
@@ -956,7 +1647,11 @@ if QT_AVAILABLE:
             self.preflight_result = result
             status = result.get("status")
             if status == preflight.READY:
-                self._set_status("✅ " + preflight.summary_line(result))
+                # 自检出结论了 → 撤掉"正在检查本地数据…"那条进度消息，
+                # 让主状态显示 `✅ 数据就绪 · 5560 只 · 更新到 09-11`。
+                # 也**不再**把 summary_line（"…10,283,203 行 / 最新 …"）塞进状态栏 ——
+                # 行数与阈值在【详情】里（用户反馈"很多词看不懂"指的就是这种）。
+                self._clear_status_message()
                 self._refresh_status()
                 return
             if status == preflight.NEEDS_INCREMENTAL:
@@ -966,10 +1661,13 @@ if QT_AVAILABLE:
                     self.on_refresh_data()
                 else:
                     self._toast(f"⚠️ {preflight.summary_line(result)}；"
-                                "点【只刷新数据】可立即增量更新")
+                                "点【刷新数据】可立即增量更新")
                 return
-            # needs_full：弹首次向导
-            self._set_status(f"⚠️ {result.get('reason')}")
+            # needs_full：弹首次向导。状态栏**不贴那句原始原因**（"行情表是空的…"），
+            # 而是给一句"点哪个按钮"的话（`_data_problem_text`）；原因在向导窗口与详情里 ——
+            # 用户要的是"我该做什么"，不是"内部为什么"（原话：很多词看不懂）
+            self._clear_status_message()
+            self._refresh_status()
             self.show_first_run_wizard(result)
 
         def show_first_run_wizard(self, result: dict) -> None:
@@ -1031,7 +1729,7 @@ if QT_AVAILABLE:
             buttons.addStretch(1)
             layout.addLayout(buttons)
             layout.addWidget(QLabel(
-                "提示：下载完成后会自动跑一次选股建池；也可以之后点【立即选股并建池】。"
+                "提示：下载完成后会自动跑一次选股建池；也可以之后点【选股建池】。"
             ))
 
             self.wizard = dialog
@@ -1118,20 +1816,37 @@ if QT_AVAILABLE:
 
         # ── 状态栏与刷新 ──
 
-        def _set_status(self, text: str) -> None:
-            """显示一条**瞬时消息**（不覆盖实时状态，见 `_compose_status`）。
+        def _set_status(self, text: str, *, progress: bool = False) -> None:
+            """显示一条**瞬时消息**（任务完成/失败、刚点过的动作），见 `_compose_status`。
 
-            为什么要分两层：定时器每 5 秒重写一次状态栏；如果消息和实时状态共用同一个
+            为什么要分两层：定时器每 5 秒重写一次主状态；如果消息和实时状态共用同一个
             Label，任务完成/失败的提示会在零点几秒内被刷掉 —— 用户根本看不到。
+
+            Args:
+                progress: 这条消息是不是"进度回传"（`_on_progress`）。下载进行中时
+                    进度回传会让位给"⏬ 正在下载历史数据 48%"那一行（否则屏幕上会挂着
+                    一条**不会动**的旧进度，看起来像卡死）；而"重签 URL 继续下载"
+                    这类真正的提示仍然优先显示。
             """
             self._message = text
             self._message_at = time.monotonic()
+            self._message_is_progress = progress
             self.status_label.setText(self._compose_status())
 
+        def _clear_status_message(self) -> None:
+            """撤掉当前那条瞬时消息（例：自检已经出结论，"正在检查…"就该撤掉）。
+
+            为什么要显式撤：瞬时消息的优先级最高、能存活 10 分钟 ——
+            一条"正在做某事"的消息在事情做完之后还挂着，用户只会以为卡住了。
+            """
+            self._message = ""
+            self._message_at = 0.0
+            self._message_is_progress = False
+
         def _tick(self) -> None:
-            """每 5 秒刷新一次（全部包在 try 里：界面刷新失败绝不崩）。"""
+            """每 5 秒刷新一次（全部包在 try 里：界面刷新绝不崩）。"""
             try:
-                self.status_label.setText(self._compose_status())
+                self._refresh_status()
                 self._refresh_pool()
                 self._refresh_watchlist()
                 self._refresh_positions()
@@ -1143,46 +1858,251 @@ if QT_AVAILABLE:
                 logger.warning(f"界面刷新异常：{exc}")
 
         def _refresh_status(self) -> None:
-            self.status_label.setText(self._compose_status())
+            """刷新整个状态区：主状态一句 + 右侧短标签 + tooltip 里的详情。
 
-        def _compose_status(self) -> str:
-            """状态栏 = （可选的瞬时消息）+ 实时状态。"""
-            summary = self.engine.summary()
-            st = self.scheduler.status()
-            pool_count = len(pool.load_pool(self.cfg.db_path))
-            live = (
-                f"引擎：{'在线' if st['running'] else '已停止'}"
-                f"｜最新数据日期：{summary.get('latest_date') or '无'}"
-                f"（{summary.get('symbols', 0)} 只 / {summary.get('daily_rows', 0)} 行）"
-                f"｜今日池子：{pool_count} 只（含自选 {summary.get('watchlist', 0)} 只）"
-                f"｜持仓浮动：{self._floating_pnl()}"
-                f"｜盘中提醒："
-                f"{'已暂停' if st['intraday_paused'] else ('交易时段中' if st['in_session'] else '非交易时段')}"
-                f"｜定时：{st['run_at']}"
-                + (f"（补跑 {st['run_at_fallback']}）" if st.get("run_at_fallback") else "")
-                + f"｜下次自动运行：{st['next_run']['label']}"
-                + ("" if st.get("auto_run") else "（自动运行已关闭）")
-                # 正在下载：一直挂着这个提示（进度回调用 5 秒一次的定时器刷不出来，
-                # 而且"下载中"这件事要盖过其它状态，否则用户以为卡死了）
-                + ("｜⏬ 正在下载历史数据…" if st.get("downloading") else "")
-                # 因为数据没就绪而没自动跑：说清原因（否则用户以为定时坏了）
-                + (f"｜⚠️ {st['skipped_reason']}" if st.get("skipped_reason") else "")
-                + (f"｜⚠️ {st['last_error']}" if st.get("last_error") else "")
+            三处要用同一批事实（池子几只、持仓多少），所以**只查一次库**再分发 ——
+            5 秒一轮的刷新里查三遍同样的 SQL 是白费力气。
+            """
+            facts = self._status_facts()
+            self.status_label.setText(self._compose_status(facts))
+            self._refresh_status_tags(facts)
+            details = self._status_details(facts)
+            self.status_label.setToolTip(details)
+            self.status_details_cache = details      # 【详情】弹窗打开时直接用这一份
+
+        def _status_facts(self) -> dict:
+            """状态区一次刷新要用的全部事实（`_compose_status` / 标签 / 详情共用）。"""
+            try:
+                st = self.scheduler.status()
+            except Exception as exc:  # noqa: BLE001 - 状态区绝不能因为取状态而崩
+                logger.debug(f"取调度状态失败：{exc}")
+                st = {}
+            try:
+                summary = self.engine.summary()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"取数据概况失败：{exc}")
+                summary = {}
+            try:
+                pool_count = len(pool.load_pool(self.cfg.db_path))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"取池子只数失败：{exc}")
+                pool_count = 0
+            return {
+                "st": st,
+                "summary": summary,
+                "pool_count": pool_count,
+                "pnl": self._position_pnl(),
+            }
+
+        def _compose_status(self, facts: dict | None = None) -> str:
+            """主状态：**只讲一件事**，按优先级取（用户要的"一行主状态"）。
+
+            优先级：
+            1. 瞬时消息（任务完成/失败、刚点过的动作，10 分钟内）；
+            2. 正在下载 → `⏬ 正在下载历史数据 48%`；
+            3. 今天该自动跑却被数据闸门拦下 / 上次出错 → 那句中文原因；
+            4. 本地数据落后或不可用 → `⚠️ … · 点【下载数据】补齐`（逗号句，**不串 `｜`**）；
+            5. 一切正常 → `✅ 数据就绪 · 5560 只 · 更新到 09-11`。
+
+            为什么不再把 8 项串成一条：用户原话"太啰嗦、很多词看不懂"。
+            行数 / 补跑时间 / 引擎状态 / 日志路径全部进 tooltip 与【详情】（`_status_details`）。
+            """
+            facts = facts if facts is not None else self._status_facts()
+            st = facts["st"]
+            fresh = bool(self._message) and (
+                time.monotonic() - self._message_at < STATUS_MESSAGE_TTL
             )
-            # 瞬时消息保留 10 分钟（够用户看见），之后自然消失
-            if self._message and time.monotonic() - self._message_at < 600:
-                return f"{self._message}｜{live}"
-            return live
+            message = self._message if fresh else ""
+            downloading = bool(st.get("downloading"))
+            # 下载中且手头只有"进度回传"这类消息 → 用一行会动的下载进度；
+            # 其它消息（任务完成/失败、重签 URL 的提示）仍然优先，不被吞掉
+            if downloading and (not message or self._message_is_progress):
+                return self._download_line(st)
+            if message:
+                return message
+            reasons = [str(st.get("skipped_reason") or ""), str(st.get("last_error") or "")]
+            if any(reasons):
+                # 今天该自动跑却没跑 / 上次出错：这两句本来就是中文原因，直接说完
+                return "⚠️ " + " · ".join(r for r in reasons if r)
+            problem = self._data_problem_text()
+            if problem:
+                return problem
+            return self._ready_text(facts)
 
-        def _floating_pnl(self) -> str:
-            """持仓浮动盈亏（用库里最新收盘价；缺价则显示 —）。"""
+        def _download_line(self, st: dict) -> str:
+            """下载中的主状态：`⏬ 正在下载历史数据 48%`（带上当前阶段与 MB）。
+
+            为什么要显式"正在下载"四个字：整件事可能十几分钟，屏幕上只挂一个百分比
+            或者干脆什么都不显示，用户会以为程序卡死了（实测反馈过）。
+            """
+            value, maximum = self.progress.value(), self.progress.maximum()
+            if maximum > 0:
+                head = f"⏬ 正在下载历史数据 {value * 100 // maximum}%"
+            else:
+                head = "⏬ 正在下载历史数据…"
+            if self._progress_stage_text:
+                return f"{head} · {self._progress_stage_text}"
+            return head
+
+        def _data_problem_text(self) -> str:
+            """数据不可用 / 落后时那一句："点哪个按钮能解决"；一切正常返回空串。
+
+            为什么必须指路：用户看不懂"needs_full"这种内部说法，也不该去猜
+            —— 直接告诉他按哪个按钮（按钮文字取自 `BTN_*` 常量，与按钮上的一模一样）。
+            """
+            from laoa_trader.data import preflight
+
+            result = self.preflight_result
+            if not result:
+                return ""      # 还没自检过：不瞎报，交给"数据就绪"那句
+            status = result.get("status")
+            if status == preflight.READY:
+                return ""
+            if status == preflight.NEEDS_INCREMENTAL:
+                days = int(result.get("stale_trading_days") or 0)
+                return f"⚠️ 本地数据落后 {days} 个交易日 · 点【{BTN_DOWNLOAD_TEXT}】补齐"
+            return f"⚠️ 本地数据还没准备好 · 点【{BTN_DOWNLOAD_TEXT}】下载历史数据"
+
+        def _ready_text(self, facts: dict) -> str:
+            """正常状态：`✅ 数据就绪 · 5560 只 · 更新到 09-11`（比一行里塞八项好读）。"""
+            summary = facts["summary"]
+            latest = str(summary.get("latest_date") or "")
+            symbols = int(summary.get("symbols") or 0)
+            if latest:
+                # 只要"月-日"：状态栏不是对账的地方，年份在同一天里没有信息量
+                return f"✅ 数据就绪 · {symbols} 只 · 更新到 {latest[5:]}"
+            return "✅ 数据就绪"
+
+        def _intraday_text(self, st: dict) -> str:
+            """盘中提醒的三种取值（`已暂停` / `时段中` / `未在时段`）。"""
+            if st.get("intraday_paused"):
+                return INTRADAY_PAUSED
+            return INTRADAY_IN_SESSION if st.get("in_session") else INTRADAY_OUT_SESSION
+
+        def _refresh_status_tags(self, facts: dict | None = None) -> None:
+            """右侧短标签：每项 2~6 个字 + 一个短值；**没有值的项整项隐藏**。
+
+            为什么不做成一句长文本：用户要的是"扫一眼知道今天有没有池子、持仓多少"，
+            不是一串用竖线连起来的字段清单。
+            """
+            facts = facts if facts is not None else self._status_facts()
+            st = facts["st"]
+            next_run = (st.get("next_run") or {}).get("label") or ""
+            tags = {
+                "今日池子": f"今日池子 {facts['pool_count']}",
+                "持仓": self._portfolio_tag(),
+                # 自动运行关掉时不给"下次"（那会是一句永远不兑现的承诺）
+                "下次选股": (f"下次选股 {next_run}" if st.get("auto_run", True)
+                             else "自动运行 已关"),
+                "盘中提醒": f"盘中提醒 {self._intraday_text(st)}",
+            }
+            for name, label in self.status_tags.items():
+                text = tags.get(name, "")
+                label.setText(text)
+                label.setVisible(bool(text))       # 空 → 整项不显示（不是显示一个空壳）
+
+        def _status_details(self, facts: dict | None = None) -> str:
+            """状态详情：多行中文说明，tooltip 与【详情】弹窗**共用这一份**。
+
+            这里才是"查得到就行"的东西：行数、股票数、补跑时间、后台任务状态、
+            日志路径、自检阈值 —— 用户想核对/报障时用得上，平时不占地方。
+            """
+            from laoa_trader.data import preflight
+
+            facts = facts if facts is not None else self._status_facts()
+            st, summary, pnl = facts["st"], facts["summary"], facts["pnl"]
+            latest = summary.get("latest_date") or "无"
+            # 数据目录可能是 str（直接构造 Config 时很常见），统一成 Path 再拼
+            log_path = log_file_path() or (
+                Path(self.cfg.data_dir) / "logs" / "laoa-trader.log"
+            )
+            self_check = self.preflight_result or {}
+            lines = [
+                "状态详情",
+                "────────────",
+                f"后台任务：{'运行中' if st.get('running') else '未运行'}",
+                f"最新数据日期：{latest}",
+                f"本地股票数：{summary.get('symbols', 0)} 只",
+                f"本地行情行数：{_short_number(summary.get('daily_rows'))} 行",
+                f"今日池子：{facts['pool_count']} 只"
+                f"（含自选 {summary.get('watchlist', 0)} 只）",
+                f"持仓浮动：{self._floating_pnl(pnl)}",
+                f"盘中提醒：{self._intraday_text(st)}",
+                f"主跑时间：{st.get('run_at') or '—'}"
+                f"（补跑 {st.get('run_at_fallback') or '未设置'}）",
+                # 标签本身就会写"已关闭（每天自动运行）"，不再叠一句"（自动运行已关闭）"
+                f"下次自动运行：{(st.get('next_run') or {}).get('label') or '—'}",
+                f"数据自检：{self_check.get('status') or '尚未自检'}"
+                + (f"（落后 {self_check.get('stale_trading_days')} 个交易日）"
+                   if self_check.get("status") == preflight.NEEDS_INCREMENTAL else "")
+                # 数据不可用时把**原始原因**留在这里（状态栏只给"点哪个按钮"）
+                + (f" · {self_check.get('reason')}"
+                   if self_check.get("status") == preflight.NEEDS_FULL
+                   and self_check.get("reason") else ""),
+                f"自检阈值：历史 ≥{self.cfg.min_history_years:g} 年 / "
+                f"股票 ≥{self.cfg.min_symbols} 只 / 行业覆盖 ≥90% / 交易日历齐全",
+                f"数据目录：{self.cfg.data_dir}",
+                f"日志文件：{log_path}",
+            ]
+            if st.get("skipped_reason"):
+                lines.append(f"今天没自动跑：{st['skipped_reason']}")
+            if st.get("last_error"):
+                lines.append(f"上次出错：{st['last_error']}")
+            return "\n".join(lines)
+
+        def on_show_status_details(self) -> None:
+            """【详情】：弹出状态详情（可复制），把"看不懂的词"变成查得到的东西。
+
+            非模态（`show` 而不是 `exec`）：用户可以先看别的，也不会卡住自动化测试。
+            """
+            if self.status_dialog is None:
+                dialog = QDialog(self)
+                dialog.setWindowTitle("状态详情")
+                # 尺寸跟着主窗口走（别在小屏上开出一个比主窗口还大的对话框）
+                dialog.resize(min(560, max(360, self.width() - 80)),
+                              min(420, max(260, self.height() - 160)))
+                layout = QVBoxLayout(dialog)
+                box = QPlainTextEdit()
+                box.setReadOnly(True)          # 只读但**可选中复制**（报障时整段贴过来）
+                box.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+                self.status_details_text = box
+                layout.addWidget(box, 1)
+                row = QHBoxLayout()
+                self.btn_copy_details = QPushButton("复制详情")
+                self.btn_copy_details.setToolTip("把这段文字复制到剪贴板")
+                self.btn_copy_details.clicked.connect(self.on_copy_status_details)
+                row.addWidget(self.btn_copy_details)
+                row.addStretch(1)
+                self.btn_close_details = QPushButton("关闭")
+                self.btn_close_details.clicked.connect(dialog.close)
+                row.addWidget(self.btn_close_details)
+                layout.addLayout(row)
+                self.status_dialog = dialog
+            details = self._status_details()
+            self.status_details_cache = details
+            self.status_details_text.setPlainText(details)
+            self.status_dialog.show()
+            self.status_dialog.raise_()
+
+        def on_copy_status_details(self) -> None:
+            """把状态详情写进剪贴板（与弹窗里显示的完全是同一份文本）。"""
+            text = self.status_details_text.toPlainText() or self._status_details()
+            QApplication.clipboard().setText(text)
+            self._set_status("已复制状态详情")
+
+        def _position_pnl(self) -> tuple[str, float, float]:
+            """持仓浮动盈亏 `(状态, 金额, 成本)`；状态是中文短句：ok / 无持仓 / 无最新价 / 未知。
+
+            为什么返回中文状态而不是枚举：调用方（主状态、详情）拿到的就是能显示的东西，
+            界面层不用再各自判一遍（也就不会出现"两处对同一件事说法不同"）。
+            """
             try:
                 with self.engine.connect() as conn:
                     positions = conn.execute(
                         "SELECT symbol, quantity, avg_cost FROM position WHERE quantity > 0"
                     ).fetchall()
                     if not positions:
-                        return "无持仓"
+                        return "无持仓", 0.0, 0.0
                     latest = conn.execute(
                         "SELECT MAX(date) FROM stock_daily_hfq"
                     ).fetchone()[0]
@@ -1202,12 +2122,25 @@ if QT_AVAILABLE:
                     total_cost += qty * (cost or 0)
                     total_value += qty * price
                 if not total_cost:
-                    return "无最新价"
-                pnl = total_value - total_cost
-                return f"{pnl:+.0f} 元（{pnl / total_cost * 100:+.2f}%）"
+                    return "无最新价", 0.0, 0.0
+                return "ok", total_value - total_cost, total_cost
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"浮动盈亏计算失败：{exc}")
-                return "—"
+                return "未知", 0.0, 0.0
+
+        def _portfolio_tag(self) -> str:
+            """短标签 `持仓 +1.2%`；没有持仓（或没有最新价）→ 空串，整项不显示。"""
+            state, pnl, cost = self._position_pnl()
+            if state != "ok":
+                return ""
+            return f"持仓 {pnl / cost * 100:+.1f}%"
+
+        def _floating_pnl(self, values: tuple[str, float, float] | None = None) -> str:
+            """持仓浮动的完整说法（**详情**用）：`+1234 元（+1.20%）` / `无持仓` / `—`。"""
+            state, pnl, cost = values if values is not None else self._position_pnl()
+            if state != "ok":
+                return "—" if state == "未知" else state
+            return f"{pnl:+.0f} 元（{pnl / cost * 100:+.2f}%）"
 
         def _refresh_pool(self) -> None:
             """刷新股票池：**卡片与表格两套视图一起填**（看当前显示哪一个）。
@@ -1484,7 +2417,7 @@ if QT_AVAILABLE:
             """轻提示：状态栏 + 托盘气泡（不用模态弹窗打断操作）。"""
             self._set_status(text)
             try:
-                self.tray.showMessage("老A法师", text)
+                self.tray.showMessage("老A选股助手", text)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1556,7 +2489,12 @@ if QT_AVAILABLE:
                     self.wizard_status.setText(status)
                 except Exception:  # noqa: BLE001 - 向导可能已被关掉
                     pass
-            self._set_status(status)
+            # 记下"阶段 + 数量"，下载中那行会把它补在百分比后面（例如 `· 81/181 MB`）
+            self._progress_stage_text = (
+                f"{stage} {done / 1e6:.0f}/{total / 1e6:.0f} MB" if total >= 1_000_000
+                else (f"{stage} {done}/{total}" if total > 0 else f"{stage} {done}")
+            )
+            self._set_status(status, progress=True)
 
         def _on_worker_done(self, label: str, result: Any) -> None:
             self.progress.setValue(self.progress.maximum())
@@ -1812,7 +2750,7 @@ if QT_AVAILABLE:
                 "频道与参数取自「设置」页当前勾选（无需先保存）。",
             ]
             self._run_worker(
-                lambda: notify_all("🧪 老A法师 · 测试提醒", lines, cfg=test_cfg),
+                lambda: notify_all("🧪 老A选股助手 · 测试提醒", lines, cfg=test_cfg),
                 "测试通知",
             )
 
@@ -1825,12 +2763,13 @@ if QT_AVAILABLE:
             )
 
         def on_toggle_intraday(self) -> None:
+            # 按钮文字走 `BTN_*` 常量：状态区里"点【暂停提醒】"这类指路文案引用的就是它
             if self.scheduler.intraday_paused:
                 self.scheduler.resume_intraday()
-                self.btn_pause.setText("暂停盘中提醒")
+                self.btn_pause.setText(BTN_PAUSE_TEXT)
             else:
                 self.scheduler.pause_intraday()
-                self.btn_pause.setText("恢复盘中提醒")
+                self.btn_pause.setText(BTN_RESUME_TEXT)
             self._tick()
 
         # ── 持仓操作 ──
@@ -1984,7 +2923,7 @@ if QT_AVAILABLE:
             self.hide()
             try:
                 self.tray.showMessage(
-                    "老A法师仍在后台运行",
+                    "老A选股助手仍在后台运行",
                     "已最小化到托盘；右键托盘图标可退出。",
                 )
             except Exception:  # noqa: BLE001

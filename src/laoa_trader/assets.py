@@ -66,3 +66,20 @@ def icon_png(size: int | None = None) -> Path | None:
 def icon_ico() -> Path | None:
     """Windows 可执行文件用的多尺寸 ICO 路径（打包脚本用）。"""
     return _first(("icon.ico",))
+
+
+def ui_asset(name: str) -> Path | None:
+    """界面素材（皮肤用的纹理图等）路径；**找不到返回 None**（界面必须优雅降级）。
+
+    为什么不复用 `icon_png()`：图标是"按尺寸取一张"，界面素材是"按名字取一张"；
+    混在一起以后一定会有人以为界面素材也分 16/32/48 档。
+    素材放在 `assets/ui/` 下，由 `build/make_ui_assets.py` 生成 —— 与图标同一个理由：
+    画法留在仓库里，改色调、改密度只要改脚本重跑一遍。
+
+    注意：QSS 的 `url()` 要**绝对路径**（打包后相对路径会解析到别处），
+    调用方拿到 Path 之后用 `as_posix()` 再拼进样式表。
+    """
+    if not name:
+        return None
+    path = assets_dir() / "ui" / name
+    return path if path.is_file() else None
