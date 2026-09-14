@@ -111,7 +111,9 @@ def test_needs_full_blocks_scheduled_run(cfg, monkeypatch, log_records) -> None:
     assert "本地数据不可用" in text and "跳过本次自动选股" in text
     assert "needs_full" not in text                  # 给用户看的是中文，不是状态码
     assert "复权事件" in text or "还没有数据库" in text or "空的" in text   # 说清具体原因
-    assert "请先下载历史数据" in text                 # 日志里有下一步（不用翻文档猜）
+    assert "请先下载" in text                          # 日志里有下一步（不用翻文档猜）
+    assert "【下载数据】" in text                      # 而且指名道姓是哪个按钮
+    assert "【刷新数据】" in text                      # 轻量项（行业/日历）那条路也写清楚
     st = s.status()
     assert "数据不可用" in st["skipped_reason"]       # 状态栏能直接显示原因
     assert "跳过本次自动选股" in st["skipped_reason"]

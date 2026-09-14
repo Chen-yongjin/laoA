@@ -131,7 +131,12 @@ def test_missing_adjust_events_needs_full(tmp_path) -> None:
 
 
 def test_low_industry_coverage_needs_full(tmp_path) -> None:
-    """行业覆盖 50% → needs_full（热门行业过滤会失效）。"""
+    """行业覆盖 25% → 判不可用，但**指路必须是"点【刷新数据】"**（不是重下历史）。
+
+    为什么这条值得改口径：行业归属是目录类数据（1 次目录 + 约 90 次成分请求），
+    点一下【刷新数据】几秒钟就补上；以前这里一律给 `needs_download = full`，
+    界面/CLI 就照着"下载数据"指路 —— 用户真的被引去重下 180MB（实报 bug）。
+    """
     cfg = _cfg(tmp_path)
     seed_ready_db(cfg, symbols=(
         ("600001", "甲", "银行"), ("600002", "乙", ""), ("600003", "丙", ""), ("600004", "丁", ""),
@@ -139,7 +144,12 @@ def test_low_industry_coverage_needs_full(tmp_path) -> None:
     result = preflight.check(cfg.db_path, cfg)
     assert result["status"] == preflight.NEEDS_FULL
     assert result["industry_coverage"] == pytest.approx(0.25)
-    assert "行业归属覆盖率" in result["reason"]
+    assert "行业归属未同步" in result["reason"]
+    # 关键：指路指向【刷新数据】，而且 needs_download 不再是 full
+    assert "【刷新数据】" in result["reason"]
+    assert preflight.needs_download(result) == preflight.DOWNLOAD_SYNC_LIGHT
+    assert result["light_only"] is True
+    assert preflight.summary_line(result).startswith("本地数据缺轻量项：")
 
 
 def test_missing_calendar_needs_full(tmp_path) -> None:

@@ -287,11 +287,13 @@ QMenu::item:selected { background-color: $selection; }
 QMenu::item:disabled { color: $text_disabled; }
 QMenu::separator { height: 1px; background-color: $border; margin: 4px 8px; }
 
-/* ── 概览页的卡片（objectName 见 ui/app.py） ────────────── */
-QFrame#marketKpiCard, QFrame#marketEntry {
+/* ── 卡片（objectName 见 ui/app.py） ──────────────────────
+   KPI 块与股票池卡片给"白底 + 细边框"；概览页的**指数条目**故意**不给**边框和底：
+   它们是"名称 / 点位 / 涨跌幅"三列对齐的文本行（上一轮定稿的版式），
+   十几个条目都套上卡片会让页面变成一片白盒子，反而更乱 */
+QFrame#marketKpiCard, QFrame#poolCard {
     background-color: $panel; border: 1px solid $border; border-radius: 6px;
 }
-QFrame#poolCard { background-color: $panel; border: 1px solid $border; border-radius: 6px; }
 /* 小号灰字：用 objectName 精确上色（不依赖 palette 角色 —— 应用级样式表里
    `QLabel { color }` 会把角色的灰盖掉，写死在这里才稳定） */
 QLabel#marketSectionTitle, QLabel#marketKpiTitle,

@@ -31,6 +31,9 @@ from laoa_trader import intraday, pool, state
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import sync
 from laoa_trader.data.engine import DataEngine
+from laoa_trader import hints
+from laoa_trader.data import preflight
+from laoa_trader.hints import LIGHT_ITEM_NAMES as DL_HINT_LIGHT_ITEMS
 from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
@@ -185,8 +188,10 @@ def pool_fingerprint(title: str, lines: list[str]) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
 
 
-#: 数据闸门拦住时给用户看的中文下一步指引（界面与 CLI 共用同一句话）
-DOWNLOAD_HINT = "请先下载：点界面上的【下载数据】，或命令行运行 --download"
+#: 数据闸门拦住时给用户看的中文下一步指引（界面与 CLI 共用同一句话，见 `hints` 模块）。
+#: 后面那句是**轻量项**的指路：缺交易日历/行业归属/指数时点【刷新数据】就够了，
+#: 别去重下历史（用户实报过被指错路）
+DOWNLOAD_HINT = f"{hints.DOWNLOAD_HINT}；缺{DL_HINT_LIGHT_ITEMS}用【{hints.BTN_REFRESH_TEXT}】"
 
 
 def data_gate(
@@ -194,6 +199,8 @@ def data_gate(
     engine: DataEngine | None = None,
     *,
     today: str | None = None,
+    auto_sync_light: bool = False,
+    note_cb: Any = None,
 ) -> dict:
     """**跑策略前的数据闸门**：本地数据到底能不能用来选股？
 
@@ -203,12 +210,18 @@ def data_gate(
     - `ready` → 放行；
     - `needs_incremental` → **也放行**（数据可用，只是落后几天；`run_daily` 会先跑
       增量再选股，所以口径仍然是"先补数据再选股"）；
-    - `needs_full`（空库/跨度不足/缺复权事件/落后超窗口…）→ **拦下**，给出原因与下一步。
+    - `needs_full`（空库/跨度不足/缺复权事件/落后超窗口…）→ **拦下**，给出原因与下一步；
+    - **只缺轻量项**（交易日历/行业归属/指数）→ 默认也拦下（但指路指向【刷新数据】，
+      文案里不再是"重新下载"）；`auto_sync_light=True` 时**先自动补一次再复查**，
+      补上了就放行 —— 别让用户为了一个行业归属去重下 10 年数据。
 
     Args:
         cfg: 配置（阈值来源）。
         engine: 数据引擎（不传就用 `cfg.db_path`）。
         today: 覆盖"今天"（测试用）。
+        auto_sync_light: 只缺轻量项时自动同步（**会发约 90 个请求**，所以默认关；
+            调度器的定时/自动跑传 True，界面上的手动按钮按需自己点【刷新数据】）。
+        note_cb: 自动同步时的状态回调（"正在同步行业归属…"）。
 
     Returns:
         ```python
@@ -238,6 +251,29 @@ def data_gate(
     if status == preflight.NEEDS_INCREMENTAL:
         return {"ok": True, "status": status, "reason": reason,
                 "message": preflight.summary_line(result), "result": result}
+
+    if preflight.needs_download(result) == preflight.DOWNLOAD_SYNC_LIGHT:
+        if auto_sync_light:
+            # 先补轻量项再复查：补上了就当 ready 放行（选股不需要"行业归属完好"之外的东西）
+            logger.info(f"只缺轻量数据，先自动同步再复查：{reason}")
+            try:
+                sync.sync_light(cfg, note_cb=note_cb)
+            except Exception as exc:  # noqa: BLE001 - 补不上就按原来的原因拦下
+                logger.warning(f"轻量数据自动同步失败：{type(exc).__name__}: {exc}")
+            retry = preflight.check(db_path, cfg, today=today)
+            if retry.get("status") == preflight.READY:
+                return {"ok": True, "status": retry["status"],
+                        "reason": retry.get("reason") or "",
+                        "message": preflight.summary_line(retry), "result": retry}
+            result, reason = retry, retry.get("reason") or reason
+        return {
+            "ok": False,
+            "status": preflight.NEEDS_FULL,
+            "reason": reason,
+            "message": f"本地数据缺轻量项（{reason}）",
+            "result": result,
+        }
+
     return {
         "ok": False,
         "status": preflight.NEEDS_FULL,
@@ -671,12 +707,18 @@ class Scheduler:
             return
 
         # ── 闸门二：本地数据不可用就不选股 ──
-        gate = data_gate(self.cfg, self.engine)
+        # auto_sync_light=True：**只缺轻量项**（交易日历/行业归属/指数）时先自动补一次再复查。
+        # 定时任务跑在后台，不该因为"行业归属没同步"就跳过今天，更不该等用户去点按钮
+        # （补的是目录类数据：约 90 个请求、幂等、不动行情）。
+        gate = data_gate(self.cfg, self.engine, auto_sync_light=True)
         self._preflight_status = gate["status"]
         if not gate["ok"]:
+            # 默认给"下载历史数据 + 轻量项用【刷新数据】"这一整句（见模块顶部的 DOWNLOAD_HINT）
+            hint = DOWNLOAD_HINT
+            if preflight.needs_download(gate.get("result") or {}) == preflight.DOWNLOAD_SYNC_LIGHT:
+                hint = hints.SYNC_LIGHT_HINT        # 缺轻量项：指路【刷新数据】，不是重下历史
             self._block_daily(
-                f"本地数据不可用（{gate['reason']}）：已跳过本次自动选股；"
-                "请先下载历史数据（界面【下载数据】或命令行 --download）",
+                f"本地数据不可用（{gate['reason']}）：已跳过本次自动选股；{hint}",
                 now,
             )
             return

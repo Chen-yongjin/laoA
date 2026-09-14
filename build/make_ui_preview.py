@@ -11,13 +11,18 @@
     python build/make_ui_preview.py 出图目录
     python build/make_ui_preview.py 出图目录 --themes silver,system --sizes 960x900,1280x720
 
-产出（每个尺寸 × 每个主题一套）：
-    01-大盘概览-<主题>.png … 07-关于-<主题>.png
+产出（平铺在一个目录里，文件名自带"主题 + 尺寸"，便于"银色 vs 原生"对照）：
+    01-大盘概览-silver-960x900.png     ← 默认页 + 银色（重点看这张）
+    01-大盘概览-system-960x900.png     ← 同一页的系统默认主题（对照）
+    01b-大盘概览-页面-silver-960x900.png ← 只有页面（不含窗口边框，看排版细节）
+    02-股票池-silver-960x900.png … 06-设置-…、90-关于弹窗-…、91-状态详情-…
+    1280x720 那一档同样一套（尺寸后缀不同）
 
 设计取舍
 --------
-- **不联网**：大盘数据用一份**写死的真实样例**（取自 2026-09-14 收盘后的实测值）直接喂给
-  渲染函数 —— 跑这个脚本不该需要 API Key，也不该因为限流/断网出不了图。
+- **不联网**：把同花顺客户端换成一个假的（`PreviewClient`，数据取自 2026-09-14 收盘后的
+  实测值），但**仍走真实的取数路径** —— 跑这个脚本不需要 API Key，也不会因为限流/断网
+  出不了图；同时避免"手写 overview 漏键 → 截图里整块是空的"这种假象。
 - **按"逻辑像素"出图**：`--sizes` 里的 960x900 就是用户那台 2160×1440@150% 的等效逻辑尺寸，
   用最苛刻的那档出图，排版问题才暴露得出来。
 - 窗口尺寸用 `fit_window_geometry` 同一套规则（注入可用区域），保证"图里看到的"就是
@@ -38,35 +43,67 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))          # 复用 tests/ 里的造数工具（只读，不改测试）
 
-#: 一份**真实的**大盘概览样例（2026-09-14 收盘后实测），只为出图好看、且不联网
-SAMPLE_OVERVIEW = {
-    "as_of": "2026-09-14 15:03",
-    "limits": {"up": 55, "down": 16, "break": 30},
-    "turnover": {"sh": 779_280_000_000, "sz": 849_890_000_000,
-                 "bj": 14_010_000_000, "total": 1_643_030_000_000},
-    "breadth": {"up": 3126, "down": 2224, "flat": 221, "total": 5571},
-    "breadth_enabled": True,
-    "stale": False,
-    "failed": [],
-    "errors": [],
-    "indices": [
-        {"thscode": "000001.SH", "name": "上证指数", "last": 3885.33, "change_pct": -0.07},
-        {"thscode": "399001.SZ", "name": "深证成指", "last": 13384.57, "change_pct": -0.64},
-        {"thscode": "399006.SZ", "name": "创业板指", "last": 3285.58, "change_pct": -1.10},
-        {"thscode": "000688.SH", "name": "科创50", "last": 1528.27, "change_pct": -1.62},
-        {"thscode": "000300.SH", "name": "沪深300", "last": 4480.08, "change_pct": -0.67},
-    ],
-    "sentiment": [
-        {"thscode": "883404.TI", "name": "同花顺情绪", "last": 885.53, "change_pct": -0.18},
-        {"thscode": "883958.TI", "name": "昨日连板", "last": 6928.17, "change_pct": 3.53},
-        {"thscode": "883994.TI", "name": "昨日打首板", "last": 1551.88, "change_pct": 1.69},
-        {"thscode": "883418.TI", "name": "微盘股", "last": 2131.00, "change_pct": 0.95},
-    ],
-    "sector": [
-        {"thscode": "881155.TI", "name": "银行", "last": 1408.77, "change_pct": 0.88},
-        {"thscode": "881157.TI", "name": "证券", "last": 1428.64, "change_pct": -0.27},
-    ],
-}
+#: 写死的行情快照（2026-09-14 收盘后的实测值），只为出图好看、且不联网
+SAMPLE_ROWS: list[dict] = [
+    # 宽基
+    {"thscode": "000001.SH", "last_price": 3885.33, "price_change_ratio_pct": -0.07,
+     "turnover": 779_280_000_000},
+    {"thscode": "399001.SZ", "last_price": 13384.57, "price_change_ratio_pct": -0.64,
+     "turnover": 849_890_000_000},
+    {"thscode": "399006.SZ", "last_price": 3285.58, "price_change_ratio_pct": -1.10},
+    {"thscode": "000688.SH", "last_price": 1528.27, "price_change_ratio_pct": -1.62},
+    {"thscode": "000300.SH", "last_price": 4480.08, "price_change_ratio_pct": -0.67},
+    # 情绪（同花顺板块指数）
+    {"thscode": "883404.TI", "last_price": 885.529, "price_change_ratio_pct": -0.18},
+    {"thscode": "883958.TI", "last_price": 6928.171, "price_change_ratio_pct": 3.53},
+    {"thscode": "883994.TI", "last_price": 1551.879, "price_change_ratio_pct": 1.69},
+    {"thscode": "883418.TI", "last_price": 2131.00, "price_change_ratio_pct": 0.95},
+    # 板块（同花顺一级行业）
+    {"thscode": "881155.TI", "last_price": 1408.771, "price_change_ratio_pct": 0.88},
+    {"thscode": "881157.TI", "last_price": 1428.643, "price_change_ratio_pct": -0.27},
+]
+
+
+class PreviewClient:
+    """假的同花顺客户端：让**真实的** `market.fetch_overview` 跑一遍（不联网）。
+
+    为什么不直接手写一个 overview dict 喂给渲染函数：取数结果的结构是
+    `fetch_overview` 定的（`configured_groups`、turnover 从指数里取、errors…），
+    手写一份迟早会漏键 —— 第一版就漏了 `configured_groups`，于是三组指数**整组隐藏**，
+    截图上那一大块是空的，看着像"界面坏了"。走真实路径就不会有这种假象。
+    """
+
+    def special_pool_total(self, path: str, day: str | None = None) -> int:
+        from laoa_trader import market
+
+        return {
+            market.LIMIT_UP_PATH: 55,
+            market.LIMIT_DOWN_PATH: 16,
+            market.LIMIT_BREAK_PATH: 30,
+        }.get(path, 0)
+
+    def index_snapshot(self, thscodes: list[str]) -> dict:
+        wanted = set(thscodes)
+        return {"item": [r for r in SAMPLE_ROWS if r["thscode"] in wanted], "failed": []}
+
+    def request(self, path: str, params: dict | None = None) -> dict:
+        # 全市场快照：只给一页（涨 / 跌 / 平 + 一只北交所），够算出涨跌家数与北交所成交额
+        return {"item": [
+            {"thscode": "600519.SH", "turnover": 1e11, "volume": 1e6,
+             "price_change_ratio_pct": 1.0},
+            {"thscode": "000001.SZ", "turnover": 4e11, "volume": 2e6,
+             "price_change_ratio_pct": -0.5},
+            {"thscode": "830799.BJ", "turnover": 140.1e8, "volume": 3e5,
+             "price_change_ratio_pct": 0.0},
+        ], "total": 3}
+
+
+def _use_preview_client() -> None:
+    """把取数客户端换成假的（走真实取数路径，只是不出网）。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    market._make_client = lambda cfg: PreviewClient()
 
 
 def _seed(cfg) -> None:
@@ -147,15 +184,17 @@ def render(out_dir: Path, themes: list[str], sizes: list[tuple[int, int]]) -> in
     _seed(cfg)
 
     app = QApplication.instance() or QApplication([])
-    market.fetch_overview = lambda *a, **k: dict(SAMPLE_OVERVIEW)   # 不联网
+    _use_preview_client()          # 概览数据走真实取数路径（假客户端），不联网
 
     shots = 0
-    for theme_name in themes:
-        # 主题跟着 **config** 走（窗口自己在 __init__ 里按 `cfg.ui_theme` 应用）——
-        # 只调 `apply_theme(app, …)` 会被窗口构造时的那次覆盖掉，
-        # 结果是"两种主题的图一模一样"（第一版就踩了这个坑）
-        cfg.ui_theme = theme_name
-        for width, height in sizes:
+    for width, height in sizes:
+        for theme_name in themes:
+            # 主题跟着 **config** 走（窗口自己在 __init__ 里按 `cfg.ui_theme` 应用）——
+            # 只调 `apply_theme(app, …)` 会被窗口构造时的那次覆盖掉，
+            # 结果是"两种主题的图一模一样"（第一版就踩了这个坑）
+            cfg.ui_theme = theme_name
+            # 文件名里的尺寸后缀不能省：一档尺寸一套图，同目录平铺时靠它区分
+            tag = f"{theme_name}-{width}x{height}"
             # 离屏平台的"真屏幕"是固定值，所以这里注入可用区域 → 出来的图就是
             # 用户那台机器（逻辑像素）上会得到的布局
             avail = _available(width, height)
@@ -163,7 +202,7 @@ def render(out_dir: Path, themes: list[str], sizes: list[tuple[int, int]]) -> in
             win = ui_app.MainWindow(cfg)
             win.show()
             app.processEvents()
-            win._on_market_overview_ready(dict(SAMPLE_OVERVIEW))
+            win.refresh_market_overview(force=True)    # 同步取一轮（假客户端，离线）
             win._tick()
             app.processEvents()
 
@@ -173,24 +212,32 @@ def render(out_dir: Path, themes: list[str], sizes: list[tuple[int, int]]) -> in
                 app.processEvents()
                 QTimer.singleShot(0, lambda: None)
                 app.processEvents()
-                name = f"{index + 1:02d}-{title.replace(' ', '')}-{theme_name}-{width}x{height}.png"
+                name = f"{index + 1:02d}-{title.replace(' ', '')}-{tag}.png"
+                # 抓**整窗**（含顶部状态区与按钮行）—— 那两块正是这次整改的重点，
+                # 只抓页面会看不到状态栏与页脚
                 win.grab().save(str(out_dir / name))
                 shots += 1
                 print(f"  {name}")
+                if title == "大盘概览":
+                    # 概览页再单独抓一张"只有页面"的（看排版细节时不用被窗口边框干扰）
+                    page_name = f"{index + 1:02d}b-{title}-页面-{tag}.png"
+                    win.market_page.grab().save(str(out_dir / page_name))
+                    shots += 1
+                    print(f"  {page_name}")
 
             # 「关于」与「状态详情」两个弹窗单独出图（它们也是用户会看到的界面）
             win.on_about()
             app.processEvents()
             if win.about_dialog is not None:
                 win.about_dialog.grab().save(
-                    str(out_dir / f"90-关于弹窗-{theme_name}-{width}x{height}.png"))
+                    str(out_dir / f"90-关于弹窗-{tag}.png"))
                 shots += 1
                 win.about_dialog.close()
             win.on_show_status_details()
             app.processEvents()
             if win.status_dialog is not None:
                 win.status_dialog.grab().save(
-                    str(out_dir / f"91-状态详情-{theme_name}-{width}x{height}.png"))
+                    str(out_dir / f"91-状态详情-{tag}.png"))
                 shots += 1
                 win.status_dialog.close()
 

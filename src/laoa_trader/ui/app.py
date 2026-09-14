@@ -26,6 +26,12 @@ from laoa_trader import config
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import sync
 from laoa_trader.data.engine import DataEngine
+from laoa_trader import hints
+from laoa_trader.hints import (
+    BTN_DOWNLOAD_TEXT,
+    BTN_REFRESH_TEXT,
+    BTN_RUN_TEXT,
+)
 from laoa_trader.log import get_logger, log_file_path
 from laoa_trader.notify import KINDS, summarize
 from laoa_trader.scheduler import Scheduler, data_gate, refresh_data, run_daily
@@ -100,12 +106,9 @@ STATUS_TAGS: tuple[str, ...] = ("今日池子", "持仓", "下次选股", "盘�
 INTRADAY_PAUSED = "已暂停"
 INTRADAY_IN_SESSION = "时段中"
 INTRADAY_OUT_SESSION = "未在时段"
-#: 顶部按钮文字（2~4 字）与"指路"时引用的名字 —— **必须只有这一份**：
-#: 主状态里写"点【下载数据】补齐"，按钮上就必须真的写着【下载数据】，
-#: 否则用户拿着这句话去找一个不存在的按钮。
-BTN_DOWNLOAD_TEXT = "下载数据"
-BTN_RUN_TEXT = "选股建池"
-BTN_REFRESH_TEXT = "刷新数据"
+#: 顶部按钮文字（2~4 字）。
+#: 前三个从 `laoa_trader.hints` 取 —— 非界面层（同步/自检/调度）的"指路"文案里
+#: 也要引用这几个名字，写错就等于让用户去找一个不存在的按钮，所以只有一份定义。
 BTN_PAUSE_TEXT = "暂停提醒"
 BTN_RESUME_TEXT = "恢复提醒"
 BTN_CHECK_TEXT = "检查盘面"
@@ -114,7 +117,16 @@ BTN_ABOUT_TEXT = "关于"
 
 try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
     from PySide6.QtCore import QPoint, QSize, Qt, QThread, QTimer, Signal
-    from PySide6.QtGui import QAction, QFont, QGuiApplication, QIcon, QPalette, QPixmap
+    from PySide6.QtGui import (
+        QAction,
+        QBrush,
+        QColor,
+        QFont,
+        QGuiApplication,
+        QIcon,
+        QPalette,
+        QPixmap,
+    )
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -714,9 +726,11 @@ if QT_AVAILABLE:
             self.tabs.addTab(self._build_market_page(), "大盘概览")
             self.tabs.addTab(self._build_pool_page(), "股票池")
 
-            self.position_table = QTableWidget(0, 6)
+            self.position_table = QTableWidget(0, 7)
+            # 「盈亏比例」紧跟在「成本」后面：成本和比例挨着看，"赚了几个点"一眼就出来
+            # （以前这里没有这一列，比例只在状态栏/详情里）
             self.position_table.setHorizontalHeaderLabels(
-                ["代码", "名称", "数量", "成本", "止损", "止盈"]
+                ["代码", "名称", "数量", "成本", "盈亏比例", "止损", "止盈"]
             )
             self._stretch(self.position_table)
             self.tabs.addTab(
@@ -1648,6 +1662,20 @@ if QT_AVAILABLE:
                 return
             self.preflight_result = result
             status = result.get("status")
+            if status != preflight.READY and \
+                    preflight.needs_download(result) == preflight.DOWNLOAD_SYNC_LIGHT:
+                # **只缺轻量项**：行业归属/日历/指数是目录类数据，点【刷新数据】几秒就好。
+                # 这里直接后台补一次（不弹"下载历史数据"的向导）—— 用户实报过
+                # 被这个提示引去重下 180MB。补完再复查一次，把结论写进状态栏。
+                self._toast(f"⚠️ {result.get('reason')}")
+                self._run_worker(
+                    lambda note_cb=None, progress_cb=None: preflight.ensure_ready(
+                        self.cfg, note_cb=note_cb, progress_cb=progress_cb,
+                    ),
+                    "补齐轻量数据",
+                    with_progress=True, with_note=True,
+                )
+                return
             if status == preflight.READY:
                 # 自检出结论了 → 撤掉"正在检查本地数据…"那条进度消息，
                 # 让主状态显示 `✅ 数据就绪 · 5560 只 · 更新到 09-11`。
@@ -1798,13 +1826,15 @@ if QT_AVAILABLE:
                 # 数据变了 → 之前缓存的"needs_full"结论立刻作废，重算一次。
                 # 这里**不**走 run_preflight()：那会在"还是不够用"时再弹一次向导，
                 # 用户刚下完就被弹窗怼一脸不合适；只把结论写进状态栏。
-                gate = data_gate(self.cfg, self.engine)
+                # 轻量项（行业归属/日历/指数）缺了就**先自动补一次**再复查：
+                # 刚下完 5 年行情的用户，不该因为少一个行业归属被告知"数据仍不可用"
+                gate = data_gate(self.cfg, self.engine, auto_sync_light=True)
                 self.preflight_result = gate.get("result") or None
                 self._set_status(
                     ("✅ " if gate["ok"] else "⚠️ ") + gate["message"]
                 )
                 if not gate["ok"]:
-                    # 下完了还不够（例如跨度/行业覆盖仍不达标）：说清原因，别硬跑
+                    # 下完了还不够（例如跨度/主体缺失）：说清原因，别硬跑
                     self._toast(f"⚠️ 数据仍不可用：{gate['reason']}")
                     return
                 self._toast("下载完成，正在跑一次选股建池…")
@@ -1960,6 +1990,11 @@ if QT_AVAILABLE:
             status = result.get("status")
             if status == preflight.READY:
                 return ""
+            # 先看"该做什么"（needs_download），再看"有多严重"（status）：
+            # 只缺轻量项（交易日历/行业归属/指数）时点【刷新数据】几秒就好，
+            # 指路去"下载数据"会让人白等十几分钟重下 180MB（实报 bug）
+            if preflight.needs_download(result) == preflight.DOWNLOAD_SYNC_LIGHT:
+                return f"⚠️ {result.get('reason') or hints.SYNC_LIGHT_HINT}"
             if status == preflight.NEEDS_INCREMENTAL:
                 days = int(result.get("stale_trading_days") or 0)
                 return f"⚠️ 本地数据落后 {days} 个交易日 · 点【{BTN_DOWNLOAD_TEXT}】补齐"
@@ -2092,11 +2127,16 @@ if QT_AVAILABLE:
             QApplication.clipboard().setText(text)
             self._set_status("已复制状态详情")
 
-        def _position_pnl(self) -> tuple[str, float, float]:
-            """持仓浮动盈亏 `(状态, 金额, 成本)`；状态是中文短句：ok / 无持仓 / 无最新价 / 未知。
+        def _position_pnl(self) -> tuple[str, float]:
+            """持仓浮动 `(状态, 涨跌比例%)`；状态是中文短句：ok / 无持仓 / 无最新价 / 未知。
 
-            为什么返回中文状态而不是枚举：调用方（主状态、详情）拿到的就是能显示的东西，
+            为什么返回中文状态而不是枚举：调用方（状态栏、详情）拿到的就是能显示的东西，
             界面层不用再各自判一遍（也就不会出现"两处对同一件事说法不同"）。
+
+            为什么**只给比例、不给金额**：用户明确要求"不要记录盈亏金额，只记录盈亏比例" ——
+            "这一手赚了几个点"才是决策信息，金额只跟仓位大小有关（同样的 7% ，
+            一万块和一百万块的绝对数完全不同），还要多一处口径去核对。
+            内部为了算**加权**比例仍然要过一遍市值与成本，但金额不出这个方法。
             """
             try:
                 with self.engine.connect() as conn:
@@ -2104,7 +2144,7 @@ if QT_AVAILABLE:
                         "SELECT symbol, quantity, avg_cost FROM position WHERE quantity > 0"
                     ).fetchall()
                     if not positions:
-                        return "无持仓", 0.0, 0.0
+                        return "无持仓", 0.0
                     latest = conn.execute(
                         "SELECT MAX(date) FROM stock_daily_hfq"
                     ).fetchone()[0]
@@ -2124,25 +2164,30 @@ if QT_AVAILABLE:
                     total_cost += qty * (cost or 0)
                     total_value += qty * price
                 if not total_cost:
-                    return "无最新价", 0.0, 0.0
-                return "ok", total_value - total_cost, total_cost
+                    return "无最新价", 0.0
+                # 加权比例：按**成本**加权（每只股票的盈亏点数按投入摊平），
+                # 不是把各只的比例简单平均 —— 后者会被小仓位的高波动带偏
+                return "ok", (total_value - total_cost) / total_cost * 100
             except Exception as exc:  # noqa: BLE001
-                logger.debug(f"浮动盈亏计算失败：{exc}")
-                return "未知", 0.0, 0.0
+                logger.debug(f"持仓浮动计算失败：{exc}")
+                return "未知", 0.0
 
         def _portfolio_tag(self) -> str:
             """短标签 `持仓 +1.2%`；没有持仓（或没有最新价）→ 空串，整项不显示。"""
-            state, pnl, cost = self._position_pnl()
+            state, pct = self._position_pnl()
             if state != "ok":
                 return ""
-            return f"持仓 {pnl / cost * 100:+.1f}%"
+            return f"持仓 {pct:+.1f}%"
 
-        def _floating_pnl(self, values: tuple[str, float, float] | None = None) -> str:
-            """持仓浮动的完整说法（**详情**用）：`+1234 元（+1.20%）` / `无持仓` / `—`。"""
-            state, pnl, cost = values if values is not None else self._position_pnl()
+        def _floating_pnl(self, values: tuple[str, float] | None = None) -> str:
+            """持仓浮动的完整说法（**详情**用）：`+1.20%` / `无持仓` / `无最新价` / `—`。
+
+            **只有比例、没有金额**：用户要求持仓不记盈亏金额（`元`这个字在这里不该出现）。
+            """
+            state, pct = values if values is not None else self._position_pnl()
             if state != "ok":
                 return "—" if state == "未知" else state
-            return f"{pnl:+.0f} 元（{pnl / cost * 100:+.2f}%）"
+            return f"{pct:+.2f}%"
 
         def _refresh_pool(self) -> None:
             """刷新股票池：**卡片与表格两套视图一起填**（看当前显示哪一个）。
@@ -2291,12 +2336,37 @@ if QT_AVAILABLE:
                 self.position_table.setItem(i, 1, QTableWidgetItem(str(row.get("name") or "")))
                 self.position_table.setItem(i, 2, QTableWidgetItem(str(row.get("quantity") or 0)))
                 self.position_table.setItem(i, 3, QTableWidgetItem(_fmt_float(cost)))
+                # 「盈亏比例」：该股最新价相对成本价的浮动（涨红跌绿，没价就 `—`）
                 self.position_table.setItem(
-                    i, 4, QTableWidgetItem(_fmt_float(cost * (1 - self.cfg.stop_loss)))
+                    i, 4, self._position_change_item(cost, self._last_price(str(row["symbol"])))
                 )
                 self.position_table.setItem(
-                    i, 5, QTableWidgetItem(_fmt_float(cost * (1 + self.cfg.take_profit)))
+                    i, 5, QTableWidgetItem(_fmt_float(cost * (1 - self.cfg.stop_loss)))
                 )
+                self.position_table.setItem(
+                    i, 6, QTableWidgetItem(_fmt_float(cost * (1 + self.cfg.take_profit)))
+                )
+
+        @staticmethod
+        def _position_change_item(cost: float, price: float | None) -> Any:
+            """「盈亏比例」单元格：`+7.14%`（涨红跌绿），没有最新价就是 `—`。
+
+            为什么缺价显示 `—` 而不是 `0.00%`：0.00% 是"平盘"这个**真实结论**，
+            和"没取到价"完全不是一回事 —— 混在一起会让人以为持仓刚好打平。
+            颜色沿用 `market.value_color()`（全程序"涨红跌绿"的唯一定义，
+            平盘与缺价都返回空串 → 用默认前景色）。
+            """
+            item = QTableWidgetItem()
+            if price is None or not cost:
+                item.setText(market.DASH)
+                return item
+            pct = (float(price) - cost) / cost * 100
+            item.setText(f"{pct:+.2f}%")
+            color = market.value_color(pct)
+            if color:
+                # 用前景色而不是富文本：与表格其余部分同一套画法，排序/复制都不受影响
+                item.setForeground(QBrush(QColor(color)))
+            return item
 
         def _refresh_watchlist(self) -> None:
             """自选股列表：代码/名称/备注/状态/是否已进池。"""

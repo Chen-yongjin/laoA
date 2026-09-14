@@ -37,7 +37,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from laoa_trader import state
+from laoa_trader import hints, state
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import hithink as hx
 from laoa_trader.data import storage
@@ -667,6 +667,29 @@ def _download_history_inner(
             result.extra["names"] = name_result.rows
             if not name_result.ok:
                 logger.warning(f"股票名称同步失败（不影响行情）：{name_result.message}")
+
+        # 6) 收尾：把**轻量数据**（交易日历 / 行业归属 / 指数）也一起补齐。
+        #
+        #    为什么必须在这里做、而且必须在写行情之后：
+        #    首次下载以前只做"行情 + 股票名称"，行业归属压根没同步（它只在
+        #    `daily_update`/【刷新数据】里跑），于是自检的行业覆盖率是 0%、
+        #    判成"数据不可用"，把用户挡在选股之外，还指路去"重新下载 180MB"。
+        #    而 `sync_industry` 只给库里**已有行情**的股票写行业 —— 所以顺序不能反。
+        #    这三步失败不改变整体 `ok`（行情已经下好了），但要在 detail 里说清怎么补。
+        light_results = sync_light(cfg, client=client, progress_cb=progress_cb,
+                                   note_cb=note_cb, should_stop=should_stop)
+        # 键用**清单里的中文标签**（不是 SyncResult.stage —— 那里面是"指数日线"这种
+        # 实现名，排查时对不上"到底哪一项没同步"）
+        result.extra["light"] = {
+            label: r.ok
+            for (label, _), r in zip(LIGHT_STEPS, light_results, strict=False)
+        }
+        failed_light = [r for r in light_results if not r.ok]
+        if failed_light:
+            labels = "、".join(r.stage for r in failed_light)
+            result.detail += (
+                f"；⚠️ {labels} 没同步成功（不影响已下好的行情），{hints.SYNC_LIGHT_HINT}"
+            )
         return result
 
     except (hx.DownloadCancelled, _Cancelled):
@@ -1096,6 +1119,71 @@ def sync_stock_names(
         result.error = f"{type(exc).__name__}: {exc}"
     logger.warning(f"股票名称同步失败：{result.error}")
     return result
+
+
+#: **轻量同步**的三件套：交易日历 / 行业归属 / 指数日线。
+#: 为什么单独成一档：这三项都是目录类数据（每类 1~90 个请求、失败也不影响行情），
+#: 但缺了它们自检会判"数据不可用"—— 而**完全不需要重下 180MB 历史**就能补上。
+#: （实报 bug：首次下载没同步行业归属 → 行业覆盖 0% → 被指路去"重新下载历史"。）
+LIGHT_STEPS: tuple[tuple[str, str], ...] = (
+    ("交易日历", "calendar"),
+    ("行业归属", "industry"),
+    ("指数", "index"),
+)
+
+
+def sync_light(
+    cfg: Config | None = None,
+    client: hx.HithinkClient | None = None,
+    *,
+    progress_cb: ProgressCb | None = None,
+    note_cb: NoteCb | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> list[SyncResult]:
+    """同步"轻量数据"：**交易日历 → 行业归属 → 指数**（顺序固定）。
+
+    顺序为什么是这个：
+    - 交易日历决定"落后几个交易日"，最便宜（1 个请求），放最前；
+    - **行业归属必须在下完历史行情之后**（`sync_industry` 只给库里已有行情的股票写行业，
+      见那里的 `known` 集合）—— 行情还没落库时整个映射会被丢掉，
+      这就是"下完 5 年数据行业覆盖率还是 0%"那个 bug 的机制；
+    - 指数排最后：它最慢（几只指数各拉一段日线），而且缺了不影响选股。
+
+    每一项**独立成败**：某一项失败不返回失败整体，调用方按各自的结果决定怎么提示。
+
+    Args:
+        should_stop: 协作式取消回调；返回真时**后面几步一次请求都不发**。
+    """
+    cfg = cfg or get_config()
+    funcs = {
+        "calendar": sync_calendar,
+        "industry": sync_industry,
+        "index": sync_index,
+    }
+    results: list[SyncResult] = []
+    total = len(LIGHT_STEPS)
+    for index, (label, key) in enumerate(LIGHT_STEPS):
+        if should_stop is not None and should_stop():
+            # 取消：剩下的步骤一次请求都不发，但**已完成的那些保留**
+            # （它们是幂等 upsert，下次接着来就是）
+            for rest_label, _ in LIGHT_STEPS[index:]:
+                results.append(SyncResult(stage=rest_label, ok=False,
+                                          error="已取消（本次没有同步）"))
+            logger.info(f"轻量同步被取消（已完成 {index}/{total} 项）")
+            break
+        if key == "industry":
+            # 1 次目录 + 约 90 次成分请求（客户端 pace 0.2 → 20~40 秒）：
+            # 不报一句状态，界面在这半分钟里毫无变化，看起来就像卡死
+            _note(note_cb, f"正在同步行业归属（约 90 个板块，约半分钟）…")
+        _notify(progress_cb, f"同步{label}", index, total)
+        try:
+            results.append(funcs[key](cfg, client=client))
+        except Exception as exc:  # noqa: BLE001 - 单项失败不连累其它项
+            logger.warning(f"{label}同步异常：{type(exc).__name__}: {exc}")
+            results.append(SyncResult(stage=label, ok=False,
+                                      error=f"{type(exc).__name__}: {exc}"))
+        _notify(progress_cb, f"同步{label}", index + 1, total)
+    return results
 
 
 def industry_map_is_fresh(

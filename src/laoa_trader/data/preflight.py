@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from laoa_trader.config import Config, get_config
+from laoa_trader import hints
 from laoa_trader.data import storage
 from laoa_trader.log import get_logger
 
@@ -46,6 +47,10 @@ NEEDS_FULL = "needs_full"
 DOWNLOAD_NONE = "none"
 DOWNLOAD_INCREMENTAL = "incremental"
 DOWNLOAD_FULL = "full"
+#: **只缺轻量数据**（交易日历 / 行业归属 / 指数）：点一下【刷新数据】就能补上，
+#: 完全不需要重下历史行情。为什么单独一个取值：以前这种情况一律给 `full`，
+#: 界面/CLI 就照着"下载数据"指路 —— 用户实测被指去重下 180MB（实报 bug）。
+DOWNLOAD_SYNC_LIGHT = "sync_light"
 
 #: 行业覆盖率下限（低于它认为行业数据不可用）
 MIN_INDUSTRY_COVERAGE = 0.9
@@ -101,7 +106,7 @@ def check(
             "coverage": 最新交易日行情覆盖率, "industry_coverage": 行业覆盖率,
             "has_adjust_events": bool, "has_calendar": bool,
             "latest_date": "YYYY-MM-DD" | None,
-            "needs_download": "none" | "incremental" | "full",
+            "needs_download": "none" | "incremental" | "sync_light" | "full",
             "missing_tables": [...],
         }
     """
@@ -215,17 +220,26 @@ def check(
         industry_coverage = (basic_industry / basic_total) if basic_total else 0.0
         result["industry_coverage"] = round(industry_coverage, 4)
         if basic_total == 0 or industry_coverage < MIN_INDUSTRY_COVERAGE:
+            # 这是"可以局部修复"的一种：行业归属是目录类数据，点【刷新数据】几秒钟就补上
+            # （`sync_industry`：1 次目录 + 约 90 次成分请求），**不要**让用户重下 180MB 历史
             result["reason"] = (
-                f"行业归属覆盖率只有 {industry_coverage:.0%}"
-                f"（要求 ≥{MIN_INDUSTRY_COVERAGE:.0%}）：热门行业过滤会失效，需要重新同步行业"
+                f"行业归属未同步（覆盖率 {industry_coverage:.0%}，要求 "
+                f"≥{MIN_INDUSTRY_COVERAGE:.0%}）· {hints.SYNC_LIGHT_HINT}"
             )
+            result["light_only"] = True
+            result["needs_download"] = DOWNLOAD_SYNC_LIGHT
             return result
 
         # 交易日历：判断"落后几个交易日"必须靠它
         calendar_max = _scalar(conn, "SELECT MAX(date) FROM trading_calendar")
         result["has_calendar"] = bool(calendar_max)
         if not calendar_max:
-            result["reason"] = "缺交易日历（无法判断数据是否新鲜）"
+            # 交易日历也是轻量项（1 个请求）：同样别指路去"重新下载"
+            result["reason"] = (
+                f"缺交易日历（无法判断数据是否新鲜）· {hints.SYNC_LIGHT_HINT}"
+            )
+            result["light_only"] = True
+            result["needs_download"] = DOWNLOAD_SYNC_LIGHT
             return result
 
         # 落后几个交易日：日历里"晚于最新行情日、且不晚于今天"的天数
@@ -290,6 +304,9 @@ def summary_line(result: dict) -> str:
     if status == READY:
         return (f"本地数据就绪：{result.get('rows', 0):,} 行 / "
                 f"最新 {result.get('latest_date')}")
+    if needs_download(result) == DOWNLOAD_SYNC_LIGHT:
+        # 行情是好的，只是缺轻量数据 —— 别说成"不可用"，更别说"要重新下载"
+        return f"本地数据缺轻量项：{result.get('reason')}"
     if status == NEEDS_INCREMENTAL:
         return (f"本地数据落后 {result.get('stale_trading_days', 0)} 个交易日"
                 f"（最新 {result.get('latest_date')}）——可增量更新，"
@@ -298,7 +315,10 @@ def summary_line(result: dict) -> str:
 
 
 def needs_download(result: dict) -> str:
-    """该下什么：`none` / `incremental` / `full`。"""
+    """该下什么：`none` / `incremental` / `sync_light` / `full`。
+
+    `sync_light` = 只缺轻量数据（点【刷新数据】即可），界面/CLI 的指路文案据此选按钮。
+    """
     return result.get("needs_download") or DOWNLOAD_FULL
 
 
@@ -318,6 +338,8 @@ def ensure_ready(
     - `ready` → 什么都不做，**一次请求都不发**；
     - `needs_incremental` → `auto_download` 或配置 `auto_download_on_start` 为真时
       跑一次增量（1 次请求）；
+    - `sync_light`（只缺交易日历/行业归属/指数）→ **无条件**跑一次这三步再复查
+      （轻量、幂等、不碰行情；把"为了一行业归属去重下 10 年"这条路彻底堵掉）；
     - `needs_full` → **只在 `auto_download` 显式为真时**才下载全量
       （全量是分钟级的大动作，必须由用户明确同意：界面点向导、CLI 加 `--auto-download`）。
 
@@ -344,6 +366,17 @@ def ensure_ready(
         return True, result, sync_results
 
     from laoa_trader.data import sync as sync_mod
+
+    if wanted == DOWNLOAD_SYNC_LIGHT:
+        # 只缺轻量项（行业归属/日历/指数）：**自动补一次再复查**，不再问、也不再让用户去下载。
+        # 理由：这三项是目录类数据（秒级~半分钟、幂等 upsert、不动行情），
+        # 而"全量重下"是十几分钟的大动作 —— 为了一个行业归属去重下 10 年数据说不通。
+        # 代价（约 90 个请求）与"用户点一次【刷新数据】"完全一样，所以这里不设门槛。
+        logger.info("只缺轻量数据，自动同步：" + result["reason"])
+        sync_results.extend(sync_mod.sync_light(cfg, progress_cb=progress_cb,
+                                               note_cb=note_cb,
+                                               should_stop=should_stop))
+        return True, check(cfg.db_path, cfg, today=today), sync_results
 
     allow = bool(auto_download)
     if wanted == DOWNLOAD_INCREMENTAL:

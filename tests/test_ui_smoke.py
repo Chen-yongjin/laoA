@@ -1030,6 +1030,146 @@ def test_pos_symbol_enter_adds_position(window, seeded, qapp) -> None:
     assert window.position_table.rowCount() == 2
 
 
+def test_status_points_to_refresh_when_only_light_data_missing(window, qapp) -> None:
+    """只缺轻量项（行业归属/日历/指数）时，主状态指路【刷新数据】**而不是**【下载数据】。
+
+    实报 bug：行业归属没同步被指路成"重新下载历史"，用户白等十几分钟重下 180MB。
+    """
+    from laoa_trader.data import preflight
+
+    win = window
+    ready = win.preflight_result
+    win.preflight_result = {
+        "status": preflight.NEEDS_FULL,
+        "needs_download": preflight.DOWNLOAD_SYNC_LIGHT,
+        "light_only": True,
+        "reason": "行业归属未同步（覆盖率 0%，要求 ≥90%）· 点【刷新数据】补齐即可（不用重下历史行情）",
+    }
+    win._clear_status_message()
+    win._refresh_status()
+    qapp.processEvents()
+    try:
+        text = win.status_label.fullText()
+        assert "【刷新数据】" in text
+        assert "【下载数据】" not in text
+        assert "｜" not in text
+        # 详情里也留着同一句原因（用户想核对时看得到）
+        assert "【刷新数据】" in win._status_details()
+    finally:
+        win.preflight_result = ready
+        win._refresh_status()
+        qapp.processEvents()
+
+
+# ── 持仓盈亏：只有**比例**，没有金额；持仓页显示「盈亏比例」列 ──
+
+
+def test_position_table_has_pnl_ratio_column_with_colors(window, seeded, qapp) -> None:
+    """持仓页第 5 列是「盈亏比例」：两位数百分比、涨红跌绿、没最新价显示 `—`。"""
+    from PySide6.QtCore import Qt
+
+    from laoa_trader import market
+
+    table = window.position_table
+    assert table.columnCount() == 7
+    assert [table.horizontalHeaderItem(i).text() for i in range(7)] == [
+        "代码", "名称", "数量", "成本", "盈亏比例", "止损", "止盈",
+    ]
+
+    # seeded 里 600001：成本 3.0、最新收盘 3.174 → +5.80%（两位小数，精确断言）
+    window._refresh_positions()
+    qapp.processEvents()
+    cell = table.item(0, 4)
+    assert cell.text() == "+5.80%"
+    assert cell.foreground().color().name() == market.COLOR_UP      # 赚 → 红
+
+    # 再加两只：一只亏（成本 20 > 最新 12.696）、一只没有行情（不该显示 0.00%）
+    with storage.connect(seeded.db_path) as conn:
+        storage.upsert_position(conn, "600002", name="半导体甲", quantity=500,
+                                avg_cost=20.0)
+        storage.upsert_position(conn, "600009", name="没有行情的票", quantity=100,
+                                avg_cost=10.0)
+    window._refresh_positions()
+    qapp.processEvents()
+
+    by_symbol = {
+        table.item(i, 0).text(): i for i in range(table.rowCount())
+    }
+    losing = table.item(by_symbol["600002"], 4)
+    assert losing.text() == "-36.52%"
+    assert losing.foreground().color().name() == market.COLOR_DOWN  # 亏 → 绿
+
+    missing = table.item(by_symbol["600009"], 4)
+    assert missing.text() == market.DASH                            # 不是 0.00%
+    assert missing.data(Qt.ItemDataRole.ForegroundRole) is None     # 不上色（默认前景）
+    # 原来的止损/止盈列跟着往后挪，数值仍然按成本算
+    cost = float(table.item(by_symbol["600001"], 3).text())
+    assert float(table.item(by_symbol["600001"], 5).text()) \
+        == pytest.approx(cost * (1 - seeded.stop_loss), abs=0.01)
+    assert float(table.item(by_symbol["600001"], 6).text()) \
+        == pytest.approx(cost * (1 + seeded.take_profit), abs=0.01)
+
+
+def test_position_pnl_never_shows_an_amount(window, qapp) -> None:
+    """**用户明确要求**：持仓不记盈亏金额 —— 详情那一行与状态栏短标签都不许出现「元」。"""
+    win = window
+    win._refresh_status()
+    qapp.processEvents()
+
+    tag = win.status_tags["持仓"].text()
+    assert tag.startswith("持仓 +") and tag.endswith("%")
+    assert "元" not in tag
+
+    details = win._status_details()
+    line = next(ln for ln in details.splitlines() if ln.startswith("持仓浮动："))
+    assert line == "持仓浮动：+5.80%"       # seeded：成本 3.0 / 最新 3.174
+    assert "元" not in line
+    for text in (win._floating_pnl(), win._portfolio_tag(), win.status_label.fullText()):
+        assert "元" not in text
+
+    # 没有持仓时的三种文案也不带金额
+    assert win._floating_pnl(("无持仓", 0.0)) == "无持仓"
+    assert win._floating_pnl(("无最新价", 0.0)) == "无最新价"
+    assert win._floating_pnl(("未知", 0.0)) == "—"
+
+
+def test_position_pnl_ratio_is_weighted_by_cost(window, seeded, qapp) -> None:
+    """组合比例按**成本**加权（不是把各只的比例简单平均）。"""
+    with storage.connect(seeded.db_path) as conn:
+        # 600001：3.0 → 3.174（+5.80%），成本 3000 元；600002：20 → 12.696（-36.52%），成本 100 元
+        storage.upsert_position(conn, "600001", name="低价样本", quantity=1000,
+                                avg_cost=3.0)
+        storage.upsert_position(conn, "600002", name="半导体甲", quantity=5,
+                                avg_cost=20.0)
+    window._refresh_positions()
+    state, pct = window._position_pnl()
+    assert state == "ok"
+    # 加权：(3174 + 63.48 - 3100) / 3100 ≈ +4.43%（简单平均会是 -15.36%）
+    assert pct == pytest.approx(4.43, abs=0.05)
+    assert f"{pct:+.2f}%" == "+4.43%"
+
+
+def test_position_table_columns_fit_at_960_logical_width(screen_window, qapp) -> None:
+    """≈用户那台（逻辑 960×900 → 窗口 920×760）：7 列持仓表铺满、不挤、也不顶大最小宽度。
+
+    这一条是给上一轮"窗口能缩到 760 宽"的成果上保险：多一列如果让表格的最小宽度变大，
+    窗口就又被顶出屏幕了（那正是用户最初抱怨的"最下边看不见"）。
+    """
+    win = screen_window(960, 900)
+    win.tabs.setCurrentWidget(_tab_page(win, "持仓"))
+    win._refresh_positions()
+    qapp.processEvents()
+
+    table = win.position_table
+    assert table.columnCount() == 7
+    widths = [table.columnWidth(i) for i in range(7)]
+    assert all(width > 20 for width in widths), widths          # 每列都还看得清
+    assert sum(widths) <= table.viewport().width() + 8          # Stretch：正好铺满
+    assert table.horizontalScrollBar().isVisible() is False     # 不需要横向滚动
+    assert win.minimumSizeHint().width() <= 960                 # 没把整窗最小宽度顶大
+    assert _bottom_of(table, win) <= win.height()               # 表格没被窗口下沿切掉
+
+
 # ── 「关于」对话框（版本 / 版权 / 数据来源）──
 
 
