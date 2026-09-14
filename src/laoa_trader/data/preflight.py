@@ -34,6 +34,7 @@ from typing import Any
 from laoa_trader.config import Config, get_config
 from laoa_trader import hints
 from laoa_trader.data import storage
+from laoa_trader.intraday import now_shanghai
 from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
@@ -117,7 +118,9 @@ def check(
     linkage_problem = cfg.history_warning() if hasattr(cfg, "history_warning") else ""
     min_symbols = int(getattr(cfg, "min_symbols", 4000) or 0)
     max_stale = int(getattr(cfg, "max_stale_trading_days", 0) or 0)
-    today = today or datetime.now().strftime("%Y-%m-%d")
+    # "今天"必须与交易日历同一套时钟（北京时间）：本机日期在 UTC 机器上会差一天，
+    # 落后的交易日天数就会算错（CI 上实测差 1 天 → 误判 needs_incremental / ready）
+    today = today or now_shanghai().strftime("%Y-%m-%d")
 
     result: dict[str, Any] = {
         "status": NEEDS_FULL,

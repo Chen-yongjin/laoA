@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from laoa_trader import intraday
+from laoa_trader.intraday import now_shanghai  # noqa: E402
 from laoa_trader import scheduler as sched
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
@@ -127,7 +128,7 @@ def test_manual_and_scheduled_share_one_pipeline(ready_db, monkeypatch) -> None:
     assert scheduler.status()["last_daily"]["pushed"] is True
 
     # 定时点再触发一次：同一天不应该重复跑（也不重复推）
-    scheduler._maybe_daily(datetime.now() + timedelta(minutes=1))
+    scheduler._maybe_daily(now_shanghai() + timedelta(minutes=1))
     assert len(pushed) == 1
 
 

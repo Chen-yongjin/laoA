@@ -31,6 +31,7 @@ from datetime import datetime
 import pytest
 
 from laoa_trader import scheduler as sched
+from laoa_trader.intraday import now_shanghai  # noqa: E402
 from laoa_trader import state
 from laoa_trader.config import Config, load_config
 from laoa_trader.data import preflight, storage
@@ -40,12 +41,15 @@ from tests.conftest import messages, seed_ready_db, workdays_ending
 
 
 def _today() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    # 用**程序自己的时钟**（北京时间）：A 股的交易日/交易时段都按北京时间算，
+    # 而 CI 的 runner 是 UTC —— 用本机时间会在跨日那几小时里差一天，
+    # 日历里查不到 → 被判成"今天不是交易日" → 闸门用例集体误红。
+    return now_shanghai().strftime("%Y-%m-%d")
 
 
 def _moment_after_run_at(hour: int = 16, minute: int = 30) -> datetime:
-    """"今天已过主跑时间"的那个时刻（相对真实时钟算，避免用例随日期腐坏）。"""
-    return datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+    """"今天已过主跑时间"的那个时刻（相对程序时钟算，避免用例随日期腐坏）。"""
+    return now_shanghai().replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
 @pytest.fixture(autouse=True)

@@ -25,6 +25,7 @@ pytest.importorskip("PySide6", reason="未安装 PySide6，跳过界面冒烟测
 
 from PySide6.QtCore import QEvent  # noqa: E402
 from laoa_trader.data import storage  # noqa: E402
+from laoa_trader.intraday import now_shanghai  # noqa: E402
 from laoa_trader.data.engine import DataEngine  # noqa: E402
 from laoa_trader.notify import KINDS  # noqa: E402
 from laoa_trader.strategy import rules as rules_mod  # noqa: E402
@@ -2045,7 +2046,9 @@ def test_status_bar_shows_why_daily_was_skipped(cfg, qapp, monkeypatch) -> None:
 
     ran: list[str] = []
     monkeypatch.setattr(win.scheduler, "run_daily_now", lambda **k: ran.append("ran"))
-    win.scheduler._maybe_daily(datetime.now().replace(hour=16, minute=30))
+    # 用程序自己的时钟（北京时间）：daily_skipped_today 是按「今天」记的，
+    # 用本机时间在 UTC 机器上会记到前一天 → 断言必红（CI 实测过）
+    win.scheduler._maybe_daily(now_shanghai().replace(hour=16, minute=30))
     # 主状态一次只讲一件事（见 test_status_bar_shows_one_line_main_status_and_tags）：
     # 先让出启动自检留下的那条更早的消息，看的才是"被闸门跳过"这件事本身
     win._message = ""

@@ -7,6 +7,7 @@ from datetime import datetime
 import pytest
 
 from laoa_trader import intraday
+from laoa_trader.intraday import now_shanghai  # noqa: E402
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
 from tests.conftest import FakeClient
@@ -291,7 +292,7 @@ def test_run_once_records_and_dedupes(db, cfg, monkeypatch) -> None:
                              "strategy": "LowPriceStrategy", "date": "2026-09-11"}],
                        "2026-09-11")
     with storage.connect(db) as conn:
-        storage.write_calendar(conn, [datetime.now().strftime("%Y-%m-%d")])
+        storage.write_calendar(conn, [now_shanghai().strftime("%Y-%m-%d")])
 
     engine = DataEngine(db)
     client = FakeClient(snapshots=[{
@@ -335,7 +336,7 @@ def test_run_once_dry_run_does_not_notify(db, cfg, monkeypatch) -> None:
     pool_mod.save_pool(db, [{"symbol": "600002", "name": "半导体甲", "score": 1.0,
                              "strategy": "LowPriceStrategy"}], "2026-09-11")
     with storage.connect(db) as conn:
-        storage.write_calendar(conn, [datetime.now().strftime("%Y-%m-%d")])
+        storage.write_calendar(conn, [now_shanghai().strftime("%Y-%m-%d")])
     client = FakeClient(snapshots=[{
         "ticker": "600002", "thscode": "600002.SH", "last_price": 1.0,
         "price_change_ratio_pct": -90.0, "turnover": 1e9,
@@ -353,7 +354,7 @@ def test_run_once_without_key_reports_error(db, cfg, monkeypatch) -> None:
     monkeypatch.delenv("HITHINK_FINANCE_API_KEY", raising=False)
     cfg.hithink_api_key = ""
     with storage.connect(db) as conn:
-        storage.write_calendar(conn, [datetime.now().strftime("%Y-%m-%d")])
+        storage.write_calendar(conn, [now_shanghai().strftime("%Y-%m-%d")])
     result = intraday.run_once(DataEngine(db), cfg, ignore_session=True)
     assert result["error"]
     assert result["pushed"] is False
@@ -364,7 +365,7 @@ def test_run_once_api_failure_does_not_raise(db, cfg) -> None:
     from laoa_trader.data import hithink as hx
 
     with storage.connect(db) as conn:
-        storage.write_calendar(conn, [datetime.now().strftime("%Y-%m-%d")])
+        storage.write_calendar(conn, [now_shanghai().strftime("%Y-%m-%d")])
     result = intraday.run_once(
         DataEngine(db), cfg, ignore_session=True,
         client=FakeClient(fail_with=hx.HithinkError(5001, "模拟接口错误（测试假客户端）")),
