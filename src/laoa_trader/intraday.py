@@ -33,7 +33,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any
 
@@ -205,16 +205,31 @@ def plan_sell(
 # ── 交易时段与交易日 ──
 
 
+#: A 股的一切"几点钟"都以**北京时间**为准
+_TZ_SHANGHAI = timezone(timedelta(hours=8))
+
+
+def now_shanghai(now: datetime | None = None) -> datetime:
+    """取北京时间（传入的 `now` 原样使用，便于测试注入确定时刻）。
+
+    为什么不用 `datetime.now()`：那台机器的时区不一定是北京 —— CI 的 Windows runner 就是
+    UTC，下午 13:45 UTC 会被判成"交易时段中"（而北京此刻是 21:45，早已收盘）。
+    交易时段、交易日、提醒时间戳这些**全部**要与机器时区解耦，否则换台机器/出国就错，
+    而且错得很安静（状态栏显示"时段中"、提醒被逻辑开关挡住）。
+    """
+    return now if now is not None else datetime.now(_TZ_SHANGHAI)
+
+
 def in_session(now: datetime | None = None) -> bool:
     """当前是否在交易时段内（不判断是否交易日，见 is_trading_day）。"""
-    now = now or datetime.now()
-    minutes = now.hour * 60 + now.minute
+    moment = now_shanghai(now)
+    minutes = moment.hour * 60 + moment.minute
     return any(start <= minutes <= end for start, end in SESSIONS)
 
 
 def is_trading_day(db_path: str, day: str | None = None) -> bool:
     """用官方交易日历判断是否开盘（库里查不到就当交易日，避免日历没同步时整天不跑）。"""
-    day = day or datetime.now().strftime("%Y-%m-%d")
+    day = day or now_shanghai().strftime("%Y-%m-%d")
     try:
         with storage.connect(db_path) as conn:
             row = conn.execute(
@@ -559,7 +574,7 @@ def format_message(
         except Exception:  # noqa: BLE001 - 台账缺失不影响提醒
             positions = {}
 
-    stamp = datetime.now().strftime("%H:%M")
+    stamp = now_shanghai().strftime("%H:%M")
     lines = []
     for alert in sorted(alerts, key=lambda a: a["kind"]):
         label = KIND_LABELS.get(alert["kind"], alert["kind"])
@@ -605,7 +620,7 @@ def run_once(
         {"trading_day": bool, "in_session": bool, "hits": n, "fresh": n, "pushed": bool, "error": str}
     """
     cfg = cfg or get_config()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_shanghai().strftime("%Y-%m-%d")
     result = {"trading_day": is_trading_day(engine.db_path, today),
               "in_session": in_session(), "hits": 0, "fresh": 0, "pushed": False, "error": ""}
     if not result["trading_day"]:

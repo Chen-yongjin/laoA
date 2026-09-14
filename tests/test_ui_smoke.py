@@ -2916,10 +2916,12 @@ def test_window_stays_usable_when_dragged_down_to_the_minimum(
 def test_kpi_grid_is_two_rows_of_three_plus_a_spanning_amount_card(
     market_window, qapp
 ) -> None:
-    """KPI 排布：2 行 × 3 个 + 成交额跨两行（**不许**挤成一行六个）。
+    """KPI 排布：2 行 × 3 个 + 成交额**单独占一行跨满所有列**（不许挤成一行六个）。
 
     900 逻辑宽上下是最常见的实际宽度，六个块挤一行会又扁又难看；
-    3+3 两组对齐、成交额横着够宽，才是"整齐"的那一种。
+    3+3 两组对齐、成交额横着占满一行，才是"整齐"的那一种。
+    成交额原来是"第 4 列跨两行"，在 Windows 的字体下那一列放不下三个数字（实测被截断），
+    改成跨满整行后与字体宽度无关。
     """
     from laoa_trader import market
 
@@ -2932,7 +2934,7 @@ def test_kpi_grid_is_two_rows_of_three_plus_a_spanning_amount_card(
         expected = {
             "涨停": (0, 0, 1, 1), "跌停": (0, 1, 1, 1), "炸板": (0, 2, 1, 1),
             "上涨": (1, 0, 1, 1), "下跌": (1, 1, 1, 1), "平盘": (1, 2, 1, 1),
-            "成交额": (0, 3, 2, 1),        # 跨两行、贴右侧
+            "成交额": (2, 0, 1, 3),        # 第 3 行、跨满 3 列
         }
         for name, card in win.market_kpi_cards.items():
             index = grid.indexOf(card)

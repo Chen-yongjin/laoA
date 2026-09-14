@@ -1047,9 +1047,11 @@ if QT_AVAILABLE:
             amount = MarketKpiCard(self.MARKET_KPI_AMOUNT)
             self.market_kpi_cards[self.MARKET_KPI_AMOUNT] = amount
             self.market_kpis[self.MARKET_KPI_AMOUNT] = amount.value_label
-            # 跨两行：成交额是"三个数一行"，横着放得比别的卡宽（stretch=2）
-            grid.addWidget(amount, 0, amount_column, len(self.MARKET_KPI_ROWS), 1)
-            grid.setColumnStretch(amount_column, 2)
+            # 成交额**单独占一行、跨满所有列**（原来挤在第 4 列里跨两行）：
+            # 它的文本是"沪 7793亿 · 深 8499亿 · 北 140亿"，在 Windows 的字体
+            # （微软雅黑比 Linux 上那套宽）下第 4 列放不下、数值会被截断；
+            # 跨整行之后不管字体多宽都够用，版式也仍然是"三列 + 一行"的规整样子。
+            grid.addWidget(amount, len(self.MARKET_KPI_ROWS), 0, 1, amount_column)
             self.market_kpi_grid = grid
             return frame
 

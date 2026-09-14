@@ -23,6 +23,8 @@ import pytest
 from laoa_trader import assets, config as config_mod
 from laoa_trader.ui import theme
 
+from tests._toml import p
+
 
 # ── 1) 主题名归一（配置 / 环境变量）──
 
@@ -55,8 +57,10 @@ def test_theme_falls_back_to_default_on_bad_value(raw) -> None:
 def test_theme_from_config_file_and_env(tmp_path, monkeypatch) -> None:
     """config.toml 打底、环境变量覆盖；环境变量写错也回默认。"""
     path = tmp_path / "config.toml"
+    # 路径必须转义：Windows 上 `C:\Users\...` 里的 `\U` 会让 tomllib 报
+    # "Invalid hex value"、整个配置回退默认值 —— 那样断言的是默认值，不是被测行为
     path.write_text(
-        f'data_dir = "{tmp_path}"\nui_theme = "system"\n', encoding="utf-8"
+        f'data_dir = "{p(tmp_path)}"\nui_theme = "system"\n', encoding="utf-8"
     )
     monkeypatch.delenv("UI_THEME", raising=False)
     assert config_mod.load_config(path).ui_theme == "system"
