@@ -5,6 +5,7 @@
     python -m laoa_trader --cli --download     # 下载 10 年历史数据（含进度）
     python -m laoa_trader --cli --once         # 跑一次：数据增量 + 选股 + 建池
     python -m laoa_trader --cli --pool         # 只看当前股票池
+    python -m laoa_trader --cli --scorecard    # 策略成绩单：5 条策略的 α / 胜率 / t 值 / 逐年稳定性
     python -m laoa_trader --cli --market       # 只看大盘概览（与页面同一份：家数/成交额/涨跌家数/三组指数）
     python -m laoa_trader --cli --serve        # 常驻：定时日更 + 盘中提醒
 
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from laoa_trader import pool as pool_mod
@@ -356,6 +358,113 @@ def _print_groups() -> None:
     print("    python -m laoa_trader --cli --strategies 低价股,连板回踩低吸 --once")
 
 
+def _scorecard_command(cfg, args) -> int:
+    """`--scorecard`：跑策略成绩单（回测），打印表格并落盘 CSV + Markdown。
+
+    为什么单独给一个命令：用户投诉"策略选出来的股票很垃圾"，而界面上只有
+    "今天选了哪几只"，没有任何"这条策略历史上到底行不行"的证据。这个命令
+    就是那份证据，顺带也是将来"自定义策略公式"的评估底座（同一套口径）。
+
+    **默认并列跑多套执行口径**（开盘买 A / 尾盘买 B / 隔夜 C + 对照档）：
+    同一个策略"开盘买"与"尾盘买"的成绩可能完全不同 —— 只给一套口径，等于把
+    一个执行假设偷偷写进结论里。结论看 A 与 B 是否都为正。
+
+    退出码：0 = 至少有一条策略给出结论；1 = 样本不足/库不可用（并说明原因）；
+    2 = 用法错误（例如口径写了"当天买当天卖"= T+0，在 A 股不可执行）。
+    """
+    from laoa_trader.research import scorecard as scorecard_mod
+
+    db_path = Path(args.db) if args.db else Path(cfg.db_path)
+    # 不传 --horizons → 跑默认的多口径；传了 → 跑旧口径家族（D+1 开盘买那一套，
+    # 便于与 NAS 的历史结论对齐）
+    try:
+        conventions = (
+            scorecard_mod.as_conventions(
+                scorecard_mod.check_horizons(
+                    [int(x) for x in args.horizons.replace("，", ",").split(",") if x.strip()]
+                )
+            )
+            if args.horizons
+            else scorecard_mod.CONVENTIONS
+        )
+    except (ValueError, scorecard_mod.IllegalHorizonError,
+            scorecard_mod.IllegalConventionError) as exc:
+        print(f"❌ 口径不合法：{exc}")
+        print("   合法示例：--horizons 1,3,5,10（1 = 隔日超短，持仓 1 个交易日）；"
+              "不带 --horizons 时默认跑 A/B/C + 对照档")
+        return 2
+
+    out_dir = Path(args.out) if args.out else Path.cwd() / "策略成绩单"
+    specs = list(scorecard_mod.BUILTIN_SPECS)
+    # 允许用 --groups / --strategies 只评一部分（与选股链路同一套选择语义）
+    from laoa_trader.strategy import groups as groups_mod
+
+    selection = groups_mod.resolve_from_config(cfg)
+    if not selection.empty and not selection.default_all:
+        wanted = set(selection.strategies)
+        filtered = [spec for spec in specs if spec.key in wanted]
+        # 只在**真的筛掉了**策略时才提示（默认配置就是全选，否则会让人以为漏跑了）
+        if filtered and len(filtered) != len(specs):
+            specs = filtered
+            print(f"只评估：{selection.describe()}")
+
+    print(f"正在评估 {len(specs)} 条策略（库：{db_path}）")
+    print("  执行口径：" + "；".join(
+        f"{conv.key}={conv.description}" for conv in conventions
+    ))
+    print("  一字板买不进（开盘口径）与收盘涨停买不进（尾盘口径）分别剔除并计数；"
+          "α 用同口径的全市场等权基准；t 值按信号日聚合")
+    try:
+        results = scorecard_mod.evaluate_all(
+            db_path, specs, conventions=conventions, top_n=args.top
+        )
+    except scorecard_mod.ScorecardError as exc:
+        print(f"❌ 无法评估：{exc}")
+        return 1
+    except (scorecard_mod.IllegalHorizonError,
+            scorecard_mod.IllegalConventionError) as exc:  # pragma: no cover - 上面已校验
+        print(f"❌ 口径不合法：{exc}")
+        return 2
+
+    print()
+    print(scorecard_mod.format_table(results, conventions=conventions))
+
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    try:
+        main_csv = scorecard_mod.write_csv(
+            scorecard_mod.result_rows_for_export(results),
+            out_dir / f"策略成绩单_{stamp}.csv",
+            fields=scorecard_mod.RESULT_FIELDS,
+        )
+        verdict_csv = scorecard_mod.write_csv(
+            scorecard_mod.verdict_rows_for_export(results),
+            out_dir / f"策略成绩单_{stamp}_结论.csv",
+            fields=scorecard_mod.VERDICT_FIELDS,
+        )
+        year_csv = scorecard_mod.write_csv(
+            scorecard_mod.by_year_rows_for_export(results),
+            out_dir / f"策略成绩单_{stamp}_逐年明细.csv",
+            fields=scorecard_mod.BY_YEAR_FIELDS,
+        )
+        markdown = scorecard_mod.write_markdown(
+            results, out_dir / f"策略成绩单_{stamp}.md",
+            title=f"策略成绩单（{stamp}）",
+        )
+    except OSError as exc:
+        print(f"⚠️ 成绩单落盘失败（不影响上面的结论）：{exc}")
+        return 0 if any(result["sufficient"] for result in results) else 1
+    print(f"\n已写出：\n  {main_csv}\n  {verdict_csv}\n  {year_csv}\n  {markdown}")
+
+    if not any(result["sufficient"] for result in results):
+        print("\n❌ 样本不足，未给出任何结论（原因见上）—— "
+              "先 `python -m laoa_trader --cli --download` 把数据下够（至少几年）再跑。")
+        return 1
+    print("\n提示：α 在 0.1% 级别的策略，扣掉往返成本（约 0.15%）后基本就没了；"
+          "只有 A（开盘买）与 B（尾盘买）两套口径都为正、且 t 值 ≥2、逐年大多为正，"
+          "才算这个策略真有边际。")
+    return 0
+
+
 def _fmt_amount(value: int) -> str:
     """进度数值的显示：超过 1MB 就按 MB 显示（dump 下载是几百 MB，字节数没人看得懂）。"""
     if value >= 1_000_000:
@@ -480,6 +589,29 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--list-groups", action="store_true",
                         help="列出策略组与成员策略（含持有期与权重），然后退出")
     parser.add_argument(
+        "--scorecard", action="store_true",
+        help="策略成绩单（回测）：给每条策略算 α/胜率/t 值/逐年稳定性，打印表格并写出 CSV+Markdown。"
+             "入场=信号日次日开盘、出场=买入日后第 N 个交易日收盘（T+1 合法），"
+             "一字板剔除、α 扣掉同期全市场等权收益、t 值按信号日聚合；样本不足时退出码 1",
+    )
+    parser.add_argument(
+        "--horizons", metavar="1,3,5,10",
+        help="配合 --scorecard：只跑旧口径（D+1 开盘买，持有 N 个交易日）的持有期列表，逗号分隔。"
+             "不带这个参数时默认跑多套口径：A 开盘买 / B 尾盘买 / C 隔夜 + 对照档；"
+             "0 是 T+0（当天买当天卖），在 A 股不可执行，会被拒绝",
+    )
+    parser.add_argument(
+        "--out", metavar="目录",
+        help="配合 --scorecard：成绩单落盘目录（默认 ./策略成绩单），"
+             "写出 CSV（主表 + 逐年明细）与 Markdown 报告",
+    )
+    parser.add_argument(
+        "--db", metavar="库路径",
+        help="配合 --scorecard：要评估的库（默认用本机库）。也可指向别的资料库**只读**评估，"
+             "例如服务器版的库；不会写入",
+    )
+    parser.add_argument("--top", type=int, help="配合 --scorecard：每个信号日取前 N 只（默认 30）")
+    parser.add_argument(
         "--watchlist", nargs="+", metavar=("动作", "代码"),
         help="自选股管理：add 600519 / list / remove 600519 / enable 600519 / disable 600519"
              "（add 时名称自动从本地库补，可用 --note 写备注）",
@@ -512,6 +644,11 @@ def cli(argv: list[str] | None = None) -> int:
     if args.list_groups:
         _print_groups()
         return 0
+
+    # 成绩单是**只读**评估：数据目录不可写也要能跑（用户可能只想拿一份证据），
+    # 因此放在目录/自检那两道闸门之前
+    if args.scorecard:
+        return _scorecard_command(cfg, args)
 
     if cfg.config_warning():
         print(f"⚠️ {cfg.config_warning()}")
@@ -648,7 +785,7 @@ def main(argv: list[str] | None = None) -> int:
                   "--groups", "--strategies", "--list-groups", "--watchlist",
                   "--note", "--config", "--auto-download", "--force-download",
                   "--run-at", "--run-at-fallback", "--no-auto-run",
-                  "--market",
+                  "--market", "--scorecard", "--horizons", "--out", "--db", "--top",
                   "--help", "-h")
     )
     if wants_cli:
