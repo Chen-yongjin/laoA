@@ -74,10 +74,46 @@ DEFAULT_MARKET_SECTOR: tuple[str, ...] = ("881155.TI", "881157.TI")
 #: 概览默认 TTL（秒）：界面 5 秒刷一次状态栏，但概览到点才真的打接口
 DEFAULT_MARKET_OVERVIEW_TTL = 55
 
+#: 竞价扫描的四个板块（**代码判定在 `intraday.board_of`**：`.BJ` 后缀最稳，
+#: 没后缀时按前缀推 —— 43x/83x/87x/88x/92x 是北交所）。
+#: 顺序即界面上的顺序（主板 → 创业板 → 科创板 → 北交所）。
+AUCTION_BOARDS: tuple[str, ...] = ("main", "chinext", "star", "bj")
+#: 板块 key → 中文短标签（推送、详情、设置页共用这一份）
+AUCTION_BOARD_LABELS: dict[str, str] = {
+    "main": "主板",
+    "chinext": "创业板",
+    "star": "科创板",
+    "bj": "北交所",
+}
+#: 打分门限的取值范围（下限 1；上限 = **打分满分 6**：涨幅 2 + 量比 2 + 未匹配 1 + 成交额 1，
+#: 写 8 也只会是"满分才推"，夹到 6 更贴近本意）
+AUCTION_SCORE_RANGE: tuple[int, int] = (1, 6)
+#: 推送条数的取值范围（全市场扫描，上限放宽到 50）
+AUCTION_ITEMS_RANGE: tuple[int, int] = (1, 50)
+#: 扫描宽限窗口（分钟）：调度器是 60 秒一拍、相位不固定，卡在 09:20:00 那一秒上不现实；
+#: 到点后这段时间内跑一次就算这一档完成（而且**不会跨到下一档**，见 `intraday.auction_scan_due`）
+AUCTION_SCAN_GRACE_MIN = 3
+
+def _clamp_int(value: Any, low: int, high: int, default: int) -> int:
+    """把整数夹进 `[low, high]`；写错（乱码/None）回默认。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(number, low), high)
+
+#: 提醒浮窗 / 闪烁的默认值（`config.example.toml`、README 与界面提示都引用这一份）
+DEFAULT_NOTIFY_POPUP_SECONDS = 8
+DEFAULT_NOTIFY_POPUP_MAX_ITEMS = 5
+DEFAULT_NOTIFY_FLASH_SECONDS = 6
+
 #: 这些布尔键写错时**回到默认值**（而不是像其它布尔键那样按 False 处理）。
 #: 为什么单独一群：概览是"看一眼"的辅助信息，把 `market_overview` 手滑写成
 #: `"maybe"` 应该是"没生效、仍是默认开着"，而不是"功能被悄悄关掉了"。
-_STRICT_BOOL_FIELDS = frozenset({"market_overview", "market_breadth"})
+#: 提醒浮窗与提示音同理 —— 写错一个词不该让"提醒"这个核心功能静默消失。
+_STRICT_BOOL_FIELDS = frozenset(
+    {"market_overview", "market_breadth", "notify_popup", "notify_sound"}
+)
 
 #: 严格布尔键认的真值 / 假值（与 `_as_bool` 的真值表保持一致）
 _TRUE_WORDS: tuple[str, ...] = ("1", "true", "yes", "on", "y", "是")
@@ -210,6 +246,59 @@ def _ttl_seconds(value: Any) -> int:
     return seconds if seconds > 0 else DEFAULT_MARKET_OVERVIEW_TTL
 
 
+def split_scan_at(value: Any) -> tuple[list[str], list[str]]:
+    """把"扫描时刻"收紧成规范写法：→ `(["09:20", "09:25"], ["09:70"])`。
+
+    接受的写法：`"09:20"` / `"9:5"`（补零成 `09:05`）/ `"09:20,09:25"` /
+    `[" 09:20 ", "09:25"]`。**认不出的项直接丢掉、不抛异常**（配置写错不该让程序起不来），
+    但会把丢弃的原样返回 —— 设置页据此提示"哪一项没认出来"，而不是静默少扫一次。
+    结果去重并按时间升序（扫描顺序 = 时间顺序）。
+    """
+    if isinstance(value, str):
+        items: list[Any] = value.replace("，", ",").split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        return [], []
+    good: list[str] = []
+    bad: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        parts = text.split(":")
+        if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
+            bad.append(text)
+            continue
+        hour, minute = int(parts[0]), int(parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            bad.append(text)
+            continue
+        stamp = f"{hour:02d}:{minute:02d}"
+        if stamp not in good:
+            good.append(stamp)
+    return sorted(good), bad
+
+
+def parse_scan_at(value: Any) -> list[str]:
+    """只取合法的那部分（`config.auction_scan_at` 的规范化用）。"""
+    return split_scan_at(value)[0]
+
+
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    """整数必须落在 `[minimum, maximum]` 内；写错或越界**一律回默认值**。
+
+    为什么不把越界值夹到边界（`min(max(...))`）：`notify_popup_seconds` 写成 0
+    或 -1 是"手滑"，夹成 1 秒等于"浮窗一闪就没了"，用户只会觉得功能坏了；
+    回到默认 8 秒更符合本意。条数那类"多了也还能用"的参数才用夹取。
+    """
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return number if minimum <= number <= maximum else default
+
+
 def _as_float(value: Any, default: float) -> float:
     try:
         return float(value)
@@ -287,6 +376,18 @@ class Config:
     notify_windows_open_url: bool = True
     #: 托盘气泡显示时长（毫秒）
     notify_tray_duration_ms: int = 8000
+    # ── 自绘提醒浮窗（QQ 式：响声 + 图标闪烁 + 右下角弹出列表）──
+    #: 是否弹自绘浮窗。为什么不用 Windows 原生 Toast 兜底：它的**点击行为不受我们控制**
+    #: （点不开、看不到内容），等于没提醒 —— 详见 `ui/alert_popup.py` 的说明。
+    notify_popup: bool = True
+    #: 浮窗自动消失的秒数（鼠标停在浮窗上时不消失）；非法值回默认
+    notify_popup_seconds: int = 8
+    #: 浮窗最多列几条（1~10，与「竞价提醒条数」同一个上限口径）
+    notify_popup_max_items: int = 5
+    #: 提醒时是否响一声（Windows 系统提示音，只用标准库 `winsound`；非 Windows 静默跳过）
+    notify_sound: bool = True
+    #: 托盘 / 任务栏图标闪烁几秒（0 = 不闪）
+    notify_flash_seconds: int = 6
     # ── 以下三个是"单频道开关"（老配置沿用；与 notify_channels 同时生效）──
     notify_feishu: bool = True
     notify_windows: bool = True
@@ -303,27 +404,41 @@ class Config:
     intraday_interval: int = 60
     stop_loss: float = 0.05
     take_profit: float = 0.10
-    #: 集合竞价强度提醒（9:15–9:25 的真实买卖盘）：**默认关**。
-    #: 代码（客户端 `auction_snapshot`、解析、打分、卡片那一行、详情里的"竞价一览"）
-    #: 都已就绪并通过测试，但**口径与阈值还在与用户确认**（用户明确说"稍等一下再
-    #: 做，我思考一下"）—— 所以先关着：默认流程**一次竞价请求都不发**、
-    #: 界面不显示竞价行、不产生竞价提醒。确认后把这一项改成 True 即可启用，不用改代码。
+    #: 集合竞价**全市场扫描**提醒（9:15–9:25 的真实买卖盘）：**默认关**。
+    #: 代码（客户端 `auction_snapshot`、解析、打分、过滤、卡片那一行、设置页那一组、
+    #: 详情里的"竞价扫描结果"）都已就绪并通过测试，但**口径与阈值还在与用户确认** ——
+    #: 所以先关着：默认流程**一次竞价请求都不发**、界面不显示竞价行、不产生竞价提醒。
+    #: 确认后把这一项改成 True（或到设置页勾上）即可启用，不用改代码。
     intraday_auction: bool = False
-    #: 竞价"打分"里的高开门槛（%）：`auction_pct >= 这个值` 得 2 分，达到一半得 1 分。
-    #: 默认 +2.0% —— 实测 100 只里只有 3 只超过它（约 p97，很挑）。
-    auction_alert_min_pct: float = 2.0
+    #: 扫描时刻（HH:MM 列表，默认 9:20 与 9:25 各一次）。
+    #: **为什么不每分钟扫**：全市场 5573 只按 100/批 = 56 个请求，9:15–9:25 每分钟一轮
+    #: 就是 560 个请求 —— 配额会被打光、也容易触发限流。9:25 那次拿到的是**竞价终态**。
+    auction_scan_at: list[str] = field(default_factory=lambda: ["09:20", "09:25"])
+    #: 竞价涨幅**下限**（%）：低于它的直接过滤（用户点名的"竞价涨幅比例"）。默认 +2.0%。
+    auction_min_pct: float = 2.0
+    #: 竞价涨幅**上限**（%）：≥ 它的直接过滤 —— 一字板/接近涨停**买不进**，推了没意义。
+    #: 依据：某日 25 只后期涨停里**没有一只**竞价涨幅 ≥9%，所以这条几乎零成本。
+    auction_max_pct: float = 9.0
+    #: 参与扫描的板块（多选）：取值见 `AUCTION_BOARDS`（主板/创业板/科创板/北交所）。
+    #: 只勾科创 + 创业板 = "只看双创"。**一项都不勾 = 不限制（等于全选）**。
+    auction_boards: list[str] = field(default_factory=lambda: list(AUCTION_BOARDS))
+    #: 竞价成交额下限（元）：**不到这个数就不参与**（不是只扣分）。
+    #: 为什么必须有这道门槛：竞价量太小时 `未匹配量 ÷ 成交量` 会爆表
+    #: （实测某小盘股 +29.46），拿它判断强弱等于把噪音当信号。默认 500 万 ——
+    #: 依据：全市场只有 **8.7%** 的股票过这条线（嫌严可以调到 300 万）。
+    auction_min_amount: float = 5e6
     #: 竞价"打分"里的放量门槛（量比）：`auction_volume_ratio >= 这个值` 得 2 分，
     #: 达到它的 75% 得 1 分。默认 2.0（实测约 p90）。
-    auction_alert_min_volume_ratio: float = 2.0
-    #: 竞价成交额下限（元）：**不到这个数就不参与评分**。
-    #: 为什么必须有这道门槛：竞价量太小时 `未匹配量 ÷ 成交量` 会爆表
-    #: （实测某小盘股 +29.46），拿它判断强弱等于把噪音当信号。默认 500 万。
-    auction_alert_min_amount: float = 5e6
-    #: 打分门限：`分 >= 这个值` → 竞价强（默认 3）；
-    #: 弱的分门限 = `-(这个值 - 1)`（默认 -2，即低开/卖盘剩余占优）。
-    auction_alert_min_score: int = 3
-    #: 一条竞价汇总里最多列几只（默认 5，**最大 10**）：显示与提醒条数的上限。
-    auction_alert_max_items: int = 5
+    #: 注意：这是**打分**用的，不是硬过滤（量比低但高开很多的票照样能进）。
+    auction_min_volume_ratio: float = 2.0
+    #: 打分门限：`分 >= 这个值` → 命中（默认 **2**）。
+    #: 为什么是 2 不是 3：真实全市场数据回测 —— 当日后期涨停覆盖率 24% vs 20%，
+    #: 而池子里的推送量 0.44 vs 0.29 条/天 → **2 更划算**（多推一点、多覆盖一截）。
+    #: 弱的分门限 = `-(这个值 - 1)`（低开/卖盘剩余占优）。
+    auction_min_score: int = 2
+    #: 一次扫描最多推几只（默认 10，**上限 50**）：全市场扫描命中面更宽，条数也放宽。
+    auction_alert_max_items: int = 10
+
     #: 当日异动（涨停/跌停/大幅上涨下跌/快速反弹跳水）实时提醒：默认开。
     #: 数据源是**全市场一条请求**，再在本地按"自己的票"过滤（不逐只问）。
     intraday_anomaly: bool = True
@@ -395,24 +510,55 @@ class Config:
         theme = str(self.ui_theme or "").strip().lower()
         self.ui_theme = theme if theme in UI_THEMES else DEFAULT_UI_THEME
         # 竞价阈值：写 0/负数会让"打分"失真（任何票都算强）→ 回默认值
-        for name, fallback in (("auction_alert_min_pct", 2.0),
-                               ("auction_alert_min_volume_ratio", 2.0),
-                               ("auction_alert_min_amount", 5e6)):
+        for name, fallback in (("auction_min_pct", 2.0),
+                               ("auction_min_volume_ratio", 2.0),
+                               ("auction_min_amount", 5e6)):
             value = getattr(self, name, fallback)
             try:
                 number = float(value)
             except (TypeError, ValueError):
                 number = fallback
             setattr(self, name, number if number > 0 else fallback)
-        # 打分门限至少 1 分（写 0 等于"什么都推"）；条数上限夹在 1~10
+        # 涨幅上限：必须**大于**下限（否则一条都留不下），非法/倒挂回默认 9.0；
+        # 若下限本身就 ≥9（手写成 15），再把下限也拉回默认 —— 不能让两个值互相打架
         try:
-            self.auction_alert_min_score = min(max(int(self.auction_alert_min_score), 1), 10)
+            cap = float(self.auction_max_pct)
         except (TypeError, ValueError):
-            self.auction_alert_min_score = 3
+            cap = 9.0
+        if cap <= self.auction_min_pct:
+            cap = 9.0
+        if cap <= self.auction_min_pct:
+            self.auction_min_pct = 2.0
+        self.auction_max_pct = cap
+        # 打分门限夹在 1~6（满分就是 6）、条数夹在 1~50
+        self.auction_min_score = _clamp_int(
+            self.auction_min_score, *AUCTION_SCORE_RANGE, default=2
+        )
+        self.auction_alert_max_items = _clamp_int(
+            self.auction_alert_max_items, *AUCTION_ITEMS_RANGE, default=10
+        )
+        # 板块多选：只留认得出的 key；**一个都没勾 = 不限制（全选）**，
+        # 免得用户手滑把四个都取消之后看到"0 只命中"却不知道为什么
+        picked = [str(b).strip().lower() for b in (self.auction_boards or [])]
+        boards = [b for b in AUCTION_BOARDS if b in picked]
+        self.auction_boards = boards or list(AUCTION_BOARDS)
+        # 扫描时刻：解析成 `HH:MM`、去重、排序；一个都不合法 → 回默认（9:20/9:25）
+        self.auction_scan_at = parse_scan_at(self.auction_scan_at) or ["09:20", "09:25"]
+        # 提醒浮窗：秒数收紧在 1~120，"多少条"夹在 1~10（与竞价条数同一个口径）。
+        # 秒数非法回默认、条数越界夹取 —— 两种处理不同是**故意的**：
+        # 0 秒 = "浮窗一闪就没"，写这个值几乎不可能是本意；而 8 条只是"多列两行"，
+        # 按 10 条办比丢回 5 条更贴近用户的手滑意图。
+        self.notify_popup_seconds = _bounded_int(
+            self.notify_popup_seconds, DEFAULT_NOTIFY_POPUP_SECONDS, 1, 120
+        )
         try:
-            self.auction_alert_max_items = min(max(int(self.auction_alert_max_items), 1), 10)
+            self.notify_popup_max_items = min(max(int(self.notify_popup_max_items), 1), 10)
         except (TypeError, ValueError):
-            self.auction_alert_max_items = 5
+            self.notify_popup_max_items = DEFAULT_NOTIFY_POPUP_MAX_ITEMS
+        # 闪烁 0 是**合法**的（= 不闪），所以下界从 0 起；负数/乱码回默认 6 秒
+        self.notify_flash_seconds = _bounded_int(
+            self.notify_flash_seconds, DEFAULT_NOTIFY_FLASH_SECONDS, 0, 120
+        )
         # 异动标签统一成大写、去空（接口给的枚举是大写）
         tags = self.anomaly_alert_tags
         if isinstance(tags, str):
@@ -633,15 +779,26 @@ def _apply_env(cfg: Config) -> Config:
         ("TRADE_SELL_SLIPPAGE", "sell_slippage"),
         ("INTRADAY_INTERVAL", "intraday_interval"),
         ("INTRADAY_AUCTION", "intraday_auction"),
-        ("AUCTION_ALERT_MIN_PCT", "auction_alert_min_pct"),
-        ("AUCTION_ALERT_MIN_VOLUME_RATIO", "auction_alert_min_volume_ratio"),
-        ("AUCTION_ALERT_MIN_AMOUNT", "auction_alert_min_amount"),
-        ("AUCTION_ALERT_MIN_SCORE", "auction_alert_min_score"),
+        # 旧名（上一版的 `auction_alert_min_*`）继续认：**排在新名前面**，
+        # 两个都设时后写的（新名）赢 —— 手写过的环境变量不该因为改名就失效
+        ("AUCTION_ALERT_MIN_PCT", "auction_min_pct"),
+        ("AUCTION_ALERT_MIN_VOLUME_RATIO", "auction_min_volume_ratio"),
+        ("AUCTION_ALERT_MIN_AMOUNT", "auction_min_amount"),
+        ("AUCTION_ALERT_MIN_SCORE", "auction_min_score"),
+        ("AUCTION_ALERT_MAX_ITEMS", "auction_alert_max_items"),
+        ("AUCTION_MIN_PCT", "auction_min_pct"),
+        ("AUCTION_MAX_PCT", "auction_max_pct"),
+        ("AUCTION_MIN_AMOUNT", "auction_min_amount"),
+        ("AUCTION_MIN_SCORE", "auction_min_score"),
+        ("AUCTION_MIN_VOLUME_RATIO", "auction_min_volume_ratio"),
         ("AUCTION_ALERT_MAX_ITEMS", "auction_alert_max_items"),
         ("INTRADAY_ANOMALY", "intraday_anomaly"),
         ("INTRADAY_STOP_LOSS", "stop_loss"),
         ("INTRADAY_TAKE_PROFIT", "take_profit"),
         ("UI_THEME", "ui_theme"),           # 界面主题（分发后可临时切回系统皮肤）
+        ("NOTIFY_POPUP_SECONDS", "notify_popup_seconds"),   # 浮窗自动消失秒数
+        ("NOTIFY_POPUP_MAX_ITEMS", "notify_popup_max_items"),  # 浮窗最多列几条
+        ("NOTIFY_FLASH_SECONDS", "notify_flash_seconds"),   # 图标闪烁秒数
         ("RUN_AT", "run_at"),
         ("LAOA_RUN_AT", "run_at"),          # 旧名，兼容早期配置
         ("RUN_AT_FALLBACK", "run_at_fallback"),
@@ -667,6 +824,8 @@ def _apply_env(cfg: Config) -> Config:
         ("LAOA_ENABLED_GROUPS", "enabled_groups"),
         ("LAOA_ENABLED_STRATEGIES", "enabled_strategies"),
         ("NOTIFY_CHANNELS", "notify_channels"),
+        ("AUCTION_SCAN_AT", "auction_scan_at"),
+        ("AUCTION_BOARDS", "auction_boards"),
         ("MARKET_INDICES", "market_indices"),
         ("MARKET_SENTIMENT_INDICES", "market_sentiment_indices"),
         ("MARKET_SECTOR_INDICES", "market_sector_indices"),
@@ -689,6 +848,10 @@ def _apply_env(cfg: Config) -> Config:
     for env_name, attr in (
         ("MARKET_OVERVIEW", "market_overview"),
         ("MARKET_BREADTH", "market_breadth"),
+        # 浮窗与提示音两个开关也走"严格布尔"：环境变量里写 `NOTIFY_POPUP=maybe`
+        # 应该是"没生效、仍是默认开着"，而不是把一个核心功能悄悄关掉
+        ("NOTIFY_POPUP", "notify_popup"),
+        ("NOTIFY_SOUND", "notify_sound"),
     ):
         raw = _env_str(env_name)
         if raw is not None:

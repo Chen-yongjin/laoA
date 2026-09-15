@@ -298,6 +298,24 @@ QFrame#marketKpiCard, QFrame#poolCard {
    `QLabel { color }` 会把角色的灰盖掉，写死在这里才稳定） */
 QLabel#marketSectionTitle, QLabel#marketKpiTitle,
 QLabel#marketEntryName, QLabel#statusTag { color: $text_dim; }
+
+/* ── 提醒浮窗（QQ 式，objectName 见 ui/alert_popup.py）──────
+   浮窗是**独立顶层窗口**：不加这条它会命中上面的 `QWidget` 规则，底色和桌面
+   一样是浅银灰、又没有边框，浮在别的程序上面几乎看不见。这里给它白底 + 深边框。 */
+QWidget#alertPopup {
+    background-color: $panel; border: 1px solid $border_dark; border-radius: 8px;
+}
+QWidget#alertPopup QLabel { background-color: transparent; color: $text; }
+QLabel#alertPopupTitle { font-weight: bold; }
+QLabel#alertPopupFoot { color: $text_dim; }
+/* 每一行提醒 = 一个"看起来像列表项"的按钮：左对齐、悬停才出底色（不画成按钮，
+   否则五行提醒就是五个按钮，太吵） */
+QPushButton#alertPopupRow {
+    background-color: transparent; border: none; border-radius: 4px;
+    padding: 6px 8px; text-align: left; color: $text;
+}
+QPushButton#alertPopupRow:hover { background-color: $selection; }
+QPushButton#alertPopupRow:pressed { background-color: $selection_strong; }
 """
 )
 

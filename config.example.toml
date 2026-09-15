@@ -57,6 +57,17 @@ notify_windows_open_url = true   # 弹窗按钮点击是否打开雪球页面
 # 托盘气泡显示时长（毫秒）
 notify_tray_duration_ms = 8000
 
+# ── 提醒浮窗（QQ 消息那种：响一声 + 图标闪烁 + 右下角滑出列表）──────────
+# 为什么不用 Windows 系统通知：系统弹窗的**点击行为不受本程序控制**（点不开、
+# 看不到内容，在"专注助手 / 勿扰"打开时干脆不显示），所以提醒自己画一个窗口。
+# 关掉 notify_popup = "别打扰我"：不弹浮窗、不响声、图标也不闪（提醒照常入库，
+# 随时可以在「盘中提醒」页或托盘右键的【最近提醒】里看）。
+notify_popup = true
+notify_popup_seconds = 8         # 浮窗几秒后自动消失（鼠标停在上面时不消失）
+notify_popup_max_items = 5       # 浮窗最多列几条（1~10），点任意一条看详情
+notify_sound = true              # 提醒时响一声系统提示音（winsound，仅 Windows 有效）
+notify_flash_seconds = 6         # 托盘/任务栏图标闪烁几秒（0 = 不闪）
+
 # 飞书频道：自建应用的 App ID / App Secret / 目标会话 ID。
 # 没配凭证时：勾了飞书也只会提示「未配置飞书凭证，已跳过」，不影响其它频道。
 feishu_on = true

@@ -424,3 +424,89 @@ def test_example_config_documents_market_overview() -> None:
     assert "883404.TI" in text and "883958.TI" in text
     assert "883994.TI" in text and "883418.TI" in text and "微盘股" in text
     assert "932000" not in text and "中证2000" not in text
+
+
+# ── 提醒浮窗（QQ 式）相关的四个配置 + 闪烁秒数 ──
+
+
+def test_notify_popup_defaults() -> None:
+    """默认：弹浮窗、8 秒、最多 5 条、响声、闪 6 秒。"""
+    cfg = load_config(use_env=False)
+    assert cfg.notify_popup is True
+    assert cfg.notify_popup_seconds == 8
+    assert cfg.notify_popup_max_items == 5
+    assert cfg.notify_sound is True
+    assert cfg.notify_flash_seconds == 6
+
+
+def test_notify_popup_invalid_values_fall_back(tmp_path: Path) -> None:
+    """写错就回默认：秒数 0/负数/乱码 = 8 秒，条数越界夹到 1~10，闪烁负数 = 6 秒。
+
+    注意 `notify_flash_seconds = 0` 是**合法**的（= 不闪），不该被改写成 6。
+    """
+    path = _write(tmp_path, """
+notify_popup_seconds = 0
+notify_popup_max_items = 99
+notify_flash_seconds = -3
+""")
+    cfg = load_config(path, use_env=False)
+    assert cfg.notify_popup_seconds == 8
+    assert cfg.notify_popup_max_items == 10
+    assert cfg.notify_flash_seconds == 6
+
+    path2 = _write(tmp_path, """
+notify_popup_seconds = "abc"
+notify_popup_max_items = "abc"
+notify_flash_seconds = 0
+""")
+    cfg2 = load_config(path2, use_env=False)
+    assert cfg2.notify_popup_seconds == 8
+    assert cfg2.notify_popup_max_items == 5
+    assert cfg2.notify_flash_seconds == 0
+
+
+def test_notify_popup_switches_written_wrong_stay_default(tmp_path: Path) -> None:
+    """两个开关写错（`"maybe"`）→ **回到默认开着**，不是把功能悄悄关掉。"""
+    path = _write(tmp_path, 'notify_popup = "maybe"\nnotify_sound = "maybe"\n')
+    cfg = load_config(path, use_env=False)
+    assert cfg.notify_popup is True
+    assert cfg.notify_sound is True
+
+
+def test_notify_popup_env_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """环境变量覆盖：开关认真假值，数字走同一套规范化（0 秒照样回默认）。"""
+    monkeypatch.setenv("NOTIFY_POPUP", "0")
+    monkeypatch.setenv("NOTIFY_SOUND", "off")
+    monkeypatch.setenv("NOTIFY_POPUP_SECONDS", "12")
+    monkeypatch.setenv("NOTIFY_POPUP_MAX_ITEMS", "9")
+    monkeypatch.setenv("NOTIFY_FLASH_SECONDS", "3")
+    cfg = load_config(tmp_path / "none.toml")
+    assert cfg.notify_popup is False
+    assert cfg.notify_sound is False
+    assert cfg.notify_popup_seconds == 12
+    assert cfg.notify_popup_max_items == 9
+    assert cfg.notify_flash_seconds == 3
+
+    # 环境变量写错也一样：开关回默认、秒数回默认
+    monkeypatch.setenv("NOTIFY_POPUP", "maybe")
+    monkeypatch.setenv("NOTIFY_POPUP_SECONDS", "0")
+    cfg2 = load_config(tmp_path / "none.toml")
+    assert cfg2.notify_popup is True
+    assert cfg2.notify_popup_seconds == 8
+
+
+def test_example_config_documents_notify_popup() -> None:
+    """config.example.toml 里要有这五个键，并写清"为什么不用系统通知"。"""
+    import tomllib
+    from pathlib import Path as P
+
+    example = P(__file__).resolve().parents[1] / "config.example.toml"
+    text = example.read_text(encoding="utf-8")
+    data = tomllib.loads(text)
+    assert data["notify_popup"] is True
+    assert data["notify_popup_seconds"] == 8
+    assert data["notify_popup_max_items"] == 5
+    assert data["notify_sound"] is True
+    assert data["notify_flash_seconds"] == 6
+    assert "点击行为不受" in text          # 为什么不走 Windows 系统通知
+    assert "别打扰我" in text              # notify_popup = false 的实际含义

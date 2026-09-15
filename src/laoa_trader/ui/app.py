@@ -34,7 +34,7 @@ from laoa_trader.hints import (
     BTN_RUN_TEXT,
 )
 from laoa_trader.log import get_logger, log_file_path
-from laoa_trader.notify import KINDS, summarize
+from laoa_trader.notify import KINDS, sound, summarize
 from laoa_trader.scheduler import Scheduler, data_gate, refresh_data, run_daily
 from laoa_trader.strategy import rules as rules_mod
 from laoa_trader.ui import theme as theme_mod
@@ -58,6 +58,18 @@ AUCTION_REFRESH_MS = 60_000
 #: 「大盘概览」页自己的刷新周期（毫秒）—— 每分钟一次，与 5 秒的界面刷新解耦。
 #: 取数另有 55 秒 TTL（`market_overview_ttl`），所以这一分钟里最多真打一次接口。
 MARKET_REFRESH_MS = 60_000
+
+# ── 提醒浮窗 / 图标闪烁 ──
+#: 托盘与任务栏图标闪烁的间隔（毫秒）：500ms 一闪（每秒两次）最像"有消息"，
+#: 再快就晃眼、再慢就像没在闪
+FLASH_INTERVAL_MS = 500
+#: 红点图标落盘的文件名：存在**数据目录的 cache 下**，不进仓库、不进安装包
+#: （图标本身是程序化画出来的，见 `_alert_tray_icon`）
+TRAY_ALERT_ICON_NAME = "tray-alert-32.png"
+#: 每次对账时最多看最近多少条提醒（判"是不是新提醒"用；5 秒一轮，不查全表）
+ALERT_SCAN_LIMIT = 20
+#: `_alert_seen` 的上限：长跑一整天也不让它无限涨（超了就按当前这批重新记账）
+ALERT_SEEN_LIMIT = 1000
 
 # ── 窗口尺寸 ──
 #: 窗口**期望**尺寸（可用区域够大时就用它）与**最小**尺寸上限。
@@ -127,7 +139,7 @@ BTN_DETAILS_TEXT = "详情"
 BTN_ABOUT_TEXT = "关于"
 
 try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
-    from PySide6.QtCore import QPoint, QSize, Qt, QThread, QTimer, Signal
+    from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QThread, QTimer, Signal
     from PySide6.QtGui import (
         QAction,
         QBrush,
@@ -166,6 +178,8 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
         QVBoxLayout,
         QWidget,
     )
+    # 提醒浮窗：自己画的窗口（Windows 原生 Toast 的点击行为不受我们控制，见该模块说明）
+    from laoa_trader.ui.alert_popup import AlertPopup
 
     QT_AVAILABLE = True
 except Exception as _exc:  # noqa: BLE001 - 任何导入问题都降级为 CLI
@@ -643,6 +657,19 @@ if QT_AVAILABLE:
             self.about_dialog: Any = None
             #: 「关于」里的图标标签（资源缺失时为 None）
             self.about_icon: Any = None
+            #: 提醒浮窗（QQ 式）与「提醒详情」对话框；都是**用一次建一次、之后复用**
+            self.alert_popup: Any = None
+            self.alert_detail_dialog: Any = None
+            self.alert_detail_box: Any = None
+            #: 已经提醒过的键 `(日期, 标的, 类型)`；None = 还没跟库对过账
+            #: （第一次只记账不弹：启动时把今天早上的提醒全弹一遍是骚扰）
+            self._alert_seen: set[tuple] | None = None
+            #: 图标闪烁：是否正在闪 / 当前亮的是哪一张 / 红点图标 / 闪烁代次
+            self._flashing = False
+            self._flash_on = False
+            self._flash_icon: Any = None
+            self._normal_tray_icon: Any = None
+            self._flash_token = 0
             self._cancel_download = False
 
             # 标题带版本号：用户报障第一句就是"我这是哪个版本"
@@ -675,6 +702,10 @@ if QT_AVAILABLE:
             self._auction_timer = QTimer(self)
             self._auction_timer.timeout.connect(self._auction_tick)
             self._auction_timer.start(AUCTION_REFRESH_MS)
+            # 提醒的"图标闪烁"定时器：有新提醒时开始交替托盘图标，到点（或用户点开
+            # 浮窗/主窗口）立刻停 —— 见 `_start_alert_flash` / `_stop_alert_flash`
+            self._flash_timer = QTimer(self)
+            self._flash_timer.timeout.connect(self._flash_step)
             # 切到这一页时立刻刷一次（定时器是整分钟对齐的，切过来时可能差几十秒到点）
             self.tabs.currentChanged.connect(self._on_tab_changed)
             # 启动第一屏就是概览页（它是第一个页签）：起来后立刻取一次，
@@ -1650,22 +1681,25 @@ if QT_AVAILABLE:
                 )
             self.tray = QSystemTrayIcon(icon, self)
             self.tray.setToolTip("老A选股助手")
+            # 闪烁要交替两张图，得先记住"正常的那张"（见 `_start_alert_flash`）
+            self._normal_tray_icon = icon
             menu = QMenu()
             act_show = QAction("显示主窗口", self)
             act_show.triggered.connect(self._restore_window)
+            act_recent = QAction("最近提醒", self)
+            act_recent.setToolTip("把最近几条提醒再弹一次（像 QQ 那样点开就能看）")
+            act_recent.triggered.connect(self.on_show_recent_alerts)
             act_pool = QAction("立即选股并建池", self)
             act_pool.triggered.connect(self.on_run_pipeline)
             act_quit = QAction("退出", self)
             act_quit.triggered.connect(self._quit)
             menu.addAction(act_show)
+            menu.addAction(act_recent)
             menu.addAction(act_pool)
             menu.addSeparator()
             menu.addAction(act_quit)
             self.tray.setContextMenu(menu)
-            self.tray.activated.connect(
-                lambda reason: self._restore_window()
-                if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None
-            )
+            self.tray.activated.connect(self._on_tray_activated)
             self.tray.show()
             # 这里**不再**用托盘图标去覆盖窗口图标：托盘那份是 32px，
             # 拿去当窗口图标在任务栏/Alt-Tab 上会明显发虚（窗口图标在 __init__ 里设过 256 的）
@@ -1952,6 +1986,9 @@ if QT_AVAILABLE:
                     self._heavy_paused = True
                 # 概览**不在这里刷**：它有自己的 60 秒定时器与 55 秒 TTL
                 # （见 `_market_tick`）—— 5 秒一轮会把配额刷掉
+                # 新提醒的对账（响声 / 闪图标 / 浮窗）**不管轻重都做**：
+                # 它只读最近 20 行，而且提醒不能因为"正在下载"就不响
+                self._check_new_alerts()
                 self._drain_tray()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"界面刷新异常：{exc}")
@@ -2694,6 +2731,336 @@ if QT_AVAILABLE:
                 self.tray.showMessage(message["title"], message["body"])
                 self._tray_notified += 1
 
+        # ── 提醒：响声 + 图标闪烁 + QQ 式浮窗 ──
+        #
+        # 为什么要自绘浮窗：Windows 原生 Toast 的**点击行为不受我们控制**
+        # （点不开、看不到内容），盯盘提醒"出现了却点不开"等于没提醒。
+        # 详细取舍见 `ui/alert_popup.py` 的模块说明。
+
+        @staticmethod
+        def _alert_key(row: dict) -> tuple:
+            """一条提醒的判据：`(日期, 标的, 类型)` —— 与库里的去重键同一个口径。"""
+            return (
+                str(row.get("date") or ""),
+                str(row.get("symbol") or ""),
+                str(row.get("kind") or ""),
+            )
+
+        def _check_new_alerts(self) -> None:
+            """和库对一次账：有**新**提醒就响声 + 闪图标 + 弹浮窗。
+
+            为什么从库里读、而不是等通知回调：盘中提醒是调度线程（后台 QThread）
+            跑出来的，跨线程直接碰 Qt 控件会随机崩溃；库是两条路径都认的同一份事实，
+            界面每 5 秒对一次账最稳（顺带覆盖了"手动点【检查盘面】"那条路）。
+            """
+            try:
+                rows = intraday.alert_rows(self.cfg.db_path, limit=ALERT_SCAN_LIMIT)
+            except Exception as exc:  # noqa: BLE001 - 读不到就是这轮不弹，界面照常
+                logger.debug(f"读提醒失败（本轮不弹浮窗）：{exc}")
+                return
+            keys = [self._alert_key(row) for row in rows]
+            if self._alert_seen is None:
+                # 第一次只记账不弹：启动时把今天早上的提醒全弹一遍是骚扰
+                self._alert_seen = set(keys)
+                return
+            fresh = [row for row, key in zip(rows, keys) if key not in self._alert_seen]
+            self._alert_seen.update(keys)
+            if len(self._alert_seen) > ALERT_SEEN_LIMIT:
+                # 长跑一整天也不让它无限涨（只留当前这批，旧的自然已经弹过）
+                self._alert_seen = set(keys)
+            if fresh:
+                # 库里按时间倒序（新的在前），浮窗也按这个顺序显示
+                self._notify_alerts(fresh)
+
+        def _notify_alerts(self, alerts: list[dict]) -> None:
+            """新提醒到了：响声 → 图标闪烁 → 弹浮窗（三步各自独立，一步失败不影响其它）。"""
+            if not alerts:
+                return
+            if not bool(getattr(self.cfg, "notify_popup", True)):
+                # 浮窗关掉 = 用户说"别打扰我"：连声音和闪烁一起免了，只入库
+                # （要看就去「盘中提醒」页 / 托盘【最近提醒】）
+                return
+            if bool(getattr(self.cfg, "notify_sound", True)):
+                sound.play()
+            self._start_alert_flash()
+            self.show_alert_popup(alerts)
+
+        def _alert_items(self, rows: list[dict]) -> list[dict]:
+            """把库里的提醒行转成浮窗要的展示条目（`名称（代码）` 在这里拼好）。"""
+            names = self._stock_names([str(row.get("symbol") or "") for row in rows])
+            items = []
+            for row in rows:
+                item = dict(row)
+                item["target"] = self._alert_target_text(row, names)
+                item["name"] = str(names.get(str(row.get("symbol") or "")) or "")
+                item["kind_label"] = str(row.get("label") or row.get("kind") or "")
+                item["price_text"] = _fmt_float(row.get("price")) if row.get("price") else ""
+                item["time"] = str(row.get("pushed_at") or "")
+                items.append(item)
+            return items
+
+        def show_alert_popup(self, alerts: list[dict] | None = None, *,
+                             recent: bool = False) -> bool:
+            """弹（或更新）提醒浮窗。
+
+            Args:
+                alerts: 要显示的提醒行；`None` = 从库里取最近的几条。
+                recent: 是不是"用户主动看最近提醒"（托盘【最近提醒】）——
+                    这种就算 `notify_popup = false` 也照弹（是用户自己点名要看的）。
+
+            Returns:
+                真的弹出来了 → True（没有提醒可弹 → False）。
+            """
+            if not recent and not bool(getattr(self.cfg, "notify_popup", True)):
+                return False
+            if alerts is None:
+                try:
+                    alerts = intraday.alert_rows(
+                        self.cfg.db_path, limit=self._popup_max_items()
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"读最近提醒失败：{exc}")
+                    alerts = []
+                recent = True
+            items = self._alert_items([dict(row) for row in alerts])
+            if not items:
+                if recent:
+                    self._toast("最近还没有盘中提醒")
+                return False
+            return bool(self._ensure_popup().show_alerts(items))
+
+        def _popup_max_items(self) -> int:
+            """浮窗最多列几条（配置写坏时按默认 5 条，绝不因为一个坏数字不弹窗）。"""
+            try:
+                return max(1, int(getattr(self.cfg, "notify_popup_max_items", 5)))
+            except (TypeError, ValueError):
+                return 5
+
+        def _ensure_popup(self) -> Any:
+            """浮窗只建一次（顶层窗口建一次就够了），参数**每次都从配置同步**。
+
+            为什么每次都同步：设置页改完 `notify_popup_seconds` 之后不该等到
+            重启才生效（配置对象就是唯一事实来源）。
+            """
+            if self.alert_popup is None:
+                popup = AlertPopup()
+                popup.item_clicked.connect(self.on_alert_item_clicked)
+                popup.view_all_clicked.connect(self.on_show_all_alerts)
+                popup.closed.connect(self._stop_alert_flash)
+                self.alert_popup = popup
+            self.alert_popup.max_items = self._popup_max_items()
+            try:
+                seconds = int(getattr(self.cfg, "notify_popup_seconds", 8))
+            except (TypeError, ValueError):
+                seconds = 8
+            self.alert_popup.seconds = max(1, seconds)
+            return self.alert_popup
+
+        def on_alert_item_clicked(self, item: dict) -> None:
+            """点了浮窗里的某一条 → 停闪 + 弹这条的详情。"""
+            self._stop_alert_flash()
+            self.show_alert_detail(item)
+
+        def on_show_all_alerts(self, _checked: bool = False) -> None:
+            """【查看全部】/【最近提醒】：停闪 → 显示主窗口 → 切到「盘中提醒」页。"""
+            self._stop_alert_flash()
+            self._restore_window()
+            index = self.tabs.indexOf(self.alert_table)
+            if index >= 0:
+                self.tabs.setCurrentIndex(index)
+            self._refresh_alerts()
+
+        def on_show_recent_alerts(self, _checked: bool = False) -> None:
+            """托盘菜单【最近提醒】：没有浮窗就按最近的提醒现弹一个。"""
+            popup = self.alert_popup
+            if popup is not None and popup.isVisible():
+                # 已经挂着一个（可能用户正看着）→ 抬起来就行，别重算一遍
+                popup.raise_()
+                return
+            self.show_alert_popup(recent=True)
+
+        def show_alert_detail(self, item: dict) -> None:
+            """提醒详情（可复制）：提醒原因 + 时间 + L2 条件单参数。
+
+            非模态（`show` 而不是 `exec`）：用户可以先看别的，也不会卡住自动化测试
+            —— 与「状态详情」同一个取舍。
+            """
+            if self.alert_detail_dialog is None:
+                dialog = QDialog(self)
+                dialog.setWindowTitle("提醒详情")
+                # 尺寸跟着主窗口走（别在小屏上开出一个比主窗口还大的对话框）
+                dialog.resize(min(560, max(360, self.width() - 80)),
+                              min(420, max(260, self.height() - 160)))
+                layout = QVBoxLayout(dialog)
+                box = QPlainTextEdit()
+                box.setReadOnly(True)          # 只读但**可选中复制**
+                box.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+                self.alert_detail_box = box
+                layout.addWidget(box, 1)
+                row = QHBoxLayout()
+                self.btn_copy_alert_detail = QPushButton("复制条件单参数")
+                self.btn_copy_alert_detail.setToolTip(
+                    "把这段文字复制到剪贴板（可直接抄进券商条件单）"
+                )
+                self.btn_copy_alert_detail.clicked.connect(self.on_copy_alert_detail)
+                row.addWidget(self.btn_copy_alert_detail)
+                self.btn_all_alerts = QPushButton("查看全部")
+                self.btn_all_alerts.setToolTip("打开主窗口的「盘中提醒」页")
+                self.btn_all_alerts.clicked.connect(self.on_show_all_alerts)
+                row.addWidget(self.btn_all_alerts)
+                row.addStretch(1)
+                self.btn_close_alert_detail = QPushButton("关闭")
+                self.btn_close_alert_detail.clicked.connect(dialog.close)
+                row.addWidget(self.btn_close_alert_detail)
+                layout.addLayout(row)
+                self.alert_detail_dialog = dialog
+            self.alert_detail_box.setPlainText(self._alert_detail_text(item))
+            self.alert_detail_dialog.show()
+            self.alert_detail_dialog.raise_()
+
+        def _alert_detail_text(self, item: dict) -> str:
+            """详情文本 = 浮窗那一行 + 时间 + **推送原文**（含 L2 条件单参数）。
+
+            推送原文直接调 `intraday.format_message` 生成 —— 与真正推给用户的那份
+            **同源**，不另写一套（否则"浮窗里看到的参数"和"推送里的参数"迟早不一致）。
+            """
+            target = str(item.get("target") or item.get("symbol") or "—")
+            head = "　".join(
+                part for part in (
+                    target,
+                    str(item.get("kind_label") or item.get("kind") or ""),
+                    str(item.get("price_text") or ""),
+                ) if part
+            )
+            alert = {
+                "kind": str(item.get("kind") or ""),
+                "name": str(item.get("name") or ""),
+                "symbol": str(item.get("symbol") or ""),
+                "detail": str(item.get("detail") or ""),
+                "price": item.get("price"),
+            }
+            pushed = ""
+            try:
+                _title, lines = intraday.format_message([alert], self.cfg.db_path, self.cfg)
+                # 推送文本里那两行是 Markdown 代码块（飞书要这样），详情窗去掉围栏
+                pushed = "\n".join(lines).replace("```\n", "").replace("\n```", "").strip()
+            except Exception as exc:  # noqa: BLE001 - 算不出条件单也要把原因显示出来
+                logger.debug(f"生成提醒详情失败（退回简版）：{exc}")
+            parts = [head, f"时间：{item.get('time') or '—'}", ""]
+            if pushed:
+                head_line, *_rest = pushed.split("\n")
+                parts.append(head_line)
+                if _rest:
+                    parts.extend([""] + _rest)
+            else:
+                parts.append(f"说明：{item.get('detail') or '—'}")
+            return "\n".join(parts).strip()
+
+        def on_copy_alert_detail(self, _checked: bool = False) -> None:
+            """把详情（含条件单参数）写进剪贴板 —— 与弹窗里显示的是同一份文本。"""
+            text = ""
+            if self.alert_detail_box is not None:
+                text = self.alert_detail_box.toPlainText()
+            if not text:
+                self._toast("没有可复制的内容")
+                return
+            QApplication.clipboard().setText(text)
+            self._toast("已复制提醒详情（含条件单参数）")
+
+        # ── 图标闪烁 ──
+
+        def _start_alert_flash(self) -> None:
+            """托盘 + 任务栏图标闪 `notify_flash_seconds` 秒（用户点开就立刻停）。
+
+            为什么要闪：浮窗可能被别的窗口盖住、声音可能被静音，
+            而托盘图标一直在用户眼皮底下 —— 闪它是最不会被忽略的一路。
+            """
+            try:
+                seconds = int(getattr(self.cfg, "notify_flash_seconds", 6))
+            except (TypeError, ValueError):
+                seconds = 6
+            if seconds <= 0 or self.tray is None:
+                return
+            self._normal_tray_icon = self._normal_tray_icon or self.tray.icon()
+            self._flash_icon = self._alert_tray_icon()
+            if self._flash_icon is None:
+                return  # 连红点图标都画不出来：不闪（浮窗和声音照常）
+            self._flash_token += 1
+            token = self._flash_token
+            self._flashing = True
+            self._flash_step()          # 立刻亮一次，不然要等半秒才看得出
+            self._flash_timer.start(FLASH_INTERVAL_MS)
+            # 代次放在闭包里：上一条提醒的"到点停闪"不能把这一条刚起的闪烁掐掉
+            QTimer.singleShot(seconds * 1000, lambda: self._stop_alert_flash(token))
+            try:
+                # 任务栏按钮闪烁（Windows 上就是任务栏图标闪）——0 = 一直闪到窗口被激活
+                QApplication.alert(self, 0)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"任务栏提醒失败（不影响浮窗与托盘闪烁）：{exc}")
+
+        def _flash_step(self) -> None:
+            """一闪：正常图标 ↔ 红点图标交替。"""
+            if self.tray is None or self._flash_icon is None or self._normal_tray_icon is None:
+                return
+            self._flash_on = not self._flash_on
+            self.tray.setIcon(self._flash_icon if self._flash_on else self._normal_tray_icon)
+
+        def _stop_alert_flash(self, token: int | None = None) -> None:
+            """停止闪烁并恢复原图标（用户已经看到了 / 到点了）。
+
+            Args:
+                token: 哪一次闪烁的"到点停"；与当前代次不符就忽略
+                    （否则连续两条提醒时，第一条的定时器会把第二条的闪烁掐掉）。
+            """
+            if token is not None and token != self._flash_token:
+                return
+            if self._flash_timer is not None:
+                self._flash_timer.stop()
+            self._flashing = False
+            self._flash_on = False
+            if self.tray is not None and self._normal_tray_icon is not None:
+                self.tray.setIcon(self._normal_tray_icon)
+
+        def _alert_tray_icon(self) -> Any:
+            """带红点的托盘图标：**程序化画**在现成的 32px 图标右上角。
+
+            为什么不预置一张红点 png：图标本身会随版本迭代（`build/make_icon.py` 画的），
+            预置的那张很快就会和主图不一致；现画永远跟着主图走。
+            画好的那张会存进**数据目录的 cache**（方便排查），不进仓库/安装包。
+            """
+            if self._flash_icon is not None:
+                return self._flash_icon
+            try:
+                from PySide6.QtGui import QPainter
+
+                base = assets.icon_png(32)
+                pixmap = QPixmap(str(base)) if base else self.tray.icon().pixmap(32, 32)
+                if pixmap.isNull():
+                    return None
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setBrush(QBrush(QColor(market.COLOR_UP)))   # 涨红 = 提醒色
+                painter.setPen(Qt.PenStyle.NoPen)
+                size = max(8, pixmap.width() // 3)
+                # 画在右上角，并稍微内缩：托盘图标边缘常被系统裁掉几像素
+                painter.drawEllipse(pixmap.width() - size - 1, 1, size, size)
+                painter.end()
+                self._write_alert_icon(pixmap)
+                self._flash_icon = QIcon(pixmap)
+            except Exception as exc:  # noqa: BLE001 - 画不出来就不闪，浮窗照弹
+                logger.debug(f"红点图标生成失败（不闪图标）：{exc}")
+                return None
+            return self._flash_icon
+
+        def _write_alert_icon(self, pixmap: Any) -> None:
+            """红点图标落一份到数据目录的 cache（**不进仓库**）。"""
+            try:
+                cache = Path(self.cfg.data_dir) / "cache"
+                cache.mkdir(parents=True, exist_ok=True)
+                pixmap.save(str(cache / TRAY_ALERT_ICON_NAME), "PNG")
+            except Exception as exc:  # noqa: BLE001 - 存不下不影响闪烁
+                logger.debug(f"红点图标落盘失败：{exc}")
+
         def _toast(self, text: str) -> None:
             """轻提示：状态栏 + 托盘气泡（不用模态弹窗打断操作）。"""
             self._set_status(text)
@@ -3196,11 +3563,43 @@ if QT_AVAILABLE:
             self.raise_()
             self.activateWindow()
 
+        def _on_tray_activated(self, reason: Any) -> None:
+            """托盘被点：左键单击 → 看"刚刚冒出来的提醒"，双击 → 直接开主窗口。
+
+            单击的语义按用户习惯来：**浮窗还挂在屏幕上就先把浮窗抬起来**
+            （他多半是想看刚才那条提醒），没有浮窗才开主窗口。
+            两种都先停掉图标闪烁 —— 用户已经做出反应了，再闪就是吵。
+            """
+            reason_value = getattr(reason, "value", reason)
+            trigger = QSystemTrayIcon.ActivationReason.Trigger.value
+            double = QSystemTrayIcon.ActivationReason.DoubleClick.value
+            if reason_value not in (trigger, double):
+                return
+            popup = self.alert_popup
+            if reason_value == trigger and popup is not None and popup.isVisible():
+                self._stop_alert_flash()
+                popup.raise_()
+                return
+            self._stop_alert_flash()
+            self._restore_window()
+
+        def changeEvent(self, event: Any) -> None:  # noqa: N802 - Qt 命名
+            """主窗口被激活（用户点开了它）→ 立刻停止闪烁。"""
+            try:
+                if (event.type() == QEvent.Type.ActivationChange and self.isActiveWindow()):
+                    self._stop_alert_flash()
+            except Exception as exc:  # noqa: BLE001 - 停闪失败不该影响窗口事件
+                logger.debug(f"处理激活事件失败：{exc}")
+            super().changeEvent(event)
+
         def _quit(self) -> None:
             try:
                 self.scheduler.stop()
             except Exception:  # noqa: BLE001
                 pass
+            # 浮窗是**没有父窗口的顶层窗口**，不主动收掉会在退出后留一张空壳在屏幕上
+            if self.alert_popup is not None:
+                self.alert_popup.hide_popup()
             self.tray.hide()
             QApplication.quit()
 
