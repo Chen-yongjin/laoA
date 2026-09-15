@@ -349,8 +349,13 @@ def test_new_alert_sounds_flashes_and_pops_up(win, cfg, qapp, traces, monkeypatc
     assert traces["sound"] == [sound.DEFAULT_ALIAS]
     assert alerts == [["flash"]]
     assert win.alert_popup is not None and win.alert_popup.isVisible()
-    assert "样本股（600000）" in win.alert_popup.rows[0].text()
-    assert "🚀 放量突破20日高" in win.alert_popup.rows[0].text()
+    # 名称+代码在**行文本**里（省略是从中间挖的，开头一定保得住）；
+    # 类型那一段改看 **tooltip（全文）**：`text()` 是按可用宽度做中间省略后的结果，
+    # 而省略位置取决于字体宽度 —— Windows 的微软雅黑比 Linux 那套宽，行文本会变成
+    # `样本股（600000）  …突破20日高  12.34`，拿 text() 断言类型文案在 CI 上必红。
+    row = win.alert_popup.rows[0]
+    assert "样本股（600000）" in row.text()
+    assert "🚀 放量突破20日高" in row.toolTip()
 
 
 def test_alerts_already_in_db_do_not_popup_on_startup(cfg, qapp, monkeypatch, traces) -> None:
