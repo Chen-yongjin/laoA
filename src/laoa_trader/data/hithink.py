@@ -78,6 +78,9 @@ DOWNLOAD_CHUNK = 1 << 20
 #: 重试退避上限（秒）
 _MAX_BACKOFF = 30.0
 
+#: 集合竞价快照每批最多多少个代码（接口上限 100）
+AUCTION_BATCH = 100
+
 
 class HithinkError(RuntimeError):
     """接口业务错误（信封 `code != 0`）。"""
@@ -853,6 +856,94 @@ class HithinkClient:
         if not items:
             raise batch_error
         return {"item": items, "failed": failed}
+
+    # -- 集合竞价 / 异动 --
+
+    def auction_snapshot(self, thscodes: list[str], stage: str = "live",
+                         chunk: int = AUCTION_BATCH) -> dict:
+        """集合竞价快照（9:15–9:25 的**真实买卖盘**）。
+
+        契约要点（照抄实测，别猜）：
+        - 端点 `a-share/auction/snapshot`，参数 `thscodes`（1–100 个）与 `stage`；
+        - 返回 `data` 里有 `auction_phase` / `data_status` / `total` / `item`；
+          `auction_phase="closed"` + `data_status="final"` 表示**竞价已结束、这是终态**；
+          非竞价时段是 `closed`/`not_ready` —— 那是**正常状态**（"现在没有竞价数据"），
+          不是错误，所以这里**不抛异常**，把 phase/status 原样交回给调用方判断；
+        - `item` 字段：`auction_price / auction_pct / auction_volume(手) / auction_amount /
+          auction_unmatched / auction_turnover_pct / auction_yesterday_ratio_pct /
+          auction_volume_ratio / pre_close_price / open_price / last_price`。
+          ⚠️ `auction_unmatched` 实测会出现 **-1**（茅台就是 -1）= "未提供"，
+          调用方（`intraday.auction_fields`）必须把负数当"没有"，绝不能读成"卖压 1 手"。
+
+        Args:
+            thscodes: 同花顺代码（也接受 `sh.600519` / 裸 6 位），**自动按 100 分批**。
+            stage: `live`（默认，竞价进行中/当天快照）。
+            chunk: 每批代码数（接口上限 100）。
+
+        Returns:
+            `{"item": [行...], "failed": [...], "phase": "…", "status": "…",
+              "timestamp": 服务端时间戳}`；一批都没成功时 `item` 为空、`failed` 有值。
+        """
+        wanted: list[str] = []
+        failed: list[str] = []
+        for raw in thscodes or []:
+            text = str(raw).strip()
+            if not text:
+                continue
+            try:
+                code = to_thscode(text)
+            except ValueError:
+                failed.append(text)
+                continue
+            if code not in wanted:
+                wanted.append(code)
+        if not wanted:
+            return {"item": [], "failed": failed, "phase": "", "status": "", "timestamp": 0}
+
+        items: list[dict] = []
+        phase = status = ""
+        timestamp = 0
+        size = max(1, min(int(chunk or AUCTION_BATCH), AUCTION_BATCH))
+        for i in range(0, len(wanted), size):
+            batch = wanted[i : i + size]
+            try:
+                data = self.request(
+                    "/a-share/auction/snapshot",
+                    {"thscodes": ",".join(batch), "stage": stage},
+                )
+            except (HithinkAuthError, HithinkNotReadyError):
+                raise                      # 与代码无关（Key/就绪度）：整批都没意义
+            except Exception as exc:  # noqa: BLE001 - 一批失败不连累其它批
+                logger.warning(f"竞价快照这一批取不到（已跳过）：{exc}")
+                failed.extend(batch)
+                continue
+            items.extend(data.get("item") or [])
+            phase = str(data.get("auction_phase") or phase)
+            status = str(data.get("data_status") or status)
+            timestamp = int(data.get("timestamp") or timestamp or 0)
+        return {"item": items, "failed": failed, "phase": phase,
+                "status": status, "timestamp": timestamp}
+
+    def anomaly_list(self, tag_codes: list[str] | None = None) -> list[dict]:
+        """当日全市场异动（涨停/跌停/大幅上涨下跌/快速反弹跳水）—— **一条请求**。
+
+        为什么不做"逐只查异动"：那是几百次请求（池子+自选+持仓逐只问），
+        而这个端点一次就把当日全市场异动给全了，本地按自己的票过滤即可
+        （见 `intraday.anomaly_alerts`）。
+
+        Args:
+            tag_codes: 只看这些标签（空/None = 全部）。
+
+        Returns:
+            `item` 行：`{stock_name, analysis_content(异动原因长文本), keyword_list,
+            thscode, tag_name}`。
+        """
+        params: dict[str, Any] = {}
+        codes = [str(c).strip().upper() for c in (tag_codes or []) if str(c).strip()]
+        if codes:
+            params["tag_codes"] = ",".join(codes)
+        data = self.request("/a-share/special-data/anomaly-analysis-list", params)
+        return list(data.get("item") or [])
 
     def limit_up_ladder(self) -> list[dict]:
         """近 30 个交易日的连板梯队矩阵。"""

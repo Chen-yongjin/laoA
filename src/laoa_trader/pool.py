@@ -457,11 +457,52 @@ def source_label(row: dict, watch_entry: dict | None) -> str:
     return " + ".join(parts) if parts else "—"
 
 
+def limit_up_annotations(db_path: str, day: str | None = None) -> dict[str, dict]:
+    """今日涨停池的"几连板 + 涨停原因" → `{symbol: {"continue_day_text", "reason"}}`。
+
+    为什么单独查一次、而不是并进 `load_pool` 的 SQL：股票池是**建池那一刻**的行，
+    涨停池是当天实时/收盘后更新的；两者按 (date, symbol) 左右拼一次就够了。
+    一次查询建全量映射（而不是每行一次查询）也是必须的 —— 池子十几行就变成十几次查询。
+    """
+    with storage.connect(db_path) as conn:
+        if day is None:
+            row = conn.execute("SELECT MAX(date) FROM limit_up_pool").fetchone()
+            day = row[0] if row else None
+        if not day:
+            return {}
+        return {
+            str(r[0]): {
+                "continue_day_text": str(r[1] or ""),
+                "reason": str(r[2] or ""),
+            }
+            for r in conn.execute(
+                "SELECT symbol, continue_day_text, reason_type FROM limit_up_pool "
+                "WHERE date = ?",
+                (day,),
+            )
+        }
+
+
+def limit_up_text(row: dict) -> str:
+    """卡片/表格里那一行：`2 连板 · 半导体设备+业绩预增`。
+
+    - 不是今日涨停票 → **空串**（调用方据此整行不显示）；
+    - 没有原因就只显示连板数；没有连板数就只显示原因；两者都没有但确实在涨停池里 → `涨停`。
+    """
+    if not row.get("is_limit_up"):
+        return ""
+    parts = [str(row.get("continue_day_text") or "").strip(),
+             str(row.get("limit_up_reason") or "").strip()]
+    text = " · ".join(part for part in parts if part)
+    return text or "涨停"
+
+
 def pool_table_rows(db_path: str, day: str | None = None) -> list[dict]:
-    """界面表格用：给每条池子记录补上行业、来源（组/自选）与自选备注。"""
+    """界面表格用：给每条池子记录补上行业、来源（组/自选）、自选备注与涨停信息。"""
     rows = load_pool(db_path, day)
     if not rows:
         return []
+    limit_up = limit_up_annotations(db_path)
     with storage.connect(db_path) as conn:
         industries = {
             r[0]: r[1]
@@ -489,5 +530,9 @@ def pool_table_rows(db_path: str, day: str | None = None) -> list[dict]:
             "source_label": source_label(row, entry),
             "note": note,
             "watchlist_enabled": bool(entry and int(entry.get("enabled", 1)) == 1),
+            # 今日涨停池里的信息（不在池里 → is_limit_up False，界面上整行不显示）
+            "is_limit_up": row["symbol"] in limit_up,
+            "continue_day_text": (limit_up.get(row["symbol"]) or {}).get("continue_day_text", ""),
+            "limit_up_reason": (limit_up.get(row["symbol"]) or {}).get("reason", ""),
         })
     return out

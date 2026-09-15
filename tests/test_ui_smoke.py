@@ -219,17 +219,19 @@ def test_window_renders_all_panels(window, qapp) -> None:
     assert window.pool_table.isVisible() is False
     window.on_toggle_pool_view()          # 切到表格视图，接着断言表格内容
     assert window.pool_table.isVisible() is True
-    # 池子表格：代码/名称/来源策略/来源/备注/热门行业/分数/条件单参数/复制按钮
-    assert window.pool_table.columnCount() == 9
+    # 池子表格：代码/名称/来源策略/来源/备注/**涨停**/热门行业/分数/条件单参数/复制按钮
+    assert window.pool_table.columnCount() == 10
     assert window.pool_table.item(0, 0).text() == "600002"
     assert window.pool_table.item(0, 1).text() == "半导体甲"
     assert window.pool_table.item(0, 2).text() == "低价股"
     # 来源列：组名 + 持有期（策略标的；"来源"与"组别"合成一列，不重复）
     assert window.pool_table.item(0, 3).text() == "波段·T+10（T+10）"
     assert window.pool_table.item(0, 4).text() == ""            # 备注（纯策略标的为空）
-    assert window.pool_table.item(0, 5).text() == "半导体"
-    assert window.pool_table.item(0, 7).text().startswith("触发 ")
-    assert window.pool_table.cellWidget(0, 8).text() == "复制条件单"
+    # 涨停列：seeded 库里 600002 今日在涨停池（连板文案 + 原因）
+    assert window.pool_table.item(0, 5).text() == "首板 · 芯片"
+    assert window.pool_table.item(0, 6).text() == "半导体"
+    assert window.pool_table.item(0, 8).text().startswith("触发 ")
+    assert window.pool_table.cellWidget(0, 9).text() == "复制条件单"
 
 
 def test_status_bar_shows_one_line_main_status_and_tags(window) -> None:
@@ -770,10 +772,11 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
 
 def test_pool_table_has_source_column(window) -> None:
     """「来源」列合并了"策略组别"与"自选/策略+自选"，避免两列重复信息。"""
-    assert window.pool_table.columnCount() == 9
-    header = [window.pool_table.horizontalHeaderItem(i).text() for i in range(9)]
+    assert window.pool_table.columnCount() == 10
+    header = [window.pool_table.horizontalHeaderItem(i).text() for i in range(10)]
     assert header[3] == "来源"
     assert header[4] == "备注"
+    assert header[5] == "涨停"          # 新增：今日涨停池的连板数 + 涨停原因
     assert window.pool_table.item(0, 3).text() == "波段·T+10（T+10）"
 
 
@@ -870,7 +873,11 @@ def test_pool_cards_hide_empty_fields(window, qapp, monkeypatch) -> None:
     card = window.pool_cards[0]
     assert card.score_text == "—"          # 没有分数：格式化结果就是"—"，但不显示
     assert card.industry == "" and card.note == ""
-    texts = [label.text() for label in card.findChildren(QLabel)]
+    # 只看**可见**的标签：新增的"竞价/涨停"两行在没有数据时是空且隐藏的
+    # （"不留空壳"说的是页面上看得见的地方不留空标签）
+    assert card.auction_label.isVisible() is False and card.auction_label.text() == ""
+    assert card.limit_up_label.isVisible() is False and card.limit_up_label.text() == ""
+    texts = [label.text() for label in card.findChildren(QLabel) if label.isVisible()]
     assert all(t.strip() for t in texts), f"卡片上留了空标签：{texts}"
     assert not any(t.startswith("分数") for t in texts)
     assert not any("热门行业" in t for t in texts)
@@ -1174,6 +1181,88 @@ def test_yield_gui_keeps_the_main_thread_responsive(qapp) -> None:
     alive = count_ticks(with_yield=True)
     assert alive >= 5, f"让出之后主线程仍只跳了 {alive} 次"
     assert alive > starved, f"让出版的定时器次数（{alive}）没有优于不让出的（{starved}）"
+
+
+# ── 需求 1/2/3 的界面部分：提醒标的文案、涨停原因、竞价那一行 ──
+
+
+def test_alert_table_shows_name_with_symbol(window, seeded, qapp) -> None:
+    """提醒表格的标的列显示 `名称（代码）`（与推送文本同一格式），并优雅退化。"""
+    with storage.connect(seeded.db_path) as conn:
+        storage.write_stock_basic(conn, [("600001", "低价样本", "银行")])
+        storage.record_alerts(conn, [
+            {"symbol": "600001", "kind": "break_high", "price": 3.2, "detail": "突破 20 日高点"},
+            # 库里没有名字的那只：只显示代码（**不许出现 `（None）`**）
+            {"symbol": "600009", "kind": "break_high", "price": 9.9, "detail": "突破"},
+            # symbol 为空的提醒（首板那类）：用说明里的名称
+            {"symbol": "", "kind": "first_board", "price": 12.0,
+             "detail": "半导体甲 首板，封单 0.90 亿"},
+        ], "2026-09-15")
+    window._refresh_alerts()
+    qapp.processEvents()
+
+    table = window.alert_table
+    assert table.horizontalHeaderItem(1).text() == "标的"     # 表头不再是「代码」
+    texts = {table.item(i, 1).text() for i in range(table.rowCount())}
+    assert "低价样本（600001）" in texts
+    assert "600009" in texts                                  # 没有名字 → 只显示代码
+    assert "半导体甲" in texts                                 # 没有代码 → 用说明里的名称
+    assert all("None" not in text for text in texts)
+
+
+def test_pool_card_shows_limit_up_reason_and_auction(pool_window, qapp,
+                                                     monkeypatch) -> None:
+    """池子卡片：今日涨停票显示 `涨停：2 连板 · 原因`；竞价窗口内显示 `竞价 +3.2% 量比 2.8`。"""
+    from PySide6.QtWidgets import QLabel
+
+    from laoa_trader import market
+    from laoa_trader import pool as pool_mod
+
+    rows = [
+        {"symbol": "600002", "name": "半导体甲", "strategy": "LowPriceStrategy",
+         "strategies": "LowPriceStrategy", "score": 1.0, "reason": "r",
+         "label": "低价股", "source_label": "波段·T+10（T+10）", "industry": "半导体",
+         "note": "", "is_limit_up": True, "continue_day_text": "2 连板",
+         "limit_up_reason": "半导体设备+业绩预增"},
+        {"symbol": "600003", "name": "白酒样本", "strategy": "X", "strategies": "X",
+         "score": 1.0, "reason": "r", "label": "低价股", "source_label": "策略",
+         "industry": "白酒", "note": "", "is_limit_up": False,
+         "continue_day_text": "", "limit_up_reason": ""},
+    ]
+    monkeypatch.setattr(pool_mod, "pool_table_rows", lambda db_path, day=None: rows)
+    window = pool_window
+    window.auction_snapshot = {
+        "600002": {"symbol": "600002", "name": "半导体甲", "pct": 3.2, "volume_ratio": 2.8,
+                   "turnover_pct": 0.13, "yesterday_ratio": 0.95, "unmatched": None,
+                   "price": 12.5, "pre_close": 12.2},
+        "600003": {"symbol": "600003", "name": "白酒样本", "pct": -1.5, "volume_ratio": 0.6,
+                   "turnover_pct": 0.02, "yesterday_ratio": 0.4, "unmatched": None,
+                   "price": 88.0, "pre_close": 89.3},
+    }
+    window._pool_signature = ()          # 强制重建卡片
+    window._refresh_pool()
+    qapp.processEvents()
+
+    limit_card = next(c for c in window.pool_cards if c.symbol == "600002")
+    assert limit_card.limit_up_text == "2 连板 · 半导体设备+业绩预增"
+    assert limit_card.limit_up_label.text() == "涨停：2 连板 · 半导体设备+业绩预增"
+    assert limit_card.limit_up_label.isVisible() is True
+    assert limit_card.auction_text == "竞价 +3.2% 量比2.8"      # 形态照需求给的样例
+    assert limit_card.auction_label.text() == "竞价 +3.2% 量比2.8"
+    # 涨红跌绿（颜色来自 market，不写死字符串）
+    assert limit_card.auction_label.styleSheet() == f"color:{market.COLOR_UP}"
+    plain_card = next(c for c in window.pool_cards if c.symbol == "600003")
+    assert plain_card.auction_label.styleSheet() == f"color:{market.COLOR_DOWN}"
+    # "看全部竞价"的位置：详情弹窗里有按分排序的一览（★ = 会被推送的前 N 只）
+    details = window._status_details()
+    assert "竞价一览" in details
+    assert "半导体甲（600002）" in details
+    assert "★" in details
+    assert plain_card.limit_up_label.isVisible() is False      # 不是涨停票 → 没有这一行
+    assert plain_card.limit_up_label.text() == ""
+    # 表格视图也有「涨停」列
+    from laoa_trader import pool as pool_module
+    assert pool_module.limit_up_text(rows[0]) == "2 连板 · 半导体设备+业绩预增"
 
 
 def test_status_points_to_refresh_when_only_light_data_missing(window, qapp) -> None:

@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any
@@ -62,6 +63,31 @@ KIND_LABELS_POOL = {
     "pullback_ma5_buy": "🎯 池内回踩买点",
 }
 
+#: 集合竞价窗口（北京时间）：9:15–9:25。竞价是当天**第一份真实买卖盘**。
+AUCTION_START = (9, 15)
+AUCTION_END = (9, 25)
+#: 9:25 之后到这里为止再拉一次：这时拿到的是竞价的**终态**（接口 phase=closed + final）
+AUCTION_TAIL = (9, 30)
+#: 一条推送/汇总里最多列几只竞价强度（配置 `auction_alert_max_items`，上限 10）
+AUCTION_MAX_ALERTS = 5
+
+#: "未匹配比"的两个阈值：`未匹配量 ÷ 竞价成交量` ≥ +0.5 买盘剩余占优、≤ -0.5 卖盘剩余占优。
+#: 这是个**比例**（不像涨幅/量比那样随股票规模变化），所以固定成常量而不是配置项。
+UNMATCHED_RATIO_STRONG = 0.5
+
+#: 异动标签枚举（接口 `tag_name` 给的大写值）→ 中文短名。
+#: 接口也可能直接给中文（"快速反弹"），两种都认 —— 见 `anomaly_tag_label`。
+ANOMALY_TAGS: dict[str, str] = {
+    "LIMIT_UP": "涨停",
+    "LIMIT_DOWN": "跌停",
+    "SHARP_RISE": "大幅上涨",
+    "SHARP_FALL": "大幅下跌",
+    "RAPID_RALLY": "快速反弹",
+    "RAPID_DECLINE": "快速下跌",
+}
+#: 异动原因文本截断长度：推送要一行看得完，完整原文交易所接口随时能再取
+ANOMALY_REASON_LIMIT = 120
+
 KIND_LABELS = {
     "stop_loss": "🛑 触及止损",
     "take_profit": "🎯 触及止盈",
@@ -70,7 +96,14 @@ KIND_LABELS = {
     "break_high": "🚀 放量突破20日高",
     "first_board": "🔥 首板厚封单",
     "pullback_ma5_buy": "🎯 池内回踩买点",
+    # 竞价强度：强/弱分开成两种 kind，去重键 (date, symbol, kind) 天然一天只推一次
+    "auction_strong": "⚡ 竞价强度",
+    "auction_weak": "⚡ 竞价走弱",
 }
+
+# 异动的 kind 按标签区分（同一只票同一天同一标签只推一次；标签变了可以再推一条）
+for _tag_code in ANOMALY_TAGS:
+    KIND_LABELS[f"anomaly_{_tag_code.lower()}"] = "⚡ 异动"
 
 
 # ── 条件单参数（移植自 sequoia_x/trade_plan.py）──
@@ -508,9 +541,17 @@ def evaluate_first_board(client: hx.HithinkClient) -> list[tuple[str, float, str
 
 
 def build_alerts(
-    engine: DataEngine, client: hx.HithinkClient, scan_market: bool = False
+    engine: DataEngine,
+    client: hx.HithinkClient,
+    scan_market: bool = False,
+    cfg: Config | None = None,
 ) -> list[dict]:
-    """跑一轮规则，返回本轮命中的提醒（**未去重**）。"""
+    """跑一轮规则，返回本轮命中的提醒（**未去重**）。
+
+    两类"额外"提醒也在这里并进来（共用同一次循环，不再加定时器）：
+    - **竞价强度**（只在 9:15–9:30 有数据，见 `auction_alerts`）；
+    - **当日异动**（全市场一条请求 + 本地按自己的票过滤，见 `anomaly_alerts`）。
+    """
     pool, pool_symbols = watch_targets(engine.db_path)
     symbols = list(pool)
     if not symbols:
@@ -551,9 +592,17 @@ def build_alerts(
                     alerts.append({"symbol": symbol, "name": name, "kind": kind,
                                    "price": price, "detail": detail})
 
+    cfg = cfg or get_config()
+    # 竞价强度：9:15–9:25 每分钟一次 + 9:25 后的终态一次（不在窗口内则一次请求都不发）
+    alerts.extend(auction_alerts(client, db_path=engine.db_path, cfg=cfg))
+    # 当日异动：全市场一条请求，本地只留自己的票
+    alerts.extend(anomaly_alerts(client, db_path=engine.db_path, cfg=cfg))
+
     for kind, price, detail in evaluate_first_board(client):
         alerts.append({"symbol": "", "name": detail.split(" ")[0], "kind": kind,
                        "price": price, "detail": detail})
+    # 涨停类提醒补"为什么涨停"（按需：只有真命中涨停打开/首板才去拉涨停池）
+    enrich_limit_up_reasons(client, alerts)
     return alerts
 
 
@@ -608,6 +657,522 @@ def format_message(
     return title, lines
 
 
+# ── 集合竞价强度 / 当日异动 ──
+
+
+def _num(value: Any) -> float | None:
+    """宽松转 float（空/停牌/字段缺失一律 None）。"""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _hhmm(now: datetime) -> tuple[int, int]:
+    return (now.hour, now.minute)
+
+
+def auction_window(now: datetime | None = None) -> bool:
+    """现在是不是**集合竞价进行中**（9:15–9:25）。"""
+    now = now or now_shanghai()
+    return AUCTION_START <= _hhmm(now) < AUCTION_END
+
+
+def auction_tail(now: datetime | None = None) -> bool:
+    """9:25–9:30：竞价已结束，这时候取到的 `phase=closed / data_status=final` 是**终态**。"""
+    now = now or now_shanghai()
+    return AUCTION_END <= _hhmm(now) < AUCTION_TAIL
+
+
+def auction_fetch_window(now: datetime | None = None) -> bool:
+    """该不该去取竞价数据：9:15–9:30（含 9:25 后取终态那段）。
+
+    为什么把 9:25–9:30 也算进来：竞价终态（谁高开放量、谁低开走弱）是收盘前都在用的信息，
+    而接口在 9:25 之后仍然返回 `phase=closed + data_status=final`，取的还是同一天的数。
+    """
+    return auction_window(now) or auction_tail(now)
+
+
+def auction_fields(row: dict, name: str = "") -> dict:
+    """竞价快照行 → 干净的展示字段（**负数/缺失的未匹配量一律当"没有"**）。
+
+    接口**只给一个带符号的未匹配量**（没有买/卖两个数），实测 100 只里
+    **>0 的 52 只、<0 的 45 只、恰好 -1 的 1 只**，所以要这么读：
+    - `> 0` = **买盘剩余**（买强）；`< 0` = **卖盘剩余**（卖强）；两者都是真实力量对比；
+    - **恰好 -1 当"缺失"**（茅台就是 -1）—— 那不是"卖压 1 手"；
+    - 另外算一个"未匹配比" `未匹配量 ÷ 竞价成交量`，用于打分与展示。
+    """
+    unmatched = _num(row.get("auction_unmatched"))
+    if unmatched == -1.0:
+        unmatched = None                 # -1 是"未提供"，不是卖压 1 手
+    volume = _num(row.get("auction_volume"))
+    symbol = ""
+    thscode = str(row.get("thscode") or "")
+    if thscode:
+        try:
+            symbol = hx.to_local_symbol(thscode)
+        except ValueError:
+            symbol = ""
+    amount = _num(row.get("auction_amount"))
+    ratio = None
+    if unmatched is not None and volume:
+        ratio = unmatched / volume
+    return {
+        "symbol": symbol,
+        "name": str(row.get("name") or name or symbol),
+        "price": _num(row.get("auction_price")),
+        "pct": _num(row.get("auction_pct")),
+        "volume_ratio": _num(row.get("auction_volume_ratio")),
+        "turnover_pct": _num(row.get("auction_turnover_pct")),
+        "yesterday_ratio": _num(row.get("auction_yesterday_ratio_pct")),
+        # 带符号的未匹配量（正=买盘剩余、负=卖盘剩余）；-1/缺失 → None
+        "unmatched": unmatched,
+        "volume": volume,
+        "unmatched_ratio": ratio,
+        "amount": amount,
+        "pre_close": _num(row.get("pre_close_price")),
+    }
+
+
+def auction_card_text(fields: dict) -> str:
+    """股票池卡片上那一行：`竞价 +3.2% 量比2.8 买盘剩余1200手`。
+
+    - 拿不到涨跌幅 → 空串（整行不显示）；
+    - 未匹配量缺失（-1）→ 只显示涨幅与量比；
+    - 未匹配量为正 = 买盘剩余、为负 = 卖盘剩余（数值用绝对值 + 中文标注，别让用户猜符号）。
+    """
+    pct = fields.get("pct")
+    if pct is None:
+        return ""
+    text = f"竞价 {pct:+.1f}%"
+    if fields.get("volume_ratio") is not None:
+        text += f" 量比{fields['volume_ratio']:.1f}"
+    unmatched = fields.get("unmatched")
+    if unmatched:
+        side = "买盘剩余" if unmatched > 0 else "卖盘剩余"
+        text += f" {side}{abs(unmatched):,.0f}手"
+    return text
+
+
+def auction_detail(fields: dict, score: int | None = None) -> str:
+    """推送里的那句：原始数值 + 分数都写出来（用户要能看到"为什么给这个分"）。
+
+    形如：`+3.21% 量比2.80 买盘剩余1,200手 成交额5,200万 未匹配比+0.62（分5）`。
+    """
+    parts = []
+    if fields.get("pct") is not None:
+        parts.append(f"{fields['pct']:+.2f}%")
+    if fields.get("volume_ratio") is not None:
+        parts.append(f"量比{fields['volume_ratio']:.2f}")
+    unmatched = fields.get("unmatched")
+    if unmatched:
+        side = "买盘剩余" if unmatched > 0 else "卖盘剩余"
+        parts.append(f"{side}{abs(unmatched):,.0f}手")
+    if fields.get("amount") is not None:
+        parts.append(f"成交额{fields['amount'] / 1e4:,.0f}万")
+    if fields.get("unmatched_ratio") is not None:
+        parts.append(f"未匹配比{fields['unmatched_ratio']:+.2f}")
+    if fields.get("turnover_pct") is not None:
+        parts.append(f"换手{fields['turnover_pct'] * 100:.2f}%")
+    if fields.get("yesterday_ratio") is not None:
+        parts.append(f"昨日量比{fields['yesterday_ratio']:.2f}")
+    text = " ".join(parts) or "竞价数据不完整"
+    return f"{text}（分{score}）" if score is not None else text
+
+
+def auction_score(
+    fields: dict, cfg: Config | None = None
+) -> tuple[int | None, dict]:
+    """给一只票的竞价**打分**（取代原来的"涨幅 ≥2% 且 量比 ≥2"那个 AND 判据）。
+
+    为什么改成分级：实测 100 只里"涨幅≥2% **且** 量比≥2 **且** 成交额≥500万"是 **0 只** ——
+    AND 判据太严，等于永远不提醒。改成分级之后，只要"高开或放量或买盘占优"就有分。
+
+    计分表（越强分越高，负数表示低开/卖压）：
+    - `+2` 竞价涨幅 ≥ `min_pct`（默认 +2.0%）；`+1` 涨幅 ≥ 它的一半（默认 +1.0%）
+    - `+2` 量比 ≥ `min_ratio`（默认 2.0）；`+1` 量比 ≥ 它的 0.75（默认 1.5）
+    - `+1` 未匹配比 ≥ +0.5（买盘剩余占优）；`-1` 未匹配比 ≤ -0.5（卖盘剩余占优）
+    - `+1` 竞价成交额 ≥ `min_amount`（默认 500 万）
+    - **低开按对称规则扣分**：涨幅 ≤ `-min_pct` 记 `-2`、≤ `-min_pct/2` 记 `-1`。
+      为什么要补这一条：原口径只给"买盘那侧"加分（成交额那 1 分一定会拿），
+      于是分数最低只能到 `0`，而"竞价弱"的门限是 `-2` —— **那条规则永远不可能触发**。
+      补上对称的扣分之后，`≤ -2` 才真正表示"低开且卖盘占优"，与"低开/卖压"的说法一致。
+
+    **成交额不到下限 → 返回 `(None, …)`：不参与评分**。竞价量太小时
+    "未匹配量 ÷ 成交量"会爆表（实测某小盘股 +29.46），拿它判断强弱等于把噪音当信号。
+    **正好等于门限也算命中**（判据用 `>=` / `<=`，与配置里写的数字一致）。
+
+    Returns:
+        `(分数 or None, 明细)`；明细里逐项写清哪一档命中、以及三个原始数值 ——
+        界面与推送都要显示原始数（只给一个分，用户没法核对）。
+    """
+    cfg = cfg or get_config()
+    try:
+        min_pct = float(getattr(cfg, "auction_alert_min_pct", 2.0) or 2.0)
+        min_ratio = float(getattr(cfg, "auction_alert_min_volume_ratio", 2.0) or 2.0)
+        min_amount = float(getattr(cfg, "auction_alert_min_amount", 5e6) or 5e6)
+    except (TypeError, ValueError):     # 配置被手改成怪值：按默认口径走，别抛
+        min_pct, min_ratio, min_amount = 2.0, 2.0, 5e6
+
+    breakdown: dict = {"reasons": []}
+    amount = fields.get("amount")
+    if amount is None or amount < min_amount:
+        breakdown["skipped"] = "成交额不足"
+        return None, breakdown                   # 成交额不达标：不参与评分
+
+    score = 0
+    pct = fields.get("pct")
+    if pct is not None:
+        if pct >= min_pct:
+            score += 2
+            breakdown["reasons"].append(f"高开{pct:+.2f}%")
+        elif pct >= min_pct / 2:
+            score += 1
+            breakdown["reasons"].append(f"略高开{pct:+.2f}%")
+        elif pct <= -min_pct:
+            score -= 2                      # 低开：与"高开 +2"对称（见 docstring）
+            breakdown["reasons"].append(f"低开{pct:+.2f}%")
+        elif pct <= -min_pct / 2:
+            score -= 1
+            breakdown["reasons"].append(f"略低开{pct:+.2f}%")
+    ratio = fields.get("volume_ratio")
+    if ratio is not None:
+        if ratio >= min_ratio:
+            score += 2
+            breakdown["reasons"].append(f"放量{ratio:.2f}")
+        elif ratio >= min_ratio * 0.75:
+            score += 1
+            breakdown["reasons"].append(f"略放量{ratio:.2f}")
+    unmatched_ratio = fields.get("unmatched_ratio")
+    if unmatched_ratio is not None:
+        if unmatched_ratio >= UNMATCHED_RATIO_STRONG:
+            score += 1
+            breakdown["reasons"].append("买盘占优")
+        elif unmatched_ratio <= -UNMATCHED_RATIO_STRONG:
+            score -= 1
+            breakdown["reasons"].append("卖盘占优")
+    score += 1                                   # 成交额已过门槛（上面提前返回了）
+    breakdown["reasons"].append(f"成交额{amount / 1e4:,.0f}万")
+    breakdown.update({"score": score, "pct": pct, "volume_ratio": ratio,
+                      "unmatched_ratio": unmatched_ratio})
+    return score, breakdown
+
+
+def auction_verdict(score: int | None, cfg: Config | None = None) -> str:
+    """分数 → `auction_strong` / `auction_weak` / 空串（不提示）。
+
+    弱的分门限 = 强门限取负再放宽一档（默认 3 → **-2**）。
+    注意：**弱只对持仓提示**（低开是"我已经买了"的风险），这一条在 `auction_alerts` 里判，
+    因为这里拿不到持仓集合。
+    """
+    if score is None:
+        return ""
+    cfg = cfg or get_config()
+    try:
+        min_score = int(getattr(cfg, "auction_alert_min_score", 3) or 3)
+    except (TypeError, ValueError):
+        min_score = 3
+    if score >= min_score:
+        return "auction_strong"
+    if score <= -max(1, min_score - 1):
+        return "auction_weak"
+    return ""
+
+
+def anomaly_tag_label(raw: Any) -> tuple[str, str]:
+    """`tag_name` → `(kind 后缀, 中文短名)`；枚举与中文两种写法都认。
+
+    接口里 `tag_name` 既可能是枚举（`RAPID_RALLY`）也可能是中文（`快速反弹`），
+    猜错会让"标签过滤"和"去重 kind"都失效，所以两种都认、认不出用原样文本当标签。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "other", "异动"
+    upper = text.upper()
+    if upper in ANOMALY_TAGS:
+        return upper.lower(), ANOMALY_TAGS[upper]
+    for code, label in ANOMALY_TAGS.items():
+        if text == label:
+            return code.lower(), label
+    slug = re.sub(r"[^0-9a-z_]+", "_", upper.lower()).strip("_")
+    return (slug or "other"), text
+
+
+def alert_universe(db_path: str, cfg: Config | None = None) -> dict[str, str]:
+    """提醒关心的**全部标的**：股票池 + 自选 + 持仓 → `{symbol: 名称}`（去重）。
+
+    为什么三类都要：竞价强度与异动只对"用户关心的票"有意义 ——
+    池子是要买的、持仓是已经买了的、自选是盯着的；漏掉哪一类用户都会当成 bug。
+    名称以 `stock_basic` 为准（池子/自选里存的是建池那天的名字，可能已经改名）。
+    """
+    from laoa_trader import pool as pool_mod
+
+    cfg = cfg or get_config()
+    symbols: dict[str, str] = {}
+    for row in pool_mod.load_pool(db_path):
+        symbol = str(row.get("symbol") or "")
+        if symbol:
+            symbols.setdefault(symbol, str(row.get("name") or ""))
+    with storage.connect(db_path) as conn:
+        for row in storage.load_watchlist(conn):
+            symbol = str(row.get("symbol") or "")
+            if symbol:
+                symbols.setdefault(symbol, str(row.get("name") or ""))
+        for symbol, row in storage.load_positions(conn).items():
+            symbols.setdefault(str(symbol), str(row.get("name") or ""))
+        wanted = list(symbols)
+        if wanted:
+            placeholders = ",".join("?" * len(wanted))
+            for symbol, name in conn.execute(
+                f"SELECT symbol, name FROM stock_basic WHERE symbol IN ({placeholders})",
+                wanted,
+            ):
+                if name:
+                    symbols[str(symbol)] = str(name)
+    return {s: n for s, n in symbols.items() if s}
+
+
+def position_symbols(db_path: str) -> set[str]:
+    """持仓代码集合：**"竞价弱"只对真持仓提示**（低开是"我已经买了"的风险，
+    没买的票低开跟我没关系；池子里的票低开也不该在 9:20 就报警）。"""
+    with storage.connect(db_path) as conn:
+        return {str(symbol) for symbol in storage.load_positions(conn)}
+
+
+def auction_alerts(
+    client: hx.HithinkClient,
+    db_path: str | None = None,
+    cfg: Config | None = None,
+    now: datetime | None = None,
+) -> list[dict]:
+    """竞价强度提醒（按**分数**排强弱）；不在竞价窗口、或没开这个功能时返回空列表。
+
+    口径（替换了早期那个"涨幅≥2% 且 量比≥2"的 AND 判据 —— 实测那种组合在 100 只里是 0 只）：
+    - 每只票按 `auction_score()` 打分（高开/放量/买盘剩余/成交额各给分，卖盘剩余扣分）；
+    - **分 ≥ `auction_alert_min_score`（默认 3）→ 竞价强**；
+    - **分 ≤ -(门限-1)（默认 -2）→ 竞价弱**，而且**只对持仓提示**
+      （低开是"我已经买了"的风险；没买的票低开与我无关）；
+    - 成交额不到 `auction_alert_min_amount`（500 万）→ **不参与评分**；
+    - 按分数（同分按 |涨幅|）排序，**最多 `auction_alert_max_items` 只（默认 5、上限 10）**。
+
+    节奏由调用方定：`run_once` 每 `intraday_interval` 跑一轮，
+    所以 9:15–9:25 之间是每分钟一次，9:25 之后那一轮拿到的是**终态**。
+    失败只记日志（竞价数据缺一轮不影响其它提醒）。
+    """
+    cfg = cfg or get_config()
+    if not bool(getattr(cfg, "intraday_auction", True)):
+        return []
+    if not auction_fetch_window(now):
+        return []            # 不在 9:15–9:30：一次请求都不发（接口这时也没有竞价数据）
+    db_path = db_path or cfg.db_path
+    universe = alert_universe(db_path, cfg)
+    if not universe:
+        return []
+    code_map: dict[str, str] = {}
+    for symbol in universe:
+        try:
+            code_map[hx.to_thscode(symbol)] = symbol
+        except ValueError:
+            continue
+    if not code_map:
+        return []
+    try:
+        data = client.auction_snapshot(list(code_map))
+    except Exception as exc:  # noqa: BLE001 - 竞价取不到不该影响其它提醒
+        logger.warning(f"竞价快照获取失败（本轮跳过竞价提醒）：{exc}")
+        return []
+    phase = str(data.get("phase") or "")
+    held = position_symbols(db_path)
+    try:
+        max_items = int(getattr(cfg, "auction_alert_max_items", AUCTION_MAX_ALERTS)
+                        or AUCTION_MAX_ALERTS)
+    except (TypeError, ValueError):
+        max_items = AUCTION_MAX_ALERTS
+    max_items = min(max(max_items, 1), 10)       # 上限 10：再多就成刷屏了
+    hits: list[dict] = []
+    for row in data.get("item") or []:
+        symbol = code_map.get(str(row.get("thscode") or ""))
+        if not symbol:
+            continue
+        fields = auction_fields(row, name=universe.get(symbol, ""))
+        score, breakdown = auction_score(fields, cfg)
+        kind = auction_verdict(score, cfg)
+        if not kind:
+            continue
+        if kind == "auction_weak" and symbol not in held:
+            continue                             # 弱只对持仓提示
+        hits.append({
+            "symbol": symbol,
+            "name": fields["name"] or symbol,
+            "kind": kind,
+            "price": fields["price"],
+            "score": score,
+            "detail": auction_detail(fields, score),
+            "_sort": (int(score if score is not None else 0),
+                      abs(fields.get("pct") or 0.0)),
+        })
+    # 按分数排（同分按涨幅绝对值），只留前 N —— 提醒条数上限就是这里生效的
+    hits.sort(key=lambda item: item["_sort"], reverse=True)
+    for hit in hits:
+        hit.pop("_sort", None)
+    if hits:
+        logger.info(f"竞价强度命中 {len(hits)} 只（phase={phase or '—'}，"
+                    f"取前 {max_items} 只推送）")
+    return hits[:max_items]
+
+
+def fetch_auction(
+    db_path: str,
+    cfg: Config | None = None,
+    client: hx.HithinkClient | None = None,
+    now: datetime | None = None,
+) -> dict[str, dict]:
+    """取一次竞价快照 → `{symbol: 展示字段}`（界面卡片用；失败/非窗口返回空字典）。
+
+    与 `auction_alerts` 共用 `auction_fields`，所以卡片上的数字与推送里的数字**一定一致**
+    （同一个接口、同一套"负数当没有"的处理）。
+    """
+    cfg = cfg or get_config()
+    if not bool(getattr(cfg, "intraday_auction", True)):
+        return {}
+    if not auction_fetch_window(now):
+        return {}                        # 不在窗口里：不发请求
+    universe = alert_universe(db_path, cfg)
+    if not universe:
+        return {}
+    code_map: dict[str, str] = {}
+    for symbol in universe:
+        try:
+            code_map[hx.to_thscode(symbol)] = symbol
+        except ValueError:
+            continue
+    if not code_map:
+        return {}
+    client = client or hx.HithinkClient(
+        api_key=getattr(cfg, "hithink_api_key", "") or None, pace=0.05
+    )
+    try:
+        data = client.auction_snapshot(list(code_map))
+    except Exception as exc:  # noqa: BLE001 - 取不到就不显示那一行，界面照常
+        logger.info(f"竞价快照取数失败（卡片上不显示竞价行）：{exc}")
+        return {}
+    out: dict[str, dict] = {}
+    for row in data.get("item") or []:
+        symbol = code_map.get(str(row.get("thscode") or ""))
+        if not symbol:
+            continue
+        fields = auction_fields(row, name=universe.get(symbol, ""))
+        # 顺手把分数算好带上：界面要"原始数 + 分"一起显示（只给一个分用户没法核对）
+        score, breakdown = auction_score(fields, cfg)
+        fields["score"] = score
+        fields["reasons"] = breakdown.get("reasons", [])
+        out[symbol] = fields
+    return out
+
+
+def anomaly_alerts(
+    client: hx.HithinkClient,
+    db_path: str | None = None,
+    cfg: Config | None = None,
+) -> list[dict]:
+    """当日异动里**只挑自己的票**（池子 / 自选 / 持仓）。
+
+    为什么拉全市场再本地过滤：`anomaly-analysis-list` **一条请求**就给全市场异动，
+    而逐只问（`anomaly-analysis-stock`）要几百次 —— 池子+自选+持仓几十只也够呛。
+    接口失败只记日志：异动提醒缺一轮，不该影响止损止盈这些更重要的提醒。
+    """
+    cfg = cfg or get_config()
+    if not bool(getattr(cfg, "intraday_anomaly", True)):
+        return []
+    db_path = db_path or cfg.db_path
+    universe = alert_universe(db_path, cfg)
+    if not universe:
+        return []
+    wanted_tags = [str(tag).strip().upper() for tag in (cfg.anomaly_alert_tags or [])]
+    try:
+        rows = client.anomaly_list(wanted_tags or None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"异动列表获取失败（本轮跳过异动提醒）：{exc}")
+        return []
+    hits: list[dict] = []
+    for row in rows or []:
+        thscode = str(row.get("thscode") or "")
+        if not thscode:
+            continue
+        try:
+            symbol = hx.to_local_symbol(thscode)
+        except ValueError:
+            continue
+        if symbol not in universe:
+            continue                       # **只推自己的票**（池外异动一律不打扰）
+        tag = str(row.get("tag_name") or "")
+        suffix, label = anomaly_tag_label(tag)
+        if wanted_tags and suffix.upper() not in wanted_tags and tag.upper() not in wanted_tags:
+            continue                       # 配置里只关心某些标签
+        reason = _clip_text(str(row.get("analysis_content") or ""), ANOMALY_REASON_LIMIT)
+        detail = f"{label} · {reason}" if reason else label
+        hits.append({
+            "symbol": symbol,
+            "name": str(row.get("stock_name") or universe.get(symbol) or symbol),
+            "kind": f"anomaly_{suffix}",
+            "price": None,
+            "detail": detail,
+        })
+    if hits:
+        logger.info(f"异动命中 {len(hits)} 只（全市场 {len(rows or [])} 条里属于自己票的）")
+    return hits
+
+
+def _clip_text(text: str, limit: int) -> str:
+    """长文本截断（加省略号）：异动原因是整段新闻，推送一行不能太长。"""
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+#: 需要补"涨停原因"的提醒类型（这几条本来只说"涨停打开/首板"，用户看不出为什么涨停）
+LIMIT_UP_KINDS = ("limit_up_open", "first_board")
+
+
+def enrich_limit_up_reasons(client: hx.HithinkClient, alerts: list[dict]) -> None:
+    """给涨停类提醒补上"为什么涨停"（**按需取**：只有真命中才去拉涨停池）。
+
+    为什么要按需：`limit_up_pool()` 会自动翻页（一天几十上百条），
+    而绝大多数轮次根本没有涨停类提醒 —— 每轮都拉等于白花配额。
+    原因取不到就保持原样（少一句话，不影响这条提醒本身的价值）。
+    """
+    targets = {
+        alert["symbol"] for alert in alerts
+        if alert.get("kind") in LIMIT_UP_KINDS and alert.get("symbol")
+        # 只跳过"已经补过原因"的（详情里本来就有原因的首板提醒不用再补）；
+        # 注意不能拿"详情里有'涨停'两个字"当判据 —— "涨停打开"本来就有这两个字
+        and "涨停原因" not in str(alert.get("detail") or "")
+    }
+    if not targets:
+        return
+    try:
+        rows = client.limit_up_pool()
+    except Exception as exc:  # noqa: BLE001 - 补原因失败不影响提醒本身
+        logger.info(f"涨停池取不到（本轮不给涨停类提醒补原因）：{exc}")
+        return
+    reasons: dict[str, str] = {}
+    for row in rows or []:
+        code = str(row.get("thscode") or row.get("ticker") or "")
+        if not code:
+            continue
+        try:
+            symbol = hx.to_local_symbol(code)
+        except ValueError:
+            continue
+        reason = str(row.get("limit_up_reason") or "").strip()
+        if reason:
+            reasons.setdefault(symbol, reason)
+    for alert in alerts:
+        if alert.get("kind") in LIMIT_UP_KINDS and alert.get("symbol") in reasons:
+            alert["detail"] = f"{alert.get('detail') or ''}，涨停原因：{reasons[alert['symbol']]}"
+
+
 def run_once(
     engine: DataEngine,
     cfg: Config | None = None,
@@ -632,8 +1197,12 @@ def run_once(
     if not result["trading_day"]:
         logger.info("今天不是交易日，跳过盘中提醒")
         return result
-    if not result["in_session"] and not ignore_session:
-        logger.info("当前不在交易时段（09:30-11:30 / 13:00-15:00），跳过")
+    # 竞价窗口（9:15–9:25）也要跑：那时还没到 9:30，但它正是"真实买卖盘"最有价值的十分钟。
+    # 9:25–9:30 那一轮同样放行 —— 拿到的是竞价**终态**（接口 phase=closed/final）。
+    auction_on = bool(getattr(cfg, "intraday_auction", True))
+    in_window = result["in_session"] or (auction_on and auction_fetch_window())
+    if not in_window and not ignore_session:
+        logger.info("当前不在交易时段（含集合竞价窗口），跳过")
         return result
 
     if client is None and not hx.available():
@@ -643,7 +1212,7 @@ def run_once(
 
     try:
         client = client or hx.HithinkClient(api_key=cfg.hithink_api_key or None, pace=0.05)
-        alerts = build_alerts(engine, client)
+        alerts = build_alerts(engine, client, cfg=cfg)
         result["hits"] = len(alerts)
         fresh = record_alerts(engine.db_path, alerts, today)
         result["fresh"] = len(fresh)

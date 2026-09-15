@@ -22,6 +22,7 @@ from typing import Any
 
 import laoa_trader
 from laoa_trader import assets, intraday, market, pool, state
+from laoa_trader import pool as pool_mod
 from laoa_trader import config
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import sync
@@ -49,6 +50,10 @@ SOURCE_TEXT = ("数据来源：同花顺（fuyao.aicubes.cn）。"
 
 #: 关于页里图标的显示边长（资源只有 256/128/48/32/16 这几档，这里由 QPixmap 平滑缩放）
 ABOUT_ICON_SIZE = 64
+
+#: 竞价强度的界面刷新周期（毫秒）：竞价窗口只有 9:15–9:30 这十几分钟，
+#: 每分钟一次就够（卡片上那一行要新鲜，但不能每 5 秒打一次接口）。
+AUCTION_REFRESH_MS = 60_000
 
 #: 「大盘概览」页自己的刷新周期（毫秒）—— 每分钟一次，与 5 秒的界面刷新解耦。
 #: 取数另有 55 秒 TTL（`market_overview_ttl`），所以这一分钟里最多真打一次接口。
@@ -624,6 +629,9 @@ if QT_AVAILABLE:
             #: 启动自检结果（三态）与首次向导
             self.preflight_result: dict | None = None
             self.wizard: Any = None
+            #: 竞价强度快照：`{symbol: 展示字段}`（见 `request_auction` / `_auction_tick`）
+            self.auction_snapshot: dict[str, dict] = {}
+            self._auction_worker: Worker | None = None
             #: 数据概况的缓存与时间戳（见 `_summary_cached`）
             self._summary: dict | None = None
             self._summary_at = 0.0
@@ -663,6 +671,10 @@ if QT_AVAILABLE:
             self._market_timer = QTimer(self)
             self._market_timer.timeout.connect(self._market_tick)
             self._market_timer.start(MARKET_REFRESH_MS)
+            # 竞价强度自己的定时器：每分钟一次；真正去取的前提是"在竞价窗口内"
+            self._auction_timer = QTimer(self)
+            self._auction_timer.timeout.connect(self._auction_tick)
+            self._auction_timer.start(AUCTION_REFRESH_MS)
             # 切到这一页时立刻刷一次（定时器是整分钟对齐的，切过来时可能差几十秒到点）
             self.tabs.currentChanged.connect(self._on_tab_changed)
             # 启动第一屏就是概览页（它是第一个页签）：起来后立刻取一次，
@@ -725,10 +737,11 @@ if QT_AVAILABLE:
 
             # 股票池页 = 【卡片/表格】切换按钮 + 空池提示 + 卡片视图 + 表格视图。
             # 两个视图**都留着**：卡片看得全，表格看得密，用户自己挑；切换只是 setVisible。
-            self.pool_table = QTableWidget(0, 9)
-            # 「来源」列把"策略组别"和"自选/策略+自选"合成一列（避免两列重复信息）
+            self.pool_table = QTableWidget(0, 10)
+            # 「来源」列把"策略组别"和"自选/策略+自选"合成一列（避免两列重复信息）；
+            # 「涨停」列放在「备注」后面：今日涨停池里的连板数与涨停原因（不是涨停票就是空）
             self.pool_table.setHorizontalHeaderLabels(
-                ["代码", "名称", "来源策略", "来源", "备注", "热门行业", "分数",
+                ["代码", "名称", "来源策略", "来源", "备注", "涨停", "热门行业", "分数",
                  "条件单参数", "复制"]
             )
             self._stretch(self.pool_table)
@@ -750,7 +763,9 @@ if QT_AVAILABLE:
             )
 
             self.alert_table = QTableWidget(0, 5)
-            self.alert_table.setHorizontalHeaderLabels(["时间", "代码", "类型", "价格", "说明"])
+            # 第 2 列是「标的」而不是「代码」：用户要求显示成 `名称（代码）`
+            # （与推送文本同一格式），光看代码认不出是哪只票
+            self.alert_table.setHorizontalHeaderLabels(["时间", "标的", "类型", "价格", "说明"])
             self._stretch(self.alert_table)
             self.watch_table = QTableWidget(0, 5)
             self.watch_table.setHorizontalHeaderLabels(
@@ -1339,6 +1354,23 @@ if QT_AVAILABLE:
                 # 没分数就不显示 —— 表格里那种"空单元格 + 一个 —"在卡片上很难看
                 head.addWidget(QLabel(f"分数 {card.score_text}"))
             layout.addLayout(head)
+
+            # 第 1.5 行：竞价强度（只在竞价窗口内有数据）+ 涨停信息（不是涨停票就没有）
+            # 两行都放在最上面：竞价是当天最早的信号，涨停原因是"为什么涨"的答案
+            card.auction_text = self._auction_text(str(row.get("symbol") or ""))
+            card.auction_label = QLabel(card.auction_text)
+            auction_font = card.auction_label.font()
+            auction_font.setBold(True)
+            card.auction_label.setFont(auction_font)
+            card.auction_label.setVisible(bool(card.auction_text))
+            layout.addWidget(card.auction_label)
+
+            card.limit_up_text = pool_mod.limit_up_text(row)
+            card.limit_up_label = QLabel(
+                f"涨停：{card.limit_up_text}" if card.limit_up_text else ""
+            )
+            card.limit_up_label.setVisible(bool(card.limit_up_text))
+            layout.addWidget(card.limit_up_label)
 
             # 第 2 行：来源 + 热门行业 + 备注（各段为空就整段不出现，不留空标签）
             meta = QHBoxLayout()
@@ -2107,6 +2139,34 @@ if QT_AVAILABLE:
                 label.setText(text)
                 label.setVisible(bool(text))       # 空 → 整项不显示（不是显示一个空壳）
 
+        def _auction_detail_lines(self) -> list[str]:
+            """状态详情里的**竞价一览**（按分排序，★ = 前 N 只）。
+
+            为什么放这里：卡片与提醒默认只显示前 `auction_alert_max_items` 只（避免刷屏），
+            但用户要能"看全部竞价" —— 详情弹窗就是那个地方；
+            每行给的是**原始数值 + 分**（只给一个分，用户没法核对）。
+            """
+            if not self.auction_snapshot:
+                return []
+            def _key(fields: dict) -> tuple:
+                score = fields.get("score")
+                return (score if score is not None else -99,
+                        abs(fields.get("pct") or 0.0))
+
+            rows = sorted(self.auction_snapshot.values(), key=_key, reverse=True)
+            try:
+                top = int(getattr(self.cfg, "auction_alert_max_items", 5) or 5)
+            except (TypeError, ValueError):
+                top = 5
+            lines = [f"竞价一览（共 {len(rows)} 只，★ = 推送前 {top} 只）"]
+            for index, fields in enumerate(rows):
+                mark = "★" if index < top else "·"
+                lines.append(
+                    f"  {mark} {fields.get('name')}（{fields.get('symbol')}）"
+                    f"{intraday.auction_detail(fields, fields.get('score'))}"
+                )
+            return lines
+
         def _status_details(self, facts: dict | None = None) -> str:
             """状态详情：多行中文说明，tooltip 与【详情】弹窗**共用这一份**。
 
@@ -2147,6 +2207,7 @@ if QT_AVAILABLE:
                    and self_check.get("reason") else ""),
                 f"自检阈值：历史 ≥{self.cfg.min_history_years:g} 年 / "
                 f"股票 ≥{self.cfg.min_symbols} 只 / 行业覆盖 ≥90% / 交易日历齐全",
+                *self._auction_detail_lines(),
                 f"数据目录：{self.cfg.data_dir}",
                 f"日志文件：{log_path}",
             ]
@@ -2267,9 +2328,13 @@ if QT_AVAILABLE:
             （池子通常十几行，多画一份的代价可以忽略）。
             """
             rows = pool.pool_table_rows(self.cfg.db_path)
+            # 签名里带上"涨停信息 + 竞价那一行"：竞价数据每分钟变一次、涨停池盘中会变，
+            # 变了就要重建卡片（否则卡片上那两行会停在旧值）
             signature = tuple(
                 (r["symbol"], r.get("score"), r.get("reason"), r.get("industry"),
-                 r.get("source_label"), r.get("note"))
+                 r.get("source_label"), r.get("note"),
+                 r.get("is_limit_up"), r.get("continue_day_text"), r.get("limit_up_reason"),
+                 self._auction_text(r["symbol"]))
                 for r in rows
             )
             if signature == self._pool_signature:
@@ -2289,12 +2354,15 @@ if QT_AVAILABLE:
                 self.pool_table.setItem(i, 2, QTableWidgetItem(str(row.get("label") or "")))
                 self.pool_table.setItem(i, 3, QTableWidgetItem(str(row.get("source_label") or "—")))
                 self.pool_table.setItem(i, 4, QTableWidgetItem(str(row.get("note") or "")))
-                self.pool_table.setItem(i, 5, QTableWidgetItem(str(row.get("industry") or "")))
-                self.pool_table.setItem(i, 6, QTableWidgetItem(_fmt_float(row.get("score"), 3)))
-                self.pool_table.setItem(i, 7, QTableWidgetItem(plan_text))
+                # 「涨停」列：`2 连板 · 半导体设备`（不在今日涨停池里就是空的）
+                limit_up = pool_mod.limit_up_text(row)
+                self.pool_table.setItem(i, 5, QTableWidgetItem(limit_up))
+                self.pool_table.setItem(i, 6, QTableWidgetItem(str(row.get("industry") or "")))
+                self.pool_table.setItem(i, 7, QTableWidgetItem(_fmt_float(row.get("score"), 3)))
+                self.pool_table.setItem(i, 8, QTableWidgetItem(plan_text))
                 btn = QPushButton("复制条件单")
                 btn.clicked.connect(lambda _=False, r=row, p=price: self._copy_plan(r, p))
-                self.pool_table.setCellWidget(i, 8, btn)
+                self.pool_table.setCellWidget(i, 9, btn)
 
             # ── 卡片视图 ──
             for card in self.pool_cards:
@@ -2307,6 +2375,8 @@ if QT_AVAILABLE:
             self.pool_cards = []
             for i, row in enumerate(rows):
                 card = self._build_pool_card(row, prices[row["symbol"]])
+                color = self._auction_color(str(row["symbol"]))
+                card.auction_label.setStyleSheet(f"color:{color}" if color else "")
                 # 插在底部弹簧之前（弹簧始终在最后，卡片才不会散在页面中间）
                 self.pool_cards_layout.insertWidget(i, card)
                 self.pool_cards.append(card)
@@ -2540,14 +2610,81 @@ if QT_AVAILABLE:
             self._tick()
 
         def _refresh_alerts(self) -> None:
+            """最近的盘中提醒：第 2 列显示成 `名称（代码）`。
+
+            名字从 `stock_basic` 查（`intraday_alert` 表里没有 name 列，也**不加列做迁移**）：
+            一次查询拿全表映射，而不是每行查一次 —— 提醒列表最多 100 行，
+            逐行查就是 100 次数据库往返（每 5 秒一轮）。
+            """
             rows = intraday.alert_rows(self.cfg.db_path, limit=100)
+            names = self._stock_names([str(r.get("symbol") or "") for r in rows])
             self.alert_table.setRowCount(len(rows))
             for i, row in enumerate(rows):
                 self.alert_table.setItem(i, 0, QTableWidgetItem(str(row.get("pushed_at") or "")))
-                self.alert_table.setItem(i, 1, QTableWidgetItem(str(row.get("symbol") or "")))
+                self.alert_table.setItem(i, 1, QTableWidgetItem(self._alert_target_text(row, names)))
                 self.alert_table.setItem(i, 2, QTableWidgetItem(str(row.get("label") or row.get("kind") or "")))
                 self.alert_table.setItem(i, 3, QTableWidgetItem(_fmt_float(row.get("price"))))
                 self.alert_table.setItem(i, 4, QTableWidgetItem(str(row.get("detail") or "")))
+
+        def _auction_text(self, symbol: str) -> str:
+            """卡片上竞价那一行：`竞价 +3.2% 量比 2.8`（没有数据/不在窗口 → 空串）。"""
+            fields = self.auction_snapshot.get(symbol)
+            return intraday.auction_card_text(fields) if fields else ""
+
+        def _auction_color(self, symbol: str) -> str:
+            """竞价那一行的颜色：涨红跌绿（复用 `market.value_color` 的唯一定义）。"""
+            fields = self.auction_snapshot.get(symbol)
+            return market.value_color((fields or {}).get("pct")) if fields else ""
+
+        def _auction_tick(self) -> None:
+            """竞价窗口内每分钟取一次（不在窗口里、或没开这个功能时一次请求都不发）。"""
+            if not bool(getattr(self.cfg, "intraday_auction", True)):
+                return
+            if not intraday.auction_fetch_window():
+                return
+            self.request_auction()
+
+        def request_auction(self) -> None:
+            """后台取一次竞价快照 → 刷新卡片上那一行（失败只记日志，界面照常）。"""
+            if self._auction_worker is not None and self._auction_worker.isRunning():
+                return
+            worker = Worker(intraday.fetch_auction, self.cfg.db_path, self.cfg)
+            self._auction_worker = worker
+            worker.finished_ok.connect(self._on_auction_ready)
+            worker.failed.connect(
+                lambda msg: logger.info(f"竞价取数失败（卡片不显示竞价行）：{msg.splitlines()[0]}")
+            )
+            worker.start()
+
+        def _on_auction_ready(self, snapshot: Any) -> None:
+            """竞价数据回来了（主线程）：换成新数据并按最新内容重建卡片。"""
+            self.auction_snapshot = snapshot if isinstance(snapshot, dict) else {}
+            self._refresh_pool()
+
+        def _stock_names(self, symbols: list[str]) -> dict[str, str]:
+            """`{symbol: 名称}`（一次查询）：代码 → 名字，供界面拼 `名称（代码）`。"""
+            wanted = [s for s in dict.fromkeys(symbols) if s]
+            if not wanted:
+                return {}
+            try:
+                return self.engine.get_stock_names(wanted)
+            except Exception as exc:  # noqa: BLE001 - 取不到名字就退回显示代码
+                logger.debug(f"取股票名称失败：{exc}")
+                return {}
+
+        @staticmethod
+        def _alert_target_text(row: dict, names: dict[str, str]) -> str:
+            """提醒里那一列：`名称（代码）`。
+
+            三种退化都要好看：没有名字 → 只显示代码；连代码都没有（首板那类提醒）
+            → 用说明里的名称，再不行才 `—`。**绝不显示 `（None）`**。
+            """
+            symbol = str(row.get("symbol") or "").strip()
+            name = str(names.get(symbol) or "").strip()
+            if symbol:
+                return f"{name}（{symbol}）" if name else symbol
+            detail = str(row.get("detail") or "").strip()
+            return detail.split(" ")[0] if detail else "—"
 
         def _drain_tray(self) -> None:
             """把后台线程投递的托盘消息弹出来（跨线程只能这样传递）。"""

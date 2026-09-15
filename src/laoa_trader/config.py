@@ -303,6 +303,32 @@ class Config:
     intraday_interval: int = 60
     stop_loss: float = 0.05
     take_profit: float = 0.10
+    #: 集合竞价强度提醒（9:15–9:25 的真实买卖盘）：**默认关**。
+    #: 代码（客户端 `auction_snapshot`、解析、打分、卡片那一行、详情里的"竞价一览"）
+    #: 都已就绪并通过测试，但**口径与阈值还在与用户确认**（用户明确说"稍等一下再
+    #: 做，我思考一下"）—— 所以先关着：默认流程**一次竞价请求都不发**、
+    #: 界面不显示竞价行、不产生竞价提醒。确认后把这一项改成 True 即可启用，不用改代码。
+    intraday_auction: bool = False
+    #: 竞价"打分"里的高开门槛（%）：`auction_pct >= 这个值` 得 2 分，达到一半得 1 分。
+    #: 默认 +2.0% —— 实测 100 只里只有 3 只超过它（约 p97，很挑）。
+    auction_alert_min_pct: float = 2.0
+    #: 竞价"打分"里的放量门槛（量比）：`auction_volume_ratio >= 这个值` 得 2 分，
+    #: 达到它的 75% 得 1 分。默认 2.0（实测约 p90）。
+    auction_alert_min_volume_ratio: float = 2.0
+    #: 竞价成交额下限（元）：**不到这个数就不参与评分**。
+    #: 为什么必须有这道门槛：竞价量太小时 `未匹配量 ÷ 成交量` 会爆表
+    #: （实测某小盘股 +29.46），拿它判断强弱等于把噪音当信号。默认 500 万。
+    auction_alert_min_amount: float = 5e6
+    #: 打分门限：`分 >= 这个值` → 竞价强（默认 3）；
+    #: 弱的分门限 = `-(这个值 - 1)`（默认 -2，即低开/卖盘剩余占优）。
+    auction_alert_min_score: int = 3
+    #: 一条竞价汇总里最多列几只（默认 5，**最大 10**）：显示与提醒条数的上限。
+    auction_alert_max_items: int = 5
+    #: 当日异动（涨停/跌停/大幅上涨下跌/快速反弹跳水）实时提醒：默认开。
+    #: 数据源是**全市场一条请求**，再在本地按"自己的票"过滤（不逐只问）。
+    intraday_anomaly: bool = True
+    #: 只关心这些异动标签（空列表 = 全部）；取值见 `intraday.ANOMALY_TAGS`
+    anomaly_alert_tags: list[str] = field(default_factory=list)
 
     # ── 大文件下载（dump 几百 MB：断点续传 + 过期自动重签）──
     #: 单次下载失败后的最大尝试次数（每次都会重新签 URL 并从断点继续）
@@ -368,6 +394,32 @@ class Config:
         # 主题同理：写错（"Silver " / "银色" / 少个字母）不该让界面起不来 —— 回默认
         theme = str(self.ui_theme or "").strip().lower()
         self.ui_theme = theme if theme in UI_THEMES else DEFAULT_UI_THEME
+        # 竞价阈值：写 0/负数会让"打分"失真（任何票都算强）→ 回默认值
+        for name, fallback in (("auction_alert_min_pct", 2.0),
+                               ("auction_alert_min_volume_ratio", 2.0),
+                               ("auction_alert_min_amount", 5e6)):
+            value = getattr(self, name, fallback)
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                number = fallback
+            setattr(self, name, number if number > 0 else fallback)
+        # 打分门限至少 1 分（写 0 等于"什么都推"）；条数上限夹在 1~10
+        try:
+            self.auction_alert_min_score = min(max(int(self.auction_alert_min_score), 1), 10)
+        except (TypeError, ValueError):
+            self.auction_alert_min_score = 3
+        try:
+            self.auction_alert_max_items = min(max(int(self.auction_alert_max_items), 1), 10)
+        except (TypeError, ValueError):
+            self.auction_alert_max_items = 5
+        # 异动标签统一成大写、去空（接口给的枚举是大写）
+        tags = self.anomaly_alert_tags
+        if isinstance(tags, str):
+            tags = [x for x in tags.replace("，", ",").split(",")]
+        self.anomaly_alert_tags = [
+            str(tag).strip().upper() for tag in (tags or []) if str(tag).strip()
+        ]
         self.market_overview_ttl = _ttl_seconds(self.market_overview_ttl)
 
     # -- 派生属性 --
@@ -551,6 +603,10 @@ def load_config(path: Path | str | None = None, *, use_env: bool = True) -> Conf
 
     if use_env:
         cfg = _apply_env(cfg)
+    # 环境变量是**构造之后**才盖上去的：这里再跑一次归一，
+    # 非法值才会退回默认（主题名、涨跌停阈值、异动标签大小写等都靠这一步）
+    cfg.__post_init__()
+
     return cfg
 
 
@@ -576,6 +632,13 @@ def _apply_env(cfg: Config) -> Config:
         ("TRADE_BUY_SLIPPAGE", "buy_slippage"),
         ("TRADE_SELL_SLIPPAGE", "sell_slippage"),
         ("INTRADAY_INTERVAL", "intraday_interval"),
+        ("INTRADAY_AUCTION", "intraday_auction"),
+        ("AUCTION_ALERT_MIN_PCT", "auction_alert_min_pct"),
+        ("AUCTION_ALERT_MIN_VOLUME_RATIO", "auction_alert_min_volume_ratio"),
+        ("AUCTION_ALERT_MIN_AMOUNT", "auction_alert_min_amount"),
+        ("AUCTION_ALERT_MIN_SCORE", "auction_alert_min_score"),
+        ("AUCTION_ALERT_MAX_ITEMS", "auction_alert_max_items"),
+        ("INTRADAY_ANOMALY", "intraday_anomaly"),
         ("INTRADAY_STOP_LOSS", "stop_loss"),
         ("INTRADAY_TAKE_PROFIT", "take_profit"),
         ("UI_THEME", "ui_theme"),           # 界面主题（分发后可临时切回系统皮肤）
@@ -600,10 +663,6 @@ def _apply_env(cfg: Config) -> Config:
         else:
             setattr(cfg, attr, raw)
 
-    # 字符串类字段（含主题、视图）在 __post_init__ 里做过归一，而环境变量是在
-    # 构造**之后**才盖上去的 —— 所以这里再跑一次归一，非法值才会退回默认
-    cfg.__post_init__()
-
     env_list = (
         ("LAOA_ENABLED_GROUPS", "enabled_groups"),
         ("LAOA_ENABLED_STRATEGIES", "enabled_strategies"),
@@ -611,6 +670,7 @@ def _apply_env(cfg: Config) -> Config:
         ("MARKET_INDICES", "market_indices"),
         ("MARKET_SENTIMENT_INDICES", "market_sentiment_indices"),
         ("MARKET_SECTOR_INDICES", "market_sector_indices"),
+        ("ANOMALY_ALERT_TAGS", "anomaly_alert_tags"),
     )
     for env_name, attr in env_list:
         raw = _env_str(env_name)
