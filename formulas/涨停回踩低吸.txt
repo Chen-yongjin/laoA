@@ -1,0 +1,11 @@
+# 名称: 涨停回踩低吸
+# 说明: 近 10 日内出现过涨停或连板（用本地涨停池数据），今日缩量回踩 5 日线不破。
+#       涨停数据来自每天同步的 limit_up_pool，没下载到涨停池时这几条公式不会出信号。
+ZT10:=涨停天数(10)
+LB:=连板()
+M5:=MA(C,5)
+V5:=MA(V,5)
+HAS_ZT:=ZT10>=1 OR LB>=1
+SHRINK:=V<V5*0.9
+PULLBACK:=C>=M5*0.98 AND C<REF(C,1)
+HAS_ZT AND SHRINK AND PULLBACK

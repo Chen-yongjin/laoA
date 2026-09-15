@@ -1,0 +1,11 @@
+# 名称: 均线多头排列
+# 说明: MA5>MA10>MA20>MA60 且收盘接近 20 日新高，趋势跟随用。
+#       注意至少需要 60 根 K 线（见公式末尾的 min_history 提示）。
+M5:=MA(C,5)
+M10:=MA(C,10)
+M20:=MA(C,20)
+M60:=MA(C,60)
+HH:=HHV(H,20)
+TREND:=M5>M10 AND M10>M20 AND M20>M60
+NEAR_HIGH:=C>M5 AND C>HH*0.98
+TREND AND NEAR_HIGH

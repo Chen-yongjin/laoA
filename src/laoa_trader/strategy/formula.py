@@ -1,0 +1,2300 @@
+"""自定义选股公式引擎：通达信/同花顺风格公式的**解析器 + 白名单向量化求值器**。
+
+为什么要这个模块
+----------------
+内置的 5 条策略是"我们挑的"，而用户（尤其是要把程序分发出去的人）总想写自己的条件：
+"5 日线上穿 + 量能放大 1.5 倍 + 近期有过涨停"这类话，用公式表达比改代码现实得多。
+本模块只做**引擎核心**：语法 → AST → 求值。界面、配置文件、CLI 都不在这里碰，
+所以它是 Qt 无关、可离线单测的（`tests/test_formula.py` 全程不联网）。
+
+语言是通达信/同花顺风格的**明确子集**（不是全集，也不打算做全集）：::
+
+    M5:=MA(C,5)                       { 中间变量，不输出；花括号是注释 }
+    M10:=MA(C,10)
+    C>M5 AND M10>REF(M10,1) AND V>MA(V,5)*1.5 AND 连板()>=2
+
+最后一行必须是**选股条件**（返回 0/1 的表达式），其余行只能是 `X:=...` 赋值。
+信号为 True 表示"当日收盘后选中"——与项目现有口径一致（见 `strategy/rules.py`）。
+
+为什么**绝对不用** eval / exec
+------------------------------
+公式是**用户可编辑的文本**，而且这份程序**要分发给别人**。把 `eval` 接到用户输入上，
+哪怕自认为只允许"表达式"，也等于交出了 `__import__("os").system(...)` 这类能力：
+表达式里能写属性访问、能调任意对象，靠正则黑名单是拦不住的（历史上大量漏洞都是这么来的，
+`__class__.__bases__` 之类能绕过一切字符过滤）。所以这里走完全不同的路：
+
+    tokenizer（自己写）→ 递归下降解析成 AST → 白名单求值器
+    （只认有限的节点类型 / 字段名 / 函数名，别的名字在**解析期**就报中文错）
+
+整条链路上没有任何 `eval`/`exec`/`compile`/动态 `getattr`：用户输入最多变成
+"一个我们自己定义的 AST 节点"。`_Evaluator.eval_node()` 末尾那句 raise 就是兜底——
+真的出现不认识的节点，宁可报错也不执行。
+
+为什么 NaN 要比成 False（而不是抛异常、也不是当成 0）
+----------------------------------------------------
+停牌、上市不足 N 日、窗口不够长、除以 0 —— 这些在真实数据里**每天都会出现**，
+所以"缺值"是常态而不是异常：
+
+* 抛异常 → 一只股票的缺值会让整轮选股崩掉（分发出去的程序不可接受）；
+* 当成 0 → `V>MA(V,5)` 会在缺量日算成 `0>1000` = False（碰巧对），
+  但 `C!=0` 会算成 True（**错**），停牌日被选进池子；
+* 比成 False → 缺值**永远不产生信号**，语义是"数据不足就不选它"，这是唯一安全的默认。
+
+所以内部约定是：**条件型值也是 0 / 1 / NaN 的浮点序列**（NaN = 缺值/未知），
+沿着 AND/OR/NOT/COUNT/IF 一路传播，只在最后一步折成布尔（NaN → False）。
+为什么要这么绕：如果比较直接吐布尔，`NOT` 会把缺值翻成 True
+（`NOT (C>MA(C,5))` 在 MA 还没算出来的前 4 根上全为真），等于"数据不足"变成了买入信号 ——
+而这是回测/选股里最贵的一种错。（见 `_logic_combine` / `_not` / `_count`。）
+
+特别注意 IEEE 的坑：`NaN != 5` 在 float 语义下是 **True**。所以 `=`/`!=` 必须显式
+把缺值掩成 NaN（见 `_num_cmp`），否则"停牌日不等于 5"会变成一条选股信号。
+"""
+
+from __future__ import annotations
+
+import difflib
+import math
+import sqlite3
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
+
+from laoa_trader.data.engine import HFQ_TABLE
+from laoa_trader.log import get_logger
+
+logger = get_logger(__name__)
+
+# ── 硬限制（分发产品的防炸边界；全部给中文错误）──
+#: 单条公式最大字符数
+MAX_FORMULA_CHARS = 2000
+#: 单条公式最大语句数（一行一条）
+MAX_FORMULA_LINES = 60
+#: AST 节点数上限（防止 `1+1+1+...` 这类把解析/求值拖垮）
+MAX_AST_NODES = 2000
+#: 表达式/括号最大嵌套深度。**必须限制**：Python 递归深度默认 1000，
+#: 一串 `(((((...` 会直接 RecursionError（未捕获异常 = 违反"全部中文错误"）。
+MAX_DEPTH = 64
+#: 窗口参数 N 的合法区间。上限同时兜住 `HHV(C,10**9)` 这种"常数爆炸"
+MAX_WINDOW = 5000
+#: 数字字面量的绝对值上限（防止字面量溢出成 inf 参与比较）
+MAX_LITERAL = 1e15
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 错误类型
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class FormulaError(Exception):
+    """公式错误：**结构化**（行号 / 列号 / 机器可读 code）+ 中文消息。
+
+    为什么要结构化而不是一句 str：下一轮界面要拿它做两件事 ——
+    ① 把光标定位到出错位置；② 按 code 分类（比如 `unknown_field` 可以顺手提示可用字段）。
+    所以 `message` 里**不含**行号前缀（那是展示层的事），`__str__` 才拼上去。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        line: int | None = None,
+        col: int | None = None,
+        code: str = "syntax",
+        hint: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.line = line
+        self.col = col
+        self.code = code
+        self.hint = hint
+
+    def __str__(self) -> str:  # noqa: D105 - 见类注释
+        if self.line is None:
+            head = ""
+        elif self.col is None:
+            head = f"第 {self.line} 行："
+        else:
+            head = f"第 {self.line} 行第 {self.col} 列："
+        tail = f"（{self.hint}）" if self.hint else ""
+        return f"{head}{self.message}{tail}"
+
+    def __repr__(self) -> str:
+        return f"FormulaError({str(self)!r}, code={self.code!r})"
+
+    def to_dict(self) -> dict[str, Any]:
+        """给界面用的字典（JSON 友好）。"""
+        return {
+            "message": self.message,
+            "line": self.line,
+            "col": self.col,
+            "code": self.code,
+            "hint": self.hint,
+            "text": str(self),
+        }
+
+
+class FormulaDataError(RuntimeError):
+    """数据侧的问题（库不存在、字段长度不一致……）—— **不是**公式本身的错。
+
+    与 `FormulaError` 分开：这样界面能区分"你公式写错了"（要改公式）
+    和"本地数据不够/坏了"（要去下载数据），两者的下一步动作完全不同。
+    """
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 字段表
+# ══════════════════════════════════════════════════════════════════════════
+
+#: 别名（大写）→ 规范字段名。字段大小写不敏感，短名长名都认。
+FIELD_ALIASES: dict[str, str] = {
+    "C": "C",
+    "CLOSE": "C",
+    "O": "OPEN",
+    "OPEN": "OPEN",
+    "H": "HIGH",
+    "HIGH": "HIGH",
+    "L": "LOW",
+    "LOW": "LOW",
+    "V": "VOL",
+    "VOL": "VOL",
+    "VOLUME": "VOL",
+    "AMO": "AMOUNT",
+    "AMOUNT": "AMOUNT",
+    "PRE": "PRE_CLOSE",
+    "PRE_CLOSE": "PRE_CLOSE",
+    "DATE": "DATE",
+    "INDUSTRY": "INDUSTRY",
+}
+
+#: 规范字段名 → 静态类型（num = 数值序列，str = 字符串）
+FIELD_KINDS: dict[str, str] = {
+    "C": "num",
+    "OPEN": "num",
+    "HIGH": "num",
+    "LOW": "num",
+    "VOL": "num",
+    "AMOUNT": "num",
+    "PRE_CLOSE": "num",
+    "DATE": "str",
+    "INDUSTRY": "str",
+}
+
+#: 扩展字段注册表 —— **竞价字段的扩展点**。
+#:
+#: 竞价数据默认关闭、且只有 9:25 才有值（见 `config.example.toml` 的竞价开关），
+#: 所以本轮**不实现**任何竞价字段。等竞价功能要接进公式时：
+#:   1. 在这里登记 `"JJL": "num"`（规范名 → 静态类型）；
+#:   2. 由调用方在 `Series.extra` 里塞进同名数组（长度 = 序列长度）。
+#: 解析器与求值器都只认这里登记过的名字，**不需要改本模块的其它任何一行**。
+EXTRA_FIELDS: dict[str, str] = {}
+
+_NUM = "num"
+_BOOL = "bool"
+_STR = "str"
+
+_KIND_LABEL = {_NUM: "数值", _BOOL: "条件（0/1）", _STR: "字符串"}
+
+
+def _all_fields() -> dict[str, str]:
+    """别名 + 扩展字段（每次现算：扩展字段允许运行时登记）。"""
+    out = dict(FIELD_ALIASES)
+    for name in EXTRA_FIELDS:
+        out.setdefault(name.upper(), name.upper())
+    return out
+
+
+def _field_kind(canonical: str) -> str:
+    return EXTRA_FIELDS.get(canonical, FIELD_KINDS.get(canonical, _NUM))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Tokenizer
+# ══════════════════════════════════════════════════════════════════════════
+
+#: 全角/中文标点 → 半角。为什么必须有：中文输入法下 `（`、`，`、`：`、
+#: `“”` 是最常见的"明明看着一样却不通过"，而这跟"用户不会写公式"是两回事 ——
+#: 1:1 替换不会改变列号，所以直接在这里归一化，用户永远看不到这类低级报错。
+_FULLWIDTH = {
+    "（": "(",
+    "）": ")",
+    "，": ",",
+    "：": ":",
+    "；": ";",
+    "＞": ">",
+    "＜": "<",
+    "＝": "=",
+    "＋": "+",
+    "－": "-",   # U+FF0D
+    "—": "-",   # U+2014 破折号（用户在中文里打出来的"减号"）
+    "＊": "*",
+    "／": "/",
+    "！": "!",
+    "％": "%",
+    "．": ".",
+    "“": '"',
+    "”": '"',
+    "‘": "'",
+    "’": "'",
+}
+
+#: 双字符运算符（**必须先于单字符匹配**，否则 `>=` 会被拆成 `>` `=`）
+_TWO_CHAR_OPS = (">=", "<=", "!=", "&&", "||")
+#: 符号写法 → 规范写法。求值器只认规范名，所以归一化必须在**词法期**做一次，
+#: 否则 `&&` 会一路以自身的形式流到解析器（表现为一句莫名其妙的"一行只能写一条语句"）。
+_SYMBOL_ALIASES = {"&&": "AND", "||": "OR"}
+#: 单字符运算符（`=` 也是相等比较；`:=` 在赋值里单独处理）
+_ONE_CHAR_OPS = ("+", "-", "*", "/", ">", "<", "=")
+#: 比较运算符（"连续比较"拦截用）
+_CMP_OPS = ("=", "!=", ">", "<", ">=", "<=")
+
+#: 解出来的 token 种类
+#: num 数字 / str 字符串 / ident 名字 / op 运算符 / lparen / rparen / comma / assign(:=) / colon(:)
+_IDENT_START_EXTRA = "_"
+
+#: Python 关键字 / 内建名：出现即报错（用户不可能"想写"这些，只会是注入尝试或误贴代码）。
+#:
+#: ⚠️ 黑名单**不能包含任何合法字段名** —— 最初这里把 `OPEN`（Python 的 `open()`）也列了进去，
+#: 结果 `OPEN>PRE_CLOSE` 会被当成"注入"拒绝，而 OPEN 明明是开盘价的合法长名。
+#: 加条目时请先和 `FIELD_ALIASES` / `FUNCTIONS` 对一遍。
+_FORBIDDEN_WORDS: dict[str, str] = {
+    name: "公式只能写赋值与选股条件，不支持导入模块、定义函数/类、循环、异常处理"
+    for name in (
+        "IMPORT", "FROM", "DEF", "CLASS", "LAMBDA", "RETURN", "YIELD", "GLOBAL",
+        "NONLOCAL", "DEL", "ASSERT", "RAISE", "TRY", "EXCEPT", "FINALLY", "WITH",
+        "AS", "PASS", "BREAK", "CONTINUE", "WHILE", "FOR", "ELIF", "ELSE",
+        "EXEC", "EVAL", "COMPILE", "GETATTR", "SETATTR", "VARS", "DIR",
+        "INPUT", "PRINT", "SUBPROCESS", "SYSTEM", "POPEN", "OS", "SYS",
+        "BUILTINS", "GLOBALS", "LOCALS", "STATICMETHOD", "PROPERTY", "SUPER",
+    )
+}
+#: 会给出**更具体**提示的名字（比"未知字段"更能说明用户想干什么）
+_SPECIAL_WORDS: dict[str, str] = {
+    "TRUE": "公式里没有 True/False，条件请写成比较式（例如 C>O）",
+    "FALSE": "公式里没有 True/False，条件请写成比较式（例如 C>O）",
+    "NONE": "公式里没有 None，缺值直接用字段本身即可（缺值不会产生信号）",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _Token:
+    """词法单元。`col` 是 1 起的列号（用户看到的列），全部按**归一化后**的字符算。"""
+
+    kind: str
+    value: str
+    line: int
+    col: int
+
+
+def _is_ident_start(ch: str) -> bool:
+    # 注意 `ch.isalpha()` 对汉字为 True（Python 的 Unicode 语义），
+    # 所以"涨停天数"这类中文函数名天然可用
+    return ch.isalpha() or ch in _IDENT_START_EXTRA
+
+
+def _is_ident_char(ch: str) -> bool:
+    return ch.isalnum() or ch in _IDENT_START_EXTRA
+
+
+#: 数字字面量：支持 1 / 1.5 / .5 / 1e3（不支持 `1.2.3`，会在第二个点报错）
+def _scan_number(text: str, i: int) -> tuple[str, int] | None:
+    n = len(text)
+    j = i
+    seen_dot = False
+    if text[j] == ".":
+        seen_dot = True
+        j += 1
+    elif text[j].isdigit():
+        while j < n and text[j].isdigit():
+            j += 1
+    else:
+        return None
+    if not seen_dot and j < n and text[j] == ".":
+        j += 1
+    while j < n and text[j].isdigit():
+        j += 1
+    if not any(c.isdigit() for c in text[i:j]):
+        return None
+    # 指数部分：`1e3` 要认，否则会被切成 `1` + 标识符 `e3`（错误信息会非常费解）
+    if j < n and text[j] in "eE":
+        k = j + 1
+        if k < n and text[k] in "+-":
+            k += 1
+        if k < n and text[k].isdigit():
+            while k < n and text[k].isdigit():
+                k += 1
+            j = k
+    return text[i:j], j
+
+
+def _positions(text: str) -> tuple[list[int], list[int]]:
+    """预扫每个字符的 (行, 列)。
+
+    为什么预扫：注释里可能有换行（`{...}` 可以跨行），逐段手工维护行列太容易错，
+    而**错误信息的行列号就是用户唯一的定位线索**——错一格就指向别的字符。
+    """
+    lines: list[int] = []
+    cols: list[int] = []
+    ln, cl = 1, 1
+    for ch in text:
+        lines.append(ln)
+        cols.append(cl)
+        if ch == "\n":
+            ln += 1
+            cl = 1
+        else:
+            cl += 1
+    return lines, cols
+
+
+def _tokenize(text: str) -> list[_Token]:
+    """把公式切成 token 列表（不产生 '换行' token：语句是按行切的，见 `_Parser`）。"""
+    line_of, col_of = _positions(text)
+    toks: list[_Token] = []
+    i, n = 0, len(text)
+    while i < n:
+        raw = text[i]
+        ch = _FULLWIDTH.get(raw, raw)
+
+        if ch == "\n" or ch in " \t":
+            i += 1
+            continue
+
+        # ── 注释 ──
+        # `{...}` 是通达信写法；`//` 与 `#` 支持到行尾（`#` 同时被公式文件的注释头使用）
+        if ch == "{":
+            end = text.find("}", i)
+            if end < 0:
+                raise FormulaError(
+                    "花括号注释 `{` 没有闭合",
+                    line=line_of[i], col=col_of[i], code="comment",
+                    hint="补一个 `}`；注释也可以整行删掉",
+                )
+            i = end + 1
+            continue
+        if ch == "#" or (ch == "/" and i + 1 < n and text[i + 1] == "/"):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+            continue
+
+        tok_line, tok_col = line_of[i], col_of[i]
+
+        # ── 字符串（单双引号都认）──
+        # 引号本身也按归一化后的字符比较：中文输入法打出的 `“ ”` 必须是合法的引号，
+        # 否则 `INDUSTRY=“半导体”` 会以"字符串没有闭合"收场（非常费解）。
+        # 但**内容原样保留**（不做全角归一）—— 行业名里真出现全角字符时不该被改写。
+        if ch in ("'", '"'):
+            j = i + 1
+            buf: list[str] = []
+            while j < n:
+                if _FULLWIDTH.get(text[j], text[j]) == ch:
+                    break
+                if text[j] == "\n":
+                    raise FormulaError(
+                        "字符串没有闭合", line=tok_line, col=tok_col, code="string",
+                    )
+                buf.append(text[j])
+                j += 1
+            if j >= n:
+                raise FormulaError(
+                    "字符串没有闭合", line=tok_line, col=tok_col, code="string",
+                )
+            toks.append(_Token("str", "".join(buf), tok_line, tok_col))
+            i = j + 1
+            continue
+
+        # ── 数字 ──
+        if ch.isdigit() or ch == ".":
+            scanned = _scan_number(text, i)
+            if scanned is not None:
+                literal, j = scanned
+                toks.append(_Token("num", literal, tok_line, tok_col))
+                i = j
+                continue
+            if ch == ".":
+                raise FormulaError(
+                    "不支持属性访问（`.`）",
+                    line=tok_line, col=tok_col, code="forbidden",
+                    hint="公式里没有对象属性；字段请直接写名字（如 CLOSE）",
+                )
+
+        # ── 名字（含中文）──
+        if _is_ident_start(ch):
+            j = i
+            while j < n and _is_ident_char(_FULLWIDTH.get(text[j], text[j])):
+                j += 1
+            toks.append(_Token("ident", text[i:j], tok_line, tok_col))
+            i = j
+            continue
+
+        # ── `:=` 赋值 ──
+        if ch == ":":
+            if i + 1 < n and text[i + 1] == "=":
+                toks.append(_Token("assign", ":=", tok_line, tok_col))
+                i += 2
+            else:
+                toks.append(_Token("colon", ":", tok_line, tok_col))
+                i += 1
+            continue
+
+        # ── 双字符运算符 ──
+        pair = text[i : i + 2]
+        pair_norm = "".join(_FULLWIDTH.get(c, c) for c in pair)
+        if pair_norm in _TWO_CHAR_OPS:
+            # `&&` → AND、`||` → OR（`!=` 原样保留）：解析期只认规范名
+            toks.append(
+                _Token("op", _SYMBOL_ALIASES.get(pair_norm, pair_norm), tok_line, tok_col)
+            )
+            i += 2
+            continue
+
+        if ch == "!":
+            toks.append(_Token("op", "NOT", tok_line, tok_col))
+            i += 1
+            continue
+        if ch in _ONE_CHAR_OPS:
+            toks.append(_Token("op", ch, tok_line, tok_col))
+            i += 1
+            continue
+        if ch == "(":
+            toks.append(_Token("lparen", "(", tok_line, tok_col))
+            i += 1
+            continue
+        if ch == ")":
+            toks.append(_Token("rparen", ")", tok_line, tok_col))
+            i += 1
+            continue
+        if ch == ",":
+            toks.append(_Token("comma", ",", tok_line, tok_col))
+            i += 1
+            continue
+        if ch == "[":
+            raise FormulaError(
+                "不支持下标访问（`[`）",
+                line=tok_line, col=tok_col, code="forbidden",
+                hint="取历史值请用 REF(X,N)，例如 REF(C,1) 是昨收",
+            )
+        if ch == ";":
+            raise FormulaError(
+                "不认识的字符 `;`",
+                line=tok_line, col=tok_col, code="syntax",
+                hint="公式按行分隔语句，不需要分号",
+            )
+        if ch == "}":
+            raise FormulaError(
+                "多余的 `}`", line=tok_line, col=tok_col, code="comment",
+                hint="注释必须写成 `{ ... }`",
+            )
+
+        raise FormulaError(
+            f"不认识的字符 `{raw}`", line=tok_line, col=tok_col, code="syntax",
+            hint="公式只支持 + - * / 比较运算、AND/OR/NOT、括号和已经列出的函数",
+        )
+    return toks
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AST 节点（全部是不可变的小对象；白名单求值器只认这几类）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True, slots=True)
+class _Lit:
+    """常量（数字或字符串）。"""
+
+    value: Any
+    dtype: str
+    line: int
+    col: int
+
+
+@dataclass(frozen=True, slots=True)
+class _FieldRef:
+    """字段引用（`C` / `INDUSTRY` ...），name 是**规范名**。"""
+
+    name: str
+    dtype: str
+    line: int
+    col: int
+
+
+@dataclass(frozen=True, slots=True)
+class _VarRef:
+    """`:=` 定义的中间变量引用。"""
+
+    name: str
+    dtype: str
+    line: int
+    col: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Unary:
+    op: str          # "-" | "NOT"
+    operand: Any
+    dtype: str
+    line: int
+    col: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Binary:
+    op: str          # + - * / > < >= <= = != AND OR
+    left: Any
+    right: Any
+    dtype: str
+    line: int
+    col: int
+
+
+@dataclass(frozen=True, slots=True)
+class _InList:
+    """`INDUSTRY IN ("半导体","软件服务")`。"""
+
+    operand: Any
+    values: tuple[str, ...]
+    line: int
+    col: int
+    dtype: str = _BOOL
+
+
+@dataclass(frozen=True, slots=True)
+class _Call:
+    name: str        # 规范名（大写）
+    args: tuple[Any, ...]
+    dtype: str
+    line: int
+    col: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Statement:
+    """一条语句：`name` 为 None 表示"裸表达式"（只允许出现在最后一行 = 选股条件）。"""
+
+    name: str | None
+    node: Any
+    output: bool          # 用 `:` 声明的输出变量（供界面展示用）
+    line: int
+    col: int
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 向量化指标实现（纯 numpy，全部"窗口不足 → NaN"）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _broadcast(value: Any, n: int) -> np.ndarray:
+    """把标量/数组统一成长度 n 的 float64 数组。
+
+    为什么允许标量：`MA(C,5)` 的第一个参数可能是 `5` 这样的常量，
+    让 numpy 到处做广播太容易漏；统一在入口处展开，后面的实现只管一维数组。
+    """
+    arr = np.asarray(value, dtype="float64")
+    if arr.ndim == 0:
+        return np.full(n, float(arr), dtype="float64")
+    if arr.ndim != 1 or arr.shape[0] != n:
+        raise FormulaError(
+            "序列长度不一致（内部错误：字段长度应等于交易日数）", code="shape",
+        )
+    return arr
+
+
+def _roll(x: Any, window: int, reducer: Callable[[np.ndarray], np.ndarray], n: int) -> np.ndarray:
+    """通用滚动窗口：**窗口不足 N 根 → NaN**（而不是拿"更短的窗口"凑一个数）。
+
+    为什么坚持 min_periods=N：`MA(C,5)` 在第 3 根 K 线上没有"5 日均线"这回事。
+    如果拿 3 根平均糊弄，用户会得到一个看起来正常、实际口径错误的信号 ——
+    缺值(False) 只是"今天不选它"，算错却是"今天选错它"。前者可接受，后者不行。
+    """
+    x = _broadcast(x, n)
+    out = np.full(n, np.nan, dtype="float64")
+    if window < 1 or n < window:
+        return out
+    w = sliding_window_view(x, window)
+    with np.errstate(all="ignore"):
+        out[window - 1 :] = reducer(w)
+    return out
+
+
+def _roll_mean(x: Any, window: int, n: int) -> np.ndarray:
+    # 窗口里只要有 NaN，mean 就是 NaN（numpy 的默认语义正好等于"缺值即缺值"）
+    return _roll(x, window, lambda w: w.mean(axis=1), n)
+
+
+def _roll_sum(x: Any, window: int, n: int) -> np.ndarray:
+    return _roll(x, window, lambda w: w.sum(axis=1), n)
+
+
+def _roll_max(x: Any, window: int, n: int) -> np.ndarray:
+    return _roll(x, window, lambda w: w.max(axis=1), n)
+
+
+def _roll_min(x: Any, window: int, n: int) -> np.ndarray:
+    return _roll(x, window, lambda w: w.min(axis=1), n)
+
+
+def _roll_std(x: Any, window: int, n: int) -> np.ndarray:
+    # STD 用**样本标准差**（ddof=1），与通达信 STD 一致（总体标准差是 STDP）
+    if window < 2:
+        return np.full(n, np.nan, dtype="float64")
+    return _roll(x, window, lambda w: w.std(axis=1, ddof=1), n)
+
+
+def _ref(x: Any, offset: int, n: int) -> np.ndarray:
+    """REF(X,N) = N 根 K 线之前的 X。落到序列之前的位置是 **NaN**（不是 0，也不是回绕）。"""
+    x = _broadcast(x, n)
+    if offset == 0:
+        return x.copy()
+    out = np.full(n, np.nan, dtype="float64")
+    if offset < n:
+        out[offset:] = x[: n - offset]
+    return out
+
+
+def _ema(x: Any, window: int, n: int) -> np.ndarray:
+    """EMA：`EMA[i] = (2*X[i] + (N-1)*EMA[i-1]) / (N+1)`，首值取 X[0]（通达信口径）。
+
+    手写循环而不是 pandas 的 `ewm`：缺值处要"沿用上一根、不更新"，这是本项目的约定
+    （缺值不产生信号），而 `ewm` 的 skipna 语义与此不同，且 5000 根的循环开销可以忽略。
+    """
+    x = _broadcast(x, n)
+    out = np.full(n, np.nan, dtype="float64")
+    alpha = 2.0 / (window + 1.0)
+    prev = np.nan
+    for i in range(n):
+        xi = x[i]
+        if np.isnan(xi):
+            out[i] = prev          # 缺值沿用上一根（prev 仍为 NaN 时就是 NaN）
+            continue
+        prev = xi if np.isnan(prev) else alpha * xi + (1.0 - alpha) * prev
+        out[i] = prev
+    return out
+
+
+def _count(cond: Any, window: int, n: int) -> np.ndarray:
+    """COUNT(COND,N)：近 N 根里 COND 为真的次数。
+
+    窗口里有**缺值**（不知道当天算不算）时整格返回 NaN，而不是"能数几根数几根" ——
+    数少了的结论会变成"不满足条件"，那是**用缺数据下结论**，与全模块的口径冲突。
+    """
+    flags = _as_cond_float(cond, n)
+    known = _roll_sum(np.where(np.isnan(flags), 0.0, 1.0), window, n)
+    total = _roll_sum(np.nan_to_num(flags, nan=0.0), window, n)
+    with np.errstate(all="ignore"):
+        return np.where(known == float(window), total, np.nan)
+
+
+def _cross(a: Any, b: Any, n: int) -> np.ndarray:
+    """CROSS(A,B)：**这一根** A 上穿 B（`A[i]>B[i] 且 A[i-1]<=B[i-1]`）。
+
+    注意"上穿"必须用到前一根：只写成 `A>B` 会连续多日成立（典型 bug：
+    用户以为选的是"金叉那天"，实际选的是"金叉之后的每一天"）。
+    第一根没有前值、以及任一侧缺值 → NaN（→ 最终为 False），不会产生金叉信号。
+    """
+    A = _broadcast(a, n)
+    B = _broadcast(b, n)
+    out = np.full(n, np.nan, dtype="float64")
+    if n >= 2:
+        missing = np.isnan(A) | np.isnan(B)
+        with np.errstate(all="ignore"):
+            crossed = (A[1:] > B[1:]) & (A[:-1] <= B[:-1])
+        out[1:] = np.where(
+            missing[1:] | missing[:-1], np.nan, crossed.astype("float64"),
+        )
+    return out
+
+
+def _barslast(cond: Any, n: int) -> np.ndarray:
+    """BARSLAST(COND)：距离**上一次** COND 为真过了多少根（当根为真 = 0）；从未为真 = NaN。
+
+    当根条件缺值 → 当根 NaN（"上一次是什么时候"这一刻仍然是不知道的）。
+    """
+    flags = _as_cond_float(cond, n)
+    out = np.full(n, np.nan, dtype="float64")
+    last = -1
+    for i in range(n):
+        current = flags[i]
+        if current == 1.0:
+            last = i
+        if last >= 0 and not np.isnan(current):
+            out[i] = i - last
+    return out
+
+
+def _vol_ratio(amount: Any, window: int, n: int) -> np.ndarray:
+    """量比 = 当日成交额 / **不含当日**的前 N 日均额（默认 N=5）。
+
+    为什么分母不含当日：含当日会把"当天放量"自己算进基准里，放量越猛分母越大，
+    比值被自己的量稀释（当日 3 倍量时 `A/((A+4*avg)/5)` 远小于 3）。
+    不足 N+1 根 → NaN → 不产生信号。
+    """
+    amt = _broadcast(amount, n)
+    prev = _ref(amt, 1, n)
+    base = _roll_mean(prev, window, n)
+    with np.errstate(all="ignore"):
+        ratio = amt / base
+    return _nanify(ratio)
+
+
+def _nanify(x: Any) -> Any:
+    """把 ±inf 折成 NaN。
+
+    `C/0` 在 IEEE 下是 inf：如果放过去，`C/V > 10` 可能在成交量为 0 的行上
+    意外为真（inf > 10）。缺值就该是 NaN，NaN 才不产生信号。
+    """
+    if isinstance(x, (int, float)):
+        return float(x) if math.isfinite(x) else float("nan")
+    arr = np.asarray(x, dtype="float64")
+    return np.where(np.isfinite(arr), arr, np.nan)
+
+
+def _as_float(value: Any) -> Any:
+    """数值化（bool → 1.0/0.0）。返回 float 标量或 float64 数组。"""
+    if isinstance(value, (bool, np.bool_)):
+        return 1.0 if value else 0.0
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    return np.asarray(value, dtype="float64")
+
+
+def _isnan(x: Any) -> Any:
+    if isinstance(x, float):
+        return math.isnan(x)
+    return np.isnan(x)
+
+
+def _as_cond_array(value: Any, n: int) -> np.ndarray:
+    """最终折算：条件值 → 长度 n 的 bool 数组。**缺值一律 False**。
+
+    这是"0/1/NaN 内部表示"的最后一道关口（见模块头的说明）：
+    比较、CROSS 等返回的是 0/1 浮点 + NaN，这里才折成布尔给调用方。
+    """
+    if isinstance(value, str):
+        raise FormulaError("条件里不能直接用字符串（请写成比较式）", code="type")
+    arr = np.asarray(value)
+    if arr.dtype == bool:
+        if arr.ndim == 0:
+            return np.full(n, bool(arr), dtype=bool)
+        return arr
+    if arr.dtype.kind in ("U", "S", "O"):
+        raise FormulaError("条件里不能直接用字符串（请写成比较式）", code="type")
+    floats = np.asarray(arr, dtype="float64")
+    with np.errstate(all="ignore"):
+        return np.where(np.isnan(floats), False, floats != 0)
+
+
+def _as_cond_float(value: Any, n: int) -> np.ndarray:
+    """条件值 → 长度 n 的 float64 序列，取值只有 0.0 / 1.0 / NaN（未知）。
+
+    归一化到 0/1 是为了让 AND/OR/NOT 的实现是"数值运算 + 缺值掩码"这么简单的东西，
+    而不是又一套三值逻辑的 if/else。
+    """
+    if isinstance(value, (bool, np.bool_)):
+        return np.full(n, 1.0 if value else 0.0, dtype="float64")
+    if isinstance(value, str):
+        raise FormulaError("条件里不能直接用字符串（请写成比较式）", code="type")
+    arr = np.asarray(value)
+    if arr.dtype.kind in ("U", "S", "O"):
+        raise FormulaError("条件里不能直接用字符串（请写成比较式）", code="type")
+    floats = np.asarray(arr, dtype="float64")
+    if floats.ndim == 0:
+        return np.full(n, 0.0 if np.isnan(floats) else float(floats != 0), dtype="float64")
+    with np.errstate(all="ignore"):
+        return np.where(np.isnan(floats), np.nan, (floats != 0).astype("float64"))
+
+
+def _logic_combine(op: str, a: Any, b: Any, n: int) -> np.ndarray:
+    """AND / OR。**任一侧缺值 → 结果缺值**（悲观口径）。
+
+    为什么"悲观"而不是 Kleene 三值逻辑的 `True OR 未知 = True`：
+    选股公式的输出是"买不买"，让缺值一路保持"不知道"（最终 False）永远不会造出
+    假信号；而 `True OR 未知 = True` 会让"数据不足"变成一条真的选股信号。
+    宁可漏选，不可错选。
+    """
+    A = _as_cond_float(a, n)
+    B = _as_cond_float(b, n)
+    missing = np.isnan(A) | np.isnan(B)
+    with np.errstate(all="ignore"):
+        result = np.minimum(A, B) if op == "AND" else np.maximum(A, B)
+    return np.where(missing, np.nan, result)
+
+
+def _not(a: Any, n: int) -> np.ndarray:
+    """NOT：缺值的**否定仍然是缺值**（否则 `NOT (C>MA(C,5))` 会在数据不足的前几根上全为真）。"""
+    A = _as_cond_float(a, n)
+    with np.errstate(all="ignore"):
+        return np.where(np.isnan(A), np.nan, 1.0 - A)
+
+
+def _num_cmp(op: str, a: Any, b: Any) -> Any:
+    """数值比较 → 0.0 / 1.0 / NaN。**缺值给 NaN**（不是 False，见模块头）。
+
+    `NaN != 5` 在 IEEE 语义下是 True，如果不显式抹掉，停牌日会满足 `C!=5`
+    从而变成一条选股信号。所以这里统一：任一侧缺值 → NaN（既不算相等也不算不等）。
+    """
+    A = _as_float(a)
+    B = _as_float(b)
+    with np.errstate(all="ignore"):
+        if op == ">":
+            result = np.greater(A, B)
+        elif op == "<":
+            result = np.less(A, B)
+        elif op == ">=":
+            result = np.greater_equal(A, B)
+        elif op == "<=":
+            result = np.less_equal(A, B)
+        elif op == "=":
+            result = np.equal(A, B)
+        else:  # !=
+            result = np.not_equal(A, B)
+        missing = np.logical_or(_isnan(A), _isnan(B))
+        float_result = np.asarray(result, dtype="float64")
+        return np.where(missing, np.nan, float_result)
+
+
+def _as_object_array(value: Any, n: int) -> np.ndarray:
+    if isinstance(value, str):
+        return np.full(n, value, dtype=object)
+    arr = np.asarray(value, dtype=object)
+    if arr.ndim == 0:
+        return np.full(n, arr.item(), dtype=object)
+    return arr
+
+
+def _str_cmp(op: str, a: Any, b: Any, n: int) -> np.ndarray:
+    """字符串比较（只支持 `=` / `!=`；解析期已经拦下其它运算符）→ 0.0 / 1.0。"""
+    A = _as_object_array(a, n)
+    B = _as_object_array(b, n)
+    result = np.equal(A, B) if op == "=" else np.not_equal(A, B)
+    result = np.asarray(result, dtype=bool)
+    if result.ndim == 0:
+        return np.full(n, float(result), dtype="float64")
+    return result.astype("float64")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 函数白名单
+# ══════════════════════════════════════════════════════════════════════════
+
+#: 参数类型代码：num 数值 / cond 条件（数值也接受，非 0 即真）/ window 正整数常数 /
+#: offset 非负整数常数（REF 允许 0）
+_W = "window"
+_OFF = "offset"
+
+
+@dataclass(frozen=True, slots=True)
+class _FuncSpec:
+    """一个函数的静态签名 + 求值实现。"""
+
+    min_args: int
+    max_args: int
+    result: str                        # num / bool / same（与第 2 个分支同类型，仅 IF）
+    arg_kinds: tuple[str, ...]
+    impl: Callable[..., Any]
+    #: 窗口参数在参数里的位置（None = 这个函数不吃窗口）；用于估算最少需要多少根 K 线
+    hist_arg: int | None = None
+    #: 在窗口 N 之上还要多几根（REF(X,N) 需要 N+1 根）
+    hist_extra: int = 0
+    #: 不写参数时的隐含根数（`量比()` 内部固定看前 5 日，所以至少要 6 根）
+    hist_default: int = 0
+
+
+def _impl_ma(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return _roll_mean(vals[0], ev.win(vals[1], node.args[1]), ev.n)
+
+
+def _impl_ema(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return _ema(vals[0], ev.win(vals[1], node.args[1]), ev.n)
+
+
+def _impl_ref(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return _ref(vals[0], ev.win(vals[1], node.args[1], minimum=0, code="offset"), ev.n)
+
+
+def _impl_hhv(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return _roll_max(vals[0], ev.win(vals[1], node.args[1]), ev.n)
+
+
+def _impl_llv(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return _roll_min(vals[0], ev.win(vals[1], node.args[1]), ev.n)
+
+
+def _impl_sum(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return _roll_sum(vals[0], ev.win(vals[1], node.args[1]), ev.n)
+
+
+def _impl_std(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return _roll_std(vals[0], ev.win(vals[1], node.args[1]), ev.n)
+
+
+def _impl_count(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return _count(vals[0], ev.win(vals[1], node.args[1]), ev.n)
+
+
+def _impl_cross(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return _cross(vals[0], vals[1], ev.n)
+
+
+def _impl_abs(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return np.abs(_as_float(vals[0]))
+
+
+def _impl_max(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    # numpy 的 maximum/minimum 遇 NaN 传播 NaN（与"缺值即缺值"的全局约定一致）
+    return np.maximum(_as_float(vals[0]), _as_float(vals[1]))
+
+
+def _impl_min(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return np.minimum(_as_float(vals[0]), _as_float(vals[1]))
+
+
+def _impl_if(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    """IF(COND,A,B)：条件缺值 → 结果也缺值（不偷偷取 B，那会把"不知道"变成结论）。"""
+    cond = _as_cond_float(vals[0], ev.n)
+    chosen = np.where(cond == 1.0, _as_float(vals[1]), _as_float(vals[2]))
+    return np.where(np.isnan(cond), np.nan, chosen)
+
+
+def _impl_barslast(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    return _barslast(vals[0], ev.n)
+
+
+def _impl_limit_up_days(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    """涨停天数()：每根 K 线"是否涨停"（0/1，来自本地 limit_up_pool）。
+
+    带参数 `涨停天数(N)` = 近 N 日涨停次数（等价 `COUNT(涨停天数()>0,N)`，但更省事）。
+    两种形式都要：用户口语里"涨停天数"既可能指"今天是不是涨停"，也可能指"近10天几次"。
+    """
+    flags = ev.series.limit_up_days
+    if not vals:
+        return flags.copy()
+    return _roll_sum(flags, ev.win(vals[0], node.args[0]), ev.n)
+
+
+def _impl_limit_up_cnt(ev: _Evaluator, node: _Call, vals: list) -> Any:  # noqa: ARG001
+    """连板()：当日连板天数（0 = 非涨停），来自 limit_up_pool.high_days。"""
+    return ev.series.limit_up_cnt.copy()
+
+
+def _impl_vol_ratio(ev: _Evaluator, node: _Call, vals: list) -> Any:
+    """量比()：当日成交额 ÷ 前 5 日均额（本项目自定义口径，见 `_vol_ratio`）。"""
+    window = ev.win(vals[0], node.args[0]) if vals else 5
+    return _vol_ratio(ev.series.amount, window, ev.n)
+
+
+#: 函数白名单：**只有这里的名字能被调用**（解析期查表，表外一律报错）
+FUNCTIONS: dict[str, _FuncSpec] = {
+    "MA": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_ma, hist_arg=1),
+    "EMA": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_ema, hist_arg=1),
+    "REF": _FuncSpec(2, 2, _NUM, (_NUM, _OFF), _impl_ref, hist_arg=1, hist_extra=1),
+    "HHV": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_hhv, hist_arg=1),
+    "LLV": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_llv, hist_arg=1),
+    "SUM": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_sum, hist_arg=1),
+    "STD": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_std, hist_arg=1),
+    "COUNT": _FuncSpec(2, 2, _NUM, ("cond", _W), _impl_count, hist_arg=1),
+    "CROSS": _FuncSpec(2, 2, _BOOL, (_NUM, _NUM), _impl_cross),
+    "ABS": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_abs),
+    "MAX": _FuncSpec(2, 2, _NUM, (_NUM, _NUM), _impl_max),
+    "MIN": _FuncSpec(2, 2, _NUM, (_NUM, _NUM), _impl_min),
+    "IF": _FuncSpec(3, 3, "same", ("cond", _NUM, _NUM), _impl_if),
+    "BARSLAST": _FuncSpec(1, 1, _NUM, ("cond",), _impl_barslast),
+    # ── 本项目特有（数据来自本地库，不联网）──
+    "涨停天数": _FuncSpec(0, 1, _NUM, (_W,), _impl_limit_up_days, hist_arg=0, hist_default=1),
+    "连板": _FuncSpec(0, 0, _NUM, (), _impl_limit_up_cnt, hist_default=1),
+    "量比": _FuncSpec(0, 1, _NUM, (_W,), _impl_vol_ratio, hist_arg=0,
+                   hist_extra=1, hist_default=6),
+}
+
+#: 展示给用户的"可用函数"清单（界面提示与错误提示共用，避免两处写法漂移）
+SUPPORTED_FUNCTIONS: tuple[str, ...] = tuple(sorted(FUNCTIONS))
+
+#: 关键字（大小写不敏感）；`&&`/`||`/`!` 在词法期已归一成这三个
+_LOGIC_WORDS = ("AND", "OR", "NOT")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 解析器（递归下降）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class _Parser:
+    """把 token 流解析成 AST，**同时做静态类型检查**。
+
+    为什么类型检查放在解析期（而不是等拿到数据再报错）：下一轮的界面要在用户
+    敲字时实时校验，那时候**没有**股票数据；而且"最后一行是不是条件"这种判断
+    本来就只依赖表达式结构，跟数据无关。
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.toks = _tokenize(text)
+        self.pos = 0
+        self.nodes = 0
+        self.vars: dict[str, str] = {}
+        self.fields: list[str] = []
+        self.funcs: list[str] = []
+        self.outputs: list[str] = []
+        self.min_history = 1
+        self.depth = 0
+        self.statements: list[_Statement] = []
+
+    # ── token 流 ──
+
+    def peek(self, k: int = 0) -> _Token:
+        i = self.pos + k
+        if i < len(self.toks):
+            return self.toks[i]
+        # EOF 沿用"最后一个 token 的下一列"，让报错位置落在公式末尾
+        if self.toks:
+            last = self.toks[-1]
+            return _Token("eof", "", last.line, last.col + len(last.value))
+        return _Token("eof", "", 1, 1)
+
+    def next(self) -> _Token:
+        tok = self.peek()
+        if tok.kind != "eof":
+            self.pos += 1
+        return tok
+
+    def at_keyword(self, *words: str, k: int = 0) -> bool:
+        tok = self.peek(k)
+        return tok.kind == "ident" and tok.value.upper() in words
+
+    def bump(self, tok: _Token) -> None:
+        """AST 节点计数（超限即报错，防止超长表达式把解析/求值拖垮）。"""
+        self.nodes += 1
+        if self.nodes > MAX_AST_NODES:
+            raise FormulaError(
+                f"公式太复杂（AST 节点超过 {MAX_AST_NODES}）",
+                line=tok.line, col=tok.col, code="too_complex",
+                hint="拆成多条 `:=` 中间变量，或者简化条件",
+            )
+
+    # ── 入口 ──
+
+    def parse(self) -> tuple[list[_Statement], Any]:
+        last_line = 0
+        while self.pos < len(self.toks):
+            start = self.peek()
+            if start.line == last_line:
+                raise FormulaError(
+                    "一行只能写一条语句",
+                    line=start.line, col=start.col, code="syntax",
+                    hint="每条语句独占一行（`:=` 定义变量，最后一行写选股条件）",
+                )
+            if not self._is_assignment():
+                node = self.expr()
+                if self.pos < len(self.toks):
+                    self._raise_leftover(start, node)
+                self.statements.append(_Statement(None, node, False, start.line, start.col))
+            else:
+                self.statements.append(self._assignment())
+            last_line = self.toks[self.pos - 1].line
+
+        if not self.statements:
+            raise FormulaError(
+                "公式是空的", line=1, col=1, code="empty",
+                hint="至少要写一行选股条件，例如 `C>MA(C,5)`",
+            )
+        if len(self.statements) > MAX_FORMULA_LINES:
+            raise FormulaError(
+                f"公式行数太多（{len(self.statements)} 行，上限 {MAX_FORMULA_LINES} 行）",
+                line=self.statements[MAX_FORMULA_LINES].line, code="too_long",
+            )
+        condition = self._final_condition()
+        return self.statements, condition
+
+    def _raise_leftover(self, start: _Token, node: Any) -> None:
+        """裸表达式后面还剩 token。
+
+        分两种情况给**不同**的错，因为用户要做的事完全不同：
+        * 剩的东西在同一行 → 是"这行多写了东西"（多半是多余括号/逗号/两条语句挤一行）；
+        * 剩的东西在后面的行 → 是"中间行没写变量名"（想输出中间序列却写成裸表达式）。
+        """
+        leftover = self.peek()
+        if leftover.line != start.line:
+            raise FormulaError(
+                "中间语句必须是赋值",
+                line=start.line, col=start.col, code="syntax",
+                hint="中间行要写成 `X:=表达式`（例如 M5:=MA(C,5)），最后一行才是选股条件",
+            )
+        if leftover.kind == "rparen":
+            raise FormulaError(
+                "多余的 `)`", line=leftover.line, col=leftover.col, code="syntax",
+                hint="括号没有对应的 `(`",
+            )
+        if leftover.kind == "comma":
+            raise FormulaError(
+                "多余的逗号", line=leftover.line, col=leftover.col, code="syntax",
+                hint="公式按行分隔语句，行尾和中间都不需要逗号（参数之间才用）",
+            )
+        raise FormulaError(
+            "一行只能写一条语句",
+            line=leftover.line, col=leftover.col, code="syntax",
+            hint="每条语句独占一行（`:=` 定义变量，最后一行写选股条件）",
+        )
+
+    def _final_condition(self) -> Any:
+        """最后一条语句必须是**裸表达式**且是条件（返回 0/1）。"""
+        last = self.statements[-1]
+        if last.name is not None:
+            raise FormulaError(
+                "公式最后一行必须是选股条件（返回 0/1 的表达式）",
+                line=last.line, col=last.col, code="not_condition",
+                hint="把最后一行改成条件，例如 `C>MA(C,5)`；`X:=...` 只是定义中间变量",
+            )
+        if last.node.dtype != _BOOL:
+            raise FormulaError(
+                "公式最后一行必须是选股条件（返回 0/1 的表达式），"
+                f"现在是{_KIND_LABEL[last.node.dtype]}序列",
+                line=last.line, col=last.col, code="not_condition",
+                hint="加一个比较，例如 `C>MA(C,5)`、`量比()>1.5`",
+            )
+        return last.node
+
+    def _is_assignment(self) -> bool:
+        tok = self.peek()
+        if tok.kind != "ident":
+            return False
+        nxt = self.peek(1)
+        return nxt.kind in ("assign", "colon")
+
+    def _assignment(self) -> _Statement:
+        name_tok = self.next()
+        op_tok = self.next()
+        self._check_name_usable(name_tok, as_variable=True)
+        node = self.expr()
+        upper = name_tok.value.upper()
+        # 允许重复赋值（通达信语义），但**不允许**覆盖字段/函数名 ——
+        # 那会让用户后面的 `C` 突然变成自己的变量，属于极难排查的坑
+        self.vars[upper] = node.dtype
+        if op_tok.kind == "colon" and upper not in self.outputs:
+            self.outputs.append(upper)
+        return _Statement(
+            upper, node, op_tok.kind == "colon", name_tok.line, name_tok.col,
+        )
+
+    def _check_name_usable(self, tok: _Token, *, as_variable: bool) -> None:
+        """变量名不能与字段/函数重名，也不能用 Python 关键字。"""
+        name = tok.value
+        upper = name.upper()
+        self._check_forbidden(tok)
+        if not upper.isidentifier() and not any("\u4e00" <= c <= "\u9fff" for c in upper):
+            raise FormulaError(
+                f'变量名 "{name}" 不合法', line=tok.line, col=tok.col, code="syntax",
+            )
+        if upper in _all_fields():
+            raise FormulaError(
+                f'变量名 "{name}" 与内置字段同名',
+                line=tok.line, col=tok.col, code="syntax",
+                hint=f"{upper} 已经是行情字段，请换一个名字（例如 MY{upper}）",
+            )
+        if upper in FUNCTIONS:
+            raise FormulaError(
+                f'变量名 "{name}" 与内置函数同名',
+                line=tok.line, col=tok.col, code="syntax",
+                hint="请换一个名字（例如 M5、A1）",
+            )
+
+    def _check_forbidden(self, tok: _Token) -> None:
+        name = tok.value
+        upper = name.upper()
+        if name.startswith("_"):
+            # `__class__` / `__import__` / `_x` 一律拒绝：公式没有任何理由访问
+            # 以下划线开头的名字，而这些名字正是绕过白名单的常用入口
+            raise FormulaError(
+                f'公式里不允许使用 "{name}" 这类下划线名字',
+                line=tok.line, col=tok.col, code="forbidden",
+                hint="公式不能访问程序的内部对象，只能使用字段和上面列出的函数",
+            )
+        if upper in _SPECIAL_WORDS:
+            raise FormulaError(
+                _SPECIAL_WORDS[upper], line=tok.line, col=tok.col, code="forbidden",
+            )
+        if upper in _FORBIDDEN_WORDS:
+            raise FormulaError(
+                f'公式里不允许使用 "{name}"',
+                line=tok.line, col=tok.col, code="forbidden",
+                hint=_FORBIDDEN_WORDS[upper],
+            )
+
+    # ── 表达式（优先级从低到高）──
+
+    def expr(self) -> Any:
+        self.depth += 1
+        if self.depth > MAX_DEPTH:
+            tok = self.peek()
+            raise FormulaError(
+                f"表达式嵌套太深（超过 {MAX_DEPTH} 层）",
+                line=tok.line, col=tok.col, code="too_complex",
+                hint="用 `:=` 把中间结果拆成几个变量",
+            )
+        try:
+            return self.or_expr()
+        finally:
+            self.depth -= 1
+
+    def or_expr(self) -> Any:
+        node = self.and_expr()
+        while True:
+            tok = self.peek()
+            if (tok.kind == "op" and tok.value == "OR") or self.at_keyword("OR"):
+                self.next()
+                right = self.and_expr()
+                node = self._logic("OR", node, right, tok)
+            else:
+                return node
+
+    def and_expr(self) -> Any:
+        node = self.not_expr()
+        while True:
+            tok = self.peek()
+            if (tok.kind == "op" and tok.value == "AND") or self.at_keyword("AND"):
+                self.next()
+                right = self.not_expr()
+                node = self._logic("AND", node, right, tok)
+            else:
+                return node
+
+    def not_expr(self) -> Any:
+        tok = self.peek()
+        if (tok.kind == "op" and tok.value == "NOT") or self.at_keyword("NOT"):
+            self.next()
+            operand = self.not_expr()
+            self._require_cond(operand, tok, "NOT")
+            self.bump(tok)
+            return _Unary("NOT", operand, _BOOL, tok.line, tok.col)
+        return self.comparison()
+
+    def _logic(self, op: str, left: Any, right: Any, tok: _Token) -> Any:
+        self._require_cond(left, tok, op)
+        self._require_cond(right, tok, op)
+        self.bump(tok)
+        return _Binary(op, left, right, _BOOL, tok.line, tok.col)
+
+    def _require_cond(self, node: Any, tok: _Token, what: str) -> None:
+        """条件位必须是**条件型**表达式（比较 / CROSS / IN / AND OR NOT）。
+
+        为什么要求这么严（通达信对"非 0 即真"更宽松）：`V AND C>O` 在宽松语义下
+        等于"成交量非 0 且收阳"，几乎总是**用户写错了**（他想要的是放量）。宽松会让
+        这种错误静默生效、结果看着还挺像那么回事；严格则当场告诉他该写 `V>0`。
+        选股公式是"选出来的东西要真金白银买"的工具，宁可恶毒一点。
+        """
+        if node.dtype == _STR:
+            raise FormulaError(
+                f'运算符 "{what}" 需要条件（返回 0/1 的表达式），但两边有字符串',
+                line=tok.line, col=tok.col, code="type",
+                hint="字符串只能做 = / != 或 IN 比较；判断行业请写 INDUSTRY=\"半导体\"",
+            )
+        if node.dtype != _BOOL:
+            raise FormulaError(
+                f'运算符 "{what}" 需要条件（返回 0/1 的表达式），'
+                f"现在是{_KIND_LABEL[node.dtype]}序列",
+                line=tok.line, col=tok.col, code="type",
+                hint="写成比较式，例如 C>O、V>MA(V,5)、连板()>=2",
+            )
+
+    def comparison(self) -> Any:
+        left = self.additive()
+        tok = self.peek()
+        if self.at_keyword("IN"):
+            return self._in_list(left, self.next())
+        if tok.kind == "op" and tok.value in _CMP_OPS:
+            self.next()
+            right = self.additive()
+            nxt = self.peek()
+            if nxt.kind == "op" and nxt.value in _CMP_OPS:
+                raise FormulaError(
+                    "不支持连续比较（例如 1<C<5）",
+                    line=nxt.line, col=nxt.col, code="syntax",
+                    hint="请写成 `1<C AND C<5`",
+                )
+            return self._compare(tok, left, right)
+        return left
+
+    def _compare(self, tok: _Token, left: Any, right: Any) -> Any:
+        if tok.value in ("=", "!="):
+            # 字符串只能和字符串比；数值与条件可以互比（条件当 0/1，通达信同款宽松）
+            if _STR in (left.dtype, right.dtype) and left.dtype != right.dtype:
+                raise FormulaError(
+                    f'运算符 "{tok.value}" 两边类型不一致',
+                    line=tok.line, col=tok.col, code="type",
+                    hint="字符串要和字符串比（例如 INDUSTRY=\"半导体\"）",
+                )
+        else:
+            for side in (left, right):
+                if side.dtype == _STR:
+                    raise FormulaError(
+                        f'运算符 "{tok.value}" 需要数值，但两边有字符串',
+                        line=tok.line, col=tok.col, code="type",
+                        hint="字符串只支持 = / != 和 IN（例如 INDUSTRY IN (\"半导体\")）",
+                    )
+        self.bump(tok)
+        return _Binary(tok.value, left, right, _BOOL, tok.line, tok.col)
+
+    def _in_list(self, operand: Any, tok: _Token) -> Any:
+        if operand.dtype != _STR:
+            raise FormulaError(
+                "IN 只能用于字符串字段（如 INDUSTRY）",
+                line=tok.line, col=tok.col, code="type",
+                hint='写法：INDUSTRY IN ("半导体","软件服务")',
+            )
+        if self.peek().kind != "lparen":
+            raise FormulaError(
+                "IN 后面要跟一个括号列表",
+                line=tok.line, col=tok.col, code="syntax",
+                hint='写法：INDUSTRY IN ("半导体","软件服务")',
+            )
+        self.next()          # (
+        values: list[str] = []
+        if self.peek().kind == "rparen":
+            raise FormulaError(
+                "IN 的列表不能为空", line=tok.line, col=tok.col, code="syntax",
+                hint='写法：INDUSTRY IN ("半导体","软件服务")',
+            )
+        while True:
+            item = self.peek()
+            if item.kind != "str":
+                raise FormulaError(
+                    "IN 列表里只能是字符串",
+                    line=item.line, col=item.col, code="type",
+                    hint='写法：INDUSTRY IN ("半导体","软件服务")',
+                )
+            values.append(self.next().value)
+            sep = self.peek()
+            if sep.kind == "comma":
+                self.next()
+                continue
+            if sep.kind == "rparen":
+                self.next()
+                break
+            raise FormulaError(
+                "IN 列表没有闭合", line=sep.line, col=sep.col, code="syntax",
+                hint="列表项之间用逗号分隔，最后补一个 `)`",
+            )
+        if not values:  # pragma: no cover - 空列表已在上面拦下
+            raise FormulaError(
+                "IN 的列表不能为空", line=tok.line, col=tok.col, code="syntax",
+            )
+        self.bump(tok)
+        return _InList(operand, tuple(values), tok.line, tok.col)
+
+    def additive(self) -> Any:
+        node = self.multiplicative()
+        while True:
+            tok = self.peek()
+            if tok.kind == "op" and tok.value in ("+", "-"):
+                self.next()
+                right = self.multiplicative()
+                node = self._arith(tok.value, node, right, tok)
+            else:
+                return node
+
+    def multiplicative(self) -> Any:
+        node = self.unary()
+        while True:
+            tok = self.peek()
+            if tok.kind == "op" and tok.value in ("*", "/"):
+                self.next()
+                right = self.unary()
+                node = self._arith(tok.value, node, right, tok)
+            else:
+                return node
+
+    def _arith(self, op: str, left: Any, right: Any, tok: _Token) -> Any:
+        for side, label in ((left, "左边"), (right, "右边")):
+            if side.dtype == _STR:
+                raise FormulaError(
+                    f'运算符 "{op}" 需要数值，但{label}是字符串',
+                    line=tok.line, col=tok.col, code="type",
+                    hint="公式不支持字符串拼接；字符串只能做 = / != 和 IN 比较",
+                )
+        self.bump(tok)
+        return _Binary(op, left, right, _NUM, tok.line, tok.col)
+
+    def unary(self) -> Any:
+        tok = self.peek()
+        if tok.kind == "op" and tok.value == "-":
+            self.next()
+            operand = self.unary()
+            if operand.dtype == _STR:
+                raise FormulaError(
+                    '负号 "-" 只能用在数值上', line=tok.line, col=tok.col, code="type",
+                )
+            if isinstance(operand, _Lit):
+                # 常量折叠：`-1` 就该是一个字面量 -1。这样 `MA(C,-1)`、`REF(C,-1)`
+                # 能在**解析期**就报"窗口 N 非法"，而不是拖到求值期才暴露，
+                # 界面上的实时校验也才拦得住。
+                self.bump(tok)
+                return _Lit(-float(operand.value), _NUM, tok.line, tok.col)
+            self.bump(tok)
+            return _Unary("-", operand, _NUM, tok.line, tok.col)
+        return self.primary()
+
+    def primary(self) -> Any:
+        tok = self.peek()
+
+        if tok.kind == "num":
+            self.next()
+            value = float(tok.value)
+            if not math.isfinite(value) or abs(value) > MAX_LITERAL:
+                raise FormulaError(
+                    f"数字太大：{tok.value}",
+                    line=tok.line, col=tok.col, code="syntax",
+                    hint=f"字面量绝对值不能超过 {MAX_LITERAL:g}",
+                )
+            self.bump(tok)
+            return _Lit(value, _NUM, tok.line, tok.col)
+
+        if tok.kind == "str":
+            self.next()
+            self.bump(tok)
+            return _Lit(tok.value, _STR, tok.line, tok.col)
+
+        if tok.kind == "lparen":
+            self.next()
+            node = self.expr()
+            closing = self.peek()
+            if closing.kind != "rparen":
+                raise FormulaError(
+                    "括号没有配对", line=tok.line, col=tok.col, code="syntax",
+                    hint="补一个 `)`",
+                )
+            self.next()
+            return node
+
+        if tok.kind == "ident":
+            self.next()                 # 先吃掉名字本身，后面只管括号与参数
+            self._check_forbidden(tok)
+            upper = tok.value.upper()
+            # 名字已经吃掉，所以"后面是不是括号"看的是当前 token
+            if self.peek().kind == "lparen":
+                return self._call(tok, upper)
+            if upper in FUNCTIONS:
+                spec = FUNCTIONS[upper]
+                example = _FUNCTION_EXAMPLE.get(upper, f"{upper}(...)")
+                raise FormulaError(
+                    f'函数 "{upper}" 后面要跟括号',
+                    line=tok.line, col=tok.col, code="syntax",
+                    hint=f"例如 {example}"
+                    + ("" if spec.min_args else f"；{upper} 也可以写成 {upper}()"),
+                )
+            return self._field_or_var(tok, upper)
+
+        if tok.kind == "rparen":
+            raise FormulaError(
+                "多余的 `)`", line=tok.line, col=tok.col, code="syntax",
+            )
+        if tok.kind == "comma":
+            raise FormulaError(
+                "这里多了一个逗号", line=tok.line, col=tok.col, code="syntax",
+            )
+        if tok.kind == "op":
+            raise FormulaError(
+                f'表达式不完整：运算符 "{tok.value}" 前面缺少数值或条件',
+                line=tok.line, col=tok.col, code="syntax",
+            )
+        raise FormulaError(
+            "表达式不完整", line=tok.line, col=tok.col, code="syntax",
+        )
+
+    def _field_or_var(self, tok: _Token, upper: str) -> Any:
+        aliases = _all_fields()
+        if upper in self.vars:
+            self.bump(tok)
+            return _VarRef(upper, self.vars[upper], tok.line, tok.col)
+        if upper in aliases:
+            canonical = aliases[upper]
+            if canonical not in self.fields:
+                self.fields.append(canonical)
+            self.bump(tok)
+            return _FieldRef(canonical, _field_kind(canonical), tok.line, tok.col)
+
+        # 报错要能指导用户：先给"拼错了"的近似匹配，再给已定义的变量
+        pool = sorted(set(aliases) | set(self.vars))
+        near = difflib.get_close_matches(upper, pool, n=1, cutoff=0.6)
+        hints: list[str] = []
+        if near:
+            hints.append(f'是不是想写 "{near[0]}"？')
+        hints.append("可用字段：" + "、".join(sorted(set(aliases.values()))))
+        if self.vars:
+            hints.append("已定义的变量：" + "、".join(sorted(self.vars)))
+        raise FormulaError(
+            f'字段 "{tok.value}" 不存在',
+            line=tok.line, col=tok.col, code="unknown_field", hint="".join(hints),
+        )
+
+    def _call(self, tok: _Token, upper: str) -> Any:
+        spec = FUNCTIONS.get(upper)
+        if spec is None:
+            near = difflib.get_close_matches(upper, list(FUNCTIONS), n=1, cutoff=0.55)
+            hint = (f'是不是想写 "{near[0]}"？' if near else "") + (
+                "可用函数：" + "、".join(SUPPORTED_FUNCTIONS)
+            )
+            raise FormulaError(
+                f'未知函数 "{tok.value}"',
+                line=tok.line, col=tok.col, code="unknown_function", hint=hint,
+            )
+
+        self.next()                       # (
+        args: list[Any] = []
+        if self.peek().kind != "rparen":
+            while True:
+                args.append(self.expr())
+                sep = self.peek()
+                if sep.kind == "comma":
+                    self.next()
+                    continue
+                break
+        closing = self.peek()
+        if closing.kind != "rparen":
+            raise FormulaError(
+                f'函数 "{upper}" 的括号没有闭合',
+                line=tok.line, col=tok.col, code="syntax",
+                hint=f"补一个 `)`（写法：{_FUNCTION_EXAMPLE.get(upper, upper + '(...)')}）",
+            )
+        self.next()
+
+        if not (spec.min_args <= len(args) <= spec.max_args):
+            want = (
+                f"{spec.min_args} 个"
+                if spec.min_args == spec.max_args
+                else f"{spec.min_args}~{spec.max_args} 个"
+            )
+            raise FormulaError(
+                f'函数 "{upper}" 需要 {want}参数，现在给了 {len(args)} 个',
+                line=tok.line, col=tok.col, code="arity",
+                hint=f"写法：{_FUNCTION_EXAMPLE.get(upper, upper + '(...)')}",
+            )
+
+        for index, (arg, want) in enumerate(zip(args, spec.arg_kinds)):
+            self._check_arg(upper, index, arg, want)
+
+        self._note_history(spec, args)
+        if upper not in self.funcs:
+            self.funcs.append(upper)
+
+        if spec.result == "same":
+            # IF(COND,A,B)：类型取 A/B，两者必须一致（否则 np.where 会静默造出字符串数组）
+            if args[1].dtype != args[2].dtype:
+                raise FormulaError(
+                    f'函数 "{upper}" 的两个分支类型不一致',
+                    line=tok.line, col=tok.col, code="type",
+                    hint="IF 的第 2、3 个参数要么都是数值，要么都是条件",
+                )
+            dtype = args[1].dtype
+        else:
+            dtype = spec.result
+
+        self.bump(tok)
+        return _Call(upper, tuple(args), dtype, tok.line, tok.col)
+
+    def _check_arg(self, name: str, index: int, arg: Any, want: str) -> None:
+        if want == "cond":
+            # 与 _require_cond 同一套严格标准（COUNT/BARSLAST/IF 的条件位）
+            if arg.dtype != _BOOL:
+                raise FormulaError(
+                    f'函数 "{name}" 的第 {index + 1} 个参数需要条件（返回 0/1 的表达式），'
+                    f"现在是{_KIND_LABEL.get(arg.dtype, arg.dtype)}序列",
+                    line=arg.line, col=arg.col, code="type",
+                    hint="写成比较式，例如 COUNT(C>O,10)、BARSLAST(连板()>0)",
+                )
+            return
+        if want == _NUM:
+            if arg.dtype == _STR:
+                raise FormulaError(
+                    f'函数 "{name}" 的第 {index + 1} 个参数需要数值，但给的是字符串',
+                    line=arg.line, col=arg.col, code="type",
+                )
+            return
+        # window / offset：必须是正整数常数
+        if arg.dtype != _NUM:
+            raise FormulaError(
+                f'函数 "{name}" 的第 {index + 1} 个参数（窗口 N）必须是数值常数',
+                line=arg.line, col=arg.col, code="arity",
+                hint="写成常数，例如 MA(C,5)",
+            )
+        if isinstance(arg, _Lit):
+            self._check_window_literal(name, index, arg, want)
+
+    def _check_window_literal(self, name: str, index: int, arg: _Lit, want: str) -> None:
+        minimum = 0 if want == _OFF else 1
+        value = float(arg.value)
+        if value != math.floor(value):
+            raise FormulaError(
+                f'函数 "{name}" 的第 {index + 1} 个参数（窗口 N）必须是整数，现在是 {value:g}',
+                line=arg.line, col=arg.col, code="arity",
+            )
+        k = int(value)
+        if k < minimum or k > MAX_WINDOW:
+            raise FormulaError(
+                f'函数 "{name}" 的第 {index + 1} 个参数（窗口 N）'
+                f"必须在 {minimum}~{MAX_WINDOW} 之间，现在是 {k}",
+                line=arg.line, col=arg.col, code="window",
+            )
+
+    def _note_history(self, spec: _FuncSpec, args: list) -> None:
+        """估算"至少需要多少根 K 线"（**下界**，给回测/界面预热用）。
+
+        为什么是下界：动态窗口（`MA(C,MY_N)`、`MA(C,量比())`）静态算不出来，
+        这里只统计常量窗口。回测/试算按这个值预取历史就够，取多了只是浪费。
+        """
+        if spec.hist_arg is None:
+            self._note_window(max(spec.hist_default, 1))
+            return
+        if len(args) > spec.hist_arg:
+            arg = args[spec.hist_arg]
+            # 只有常量窗口能算；变量窗口（少见）不估
+            if not isinstance(arg, _Lit) or not float(arg.value).is_integer():
+                return
+            self._note_window(max(int(arg.value) + spec.hist_extra, 1))
+            return
+        self._note_window(max(spec.hist_default, 1))
+
+    def _note_window(self, bars: int) -> None:
+        if bars > self.min_history:
+            self.min_history = int(bars)
+
+
+#: 每个函数的示例写法（错误提示里直接抄给用户）
+_FUNCTION_EXAMPLE: dict[str, str] = {
+    "MA": "MA(C,5)",
+    "EMA": "EMA(C,12)",
+    "REF": "REF(C,1)",
+    "HHV": "HHV(H,20)",
+    "LLV": "LLV(L,20)",
+    "SUM": "SUM(V,5)",
+    "STD": "STD(C,20)",
+    "COUNT": "COUNT(C>O,10)",
+    "CROSS": "CROSS(C,MA(C,5))",
+    "ABS": "ABS(C-PRE_CLOSE)",
+    "MAX": "MAX(C,O)",
+    "MIN": "MIN(C,O)",
+    "IF": "IF(C>O,C,O)",
+    "BARSLAST": "BARSLAST(连板()>0)",
+    "涨停天数": "涨停天数() 或 涨停天数(10)",
+    "连板": "连板()",
+    "量比": "量比() 或 量比(5)",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 求值器
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _validate_series(series: Series) -> int:
+    """长度自检：所有数值序列必须与 `date` 等长。返回 n。"""
+    n = len(series.date)
+    for name in (
+        "close", "open", "high", "low", "vol", "amount", "pre_close",
+        "limit_up_days", "limit_up_cnt",
+    ):
+        arr = np.asarray(getattr(series, name))
+        if arr.shape[0] != n:
+            raise FormulaDataError(
+                f"{series.symbol} 的 {name} 有 {arr.shape[0]} 个值，"
+                f"但日期有 {n} 个 —— 序列长度必须一致"
+            )
+    return n
+
+
+class _Evaluator:
+    """白名单求值器：**只认** AST 里那几种节点，别的类型直接报错（绝不执行）。
+
+    无状态污染：每次 `eval` 新建一个实例，所以同一个 `Formula` 可以在多个线程
+    里并行跑（下一轮界面要按股票多线程试算）。
+    """
+
+    def __init__(self, series: Series) -> None:
+        self.series = series
+        self.n = _validate_series(series)
+        self.env: dict[str, Any] = {}
+        self._numeric = {
+            "C": series.close,
+            "OPEN": series.open,
+            "HIGH": series.high,
+            "LOW": series.low,
+            "VOL": series.vol,
+            "AMOUNT": series.amount,
+            "PRE_CLOSE": series.pre_close,
+        }
+        self._strings: dict[str, Any] = {
+            "DATE": list(series.date),
+            "INDUSTRY": series.industry,
+        }
+
+    # ── 参数校验 ──
+
+    def win(
+        self, value: Any, node: Any, *, minimum: int = 1, code: str = "window",
+    ) -> int:
+        """求值期的窗口参数校验（字面量已在解析期查过；变量形式只能在这里拦）。"""
+        arr = np.asarray(value)
+        if arr.ndim != 0:
+            raise FormulaError(
+                "窗口参数 N 必须是常数，不能是序列",
+                line=node.line, col=node.col, code=code,
+                hint="如果 N 来自变量，请先写成常数，例如 N:=5",
+            )
+        raw = float(arr)
+        if not math.isfinite(raw) or raw != math.floor(raw):
+            raise FormulaError(
+                f"窗口参数 N 必须是整数，现在是 {raw:g}",
+                line=node.line, col=node.col, code=code,
+            )
+        k = int(raw)
+        if k < minimum or k > MAX_WINDOW:
+            raise FormulaError(
+                f"窗口参数 N 必须在 {minimum}~{MAX_WINDOW} 之间，现在是 {k}",
+                line=node.line, col=node.col, code=code,
+            )
+        return k
+
+    # ── 求值 ──
+
+    def run(self, formula: Formula) -> np.ndarray:
+        if self.n == 0:
+            # 空序列（新股/空库）直接返回空信号，**不走求值**：
+            # 一堆滚动窗口在长度 0 上跑没有意义，也容易在某些 numpy 版本上告警
+            return np.zeros(0, dtype=bool)
+        result: Any = None
+        for statement in formula.statements:
+            value = self.eval_node(statement.node)
+            if statement.name is None:
+                result = value            # 只有最后一条是无名语句（解析期已保证）
+            else:
+                self.env[statement.name] = value
+        if result is None:  # pragma: no cover - 解析期保证存在
+            raise FormulaError("公式里没有选股条件（内部错误）", code="internal")
+        return _as_cond_array(result, self.n)
+
+    def eval_node(self, node: Any) -> Any:
+        if isinstance(node, _Lit):
+            return node.value
+        if isinstance(node, _FieldRef):
+            return self._field(node)
+        if isinstance(node, _VarRef):
+            if node.name not in self.env:
+                raise FormulaError(
+                    f'变量 "{node.name}" 在使用前没有赋值',
+                    line=node.line, col=node.col, code="unknown_var",
+                )
+            return self.env[node.name]
+        if isinstance(node, _Unary):
+            return self._unary(node)
+        if isinstance(node, _Binary):
+            return self._binary(node)
+        if isinstance(node, _Call):
+            spec = FUNCTIONS[node.name]
+            vals = [self.eval_node(arg) for arg in node.args]
+            return spec.impl(self, node, vals)
+        if isinstance(node, _InList):
+            operand = self.eval_node(node.operand)
+            values = set(node.values)
+            arr = _as_object_array(operand, self.n)
+            flags = np.array([v in values for v in arr], dtype="float64")
+            return flags
+        # 白名单兜底：不认识的节点**不执行**，报错收场
+        raise FormulaError(
+            "公式里有不支持的表达式（内部错误）", code="internal",
+        )
+
+    def _field(self, node: _FieldRef) -> Any:
+        if node.dtype == _STR:
+            if node.name in self._strings:
+                return self._strings[node.name]
+        else:
+            if node.name in self._numeric:
+                return self._numeric[node.name]
+            extra = self.series.extra.get(node.name)
+            if extra is not None:
+                return np.asarray(extra, dtype="float64")
+        raise FormulaDataError(
+            f"本地数据里没有字段 {node.name} 的数据（{self.series.symbol}）"
+        )
+
+    def _unary(self, node: _Unary) -> Any:
+        value = self.eval_node(node.operand)
+        if node.op == "NOT":
+            return _not(value, self.n)
+        return _nanify(-_as_float(value))
+
+    def _binary(self, node: _Binary) -> Any:
+        op = node.op
+        if op in ("AND", "OR"):
+            left = _as_cond_float(self.eval_node(node.left), self.n)
+            right = _as_cond_float(self.eval_node(node.right), self.n)
+            return _logic_combine(op, left, right, self.n)
+
+        left = self.eval_node(node.left)
+        right = self.eval_node(node.right)
+
+        if op in ("=", "!=") and (node.left.dtype == _STR or node.right.dtype == _STR):
+            return _str_cmp(op, left, right, self.n)
+        if op in (">", "<", ">=", "<=", "=", "!="):
+            return _num_cmp(op, left, right)
+
+        A = _as_float(left)
+        B = _as_float(right)
+        with np.errstate(all="ignore"):
+            if op == "+":
+                result = np.add(A, B)
+            elif op == "-":
+                result = np.subtract(A, B)
+            elif op == "*":
+                result = np.multiply(A, B)
+            else:
+                result = np.divide(A, B)
+        return _nanify(result)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 数据接口（与数据库解耦：求值器只认 Series）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class Series:
+    """单只股票的**时间升序**序列（公式求值的唯一输入）。
+
+    为什么不直接传 DataFrame：公式引擎只关心"一维数组 + 几条元信息"，
+    用 dataclass 表示能把引擎与数据库彻底解耦 —— 单测可以手搓序列（见
+    `tests/test_formula.py`），下一轮界面也可以拿内存里的数据直接试算，
+    不需要造一个临时库。
+
+    Attributes:
+        limit_up_days: 每日"是否涨停"（0/1），来自库里 `limit_up_pool`
+            （行存在即为涨停；`high_days` 为空时也算涨停）。
+        limit_up_cnt: 每日连板天数（0 表示非涨停），来自 `limit_up_pool.high_days`。
+        extra: 扩展字段（**竞价字段的挂载点**，见 `EXTRA_FIELDS`）；键是规范字段名。
+    """
+
+    symbol: str
+    name: str
+    industry: str
+    date: list[str]
+    close: np.ndarray
+    open: np.ndarray
+    high: np.ndarray
+    low: np.ndarray
+    vol: np.ndarray
+    amount: np.ndarray
+    pre_close: np.ndarray
+    limit_up_days: np.ndarray
+    limit_up_cnt: np.ndarray
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """把 list / pandas.Series 统一成 float64 一维数组（调用方少踩坑）。
+
+        在这一步就校验维度，而不是等到求值：长度不一致是**数据问题**，
+        越早暴露越好，而且错误信息能带上股票代码。
+        """
+        self.date = [str(d) for d in self.date]
+        for name in (
+            "close", "open", "high", "low", "vol", "amount", "pre_close",
+            "limit_up_days", "limit_up_cnt",
+        ):
+            arr = np.asarray(getattr(self, name), dtype="float64")
+            if arr.ndim != 1:
+                raise FormulaDataError(
+                    f"{self.symbol} 的 {name} 必须是**一维**时间序列，现在是 {arr.ndim} 维"
+                )
+            setattr(self, name, arr)
+        if not isinstance(self.extra, dict):
+            raise FormulaDataError("Series.extra 必须是 规范字段名 → 一维数组 的字典")
+
+
+def load_series(
+    db_path: str | Path,
+    symbols: Sequence[str] | None = None,
+    start: str | None = None,
+) -> Iterator[Series]:
+    """从本地库逐只产出 `Series`（**只读、不联网**）。
+
+    只读三处：`stock_daily_hfq`（后复权视图）、`stock_basic`（名称/行业）、
+    `limit_up_pool`（涨停与连板）。**一个字都不写库**。
+
+    为什么"逐只 yield"而不是一次查全表：10 年全市场约 1000 万行，
+    一次性读进内存要几百 MB～1GB，而公式是**逐只算**的。逐只查询正好让
+    内存占用保持在"一只股票"的量级（`(symbol, date)` 是主键，单只查询走索引）。
+
+    Args:
+        db_path: 本地 SQLite 路径。
+        symbols: 只取这些代码；None = 库里全部（按代码升序）。
+        start: 只要 >= 该日期（"2020-01-01"）的数据。
+
+    Yields:
+        Series（时间升序）。没有数据的代码会被跳过。
+
+    Raises:
+        FormulaDataError: 库文件不存在。
+    """
+    path = Path(db_path)
+    if not path.exists():
+        raise FormulaDataError(f"本地数据库不存在：{path}（请先在界面点【下载数据】）")
+
+    # 直接用 sqlite3：本模块不想依赖 DataEngine（那会把"读法"绑死在一处），
+    # 表名复用 engine 的常量，保证与策略/回测读的是同一张后复权视图。
+    conn = sqlite3.connect(str(path), timeout=60)
+    try:
+        if symbols is None:
+            rows = conn.execute(
+                f"SELECT DISTINCT symbol FROM {HFQ_TABLE} ORDER BY symbol"  # noqa: S608
+            ).fetchall()
+            wanted = [r[0] for r in rows]
+        else:
+            wanted = [str(s) for s in symbols]
+
+        for symbol in wanted:
+            sql = (
+                f"SELECT date, open, high, low, close, volume, turnover FROM {HFQ_TABLE} "  # noqa: S608
+                "WHERE symbol = ?"
+            )
+            params: list[Any] = [symbol]
+            if start:
+                sql += " AND date >= ?"
+                params.append(start)
+            sql += " ORDER BY date"
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            if not rows:
+                continue
+
+            basic = conn.execute(
+                "SELECT name, industry FROM stock_basic WHERE symbol = ?", (symbol,)
+            ).fetchone()
+            name = (basic[0] if basic and basic[0] else symbol)
+            industry = (basic[1] if basic and basic[1] else "")
+
+            pool = {
+                r[0]: r[1]
+                for r in conn.execute(
+                    "SELECT date, high_days FROM limit_up_pool WHERE symbol = ?", (symbol,)
+                ).fetchall()
+            }
+
+            dates = [str(r[0]) for r in rows]
+            close = np.array([_num_or_nan(r[4]) for r in rows], dtype="float64")
+            limit_days = np.array(
+                [1.0 if d in pool else 0.0 for d in dates], dtype="float64"
+            )
+            limit_cnt = np.array(
+                [_board_count(pool.get(d)) if d in pool else 0.0 for d in dates],
+                dtype="float64",
+            )
+            pre_close = np.full(len(dates), np.nan, dtype="float64")
+            if len(dates) > 1:
+                # 后复权口径下"昨收"就是昨日的后复权收盘价，直接平移一根即可
+                pre_close[1:] = close[:-1]
+
+            yield Series(
+                symbol=symbol,
+                name=name,
+                industry=industry,
+                date=dates,
+                close=close,
+                open=np.array([_num_or_nan(r[1]) for r in rows], dtype="float64"),
+                high=np.array([_num_or_nan(r[2]) for r in rows], dtype="float64"),
+                low=np.array([_num_or_nan(r[3]) for r in rows], dtype="float64"),
+                vol=np.array([_num_or_nan(r[5]) for r in rows], dtype="float64"),
+                amount=np.array([_num_or_nan(r[6]) for r in rows], dtype="float64"),
+                pre_close=pre_close,
+                limit_up_days=limit_days,
+                limit_up_cnt=limit_cnt,
+            )
+    finally:
+        conn.close()
+
+
+def _num_or_nan(value: Any) -> float:
+    return float("nan") if value is None else float(value)
+
+
+def _board_count(high_days: Any) -> float:
+    """涨停池里的连板数：`high_days` 为空时按 1 板算（它毕竟在涨停池里）。"""
+    if high_days is None:
+        return 1.0
+    try:
+        value = float(high_days)
+    except (TypeError, ValueError):
+        return 1.0
+    return value if value > 0 else 1.0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 公式对象 + 编译入口
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class Formula:
+    """编译好的公式。**不可变**，可以跨线程复用（每次 eval 都是独立上下文）。"""
+
+    text: str
+    statements: tuple[_Statement, ...]
+    condition: Any
+    fields: tuple[str, ...]
+    functions: tuple[str, ...]
+    outputs: tuple[str, ...]
+    min_history: int
+    name: str = ""
+    description: str = ""
+    source_path: str | None = None
+
+    @property
+    def label(self) -> str:
+        """展示名（没起名字时退回公式本身，界面不会显示空白）。"""
+        return self.name or self.text.strip().splitlines()[-1].strip()
+
+    def eval(self, series: Series) -> np.ndarray:
+        """对单只股票的升序序列求值，返回同长度的 bool 数组。
+
+        True = **当日收盘后选中**（与项目现有口径一致：策略用最后一根 K 线选股）。
+        """
+        try:
+            return _Evaluator(series).run(self)
+        except (FormulaError, FormulaDataError):
+            raise
+        except Exception as exc:      # noqa: BLE001 - 分发产品：宁可给中文错误也不要崩栈
+            # 兜底：真的出了意料之外的 numpy/内部异常，也要变成可读的中文错误
+            raise FormulaError(
+                f"公式求值失败（{type(exc).__name__}: {exc}）", code="eval",
+                hint="请检查公式里用到的字段与函数；数据不足的股票会被跳过",
+            ) from exc
+
+    def describe(self) -> str:
+        """一句话说明这条公式用了什么（界面"这条公式用了什么"直接用）。"""
+        parts = []
+        if self.fields:
+            parts.append("字段：" + "、".join(self.fields))
+        if self.functions:
+            parts.append("函数：" + "、".join(self.functions))
+        parts.append(f"至少需要 {self.min_history} 根 K 线")
+        return "；".join(parts)
+
+
+def compile_formula(
+    text: str,
+    *,
+    name: str = "",
+    description: str = "",
+    source_path: str | None = None,
+) -> Formula:
+    """解析并校验公式。
+
+    Args:
+        text: 公式正文（多行，最后一行是选股条件）。
+        name / description / source_path: 元信息（从公式文件加载时填，界面上显示）。
+
+    Returns:
+        Formula：可直接 `eval(series)`。
+
+    Raises:
+        FormulaError: 任何语法/类型/越界问题，**消息是中文且带行列号**，
+            结构化字段见 `FormulaError`（界面用它定位光标）。
+
+    Example:
+        >>> f = compile_formula("M5:=MA(C,5)\\nC>M5 AND V>MA(V,5)*1.5")
+        >>> f.fields, f.functions
+        (('C', 'VOL'), ('MA',))
+    """
+    if not isinstance(text, str):
+        raise FormulaError("公式必须是文本", code="type")
+    # Windows 记事本存的文件带 BOM、换行是 \r\n —— 都要先归一化，否则第一行会莫名其妙报错
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    if len(cleaned) > MAX_FORMULA_CHARS:
+        raise FormulaError(
+            f"公式太长了（{len(cleaned)} 个字符，上限 {MAX_FORMULA_CHARS}）",
+            code="too_long", hint="拆成几条公式，或者用 `:=` 减少重复书写",
+        )
+
+    parser = _Parser(cleaned)
+    statements, condition = parser.parse()
+    formula = Formula(
+        text=cleaned,
+        statements=tuple(statements),
+        condition=condition,
+        fields=tuple(parser.fields),
+        functions=tuple(parser.funcs),
+        outputs=tuple(parser.outputs),
+        min_history=parser.min_history,
+        name=name,
+        description=description,
+        source_path=source_path,
+    )
+    logger.debug(
+        f"公式编译通过：字段 {formula.fields}，函数 {formula.functions}，"
+        f"{len(formula.statements)} 条语句"
+    )
+    return formula
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 公式文件加载（供"随包分发的预置公式"用）
+# ══════════════════════════════════════════════════════════════════════════
+
+#: 认的扩展名。`.tvf` = 通达信公式文件（用户从别处导出的公式常是这个后缀）
+FORMULA_SUFFIXES = (".txt", ".tvf")
+
+#: 注释头里认的键（中英文都认，用户从别处抄来的文件常常是英文键）
+_NAME_KEYS = ("名称", "名字", "name", "title")
+_DESC_KEYS = ("说明", "描述", "备注", "desc", "description", "note")
+
+
+@dataclass(frozen=True)
+class FormulaSpec:
+    """一条"公式文件"的解析结果。
+
+    为什么把错误**放进结果**而不是抛出去：一个目录里往往有十几条公式，
+    其中一条写错不该让整个列表消失（下一轮的界面要一次显示全部，
+    并且把出错的那条标红）。所以这里逐文件报错，`formula is None` + `error` 有值。
+    """
+
+    name: str
+    description: str
+    path: str
+    source: str
+    formula: Formula | None = None
+    error: FormulaError | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.formula is not None
+
+    @property
+    def error_text(self) -> str:
+        return "" if self.error is None else str(self.error)
+
+
+def _parse_formula_file(text: str) -> tuple[str, str, str]:
+    """拆出 (名称, 说明, 公式正文)。
+
+    注释头 = 文件**开头**连续的 `#` 行（可以夹空行）。支持全角冒号 ——
+    中文用户用输入法打字时 `：` 是默认输出，为此报"格式错误"没有道理。
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff").split("\n")
+    name = ""
+    desc_parts: list[str] = []
+    body_start = 0
+    for index, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped:
+            body_start = index + 1
+            continue
+        if not stripped.startswith("#"):
+            body_start = index
+            break
+        header = stripped.lstrip("#").strip()
+        body_start = index + 1
+        if not header:
+            continue
+        key, sep, value = header.partition(":")
+        if not sep:
+            key, sep, value = header.partition("：")     # 全角冒号
+        if not sep:
+            desc_parts.append(header)
+            continue
+        key = key.strip().lower()
+        value = value.strip()
+        if key in _NAME_KEYS:
+            name = value
+        elif key in _DESC_KEYS:
+            desc_parts.append(value)
+        else:
+            desc_parts.append(f"{key}: {value}" if value else key)
+    body = "\n".join(lines[body_start:]).strip("\n")
+    return name, " ".join(p for p in desc_parts if p), body
+
+
+def load_formula_files(directory: str | Path) -> list[FormulaSpec]:
+    """加载目录下的公式文件（`.txt` / `.tvf`，UTF-8）。
+
+    约定：文件开头的 `#` 行是注释头，认 `# 名称: xxx` 与 `# 说明: xxx`；
+    其余部分是公式体（最后一行必须是选股条件）。
+
+    - 目录不存在 → 返回空列表（**不抛异常**：界面上没这个目录很正常）；
+    - 单个文件语法错 → 只有它自己 `ok=False`，其余照常；
+    - 文件名排序保证结果稳定（界面列表不会每次刷新都换顺序）。
+
+    Args:
+        directory: 公式目录。
+
+    Returns:
+        FormulaSpec 列表（含失败的条目，`ok=False`、`error_text` 是中文原因）。
+    """
+    folder = Path(directory)
+    if not folder.is_dir():
+        logger.debug(f"公式目录不存在：{folder}")
+        return []
+
+    paths = sorted(
+        (p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in FORMULA_SUFFIXES),
+        key=lambda p: p.name.lower(),
+    )
+    specs: list[FormulaSpec] = []
+    for path in paths:
+        # 用 utf-8-sig 读：Windows 记事本另存为 UTF-8 会带 BOM，带 BOM 时
+        # 第一行开头会多一个不可见字符，导致"第一条公式永远报错"这种诡异现象
+        try:
+            raw = path.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError as exc:
+            specs.append(FormulaSpec(
+                name=path.stem, description="", path=str(path), source="",
+                error=FormulaError(
+                    f"文件不是 UTF-8 编码（{exc.reason}）", code="encoding",
+                    hint="用记事本另存为 UTF-8 编码后重试",
+                ),
+            ))
+            continue
+        except OSError as exc:
+            specs.append(FormulaSpec(
+                name=path.stem, description="", path=str(path), source="",
+                error=FormulaError(f"文件读不出来：{exc}", code="io"),
+            ))
+            continue
+
+        name, description, body = _parse_formula_file(raw)
+        name = name or path.stem
+        try:
+            formula = compile_formula(
+                body, name=name, description=description, source_path=str(path),
+            )
+        except FormulaError as exc:
+            # 逐文件报错：一条公式写错不影响别的公式被加载进来
+            logger.warning(f"公式文件 {path.name} 解析失败：{exc}")
+            specs.append(FormulaSpec(
+                name=name, description=description, path=str(path), source=body,
+                error=exc,
+            ))
+            continue
+        specs.append(FormulaSpec(
+            name=name, description=description, path=str(path), source=body,
+            formula=formula,
+        ))
+    good = sum(1 for s in specs if s.ok)
+    logger.info(f"公式目录 {folder}：载入 {good}/{len(specs)} 条公式")
+    return specs
+
+
+__all__ = [
+    "EXTRA_FIELDS",
+    "FIELD_ALIASES",
+    "FUNCTIONS",
+    "MAX_FORMULA_CHARS",
+    "MAX_FORMULA_LINES",
+    "MAX_WINDOW",
+    "SUPPORTED_FUNCTIONS",
+    "Formula",
+    "FormulaDataError",
+    "FormulaError",
+    "FormulaSpec",
+    "Series",
+    "compile_formula",
+    "load_formula_files",
+    "load_series",
+]
