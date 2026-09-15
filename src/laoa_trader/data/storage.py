@@ -875,7 +875,12 @@ def data_summary(conn: sqlite3.Connection) -> dict:
 
     return {
         "daily_rows": _count("SELECT COUNT(*) FROM stock_daily_raw"),
-        "symbols": _count("SELECT COUNT(DISTINCT symbol) FROM stock_daily_raw"),
+        # 股票数用 `stock_basic` 的**表行数**（SQLite 对无 WHERE 的 COUNT(*) 走 O(1) 优化），
+        # 而不是 `COUNT(DISTINCT symbol) FROM stock_daily_raw` —— 后者要在几百万行的行情表上
+        # 做全表去重：实测 168 万行 61ms，5~10 年库（500~1000 万行）线性外推 200~400ms，
+        # 而界面每 5 秒就会问一次（用户实报"下载时界面卡死"的元凶之一）。
+        # 语义相同：每只股票在 stock_basic 里都有一行（下载/名称同步都会写）。
+        "symbols": _count("SELECT COUNT(*) FROM stock_basic"),
         "latest_date": latest_date(conn),
         "basic": _count("SELECT COUNT(*) FROM stock_basic"),
         "industries": _count(

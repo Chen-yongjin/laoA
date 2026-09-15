@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timedelta
 
 import pytest
@@ -99,6 +100,21 @@ def seeded(cfg):
     )
     cfg.source_path = config_file
     return cfg
+
+
+@pytest.fixture(autouse=True)
+def _freeze_intraday_session(monkeypatch):
+    """把"现在是不是交易时段"钉成"非交易时段"（**只影响这一份界面用例**）。
+
+    为什么必须钉：这里有不少断言写的是"盘中提醒 未在时段"（标签渲染），
+    而 `in_session` 是按**真实时钟**算的 —— 在交易时段内跑测试就会变成"时段中"，
+    那条断言会因为"你几点跑的测试"而红，跟被测代码没关系。
+    需要"时段中"的用例自己再 monkeypatch（见 `test_status_tags_…`）。
+    """
+    from laoa_trader import intraday
+
+    monkeypatch.setattr(intraday, "in_session", lambda *a, **k: False)
+    yield
 
 
 @pytest.fixture()
@@ -1031,6 +1047,135 @@ def test_pos_symbol_enter_adds_position(window, seeded, qapp) -> None:
     assert window.position_table.rowCount() == 2
 
 
+# ── 导入/下载期间界面不卡（用户实报"下载数据时界面卡死"）──
+
+
+def test_tick_skips_heavy_work_while_downloading(window, qapp, monkeypatch) -> None:
+    """下载/导入期间 `_tick()`：**不查数据概况**、也不重建表格；结束后立刻补齐一次。
+
+    为什么这条最关键：`data_summary()` 里有全表 COUNT（几百万行），
+    而导入线程正在同一张表上大批量写入 —— 每 5 秒按住界面几百毫秒，看着就是"卡死"。
+    """
+    from laoa_trader import state
+
+    from laoa_trader.ui import app as ui_app
+
+    win = window
+    counters = {"summary": 0, "pool": 0}
+    real_summary, real_pool = win.engine.summary, win._refresh_pool
+    monkeypatch.setattr(win.engine, "summary",
+                        lambda: (counters.__setitem__("summary", counters["summary"] + 1),
+                                 real_summary())[1])
+    monkeypatch.setattr(win, "_refresh_pool",
+                        lambda: (counters.__setitem__("pool", counters["pool"] + 1),
+                                 real_pool())[1])
+
+    win._invalidate_summary()                      # 基础状态：缓存作废 → 这一拍会真查
+    win._tick()
+    qapp.processEvents()
+    assert counters["summary"] >= 1                # 正常状态：会查
+    before = dict(counters)                        # 之后只看**增量**（不受定时器影响）
+
+    state.begin_download()
+    try:
+        for _ in range(3):
+            # 每次都把"缓存时间"往前推，模拟"早就过了 30 秒"：
+            # 这样"下载期间不查库"这条只能靠下载判断成立，
+            # 而不是被 TTL 顺手挡住（否则去掉下载判断用例也不会红）
+            win._summary_at -= (ui_app.SUMMARY_TTL + 1)
+            win._tick()
+            qapp.processEvents()
+        assert counters["summary"] == before["summary"]   # 一次都没查（下载优先用缓存）
+        assert counters["pool"] == before["pool"]         # 表格也没重建
+        assert "正在下载" in win.status_label.fullText() or win.status_label.fullText()
+    finally:
+        state.end_download()
+
+    win._tick()                                     # 下载结束后的第一拍：完整刷一遍
+    qapp.processEvents()
+    assert counters["summary"] > before["summary"]     # 又去查了（拿到新数字）
+    assert counters["pool"] > before["pool"]           # 表格也补齐了
+
+
+def test_summary_cache_ttl_and_invalidation(window, qapp, monkeypatch) -> None:
+    """数据概况的 30 秒 TTL：期间复用缓存；下载期间即使过期也用缓存；显式作废立刻重取。"""
+    from laoa_trader import state
+    from laoa_trader.ui import app as ui_app
+
+    win = window
+    calls = {"n": 0}
+    real = win.engine.summary
+    monkeypatch.setattr(win.engine, "summary",
+                        lambda: (calls.__setitem__("n", calls["n"] + 1), real())[1])
+
+    win._invalidate_summary()
+    first = win._summary_cached()
+    assert calls["n"] == 1
+    assert win._summary_cached() is first            # 30 秒内：直接给缓存
+    assert calls["n"] == 1
+
+    win._summary_at -= (ui_app.SUMMARY_TTL + 1)      # 模拟过了 30 秒
+    win._summary_cached()
+    assert calls["n"] == 2                           # 过期了 → 重取
+
+    state.begin_download()
+    try:
+        win._summary_at -= (ui_app.SUMMARY_TTL + 1)
+        win._summary_cached()
+        assert calls["n"] == 2                       # **下载期间不查**（导入正占着表）
+    finally:
+        state.end_download()
+
+    win._invalidate_summary()                        # 用户刚加了自选/持仓
+    win._summary_cached()
+    assert calls["n"] == 3                           # 立刻重取，数字不会滞后 30 秒
+
+
+def test_yield_gui_keeps_the_main_thread_responsive(qapp) -> None:
+    """**让出 GIL 的机制验证**：`_yield_gui()` 之后主线程的定时器照样跳。
+
+    做法：后台线程跑一段"单条 C 级调用占着 GIL"的活（`sum(range(N))` 不会在中间释放
+    GIL，正是 pandas/pyarrow 那类长 C 调用的行为）；主线程 `processEvents` +
+    QTimer 计时。让出的版本定时器照常触发，不让出的版本被饿死 ——
+    这条用例能真的红/绿（去掉让出就会红）。
+    """
+    import threading
+
+    from PySide6.QtCore import QTimer
+
+    from laoa_trader.data import sync
+
+    def count_ticks(with_yield: bool) -> int:
+        ticks = {"n": 0}
+        timer = QTimer()
+        timer.setInterval(5)
+        timer.timeout.connect(lambda: ticks.__setitem__("n", ticks["n"] + 1))
+        timer.start()
+        done = {"flag": False}
+
+        def busy() -> None:
+            for _ in range(12):
+                sum(range(6_000_000))       # 单条 C 级调用，期间**不释放 GIL**
+                if with_yield:
+                    sync._yield_gui()       # 让出 1ms → 主线程能跑
+            done["flag"] = True
+
+        thread = threading.Thread(target=busy, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 30
+        while not done["flag"] and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.001)
+        thread.join(10)
+        timer.stop()
+        return ticks["n"]
+
+    starved = count_ticks(with_yield=False)
+    alive = count_ticks(with_yield=True)
+    assert alive >= 5, f"让出之后主线程仍只跳了 {alive} 次"
+    assert alive > starved, f"让出版的定时器次数（{alive}）没有优于不让出的（{starved}）"
+
+
 def test_status_points_to_refresh_when_only_light_data_missing(window, qapp) -> None:
     """只缺轻量项（行业归属/日历/指数）时，主状态指路【刷新数据】**而不是**【下载数据】。
 
@@ -1653,6 +1798,9 @@ def test_status_bar_shows_watchlist_count(window, seeded, qapp) -> None:
     with storage.connect(seeded.db_path) as conn:
         storage.upsert_watchlist(conn, "600001", name="低价样本")
     window._tick()
+    # 数据概况在界面层有 30 秒 TTL 缓存（下载时不再每 5 秒全表 COUNT 一遍）：
+    # 这个用例是**直接写库**的，所以显式要求取新值一次
+    window._refresh_status(force_summary=True)
     qapp.processEvents()
     # 状态栏只给"今日池子几只"；"含自选几只"是细节 → 进详情（用户反馈"状态栏太啰嗦"）
     assert window.status_tags["今日池子"].text() == "今日池子 1"

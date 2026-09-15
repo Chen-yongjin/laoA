@@ -99,6 +99,12 @@ WINDOW_MARGINS = (12, 12, 12, 12)
 #: 瞬时消息（任务完成/失败、刚点过的动作）在状态栏停留多久（秒）。
 #: 10 分钟：够用户看见，又不会永远盖住实时状态。
 STATUS_MESSAGE_TTL = 600.0
+
+#: 数据概况（`engine.summary()`）在界面层的缓存时长（秒）。
+#: 为什么要缓存：它里面有全表 COUNT（行情表几百万行），而界面每 5 秒问一次 ——
+#: 5 秒一轮地把整张表数一遍，用户看到的就是"卡"（下载/导入期间更明显）。
+#: 30 秒足够：状态栏显示的是"有几只、多少行"这种量级信息，不需要秒级精确。
+SUMMARY_TTL = 30.0
 #: 右侧短标签的名字（顺序即显示顺序）。标签文本 = 名字 + 一个短值，
 #: 每项 2~6 个字；没有值的项**整项隐藏**（例如没有持仓就不显示"持仓"）。
 STATUS_TAGS: tuple[str, ...] = ("今日池子", "持仓", "下次选股", "盘中提醒")
@@ -618,6 +624,11 @@ if QT_AVAILABLE:
             #: 启动自检结果（三态）与首次向导
             self.preflight_result: dict | None = None
             self.wizard: Any = None
+            #: 数据概况的缓存与时间戳（见 `_summary_cached`）
+            self._summary: dict | None = None
+            self._summary_at = 0.0
+            #: 上一次刷新是不是因为"正在下载"被跳过了（跳过了就要在结束后补一次）
+            self._heavy_paused = False
             #: 最近一次的大盘概览（拿不到就是 None）——测试与"复制/追查原因"都从它取值
             self.market_overview: dict | None = None
             #: 「关于」对话框（测试与"重复点关于"都要能拿到它）
@@ -1875,45 +1886,103 @@ if QT_AVAILABLE:
             self._message_at = 0.0
             self._message_is_progress = False
 
+        def _heavy_refresh_allowed(self) -> bool:
+            """现在允许做"重"刷新吗（查库 + 重建表格）？
+
+            **下载/导入期间一律不允许**：导入线程正在同一张表上大批量写入，
+            而这几块每 5 秒要跑 11 条 COUNT/聚合（其中两条是全表）、还要按行查最新价
+            （N+1）。这会儿界面被按住几百毫秒到几秒，用户看到的就是"卡死"（实报）。
+            进度条与状态文案不靠这个（进度有回调在推），所以"不刷"期间界面并不瞎。
+            """
+            return not state.is_downloading()
+
         def _tick(self) -> None:
-            """每 5 秒刷新一次（全部包在 try 里：界面刷新绝不崩）。"""
+            """每 5 秒刷新一次（全部包在 try 里：界面刷新绝不崩）。
+
+            下载/导入期间**只刷"轻"的部分**（状态文案 + 托盘），
+            重活（数据概况、四个表格）留到下载结束后一次性补齐 —— 见 `_heavy_refresh_allowed`。
+            """
             try:
-                self._refresh_status()
-                self._refresh_pool()
-                self._refresh_watchlist()
-                self._refresh_positions()
-                self._refresh_alerts()
+                heavy = self._heavy_refresh_allowed()
+                # 「上一拍因为下载被跳过了，这一拍能刷了」→ 强制取一次新的数据概况，
+                # 把下载/导入写进去的行数与只数立刻补上（其余时候由 30 秒 TTL 管）
+                self._refresh_status(force_summary=heavy and self._heavy_paused)
+                if heavy:
+                    self._refresh_pool()
+                    self._refresh_watchlist()
+                    self._refresh_positions()
+                    self._refresh_alerts()
+                    if self._heavy_paused:
+                        # 下载刚结束 → 完整刷一遍已经算过了（上面那些调用），这里只落标记
+                        self._heavy_paused = False
+                else:
+                    # 记住"这次跳过了"：下载一结束的下一拍要把表格补上（不能一直空着）
+                    self._heavy_paused = True
                 # 概览**不在这里刷**：它有自己的 60 秒定时器与 55 秒 TTL
                 # （见 `_market_tick`）—— 5 秒一轮会把配额刷掉
                 self._drain_tray()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"界面刷新异常：{exc}")
 
-        def _refresh_status(self) -> None:
+        def _refresh_status(self, *, force_summary: bool = False) -> None:
             """刷新整个状态区：主状态一句 + 右侧短标签 + tooltip 里的详情。
 
             三处要用同一批事实（池子几只、持仓多少），所以**只查一次库**再分发 ——
             5 秒一轮的刷新里查三遍同样的 SQL 是白费力气。
+            数据概况走 TTL 缓存（下载期间直接用上一次的值），见 `_summary_cached`。
             """
-            facts = self._status_facts()
+            facts = self._status_facts(force_summary=force_summary)
             self.status_label.setText(self._compose_status(facts))
             self._refresh_status_tags(facts)
             details = self._status_details(facts)
             self.status_label.setToolTip(details)
             self.status_details_cache = details      # 【详情】弹窗打开时直接用这一份
 
-        def _status_facts(self) -> dict:
+        def _invalidate_summary(self) -> None:
+            """让"数据概况"缓存作废（数据刚被改过 → 下一次刷新取新值）。
+
+            为什么必须显式作废：概况有 30 秒 TTL（为了下载/导入时不卡），
+            但用户**刚**加了自选/持仓、或刚跑完一次同步时，状态栏上的数字就该立刻跟上 ——
+            不然那 30 秒里显示的是旧数，看起来像"点了没生效"。
+            """
+            self._summary = None
+            self._summary_at = 0.0
+
+        def _summary_cached(self, *, force: bool = False) -> dict:
+            """取"数据概况"（**带 TTL 缓存**；下载期间一律用上一次的值）。
+
+            为什么不直接在每次刷新时 `engine.summary()`：它里面有全表 COUNT
+            （行情表几百万行），而状态区每 5 秒刷一次 —— 那等于让界面陪着导入线程
+            一起按住数据库（用户实报"下载时界面卡死"）。
+            缓存放在**界面层**而不是 `storage`：CLI/调度器要的是实时值，
+            界面要的只是"别每 5 秒把整张表数一遍"，这是展示需求不是数据需求。
+            """
+            downloading = state.is_downloading()
+            now = time.monotonic()
+            if self._summary is not None:
+                # **下载优先**：下载/导入期间一律用上一次的值，`force` 也不行 ——
+                # 导入线程正占着同一张表，这会儿去数几百万行就是把界面按住（实报的"卡死"）
+                if downloading:
+                    return self._summary
+                if not force and now - self._summary_at < SUMMARY_TTL:
+                    return self._summary
+            try:
+                value = self.engine.summary()
+            except Exception as exc:  # noqa: BLE001 - 取不到就用上一次（宁旧勿崩）
+                logger.debug(f"取数据概况失败：{exc}")
+                value = self._summary or {}
+            self._summary = value
+            self._summary_at = now
+            return value
+
+        def _status_facts(self, *, force_summary: bool = False) -> dict:
             """状态区一次刷新要用的全部事实（`_compose_status` / 标签 / 详情共用）。"""
             try:
                 st = self.scheduler.status()
             except Exception as exc:  # noqa: BLE001 - 状态区绝不能因为取状态而崩
                 logger.debug(f"取调度状态失败：{exc}")
                 st = {}
-            try:
-                summary = self.engine.summary()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"取数据概况失败：{exc}")
-                summary = {}
+            summary = self._summary_cached(force=force_summary)
             try:
                 pool_count = len(pool.load_pool(self.cfg.db_path))
             except Exception as exc:  # noqa: BLE001
@@ -2390,6 +2459,7 @@ if QT_AVAILABLE:
 
         def on_watch_add(self) -> None:
             """加自选：名称自动从本地库补；查不到允许添加但提示。"""
+            self._invalidate_summary()
             from laoa_trader.data import storage
 
             symbol = self.watch_symbol.text().strip().zfill(6)
@@ -2439,6 +2509,7 @@ if QT_AVAILABLE:
                     return
 
         def on_watch_remove(self) -> None:
+            self._invalidate_summary()
             from laoa_trader.data import storage
 
             symbol = self._selected_watch_symbol()
@@ -2451,6 +2522,7 @@ if QT_AVAILABLE:
             self._tick()
 
         def on_watch_toggle(self, enabled: bool) -> None:
+            self._invalidate_summary()
             """启用/停用：停用后不进池、不监控，但仍留在列表里。"""
             from laoa_trader.data import storage
 
@@ -2570,6 +2642,10 @@ if QT_AVAILABLE:
 
         def _on_worker_done(self, label: str, result: Any) -> None:
             self.progress.setValue(self.progress.maximum())
+            # 后台任务可能改了数据（下载/同步/建池）：让概况缓存作废，状态栏立刻跟上
+            self._invalidate_summary()
+            # 下载/导入刚结束：下一次刷新要**完整**刷一遍（见 `_tick` 的下载跳过逻辑）
+            self._heavy_paused = True
             if isinstance(result, sync.SyncResult):
                 self._toast(f"{label}完成：{result.message}")
                 if label == "下载历史数据":
@@ -2847,6 +2923,7 @@ if QT_AVAILABLE:
         # ── 持仓操作 ──
 
         def on_add_position(self) -> None:
+            self._invalidate_summary()
             symbol = self.pos_symbol.text().strip()
             try:
                 quantity = int(float(self.pos_qty.text().strip() or 0))
@@ -2871,6 +2948,7 @@ if QT_AVAILABLE:
                 self._toast(f"写入持仓失败：{exc}")
 
         def on_delete_position(self) -> None:
+            self._invalidate_summary()
             symbol, ok = QInputDialog.getText(self, "删除持仓", "要删除的股票代码：")
             if not ok or not symbol.strip():
                 return

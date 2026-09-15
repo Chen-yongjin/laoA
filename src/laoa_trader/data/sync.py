@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -117,6 +118,75 @@ def _note(note_cb: NoteCb | None, text: str) -> None:
         note_cb(str(text))
     except Exception:  # noqa: BLE001 - 显示层的问题不能弄崩下载
         pass
+
+
+#: 导入时每处理多少行"让出一次 GIL"（见 `_yield_gui`）
+YIELD_EVERY_ROWS = 200_000
+#: 读 Parquet 的批大小（行）：按批读 → 批间让出 GIL，界面才有机会画帧
+READ_BATCH_ROWS = 250_000
+#: 进度回调的节流门限：同一阶段最多 ~5 次/秒，或整数百分比变化 ≥1% 才发一次
+PROGRESS_MIN_INTERVAL = 0.2
+PROGRESS_MIN_STEP_PCT = 1.0
+
+#: `_yield_gui()` 每次让出时睡多久（秒）。1ms 足够让主线程把这一帧画完。
+_YIELD_SECONDS = 0.001
+
+
+def _yield_gui() -> None:
+    """把 GIL **让给界面线程** —— 这不是"睡一会儿"，是"别把主线程饿死"。
+
+    为什么必须显式让：读 Parquet、清洗、以及 Python 层逐批处理都是**纯 CPU 的
+    Python/C 代码**，pyarrow/pandas 在这些路径上**不释放 GIL**。导入线程一路握着 GIL，
+    GUI 主线程连事件循环都转不动（Qt 的信号处理也进不来）—— 用户看到的是"界面卡死"，
+    不是"慢"：鼠标点了没反应、窗口发白（Windows 还会标"无响应"）。
+    `time.sleep()` 在 CPython 里会释放 GIL，所以每处理一批睡 1 毫秒就行：一批几十万行
+    才让 1ms，对总耗时的影响可以忽略（十几分钟的导入里多几十毫秒），
+    但界面能把这一帧画完、把"取消"这类点击处理掉。
+    """
+    time.sleep(_YIELD_SECONDS)
+
+
+def throttle_progress(
+    callback: ProgressCb | None,
+    *,
+    min_interval: float = PROGRESS_MIN_INTERVAL,
+    min_step_pct: float = PROGRESS_MIN_STEP_PCT,
+) -> ProgressCb | None:
+    """把一个进度回调包成**节流版**：同阶段最多 ~5 次/秒，或百分比变化 ≥1% 才发。
+
+    为什么要在 sync 层节流：10 年库导入会发出**几千次**进度回调，每一次都是"跨线程排队
+    + `QProgressBar.setValue` + 重绘"；事件队列被灌满之后，界面反而更卡
+    （用户实报"下载时界面卡死"的三个原因之一）。进度条本来也画不出 1% 以内的差别。
+
+    规则（阶段切换与首末值**一定发**，否则进度条会停在 99% 或看起来压根没开始）：
+    - 阶段名变了 → 发；
+    - `done >= total`（收尾）→ 发；
+    - 距上次发出 ≥ `min_interval` 秒 → 发；
+    - 整数百分比变化 ≥ `min_step_pct` → 发。
+
+    CLI 的"按秒/按 10% 打一行"用的是同两个门限（见 `__main__._progress`），
+    规则只有这一处，界面与命令行不会各写一套。
+    """
+    if callback is None:
+        return None
+    box: dict[str, Any] = {"stage": None, "at": 0.0, "pct": -1.0}
+
+    def wrapped(stage: str, done: int, total: int) -> None:
+        pct = (done / total * 100.0) if total > 0 else 0.0
+        first = stage != box["stage"]
+        finished = total > 0 and done >= total
+        now = time.monotonic()
+        if not (first or finished
+                or now - float(box["at"]) >= min_interval
+                or pct - float(box["pct"]) >= min_step_pct):
+            return
+        box.update(stage=stage, at=now, pct=pct)
+        try:
+            callback(stage, int(done), int(total))
+        except Exception:  # noqa: BLE001 - 回调出错不能影响下载
+            logger.debug("进度回调异常，已忽略", exc_info=True)
+
+    return wrapped
 
 
 def _notify(progress_cb: ProgressCb | None, stage: str, done: int, total: int) -> None:
@@ -227,19 +297,33 @@ def load_raw(
 
     frame = None
     try:
+        import pyarrow.compute as pc
         import pyarrow.parquet as pq
 
-        table = pq.read_table(
-            path,
-            columns=read_columns,
-            filters=[("date_ms", ">=", cutoff_ms)] if cutoff_ms is not None else None,
-        )
-        frame = table.to_pandas()
-        del table
+        # **按批读**（而不是一次性 `read_table`）：每批之间 `_yield_gui()` 让出 GIL，
+        # 界面才有机会画帧、响应点击。日期过滤仍在 Arrow 层按批做（比转成 pandas 再过滤省得多）。
+        parquet = pq.ParquetFile(path)
+        chunks = []
+        for batch in parquet.iter_batches(batch_size=READ_BATCH_ROWS,
+                                          columns=read_columns):
+            if cutoff_ms is not None:
+                batch = batch.filter(
+                    pc.greater_equal(batch.column("date_ms"), cutoff_ms)
+                )
+            if batch.num_rows:
+                chunks.append(batch.to_pandas())
+            _yield_gui()
+        del parquet
+        if chunks:
+            frame = pd.concat(chunks, ignore_index=True)
+            chunks.clear()
+        else:
+            frame = pd.DataFrame(columns=read_columns)
     except ImportError:  # pragma: no cover - 没有 pyarrow 时退回 pandas（更慢更吃内存）
         frame = pd.read_parquet(path, columns=read_columns)
         if cutoff_ms is not None:
             frame = frame[frame["date_ms"] >= cutoff_ms].reset_index(drop=True)
+        _yield_gui()
     if frame is None:  # pragma: no cover
         frame = pd.read_parquet(path, columns=read_columns)
 
@@ -254,6 +338,7 @@ def load_events(path: Path) -> Any:
     import pandas as pd
 
     frame = pd.read_parquet(path)
+    _yield_gui()          # 读文件是纯 CPU 的 C 代码，读完整批先让出一次
     frame["symbol"] = frame["thscode"].map(lambda t: hx.to_local_symbol(str(t)))
     frame["ex_date"] = frame["ex_date_ms"].map(hx.ms_to_date)
     for col in ("dividend_per_share", "per_share_bonus", "allotment_ratio", "allotment_price"):
@@ -494,6 +579,9 @@ def _download_history_inner(
     note_cb: NoteCb | None = None,
 ) -> SyncResult:
     """`download_history` 的实现体（拆出来只为让"下载中"这面旗包住整个流程）。"""
+    # 进度回调在这里**只节流一次**，下游（dump 下载 / 导入循环 / 轻量同步）全都受益：
+    # 10 年库能发出几千次回调，不节流会把界面的事件队列灌满（越刷越卡）。
+    progress_cb = throttle_progress(progress_cb)
     try:
         cfg.ensure_dirs()
         client = client or make_client(cfg)
@@ -572,6 +660,7 @@ def _download_history_inner(
         factor_input = load_raw(raw_path, columns=("close",))
         events_all = load_events(event_path)
         factors = compute_adjust_factors(factor_input, events_all)
+        _yield_gui()          # 算因子是 pandas/numpy 纯 CPU 段，算完让出一次
         del factor_input
         adjusted = cumulative_factor(raw, factors)
         # 全市场 10 年约 1000 万行 × float64 ≈ 1GB，两份同时在内存里会翻倍；
@@ -592,11 +681,12 @@ def _download_history_inner(
             # 5000 只股票逐只回调会把界面刷爆，这里按"每 0.5% 或每 5 万行"汇报一次
             step = max(total // 200, 5000)
             last_report = 0
+            last_yield = 0
             # 续传判断分片进行：一次只查 200 只股票已在库的日期（见 storage.dates_for_symbols）
             pending: list[tuple[str, Any]] = []
 
             def _flush(pending: list[tuple[str, Any]]) -> None:
-                nonlocal written, skipped, done, last_report
+                nonlocal written, skipped, done, last_report, last_yield
                 if not pending:
                     return
                 have_map = storage.dates_for_symbols(conn, [s for s, _ in pending])
@@ -622,6 +712,11 @@ def _download_history_inner(
                     if done - last_report >= step:
                         _notify(progress_cb, "写入行情", done, total)
                         last_report = done
+                    if done - last_yield >= YIELD_EVERY_ROWS:
+                        # 按**行数**让出（不是按"每 N 只股票"）：仓位多的股票会让
+                        # 单只的处理时间很长，只按只数让出会漏掉这种情况
+                        last_yield = done
+                        _yield_gui()
                 pending.clear()
 
             for symbol, group in adjusted.groupby("symbol", sort=False):
@@ -850,6 +945,8 @@ def sync_daily(
     """
     cfg = cfg or get_config()
     result = SyncResult(stage="日更数据")
+    # 增量日更同样按批汇报，同样节流（规则与下载共用一份，见 `throttle_progress`）
+    progress_cb = throttle_progress(progress_cb)
     try:
         cfg.ensure_dirs()
         client = client or make_client(cfg)
