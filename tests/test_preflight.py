@@ -42,10 +42,10 @@ def _cfg(tmp_path, **kwargs) -> Config:
 
 
 def test_default_thresholds_match_spec() -> None:
-    """默认：导入 5 年、跨度门槛 4.5 年（否则 5 年的库会被永远判不足）。"""
+    """默认：导入 3 年、跨度门槛 2.5 年（否则 3 年的库会被永远判不足）。"""
     cfg = Config()
-    assert cfg.history_years == 5
-    assert cfg.min_history_years == 4.5
+    assert cfg.history_years == 3
+    assert cfg.min_history_years == 2.5
     assert cfg.min_history_years < cfg.history_years      # 联动约束
     assert cfg.history_warning() == ""
     assert cfg.min_symbols == 4000

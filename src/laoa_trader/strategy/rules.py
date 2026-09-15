@@ -27,7 +27,7 @@ from typing import Any
 from laoa_trader.data.engine import DataEngine
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import factors
-from laoa_trader.strategy.base import BaseStrategy
+from laoa_trader.strategy.base import EVIDENCE_OPEN_ONLY, BaseStrategy
 
 logger = get_logger(__name__)
 
@@ -184,6 +184,13 @@ class DryUpExpansionStrategy(BaseStrategy):
     display_name: str = "地量后放量变盘"
     group: str = "watch"
     target_horizon: int = 3
+    # 成绩单（A 开盘买 / B 尾盘买两套口径）：A +0.09%(t=2.31)、B −0.15%(t=−3.14) ——
+    # **正 α 只活在"开盘买"口径里**，收益全在"9:30 那一秒能不能抢到那个价"上。
+    # 要不要为这个放弃它，是**用户的判断**：所以把它做成可选的内置策略 + 把两套口径的
+    # 数字摆在勾选框旁边，**默认照常推送**（过滤要用户自己开 `push_only_proven`）。
+    evidence: str = EVIDENCE_OPEN_ONLY
+    evidence_note: str = ("正 α 只存在于「开盘买」口径：A +0.09%(t=2.31)；"
+                          "换成尾盘买转负（−0.15%(t=−3.14)）→ 依赖抢开盘，未必吃得进")
 
     top_n: int = 30
     quiet_ratio: float = 0.7
@@ -243,6 +250,11 @@ class FirstLimitUpStrategy(BaseStrategy):
     display_name: str = "首板缩量整理"
     group: str = "watch"
     target_horizon: int = 3
+    # 同上：A +0.21%(t=1.92)、B −0.01%(t=−2.34) —— 首板次日"开盘抢进去"与"尾盘买"的
+    # 差别就是全部收益。同样交给用户判断：可勾选、数字写在旁边、**默认照常推送**。
+    evidence: str = EVIDENCE_OPEN_ONLY
+    evidence_note: str = ("正 α 只存在于「开盘买」口径：A +0.21%(t=1.92)；"
+                          "换成尾盘买转负（−0.01%(t=−2.34)）→ 依赖抢开盘，未必吃得进")
 
     top_n: int = 30
     limit_up: float = 0.095

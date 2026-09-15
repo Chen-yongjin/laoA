@@ -45,6 +45,10 @@ class StrategyGroup:
     horizon: int
     members: tuple[tuple[str, int], ...]
     note: str = ""
+    #: 默认是否启用。**用户拍板后的默认策略集只开 `short`**（见下面的 `disabled_reason`）。
+    enabled_by_default: bool = True
+    #: 停用原因（一句中文，引用成绩单数字）；默认启用的组是空串
+    disabled_reason: str = ""
 
     @property
     def strategies(self) -> tuple[str, ...]:
@@ -67,6 +71,9 @@ GROUPS: dict[str, StrategyGroup] = {
         horizon=2,
         members=(("LadderPullbackStrategy", 2),),
         note="连板回踩低吸：T+2 α +0.47%（t=2.02），唯一在可执行最短持有期上显著",
+        enabled_by_default=False,
+        disabled_reason=("两套口径显著为负：B 口径 −1.21%(t=−5.36)、T+10 −4.24%(t=−8.87)，"
+                         "6 年 0 年为正"),
     ),
     "short": StrategyGroup(
         key="short",
@@ -85,11 +92,30 @@ GROUPS: dict[str, StrategyGroup] = {
         horizon=10,
         members=(("LowPriceStrategy", 3),),
         note="低价股：T+3 +0.13%(t=3.50)、T+10 +0.32%(t=4.43)，四个持有期全显著",
+        enabled_by_default=False,
+        disabled_reason="T+10 波段，与本版「最多持有到 T+3」的定位不符",
     ),
 }
 
 #: 组的展示顺序
 GROUP_ORDER: tuple[str, ...] = tuple(GROUPS)
+
+#: 默认启用的组（**用户拍板**：只留 `short` 那三条 T+3 定位的策略）。
+#: `config.Config.enabled_groups` 的默认值必须与它一致（有测试钉住，防两处漂移）。
+DEFAULT_GROUPS: tuple[str, ...] = tuple(
+    key for key in GROUP_ORDER if GROUPS[key].enabled_by_default
+)
+
+
+def default_group_keys() -> list[str]:
+    """默认启用的组 key（按展示顺序）—— 配置默认值、界面勾选、文档都引用这一份。"""
+    return list(DEFAULT_GROUPS)
+
+
+def disabled_groups() -> dict[str, str]:
+    """停用的组 → 原因（界面与文档展示用；键按展示顺序）。"""
+    return {key: GROUPS[key].disabled_reason for key in GROUP_ORDER
+            if not GROUPS[key].enabled_by_default and GROUPS[key].disabled_reason}
 
 #: 策略类名 → 组 key
 _STRATEGY_TO_GROUP: dict[str, str] = {
@@ -307,14 +333,19 @@ def weights_for(selection: Selection | None = None) -> dict[str, int]:
 
 
 def describe_groups() -> list[str]:
-    """给 CLI/README 用的多行说明。"""
+    """给 CLI/README 用的多行说明（停用的组带原因，用户不用去翻文档）。"""
     lines = []
     for key in GROUP_ORDER:
         group = GROUPS[key]
         members = "、".join(
             f"{name.replace('Strategy', '')}(权重{w})" for name, w in group.members
         )
-        lines.append(f"  {key:<6} {group.label:<10} T+{group.horizon:<3} {members}")
+        mark = "  " if group.enabled_by_default else "⛔"
+        lines.append(f"  {mark}{key:<6} {group.label:<10} T+{group.horizon:<3} {members}")
+        if group.disabled_reason:
+            lines.append(f"       ⛔ 默认停用：{group.disabled_reason}")
+    lines.append("  默认启用的组：" + "、".join(default_group_keys())
+                 + "（在 config.toml 的 enabled_groups 里改）")
     return lines
 
 

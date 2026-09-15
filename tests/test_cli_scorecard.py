@@ -163,3 +163,53 @@ def test_scorecard_can_be_limited_to_one_strategy(cfg, scorecard_config, tmp_pat
     assert "只评估" in text
     assert "低价股" in text
     assert "连板回踩低吸" not in text.split("── T+1")[-1]
+
+
+def test_scorecard_warns_about_a_short_sample() -> None:
+    """3 年库（约 730 个交易日）要提示"逐年稳定性仅供参考"；长样本不提示。
+
+    为什么必须提示：分发包默认只导入 3 年，逐年分组只剩 3 个桶 ——
+    「每一年都为正 ✅」的说服力和 10 年样本不是一回事，用户据此决定策略去留时得知道。
+    """
+    from laoa_trader.research import scorecard as sc
+
+    short = {"days": 730, "start": "2023-01-03", "end": "2025-12-31"}
+    note = sc.sample_note(short)
+    assert "3 年样本较短，逐年稳定性仅供参考" in note
+    assert "2.9 年" in note or "2.8 年" in note          # 用交易日折算，不是日历跨度
+    assert "history_years" in note                        # 想要长样本怎么改也说了
+
+    assert sc.sample_note({"days": 2500}) == ""           # 10 年样本不提示
+    assert sc.sample_note({}) == ""                       # 没数据不硬凑
+    assert sc.sample_note({"days": 0}) == ""
+
+
+def test_short_sample_note_lands_in_the_report(cfg, scorecard_config, tmp_path,
+                                               capsys) -> None:
+    """3 年库跑成绩单：控制台与 Markdown 报告里都要有那句提示。"""
+    _seed_flat_market(cfg.db_path, symbols=110, days=300)     # 300 个交易日 ≈ 1.2 年
+    out_dir = tmp_path / "成绩单"
+    code = cli(["--cli", "--config", scorecard_config, "--scorecard",
+                "--out", str(out_dir), "--groups", "swing"])
+    text = capsys.readouterr().out
+    assert code == 0, text
+    assert "逐年稳定性仅供参考" in text
+    report = sorted(out_dir.glob("策略成绩单_*.md"))[0].read_text(encoding="utf-8")
+    assert "逐年稳定性仅供参考" in report
+
+
+def test_scorecard_defaults_to_all_strategies(cfg, scorecard_config, tmp_path,
+                                              capsys) -> None:
+    """成绩单**默认评全部策略**（含已停用的组），只有显式 `--groups/--strategies` 才收窄。
+
+    为什么不跟着选股开关走：默认策略集只开 `short`，跟着走就会只评 3 条 ——
+    而成绩单正是"决定谁该留"的依据，被停用那两组的数字恰恰是最需要看到的。
+    """
+    _seed_flat_market(cfg.db_path, symbols=110, days=300)
+    code = cli(["--cli", "--config", scorecard_config, "--scorecard",
+                "--out", str(tmp_path / "out")])
+    text = capsys.readouterr().out
+    assert code == 0, text
+    assert "全部策略" in text and "不受选股开关限制" in text
+    assert "只评估" not in text
+    assert "连板回踩低吸" in text                     # 停用组（ultra）也在评估范围内

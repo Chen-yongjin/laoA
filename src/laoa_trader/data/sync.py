@@ -63,14 +63,14 @@ DEFAULT_INDICES: dict[str, str] = {
     "sz.399006": "399006.SZ",  # 创业板指
 }
 
-#: 同花顺 `daily-k` dump **固定**覆盖约 10 年（端点没有"只要 5 年"的选项，
+#: 同花顺 `daily-k` dump **固定**覆盖约 10 年（端点没有"只要 3 年"的选项，
 #: 所以只能整个下载下来、导入时按 `history_years` 过滤）
 DUMP_SPAN_YEARS = 10
 
 #: 首次导入的默认年限（可被 config 的 `history_years` 覆盖）。
-#: 默认 5 年：全市场约 500 万行，分发包更小、首次下载更快；
-#: 要做长样本回测就把 `history_years` 改成 10（库会大一倍、内存峰值也更高）。
-DEFAULT_HISTORY_YEARS = 5
+#: 默认 **3 年**（用户拍板）：全市场约 300 万行，分发包更小、首次导入更快；
+#: 要做长样本回测（成绩单/逐年稳定性）就把 `history_years` 改成 10。
+DEFAULT_HISTORY_YEARS = 3
 
 #: 兼容旧名（历史上这个常量表示"dump 覆盖 10 年"）
 HISTORY_YEARS = DUMP_SPAN_YEARS
@@ -282,7 +282,7 @@ def load_raw(
         since: 只要 `date >= since`（`YYYY-MM-DD`）的行；None = 全部。
             **先在 Arrow 层按列 + 日期过滤，再转 pandas** ——
             10 年全市场 1028 万行直接进 pandas 峰值约 2GB，先过滤能省掉大部分，
-            分发给别人（默认只导入 5 年）时尤其明显。
+            分发给别人（默认只导入 3 年）时尤其明显。
         columns: 只要这些行情列（默认 OHLCV+成交额）。
             算复权因子只需要 `close`，这里传 `("close",)` 能把内存再压一大截。
 
@@ -621,7 +621,7 @@ def _download_history_inner(
                                    progress_cb=progress_cb, should_stop=should_stop,
                                    note_cb=note_cb)
 
-        # 2) 解析（**导入按 history_years 过滤**；dump 本身仍是整个 10 年，没法只下 5 年）
+        # 2) 解析（**导入按 history_years 过滤**；dump 本身仍是整个 10 年，没法只下 3 年）
         years = float(getattr(cfg, "history_years", DEFAULT_HISTORY_YEARS) or 0)
         cutoff = ""
         if years > 0:
@@ -1243,7 +1243,7 @@ def sync_light(
     - 交易日历决定"落后几个交易日"，最便宜（1 个请求），放最前；
     - **行业归属必须在下完历史行情之后**（`sync_industry` 只给库里已有行情的股票写行业，
       见那里的 `known` 集合）—— 行情还没落库时整个映射会被丢掉，
-      这就是"下完 5 年数据行业覆盖率还是 0%"那个 bug 的机制；
+      这就是"下完 N 年数据行业覆盖率还是 0%"那个 bug 的机制；
     - 指数排最后：它最慢（几只指数各拉一段日线），而且缺了不影响选股。
 
     每一项**独立成败**：某一项失败不返回失败整体，调用方按各自的结果决定怎么提示。

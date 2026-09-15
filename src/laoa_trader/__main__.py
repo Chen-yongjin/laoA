@@ -396,17 +396,24 @@ def _scorecard_command(cfg, args) -> int:
 
     out_dir = Path(args.out) if args.out else Path.cwd() / "策略成绩单"
     specs = list(scorecard_mod.BUILTIN_SPECS)
-    # 允许用 --groups / --strategies 只评一部分（与选股链路同一套选择语义）
+    # 范围：**默认评全部策略**，只有显式给了 `--groups` / `--strategies` 才收窄。
+    #
+    # 为什么不跟着选股开关（`enabled_groups`）走：成绩单本来就是"决定谁该留"的依据 ——
+    # 默认策略集收窄成只开 `short` 之后，再跟着它走就会**只评 3 条**，
+    # 被停用的那两组连数字都看不到，等于把做判断需要的证据藏起来了。
     from laoa_trader.strategy import groups as groups_mod
 
-    selection = groups_mod.resolve_from_config(cfg)
-    if not selection.empty and not selection.default_all:
-        wanted = set(selection.strategies)
-        filtered = [spec for spec in specs if spec.key in wanted]
-        # 只在**真的筛掉了**策略时才提示（默认配置就是全选，否则会让人以为漏跑了）
-        if filtered and len(filtered) != len(specs):
-            specs = filtered
-            print(f"只评估：{selection.describe()}")
+    if _split_list(args.groups) or _split_list(args.strategies):
+        selection = groups_mod.resolve_from_config(cfg)
+        if not selection.empty and not selection.default_all:
+            wanted = set(selection.strategies)
+            filtered = [spec for spec in specs if spec.key in wanted]
+            if filtered and len(filtered) != len(specs):
+                specs = filtered
+                print(f"只评估：{selection.describe()}")
+    else:
+        print("评估范围：全部策略（含已停用的组——成绩单不受选股开关限制，"
+              "用 --groups/--strategies 可以收窄）")
 
     print(f"正在评估 {len(specs)} 条策略（库：{db_path}）")
     print("  执行口径：" + "；".join(
@@ -757,6 +764,9 @@ def cli(argv: list[str] | None = None) -> int:
             print(f"  ⚠️ {err}")
         if report.get("push_skipped"):
             print(f"未推送：{report['push_skipped']}")
+        if report.get("push_note"):
+            # 推送过滤（`push_only_proven`）：把"跳过哪些、为什么"直接打出来
+            print(f"推送过滤：{report['push_note']}")
         if report.get("notify"):
             from laoa_trader.notify import summarize
 

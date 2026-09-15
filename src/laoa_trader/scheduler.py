@@ -323,6 +323,8 @@ def run_daily(
         "sync": [], "picks": 0, "signals": 0, "pool": [], "notify": {}, "errors": [],
         "data_date": None, "selection": selection.as_dict() if selection else {},
         "pushed": False, "push_skipped": None,
+        # 推送过滤（`push_only_proven`）：被跳过的标的与中文原因 —— 状态栏/日志/报告都从这里取
+        "push_skipped_rows": [], "push_note": None, "push_skipped_kind": None,
     }
 
     strategies_off = selection is not None and selection.empty
@@ -391,9 +393,32 @@ def run_daily(
         from laoa_trader.data import storage
         from laoa_trader.notify import notify_all, summarize
 
+        # 推送范围：**默认全推**；只有用户主动打开 `push_only_proven` 才收窄成
+        # "只推有边际的策略标的"。那时 `open_only` 那两条策略（地量后放量变盘 /
+        # 首板缩量整理：正 α 只在"开盘买"口径下存在，尾盘买就转负）的标的会被跳过 ——
+        # 但它们**照常进池、照常显示在表格/卡片上**，而且跳过的原因会写进推送/日志/状态栏。
+        push_rows, skipped_rows = pool.split_push_rows(pool_rows, cfg)
+        report["push_skipped_rows"] = [
+            {"symbol": r.get("symbol"), "name": r.get("name"),
+             "strategies": r.get("strategies") or r.get("strategy") or ""}
+            for r in skipped_rows
+        ]
+        if skipped_rows:
+            report["push_note"] = pool.skipped_push_note(skipped_rows)
+            logger.info("推送过滤：" + report["push_note"])
+        if not push_rows:
+            # 今天命中的全是"依赖开盘"的标的 → **不推**，但要把原因说清楚
+            report["push_skipped"] = report["push_note"] or "今天没有可推送的标的"
+            report["push_skipped_kind"] = "filtered"
+            logger.info("跳过推送：" + report["push_skipped"])
+            return report
+
         title = f"📈 老A选股助手-选股池 | {report['data_date']}"
-        lines = pool.format_pool_lines(pool_rows)
-        lines.extend(_pool_plan_lines(pool_rows, cfg))
+        lines = pool.format_pool_lines(push_rows)
+        lines.extend(_pool_plan_lines(push_rows, cfg))
+        if skipped_rows:
+            # 正文里也留一句：用户收到推送时就知道"今天还有几只没推、为什么"
+            lines.append(report["push_note"])
         day = report["data_date"] or intraday.now_shanghai().strftime("%Y-%m-%d")
         fingerprint = pool_fingerprint(title, lines)
         try:
@@ -405,6 +430,7 @@ def run_daily(
 
         if not first_time:
             report["push_skipped"] = f"{day} 已推送过相同内容的池子（指纹 {fingerprint}）"
+            report["push_skipped_kind"] = "duplicate"
             logger.info("跳过推送：" + report["push_skipped"])
             return report
 

@@ -453,9 +453,11 @@ def test_scan_result_feeds_the_detail_dialog(cfg, nopause) -> None:
     _seed(cfg, symbols)
     with storage.connect(cfg.db_path) as conn:
         # 让 600001 进池子（池内的票在结果里要标出来）
+        # 用**默认启用组**里的策略（`short`）—— "池内"标记走的是"只盯启用组的标的"，
+        # 塞一条停用组（swing）的策略进去，它本来就不该被认成"池内"
         storage.save_pool(conn, [{"symbol": "600001", "name": "主板甲",
-                                  "strategy": "LowPriceStrategy",
-                                  "strategies": "LowPriceStrategy", "score": 1.0,
+                                  "strategy": "ReversalStrategy",
+                                  "strategies": "ReversalStrategy", "score": 1.0,
                                   "reason": "r"}], DAY)
     client = FakeClient(rows=[
         _row("300001", pct=5.0, name="创业板甲"),

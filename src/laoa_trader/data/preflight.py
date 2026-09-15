@@ -112,8 +112,8 @@ def check(
         }
     """
     cfg = cfg or get_config()
-    min_years = float(getattr(cfg, "min_history_years", 4.5) or 0)
-    # 配置写矛盾时**先说清楚**：否则 5 年的库会被永远判成"历史不足"，
+    min_years = float(getattr(cfg, "min_history_years", 2.5) or 0)
+    # 配置写矛盾时**先说清楚**：否则 3 年的库会被永远判成"历史不足"，
     # 用户只会看到"又要重新下载"，根本猜不到是配置写错了
     linkage_problem = cfg.history_warning() if hasattr(cfg, "history_warning") else ""
     min_symbols = int(getattr(cfg, "min_symbols", 4000) or 0)
@@ -125,7 +125,7 @@ def check(
     result: dict[str, Any] = {
         "status": NEEDS_FULL,
         "reason": "",
-        "history_years": float(getattr(cfg, "history_years", 5) or 0),
+        "history_years": float(getattr(cfg, "history_years", 3) or 0),
         "min_history_years": min_years,
         "stale_trading_days": 0,
         "rows": 0,

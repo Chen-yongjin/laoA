@@ -1360,6 +1360,9 @@ if QT_AVAILABLE:
             card.symbol = str(row.get("symbol") or "")
             card.name = str(row.get("name") or "")
             card.label = str(row.get("label") or "")
+            # 「（依赖开盘）」标记：卡片上也要看得见（正 α 只在开盘买口径下的提示）
+            card.evidence_text = str(row.get("evidence_text") or "")
+            card.label_with_evidence = f"{card.label}{card.evidence_text}"
             card.source_label = str(row.get("source_label") or "")
             card.note = str(row.get("note") or "")
             card.industry = str(row.get("industry") or "")
@@ -1381,7 +1384,10 @@ if QT_AVAILABLE:
             head.addWidget(title)
             head.addStretch(1)
             if card.label:
-                head.addWidget(QLabel(card.label))
+                label = QLabel(card.label_with_evidence)
+                if card.evidence_text:
+                    label.setToolTip(pool_mod.open_only_tooltip(card.label))
+                head.addWidget(label)
             if row.get("score") is not None:
                 # 没分数就不显示 —— 表格里那种"空单元格 + 一个 —"在卡片上很难看
                 head.addWidget(QLabel(f"分数 {card.score_text}"))
@@ -1516,12 +1522,25 @@ if QT_AVAILABLE:
             # ── 策略组 ──
             layout.addWidget(QLabel("策略组（决定跑哪些策略；改动保存后立即生效）"))
             self.group_boxes: dict[str, Any] = {}
+            self.group_reason_labels: dict[str, Any] = {}
             for key in groups_mod.GROUP_ORDER:
                 group = groups_mod.GROUPS[key]
                 box = QCheckBox(
                     f"{group.label}（T+{group.horizon}）—— {group.note}"
                 )
                 box.setChecked(key in (self.cfg.enabled_groups or []))
+                if group.disabled_reason:
+                    # 停用的组：**默认不勾**，并把"为什么停用"直接写在勾选项的
+                    # tooltip 与小字说明里 —— 用户不该为了搞清"这组怎么没了"去翻文档
+                    box.setToolTip(f"默认停用：{group.disabled_reason}")
+                    self.group_boxes[key] = box
+                    layout.addWidget(box)
+                    note = QLabel(f"　　⛔ 默认停用：{group.disabled_reason}")
+                    note.setObjectName("statusTag")      # 小号灰字（与状态区同一档样式）
+                    note.setWordWrap(True)
+                    self.group_reason_labels[key] = note
+                    layout.addWidget(note)
+                    continue
                 self.group_boxes[key] = box
                 layout.addWidget(box)
 
@@ -1533,10 +1552,17 @@ if QT_AVAILABLE:
             for key in groups_mod.GROUP_ORDER:
                 group = groups_mod.GROUPS[key]
                 for class_name, weight in group.members:
+                    cls = rules_mod.STRATEGIES.get(class_name)
+                    note = str(getattr(cls, "evidence_note", "") or "")
                     box = QCheckBox(
                         f"　{group.label} / {rules_mod.strategy_label(class_name)}"
-                        f"（权重 {weight}）"
+                        f"（权重 {weight}）" + ("　⚠️ 依赖开盘" if note else "")
                     )
+                    if note:
+                        # 依赖开盘的策略：**可勾选、照常推送**，把两套口径的数字放在提示里
+                        # —— 判断权交给用户，程序只负责把数据摆在眼前
+                        box.setToolTip(note + "\n（标的照常推送；想只看「两套口径都为正」的"
+                                       "标的，把 config.toml 的 push_only_proven 设成 true）")
                     box.setChecked(class_name in enabled_now)
                     self.strategy_boxes[class_name] = box
                     layout.addWidget(box)
@@ -1898,8 +1924,8 @@ if QT_AVAILABLE:
             dialog.setWindowTitle("首次运行 · 下载历史数据")
             dialog.resize(680, 420)
             layout = QVBoxLayout(dialog)
-            # 导入年限（默认 5 年；0 表示不限制）
-            years = float(getattr(self.cfg, "history_years", 5) or 0)
+            # 导入年限（默认 3 年；0 表示不限制）
+            years = float(getattr(self.cfg, "history_years", 3) or 0)
             layout.addWidget(QLabel("本地数据还不能用来选股："))
             reason = QLabel(f"· {result.get('reason')}")
             reason.setWordWrap(True)
@@ -2014,7 +2040,7 @@ if QT_AVAILABLE:
                 # 这里**不**走 run_preflight()：那会在"还是不够用"时再弹一次向导，
                 # 用户刚下完就被弹窗怼一脸不合适；只把结论写进状态栏。
                 # 轻量项（行业归属/日历/指数）缺了就**先自动补一次**再复查：
-                # 刚下完 5 年行情的用户，不该因为少一个行业归属被告知"数据仍不可用"
+                # 刚下完几年行情的用户，不该因为少一个行业归属被告知"数据仍不可用"
                 gate = data_gate(self.cfg, self.engine, auto_sync_light=True)
                 self.preflight_result = gate.get("result") or None
                 self._set_status(
@@ -2516,7 +2542,14 @@ if QT_AVAILABLE:
                 plan_text = self._plan_summary(row, price)
                 self.pool_table.setItem(i, 0, QTableWidgetItem(str(row["symbol"])))
                 self.pool_table.setItem(i, 1, QTableWidgetItem(str(row.get("name") or "")))
-                self.pool_table.setItem(i, 2, QTableWidgetItem(str(row.get("label") or "")))
+                # 策略列带"证据标记"：`（依赖开盘）` = 该策略的正 α 只在"开盘买"口径下
+                # 存在（见 pool.evidence_text）—— 一眼能看出来，判断权交给用户
+                label_text = str(row.get("label") or "")
+                evidence = str(row.get("evidence_text") or "")
+                item = QTableWidgetItem(f"{label_text}{evidence}")
+                if evidence:
+                    item.setToolTip(pool_mod.open_only_tooltip(label_text))
+                self.pool_table.setItem(i, 2, item)
                 self.pool_table.setItem(i, 3, QTableWidgetItem(str(row.get("source_label") or "—")))
                 self.pool_table.setItem(i, 4, QTableWidgetItem(str(row.get("note") or "")))
                 # 「涨停」列：`2 连板 · 半导体设备`（不在今日涨停池里就是空的）
@@ -3309,7 +3342,17 @@ if QT_AVAILABLE:
 
                 bits.append("通知：" + _sum(report.get("notify") or {}))
             elif report.get("push_skipped"):
-                bits.append("未重复推送")
+                # 两种"没推"要分清：① 同一天同一批内容已经推过（幂等，正常现象）；
+                # ② 今天命中的全是「依赖开盘」的策略（默认不推）—— 后者必须把原因说出来，
+                #    否则用户会以为"策略今天没选到票"
+                if report.get("push_skipped_kind") == "filtered":
+                    bits.append("未推送：" + str(report["push_skipped"]))
+                else:
+                    bits.append("未重复推送")
+            if report.get("push_note"):
+                skipped = report.get("push_skipped_rows") or []
+                bits.append(f"已跳过 {len(skipped)} 只依赖开盘的标的（进池但没推送，"
+                            "因为 push_only_proven 开着）")
             errors = report.get("errors") or []
             text = f"{label}完成：" + "，".join(bits)
             if errors:

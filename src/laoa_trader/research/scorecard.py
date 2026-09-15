@@ -122,10 +122,16 @@ MIN_MARKET_SYMBOLS = 5
 
 #: **库级**结论门槛（比"笔数"更前置的一道闸）：库太小就不该给任何结论。
 #: 理由：等权基准要的是"全市场"，几十只股票的平均收益不是市场；
-#: 历史太短则连"是不是只有某一年有效"都无从谈起（分发包默认导入 5 年，够用）。
+#: 历史太短则连"是不是只有某一年有效"都无从谈起（分发包默认导入 **3 年**，够用）。
 #: 低于门槛时报告里必须直说"样本不足，无法评估"，并列出库里的行数与日期范围。
 MIN_DB_SYMBOLS = 100
 MIN_DB_DAYS = 250
+
+#: 样本跨度低于这个年数时，报告里要**额外**提示一句"逐年稳定性仅供参考"。
+#: 为什么：分发包默认只导入 3 年（约 730 个交易日）—— 刚好过 MIN_DB_DAYS 的门槛，
+#: 但逐年分组只剩 3 个桶，"每一年都为正 ✅"的说服力和 10 年样本完全不是一回事，
+#: 用户拿这个结论去决定策略去留时得知道这一点。
+SHORT_SAMPLE_YEARS = 4.0
 
 #: 行情表候选（按顺序探测）：
 #: - `stock_daily_hfq` = 桌面版的**后复权视图**（原始价 × factor 实时算出）；
@@ -1213,7 +1219,7 @@ def db_sufficiency(
             f"样本不足：库太小（{symbols} 只 / {days} 个交易日，"
             f"低于门槛 {min_symbols} 只 / {min_days} 个交易日）—— "
             "等权基准要的是**全市场**，几十只股票的均值不是市场；历史太短也没法看逐年稳定性。"
-            f"先把数据下够（`python -m laoa_trader --cli --download`，默认 5 年）；{span}"
+            f"先把数据下够（`python -m laoa_trader --cli --download`，默认 3 年）；{span}"
         )
     return True, ""
 
@@ -1373,6 +1379,26 @@ def _year_flag(row: dict) -> str:
     return f"⚠️{good}/{total}"
 
 
+def sample_note(db_info: dict | None) -> str:
+    """样本太短时的中文提示（够长时返回空串）。
+
+    用**交易日数**折算年数（250 交易日/年），而不是看起止日期的日历跨度：
+    停牌、缺数据都会让日历跨度虚高，交易日数才是真正的样本量。
+    """
+    info = db_info or {}
+    days = int(info.get("days") or 0)
+    if days <= 0:
+        return ""
+    years = days / 250.0
+    if years >= SHORT_SAMPLE_YEARS:
+        return ""
+    return (f"⚠️ 样本只有约 {years:.1f} 年（{days} 个交易日，"
+            f"{info.get('start') or '—'} → {info.get('end') or '—'}）—— "
+            "**3 年样本较短，逐年稳定性仅供参考**：只有 3 个年度分组时，"
+            "「每一年都为正」的偶然性远大于长样本；想要更可靠的结论，"
+            "把 config.toml 的 history_years 改成 10 重新导入。")
+
+
 def format_table(
     results: Sequence[dict],
     *,
@@ -1463,6 +1489,10 @@ def format_table(
     for result in insufficient:
         lines.append(f"  ⚠️ {result['label']}：{result['reason']}")
     db_info = results[0].get("db_info") or {}
+    note = sample_note(db_info)
+    if note:
+        lines.append("")
+        lines.append(note)
     if db_info:
         lines.append(f"数据来源：{db_info.get('backend')} {db_info.get('path')}；"
                      f"{db_info.get('rows'):,} 行 / {db_info.get('symbols')} 只 / "
@@ -1593,6 +1623,9 @@ def write_markdown(results: Sequence[dict], path: str | Path, *, title: str = "�
             f"- 涨停池：{db_info.get('limit_up_days')} 个交易日",
             "",
         ]
+        note = sample_note(db_info)
+        if note:                       # 3 年库（分发包默认）：逐年稳定性要打折扣看
+            lines += [f"> {note}", ""]
     lines += [
         "## 口径（先看这里再看数字）",
         "",

@@ -112,7 +112,8 @@ DEFAULT_NOTIFY_FLASH_SECONDS = 6
 #: `"maybe"` 应该是"没生效、仍是默认开着"，而不是"功能被悄悄关掉了"。
 #: 提醒浮窗与提示音同理 —— 写错一个词不该让"提醒"这个核心功能静默消失。
 _STRICT_BOOL_FIELDS = frozenset(
-    {"market_overview", "market_breadth", "notify_popup", "notify_sound"}
+    {"market_overview", "market_breadth", "notify_popup", "notify_sound",
+     "push_only_proven"}
 )
 
 #: 严格的真值 / 假值（与 `_as_bool` 的真值表保持一致）
@@ -338,25 +339,42 @@ class Config:
     data_dir: Path = field(default_factory=default_data_dir)
 
     # ── 策略组（跑哪几组 / 哪几条策略）──
-    #: 启用的策略组：ultra（超短·隔日 T+2）/ short（短线·T+3）/ swing（波段·T+10）
-    enabled_groups: list[str] = field(
-        default_factory=lambda: ["ultra", "short", "swing"]
-    )
+    #: 启用的策略组：ultra（超短·隔日 T+2）/ short（短线·T+3）/ swing（波段·T+10）。
+    #: **默认只开 `short`**（用户拍板后的默认策略集，与 `groups.default_group_keys()`
+    #: 一致，有测试钉住）：
+    #:   - ultra 连板回踩低吸：两套口径显著为负（B −1.21% t=−5.36、T+10 −4.24% t=−8.87，
+    #:     6 年 0 年为正）→ 停用；
+    #:   - swing 低价股是 T+10 波段，与本版「最多持有到 T+3」的定位不符 → 停用。
+    #: 两组的**代码都还在**（想自己开就把键写回 `enabled_groups`，见 groups.py）。
+    enabled_groups: list[str] = field(default_factory=lambda: ["short"])
     #: 只跑列出的策略（类名或中文名都认）；**留空 = 该组全选**。
     #: 与 enabled_groups 同时非空时取交集；两者都空 = 全选（安全默认）。
     enabled_strategies: list[str] = field(default_factory=list)
+    #: 推送是否**只推"有边际"的策略标的**（**默认 false = 启用的策略都推送**）。
+    #:
+    #: 为什么默认关（用户拍板）：`short` 组里有两条策略（地量后放量变盘、首板缩量整理）
+    #: 的正 α 只存在于"开盘买"口径 —— 换成尾盘买就转负（−0.15% / −0.01%，见
+    #: `strategy/rules.py` 的 `evidence_note`）。但**要不要为这个放弃它们，是用户的判断**：
+    #: 程序的职责是把数据摆在眼前（策略勾选框旁边就写着两套口径的数字 + 标的上的
+    #: 「（依赖开盘）」标记），**而不是替用户静默过滤掉**。所以默认全推。
+    #: 想收紧就把这一项改成 true：那时只推"两套口径都为正"的策略标的，
+    #: 被跳过的会在推送正文/日志/状态栏里说明原因（绝不会静默少推）。
+    push_only_proven: bool = False
 
     # ── 运行时自检（本地数据够不够用，三态判定；见 data/preflight.py）──
     #: 缺数据时是否自动下载：**增量自动**（1 次请求）；全量始终需要明确同意
     #: （界面向导点"开始下载"、CLI 加 --auto-download）
     auto_download_on_start: bool = True
     #: 首次下载**导入**多少年历史（同花顺 dump 固定 10 年，导入时按这个值过滤）。
-    #: 默认 5 年：全市场约 500 万行，分发出去的库更小、首次下载更快；
-    #: 想要 10 年（例如自己做长样本回测）把它改成 10。
-    history_years: float = 5.0
+    #: 默认 **3 年**（用户拍板）：全市场约 300 万行，库更小、首次导入更快。
+    #: 注意 dump 本身**没法只下 3 年**（端点固定 10 年数据集），只是导入时按这个值过滤。
+    #: 想要长样本（自己跑成绩单/回测）把它改成 10：下载文件一样，只是导入更多行。
+    history_years: float = 3.0
     #: 历史跨度下限（年）——低于它就认为"历史不够，需要重新下载"。
-    #: **必须小于** history_years，否则 5 年的库会被永远判成"不足"（见 history_warning()）
-    min_history_years: float = 4.5
+    #: **必须小于** history_years，否则 3 年的库会被永远判成"不足"（见 history_warning()）。
+    #: 2.5 的理由：3 年导入后实际跨度受交易日历与"最新交易日"影响会略小于 3，
+    #: 留 0.5 年的余量既不会误判"不足"，也仍然能挡住"只下了一年半"这种半成品。
+    min_history_years: float = 2.5
     #: 最新交易日股票数下限——低于它说明只下了一部分
     min_symbols: int = 4000
     #: `ready` 允许的最大落后交易日数（0 = 必须是最新交易日）
@@ -645,12 +663,12 @@ class Config:
         """`history_years` / `min_history_years` 写矛盾时的中文提示（空串 = 没问题）。
 
         为什么必须联动：自检的 ready 判据是"跨度 ≥ min_history_years"。
-        如果 min_history_years（默认 4.5）不小于 history_years（默认 5），
+        如果 min_history_years（默认 2.5）不小于 history_years（默认 3），
         那么**按配置导入的库永远达不到 ready**，用户会被反复催着重新下载 ——
         这个组合必须当场说清楚，不能让它表现成"数据老是缺"。
         """
-        years = float(getattr(self, "history_years", 5) or 0)
-        floor = float(getattr(self, "min_history_years", 4.5) or 0)
+        years = float(getattr(self, "history_years", 3) or 0)
+        floor = float(getattr(self, "min_history_years", 2.5) or 0)
         if years <= 0:
             return f"history_years 必须大于 0（当前 {years:g}）"
         if floor >= years:
@@ -870,6 +888,8 @@ def _apply_env(cfg: Config) -> Config:
         # 应该是"没生效、仍是默认开着"，而不是把一个核心功能悄悄关掉
         ("NOTIFY_POPUP", "notify_popup"),
         ("NOTIFY_SOUND", "notify_sound"),
+        # 推送过滤：写错（"maybe"）→ 回到默认（**全推**，与新默认一致）
+        ("PUSH_ONLY_PROVEN", "push_only_proven"),
     ):
         raw = _env_str(env_name)
         if raw is not None:

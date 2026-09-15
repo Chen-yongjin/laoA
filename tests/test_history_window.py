@@ -245,8 +245,8 @@ def test_span_three_years_needs_full(tmp_path) -> None:
 
 def test_config_linkage_defaults() -> None:
     cfg = Config()
-    assert cfg.history_years == 5
-    assert cfg.min_history_years == 4.5
+    assert cfg.history_years == 3
+    assert cfg.min_history_years == 2.5
     assert cfg.min_history_years < cfg.history_years
     assert cfg.history_warning() == ""
 

@@ -167,8 +167,9 @@ def test_run_daily_notifies_pool_with_plan_params(cfg, db, monkeypatch) -> None:
     monkeypatch.setattr(scheduler.sync, "daily_update", lambda *a, **k: [])
 
     def fake_run_all(engine, settings=None, **kwargs):
-        return {"LowPriceStrategy": [{"symbol": "600001", "name": "低价样本",
-                                      "reason": "低价股"}]}, []
+        # 用默认启用组（short）里的策略：池子只收启用组的标的（停用组的会被丢掉）
+        return {"ReversalStrategy": [{"symbol": "600001", "name": "低价样本",
+                                      "reason": "短期反转"}]}, []
 
     monkeypatch.setattr("laoa_trader.strategy.rules.run_all", fake_run_all)
     monkeypatch.setattr("laoa_trader.pool.hot_industries", lambda db_path, **k: {})

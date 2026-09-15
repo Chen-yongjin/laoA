@@ -40,6 +40,7 @@ from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import groups, rules
+from laoa_trader.strategy.base import EVIDENCE_OPEN_ONLY, EVIDENCE_PROVEN
 
 logger = get_logger(__name__)
 
@@ -399,6 +400,84 @@ def pool_changed(db_path: str, pool: list[dict], day: str | None = None) -> bool
     return existing != current
 
 
+#: 界面里给"依赖开盘执行"那类策略标的加的短标记（**可断言**，不只写在文档里）。
+#: 注意它是**提示**不是过滤：这两条策略照常推送（`push_only_proven` 默认 false），
+#: 标记只是把"正 α 只在开盘买口径下存在"这件事摆在用户眼前，让他自己决定要不要跟。
+OPEN_ONLY_TAG = "依赖开盘"
+
+
+def strategy_evidence(class_name: str) -> str:
+    """策略的证据强度（`proven` / `open_only`；认不出按 `proven`）。
+
+    为什么认不出也算 `proven`：将来新增的策略如果忘了标注，**默认照常推送**
+    （"少推了"比"多推了"更难被发现，用户会以为策略没选到票）。
+    """
+    cls = rules.STRATEGIES.get(str(class_name or ""))
+    return getattr(cls, "evidence", EVIDENCE_PROVEN) if cls else EVIDENCE_PROVEN
+
+
+def evidence_text(class_name: str) -> str:
+    """池子行上的证据标记文本：`open_only` → `（依赖开盘）`，其余为空串。"""
+    return f"（{OPEN_ONLY_TAG}）" if strategy_evidence(class_name) == EVIDENCE_OPEN_ONLY else ""
+
+
+def open_only_tooltip(strategy_label: str = "") -> str:
+    """界面上悬停那个「（依赖开盘）」标记时的中文解释（**把数据摆出来，不替用户做决定**）。"""
+    prefix = f"{strategy_label}：" if strategy_label else ""
+    return (prefix + "正 α 只存在于「开盘买」口径，收益全在「9:30 那一秒能不能抢到"
+            "那个价」上。策略照常推送（默认全推）；想只看「两套口径都为正」的标的，"
+            "就把 push_only_proven 设成 true —— 那时被跳过的会在推送正文/日志/状态栏"
+            "里说明原因。")
+
+
+def row_is_proven(row: dict) -> bool:
+    """这一行**有没有边际**：至少有一条"两套口径都为正"的策略选中它，就算有。
+
+    多策略同时选中的情况很常见（`strategies` 是逗号分隔的多条）：只要有一条 proven，
+    这个标的就值得推 —— 不能因为"顺带被某条 open_only 的策略也选中"就把整行丢掉。
+    自选股（没有策略）永远算有边际：用户自己加的，本来就要看。
+    """
+    names = [n for n in str(row.get("strategies") or "").split(",") if n.strip()]
+    if not names:
+        names = [str(row.get("strategy") or "")]
+    names = [n.strip() for n in names if n.strip()]
+    if not names:
+        return True                      # 纯自选
+    return any(strategy_evidence(name) != EVIDENCE_OPEN_ONLY for name in names)
+
+
+def split_push_rows(
+    pool_rows: list[dict], cfg: Any = None
+) -> tuple[list[dict], list[dict]]:
+    """把池子拆成 `(要推送的, 被跳过的)`。
+
+    **默认全推**（`push_only_proven = false`）：启用的策略选出来的标的都推送 ——
+    "要不要跟'依赖开盘'的策略"是用户的判断，程序不替他静默过滤。
+
+    只有用户主动把 `push_only_proven` 打开时才收窄：那时**只推"有边际"的策略标的**，
+    `evidence = open_only`（正 α 只在"开盘买"口径下存在）的标的**不推送**，
+    但它们**照常进池、照常显示在表格/卡片上** —— 用户看得到，只是不打扰他。
+    """
+    cfg = cfg or get_config()
+    if not bool(getattr(cfg, "push_only_proven", False)):
+        return list(pool_rows), []
+    keep, skipped = [], []
+    for row in pool_rows:
+        (keep if row_is_proven(row) else skipped).append(row)
+    return keep, skipped
+
+
+def skipped_push_note(skipped: list[dict]) -> str:
+    """被跳过的那些标的，在推送正文末尾/日志里的**中文说明**（说清"为什么没推"）。"""
+    if not skipped:
+        return ""
+    names = "、".join(f"{r.get('name')}（{r.get('symbol')}）" for r in skipped[:5])
+    more = f" 等 {len(skipped)} 只" if len(skipped) > 5 else ""
+    return (f"另有 {len(skipped)} 只只由「{OPEN_ONLY_TAG}」的策略选出（正 α 只在开盘买口径"
+            f"下存在），按 `push_only_proven = true` 未推送：{names}{more}；"
+            "完整清单见股票池页，想看推送就把该开关关掉。")
+
+
 def format_pool_lines(pool: list[dict]) -> list[str]:
     """把池子整理成推送正文行。
 
@@ -530,6 +609,11 @@ def pool_table_rows(db_path: str, day: str | None = None) -> list[dict]:
             "source_label": source_label(row, entry),
             "note": note,
             "watchlist_enabled": bool(entry and int(entry.get("enabled", 1)) == 1),
+            # 证据：`open_only` 的策略标的带「（依赖开盘）」标记（**照常进池、照常推送**；
+            # 只有用户打开 `push_only_proven` 时才不推，见 `split_push_rows`）。
+            # 界面上要能一眼看出来，不能只写在文档里
+            "evidence": strategy_evidence(strategy),
+            "evidence_text": evidence_text(strategy),
             # 今日涨停池里的信息（不在池里 → is_limit_up False，界面上整行不显示）
             "is_limit_up": row["symbol"] in limit_up,
             "continue_day_text": (limit_up.get(row["symbol"]) or {}).get("continue_day_text", ""),

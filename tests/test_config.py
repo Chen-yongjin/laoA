@@ -624,3 +624,36 @@ def test_example_config_documents_auction_scan() -> None:
     assert "全市场" in text                          # 扫的是全市场，不是只看自己的票
     assert "配额" in text                            # 为什么不每分钟扫
     assert "买不进" in text                          # 涨幅上限的理由
+
+
+# ── 用户拍板后的默认策略集与 3 年导入窗口 ──
+
+
+def test_default_strategy_set_is_short_only() -> None:
+    """默认只跑 `short`（T+3 定位）：ultra 两套口径显著为负、swing 是 T+10 波段。"""
+    from laoa_trader.strategy import groups as groups_mod
+
+    cfg = load_config(use_env=False)
+    assert cfg.enabled_groups == ["short"]
+    # 与 groups.py 的"默认启用"保持同一份事实（两处漂移是最容易出的事）
+    assert list(cfg.enabled_groups) == groups_mod.default_group_keys()
+    assert groups_mod.GROUPS["short"].enabled_by_default is True
+    assert groups_mod.GROUPS["ultra"].enabled_by_default is False
+    assert groups_mod.GROUPS["swing"].enabled_by_default is False
+    # 停用的组**代码仍在**（用户以后可能自己开）
+    assert set(groups_mod.GROUPS) == {"ultra", "short", "swing"}
+
+
+def test_default_history_window_is_three_years() -> None:
+    """默认导入 3 年、跨度门槛 2.5 年（必须 < 3，否则 3 年的库永远判"不足"）。"""
+    cfg = load_config(use_env=False)
+    assert cfg.history_years == 3.0
+    assert cfg.min_history_years == 2.5
+    assert cfg.min_history_years < cfg.history_years
+    assert cfg.history_warning() == ""              # 默认配置不矛盾
+
+
+def test_push_only_proven_defaults_to_off() -> None:
+    """推送过滤**默认关**：启用的策略都推送（要不要跟"依赖开盘"的策略由用户判断）。"""
+    cfg = load_config(use_env=False)
+    assert cfg.push_only_proven is False

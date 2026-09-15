@@ -442,10 +442,10 @@ def test_doctor_still_works_on_empty_db(capsys, tmp_path, cfg) -> None:
 
 
 def test_default_thresholds_are_not_silently_relaxed(tmp_path) -> None:
-    """回归保护：默认门槛必须还是"4000 只 / 4.5 年"（别为了过测试偷偷放松）。"""
+    """回归保护：默认门槛必须还是"4000 只 / 2.5 年"（别为了过测试偷偷放松）。"""
     cfg = load_config(tmp_path / "nope.toml", use_env=False)
     assert cfg.min_symbols == 4000
-    assert cfg.min_history_years == 4.5
+    assert cfg.min_history_years == 2.5
 
 
 def test_log_collector_fixture_works(log_records) -> None:

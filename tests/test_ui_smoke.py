@@ -88,7 +88,7 @@ def seeded(cfg):
         "# 用户自己的注释（保存设置后必须还在）\n"
         f'data_dir = "{p(cfg.data_dir)}"\n'
         'hithink_api_key = ""\n'
-        'enabled_groups = ["ultra", "short", "swing"]\n'
+        'enabled_groups = ["short"]\n'      # 用户拍板后的默认策略集
         'enabled_strategies = []\n'
         'notify_channels = ["windows", "feishu", "tray"]\n'
         'notify_windows_sound = true\n'
@@ -755,13 +755,31 @@ def test_doctor_command_prints_report(cfg, capsys, tmp_path) -> None:
 
 
 def test_settings_tab_widgets_reflect_config(window) -> None:
-    """设置页要反映当前配置：三个组、五个策略、三个频道、各频道参数。"""
+    """设置页要反映当前配置：三个组、五个策略、三个频道、各频道参数。
+
+    默认策略集是**用户拍板**的：只开 `short`（T+3 定位）；`ultra`（连板回踩，两套口径
+    显著为负）与 `swing`（T+10 波段）**默认不勾**，旁边要能看到停用原因。
+    """
     from laoa_trader.strategy import groups as groups_mod
 
     assert set(window.group_boxes) == set(groups_mod.GROUP_ORDER)
-    assert all(box.isChecked() for box in window.group_boxes.values())   # 默认全开
+    assert window.group_boxes["short"].isChecked() is True
+    assert window.group_boxes["ultra"].isChecked() is False
+    assert window.group_boxes["swing"].isChecked() is False
+    # 停用原因就写在勾选区旁边（小字），不只在文档里
+    assert set(window.group_reason_labels) == {"ultra", "swing"}
+    assert "显著为负" in window.group_reason_labels["ultra"].text()
+    assert "T+10 波段" in window.group_reason_labels["swing"].text()
+    assert "显著为负" in window.group_boxes["ultra"].toolTip()
     assert set(window.strategy_boxes) == set(rules_mod.STRATEGIES)
     assert not any(box.isChecked() for box in window.strategy_boxes.values())  # 空=该组全选
+    # "依赖开盘"的两条策略：**可勾选、照常推送**，但勾选项上要标出来、提示里给口径数字
+    assert "依赖开盘" in window.strategy_boxes["DryUpExpansionStrategy"].text()
+    assert "依赖开盘" in window.strategy_boxes["FirstLimitUpStrategy"].text()
+    assert "默认不推送" not in window.strategy_boxes["DryUpExpansionStrategy"].text()
+    tip = window.strategy_boxes["DryUpExpansionStrategy"].toolTip()
+    assert "A +0.09%(t=2.31)" in tip and "−0.15%(t=−3.14)" in tip
+    assert "照常推送" in tip and "push_only_proven" in tip
     assert set(window.channel_boxes) == set(KINDS)
     assert all(box.isChecked() for box in window.channel_boxes.values())
     assert window.win_sound_box.isChecked() is True
@@ -1554,9 +1572,9 @@ def test_window_opens_without_icon_assets(seeded, qapp, monkeypatch) -> None:
 
 
 def test_save_groups_writes_config_keeps_comments(window, seeded, qapp) -> None:
-    """保存策略组：只有 swing 勾选 → 写回 config.toml，注释与未知键不能丢。"""
-    window.group_boxes["ultra"].setChecked(False)
+    """保存策略组：只勾 swing（默认是只勾 short）→ 写回 config.toml，注释与未知键不能丢。"""
     window.group_boxes["short"].setChecked(False)
+    window.group_boxes["swing"].setChecked(True)
     window.on_save_groups()
     qapp.processEvents()
 
@@ -1571,8 +1589,8 @@ def test_save_groups_writes_config_keeps_comments(window, seeded, qapp) -> None:
 
 def test_save_groups_keeps_strategy_choices(window, seeded, qapp) -> None:
     window.strategy_boxes["LowPriceStrategy"].setChecked(True)
-    window.group_boxes["ultra"].setChecked(False)
     window.group_boxes["short"].setChecked(False)
+    window.group_boxes["swing"].setChecked(True)
     window.on_save_groups()
     qapp.processEvents()
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
@@ -1585,8 +1603,8 @@ def test_save_groups_requires_at_least_one_group(window, seeded) -> None:
         box.setChecked(False)
     window.on_save_groups()
     assert "至少要勾一个策略组" in window.status_label.fullText()
-    # 没有写坏配置文件
-    assert 'enabled_groups = ["ultra", "short", "swing"]' in (
+    # 没有写坏配置文件（`seeded` 里写的就是默认策略集：只开 short）
+    assert 'enabled_groups = ["short"]' in (
         seeded.data_dir / "config.toml").read_text(encoding="utf-8")
 
 
@@ -1679,6 +1697,10 @@ def test_run_pipeline_button_runs_in_background_and_is_idempotent(window, qapp,
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
     monkeypatch.setattr("laoa_trader.notify.notify_all",
                         lambda *a, **k: {"tray": {"kind": "tray", "ok": True}})
+    # 这条测的是"按钮 → 后台 → 落库"的接线，不是默认策略集：小样本库（价格缓慢上涨）
+    # 只满足「低价股」的条件（它属于默认停用的 swing 组），所以这里显式把那一组打开。
+    # 「默认只开 short」本身由 settings 页与 config 的用例钉住。
+    seeded.enabled_groups = ["swing"]
 
     window.on_run_pipeline()
     assert window._worker is not None
@@ -2369,6 +2391,10 @@ def test_wizard_download_done_runs_pipeline(cfg, qapp, monkeypatch) -> None:
     from tests.conftest import seed_ready_db
 
     cfg.min_history_years, cfg.min_symbols = 0.0, 1
+    # 这条测的是"下载完 → 自检变 ready → 自动建池"的链路，不是默认策略集：
+    # 小样本库（价格缓慢上涨）只满足「低价股」的条件（属于默认停用的 swing 组），
+    # 所以显式把它打开；"默认只开 short" 由设置页与 config 的用例钉住。
+    cfg.enabled_groups = ["swing"]
     config_file = cfg.data_dir / "config.toml"
     config_file.write_text(f'data_dir = "{p(cfg.data_dir)}"', encoding="utf-8")
     cfg.source_path = config_file
@@ -3412,3 +3438,65 @@ def test_market_entry_columns_shrink_with_the_window(screen_window, qapp) -> Non
             <= win.market_scroll.viewport().width()
     finally:
         market.clear_cache()
+
+
+# ── 证据标记与推送过滤在界面上看得见 ──
+
+
+def test_pool_table_and_card_mark_open_only(pool_window, qapp, monkeypatch) -> None:
+    """「依赖开盘」的标的：表格策略列与卡片上都带 `（依赖开盘）`（不是只写在文档里）。"""
+    from laoa_trader import pool as pool_mod
+
+    rows = [
+        {"symbol": "600002", "name": "半导体甲", "strategy": "DryUpExpansionStrategy",
+         "strategies": "DryUpExpansionStrategy", "score": 2.0, "reason": "地量后放量",
+         "label": "地量后放量变盘", "source_label": "短线·T+3（T+3）", "industry": "半导体",
+         "note": "", "group": "short", "group_label": "短线·T+3", "horizon": 3,
+         "source": "策略", "evidence": "open_only", "evidence_text": "（依赖开盘）",
+         "is_limit_up": False, "continue_day_text": "", "limit_up_reason": ""},
+        {"symbol": "600001", "name": "浦发样本", "strategy": "ReversalStrategy",
+         "strategies": "ReversalStrategy", "score": 1.0, "reason": "短期反转",
+         "label": "短期反转", "source_label": "短线·T+3（T+3）", "industry": "银行",
+         "note": "", "group": "short", "group_label": "短线·T+3", "horizon": 3,
+         "source": "策略", "evidence": "proven", "evidence_text": "",
+         "is_limit_up": False, "continue_day_text": "", "limit_up_reason": ""},
+    ]
+    monkeypatch.setattr(pool_mod, "pool_table_rows", lambda db_path, day=None: rows)
+    window = pool_window
+    window._pool_signature = ()
+    window._refresh_pool()
+    qapp.processEvents()
+
+    assert window.pool_table.item(0, 2).text() == "地量后放量变盘（依赖开盘）"
+    tip = window.pool_table.item(0, 2).toolTip()
+    assert "策略照常推送" in tip and "push_only_proven" in tip   # 提示是"可以收紧"，不是"已经收紧"
+    assert window.pool_table.item(1, 2).text() == "短期反转"          # 有边际的没有标记
+    open_card = next(c for c in window.pool_cards if c.symbol == "600002")
+    plain_card = next(c for c in window.pool_cards if c.symbol == "600001")
+    assert open_card.evidence_text == "（依赖开盘）"
+    assert open_card.label_with_evidence == "地量后放量变盘（依赖开盘）"
+    assert plain_card.evidence_text == ""
+
+
+def test_pipeline_status_explains_the_push_filter(window, qapp) -> None:
+    """状态栏要能说明"跳过几只、为什么"（用户不该以为策略今天没选到票）。"""
+    window._on_pipeline_done("选股建池", {
+        "picked": 3, "data_date": "2026-09-11",
+        "pool": [{"symbol": "600001"}], "picks": 2, "signals": 2,
+        "pushed": True, "notify": {"tray": {"kind": "tray", "ok": True}},
+        "push_note": "另有 2 只只由「依赖开盘」的策略选出（正 α 只在开盘买口径下存在）",
+        "push_skipped_rows": [{"symbol": "600002"}, {"symbol": "600003"}],
+    })
+    qapp.processEvents()
+    text = window.status_label.fullText()
+    assert "已跳过 2 只依赖开盘的标的" in text
+
+    # 全部被过滤（压根没推）：状态栏要直接给出原因，而不是那句"未重复推送"
+    window._on_pipeline_done("选股建池", {
+        "pool": [{"symbol": "600002"}], "picks": 1, "signals": 1, "pushed": False,
+        "push_skipped": "另有 1 只只由「依赖开盘」的策略选出（正 α 只在开盘买口径下存在）",
+        "push_skipped_kind": "filtered", "push_skipped_rows": [{"symbol": "600002"}],
+    })
+    qapp.processEvents()
+    assert "依赖开盘" in window.status_label.fullText()
+    assert "未重复推送" not in window.status_label.fullText()
