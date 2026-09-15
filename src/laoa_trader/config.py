@@ -115,9 +115,18 @@ _STRICT_BOOL_FIELDS = frozenset(
     {"market_overview", "market_breadth", "notify_popup", "notify_sound"}
 )
 
-#: 严格布尔键认的真值 / 假值（与 `_as_bool` 的真值表保持一致）
+#: 严格的真值 / 假值（与 `_as_bool` 的真值表保持一致）
 _TRUE_WORDS: tuple[str, ...] = ("1", "true", "yes", "on", "y", "是")
 _FALSE_WORDS: tuple[str, ...] = ("0", "false", "no", "off", "n", "否")
+
+#: 旧字段名 → 新字段名（竞价那一组改名：`auction_alert_min_*` → `auction_min_*`）。
+#: 读 config.toml 时两者都认、**新名优先**（见 `load_config`）。
+_LEGACY_FIELD_ALIASES: dict[str, str] = {
+    "auction_alert_min_pct": "auction_min_pct",
+    "auction_alert_min_volume_ratio": "auction_min_volume_ratio",
+    "auction_alert_min_amount": "auction_min_amount",
+    "auction_alert_min_score": "auction_min_score",
+}
 
 
 def default_data_dir() -> Path:
@@ -694,17 +703,15 @@ def _as_list(value: Any, default: list[str]) -> list[str]:
     return [str(item).strip() for item in items if str(item).strip()]
 
 
-def _coerce(section: dict[str, Any], name: str) -> Any:
-    """把 TOML 里的值转成目标字段的类型（TOML 没有布尔字符串这类问题，但手改容易写错）。"""
-    defaults = Config()
-    default = getattr(defaults, name)
-    value = section.get(name)
+def _coerce_value(name: str, value: Any) -> Any:
+    """按字段 `name` 的类型收紧一个原始值（`_coerce` 与旧键名别名共用）。"""
+    default = getattr(Config(), name)
     if value is None:
         return default
     if isinstance(default, list):
         return _as_list(value, default)
     if isinstance(default, bool):
-        # 概览那两个开关"写错 = 回到默认"，其余布尔键沿用原语义（写错 = 假）
+        # 概览那几个开关"写错 = 回到默认"，其余布尔键沿用原语义（写错 = 假）
         return (
             _as_bool_strict(value, default)
             if name in _STRICT_BOOL_FIELDS
@@ -715,6 +722,11 @@ def _coerce(section: dict[str, Any], name: str) -> Any:
     if isinstance(default, int):
         return _as_int(value, default)
     return _as_str(value)
+
+
+def _coerce(section: dict[str, Any], name: str) -> Any:
+    """把 TOML 里的值转成目标字段的类型（TOML 没有布尔字符串这类问题，但手改容易写错）。"""
+    return _coerce_value(name, section.get(name))
 
 
 def load_config(path: Path | str | None = None, *, use_env: bool = True) -> Config:
@@ -737,6 +749,12 @@ def load_config(path: Path | str | None = None, *, use_env: bool = True) -> Conf
         if f.name == "source_path":
             continue
         kwargs[f.name] = _coerce(data, f.name)
+
+    # 旧键名（上一版的 `auction_alert_min_*`）继续认，但**新名优先**：
+    # 改名不该让用户手写的 config.toml 静默失效（他只会看到"设置没生效"）
+    for old_key, new_key in _LEGACY_FIELD_ALIASES.items():
+        if new_key not in data and old_key in data:
+            kwargs[new_key] = _coerce_value(new_key, data[old_key])
 
     raw_dir = data.get("data_dir")
     if raw_dir:

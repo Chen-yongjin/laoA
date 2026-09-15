@@ -44,7 +44,7 @@ class FakeSignalClient:
         self.fail = fail
         self.calls: list[tuple[str, object]] = []
 
-    def auction_snapshot(self, thscodes, stage="live"):
+    def auction_snapshot(self, thscodes, stage="live", chunk=100):
         self.calls.append(("auction", tuple(thscodes)))
         if self.fail:
             raise self.fail
@@ -69,6 +69,10 @@ class FakeSignalClient:
         self.calls.append(("snapshot", tuple(thscodes or ())))
         return []
 
+    def tickers(self, **kwargs):
+        self.calls.append(("tickers", ()))
+        return []
+
 
 def _seed_targets(cfg, *, pool=("600001",), watch=(), positions=()) -> None:
     """把"自己的票"写进库（池子 + 自选 + 持仓）。"""
@@ -90,14 +94,29 @@ def _seed_targets(cfg, *, pool=("600001",), watch=(), positions=()) -> None:
                                     avg_cost=10.0)
 
 
+def _seed_market(cfg, count: int = 0, symbols: list[str] | None = None) -> list[str]:
+    """塞一批"全市场"代码进 `stock_basic`（竞价扫描的代码来源就是它）。
+
+    默认造主板代码（600000 起）；调用方也可以点名要哪些代码（测板块时用）。
+    """
+    codes = list(symbols or [])
+    if count:
+        codes += [f"{600000 + i:06d}" for i in range(count)]
+    codes = list(dict.fromkeys(codes))
+    storage.init_db(cfg.db_path)
+    with storage.connect(cfg.db_path) as conn:
+        storage.write_stock_basic(conn, [(c, f"样本{c}", "行业") for c in codes])
+    return codes
+
+
 def _auction_row(symbol: str, *, pct: float, ratio: float, unmatched: float = -1.0,
                  turnover: float = 0.0013, yesterday: float = 0.95,
-                 name: str = "低价样本") -> dict:
+                 amount: float = 2.02e7, name: str = "低价样本") -> dict:
     """一条竞价快照行（字段名照抄真实接口）。"""
     return {
         "thscode": hx.to_thscode(symbol), "ticker": symbol, "name": name,
         "auction_price": 12.5, "auction_pct": pct, "auction_volume": 158.0,
-        "auction_amount": 2.02e7, "auction_unmatched": unmatched,
+        "auction_amount": amount, "auction_unmatched": unmatched,
         "auction_turnover_pct": turnover, "auction_yesterday_ratio_pct": yesterday,
         "auction_volume_ratio": ratio, "pre_close_price": 12.2,
         "open_price": 12.5, "last_price": 12.6, "float_market_cap": 1e10,
@@ -225,7 +244,10 @@ def _scored(pct=None, ratio=None, unmatched_ratio=None, amount=6e6) -> dict:
         (_scored(0.0, 2.0, None), 3, "auction_strong"),
         # 低开带卖压：低开 -2 + 卖盘 -1 + 成交额 +1 = -2 → 弱
         (_scored(-2.5, 0.3, -0.7), -2, "auction_weak"),
-        (_scored(-1.2, 0.3, -0.7), -1, ""),      # 略低开 -1 + 卖盘 -1 + 1 = -1 → 不够弱
+        # 略低开 -1 + 卖盘 -1 + 成交额 +1 = -1 → 弱门限 = -(门限-1) = -1（门限默认已改成 2）
+        (_scored(-1.2, 0.3, -0.7), -1, "auction_weak"),
+        # 平开 + 卖盘 -1 + 成交额 +1 = 0：不构成"弱"（没有低开）
+        (_scored(0.0, 0.3, -0.7), 0, ""),
     ],
 )
 def test_auction_score_rubric(fields, expected_score, expected_verdict) -> None:
@@ -249,8 +271,8 @@ def test_auction_score_requires_minimum_amount() -> None:
 
 def test_auction_score_uses_configured_thresholds() -> None:
     """阈值全部走配置：把门槛调高，同样的票就不再算强。"""
-    cfg = Config(auction_alert_min_pct=5.0, auction_alert_min_volume_ratio=3.0,
-                 auction_alert_min_score=5)
+    cfg = Config(auction_min_pct=5.0, auction_min_volume_ratio=3.0,
+                 auction_min_score=5)
     score, _ = it.auction_score(_scored(5.0, 3.0, 0.6), cfg)
     assert score == 6 and it.auction_verdict(score, cfg) == "auction_strong"
     lower, _ = it.auction_score(_scored(4.9, 2.0, None), cfg)     # 1 + 0 + 1 = 2 → 不够
@@ -269,64 +291,106 @@ def test_auction_window_boundaries() -> None:
     assert it.auction_fetch_window(datetime(2026, 9, 15, 10, 30)) is False
 
 
-def test_auction_alerts_rank_and_cap(cfg) -> None:
-    """按**分数**排序取前 N（默认 5、上限 10）：强的进提醒、弱的只对**持仓**推。"""
-    _seed_targets(cfg, pool=[f"60000{i}" for i in range(1, 8)],
-                  positions=["600002"])
-    rows = [
-        _auction_row("600001", pct=2.0, ratio=2.0, unmatched=1200.0),   # 6 分
-        _auction_row("600002", pct=-2.5, ratio=0.3, unmatched=-900.0),  # 低开卖压 → -2 分
-        _auction_row("600003", pct=2.0, ratio=0.5),        # 3 分（高开+成交额）
-        _auction_row("600004", pct=1.2, ratio=1.6),        # 3 分（略高开+略放量+成交额）
-        _auction_row("600005", pct=0.1, ratio=0.5),        # 1 分 → 不提示
-        _auction_row("600006", pct=1.2, ratio=0.5),        # 2 分 → 不提示
-        _auction_row("600007", pct=9.0, ratio=3.0, unmatched=2000.0),   # 6 分
-    ]
-    client = FakeSignalClient(auction_rows=rows)
-    alerts = it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW)
-    kinds = {a["symbol"]: a["kind"] for a in alerts}
-    assert kinds["600001"] == "auction_strong"
-    assert kinds["600007"] == "auction_strong"
-    assert kinds["600002"] == "auction_weak"               # 持仓 → 弱也推
-    assert "600003" in kinds or "600004" in kinds          # 3 分也是强（不用 AND）
-    assert "600005" not in kinds and "600006" not in kinds
-    # 分数高的排前面（600007 与 600001 都是 6 分，|涨幅| 大的在前）
-    assert [a["symbol"] for a in alerts][:2] == ["600007", "600001"]
-    # 分数与原始数值都要写进详情（用户要能核对"为什么给这个分"）
-    assert "（分6）" in alerts[0]["detail"]
-    assert "量比3.00" in alerts[0]["detail"]
+def test_auction_scan_covers_the_whole_market_not_just_own_symbols(cfg, monkeypatch) -> None:
+    """**全市场扫描**：池子/自选/持仓之外的票一样进结果（这正是这一版改的东西）。"""
+    _seed_targets(cfg, pool=["600001"], watch=["600002"], positions=["600003"])
+    _seed_market(cfg, count=6)
+    monkeypatch.setattr(it, "auction_scan_pause", lambda seconds: None)
+    client = FakeSignalClient(auction_rows=[
+        _auction_row("600004", pct=4.0, ratio=4.0),      # 池外
+        _auction_row("600005", pct=5.0, ratio=5.0),      # 池外
+    ])
+    scan = it.auction_scan(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW, slot="09:25")
+    assert {hit["symbol"] for hit in scan["hits"]} == {"600004", "600005"}
+    assert scan["scanned"] == 6                          # 全市场（本地 stock_basic）都要扫
 
 
-def test_auction_weak_only_for_positions(cfg) -> None:
-    """**弱提醒只对持仓推**：池子里但没买的票低开不报警。"""
-    _seed_targets(cfg, pool=["600001", "600002"], positions=["600002"])
-    rows = [
-        _auction_row("600001", pct=-3.0, ratio=0.2, unmatched=-800.0),   # 池内没仓位
-        _auction_row("600002", pct=-3.0, ratio=0.2, unmatched=-800.0),   # 持仓
-    ]
-    client = FakeSignalClient(auction_rows=rows)
-    alerts = it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW)
-    assert [a["symbol"] for a in alerts] == ["600002"]
-    assert alerts[0]["kind"] == "auction_weak"
+def test_auction_scan_batches_and_paces_requests(cfg, monkeypatch) -> None:
+    """**节奏**：全市场按 100 只一批，批间 ≥0.3 秒，串行（不并发）。"""
+    _seed_market(cfg, count=5573)
+    pauses: list[float] = []
+    monkeypatch.setattr(it, "auction_scan_pause", lambda seconds: pauses.append(seconds))
+    client = FakeSignalClient()
+    it.auction_scan(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW, slot="09:20")
+    batches = [c for c in client.calls if c[0] == "auction"]
+    assert len(batches) == 56                            # 5573 / 100 → 56 批
+    assert all(len(c[1]) <= 100 for c in batches)
+    assert len(pauses) == 55                             # 批与批之间等一次
+    assert pauses and min(pauses) >= 0.3
+    assert it.AUCTION_SCAN_PACE >= 0.3
 
 
-def test_auction_alerts_respects_max_items(cfg) -> None:
-    """条数上限：默认 5 只，配置能改（**最大 10**，写大了会被夹住）。"""
+def test_auction_scan_progress_callback(cfg, monkeypatch) -> None:
+    """扫描进度回调：界面/日志据此显示"扫到第几批"（56 批要 20~30 秒，不能一声不响）。"""
+    _seed_market(cfg, count=250)
+    monkeypatch.setattr(it, "auction_scan_pause", lambda seconds: None)
+    seen: list[tuple[int, int]] = []
+    it.auction_scan(FakeSignalClient(), db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW,
+                    slot="09:20", on_progress=lambda done, total: seen.append((done, total)))
+    assert seen[0] == (1, 3) and seen[-1] == (3, 3)
+
+
+def test_auction_scan_applies_every_filter(cfg, monkeypatch) -> None:
+    """四条过滤规则逐条生效：涨幅下限 / 上限（一字板）/ 成交额 / 打分。"""
+    cfg.auction_min_score = 2
+    monkeypatch.setattr(it, "auction_scan_pause", lambda seconds: None)
+    _seed_market(cfg, count=5)
+    client = FakeSignalClient(auction_rows=[
+        _auction_row("600001", pct=1.5, ratio=5.0),      # 涨幅下限（+1.5% < 2.0%）
+        _auction_row("600002", pct=9.9, ratio=5.0),      # 涨幅上限（一字板，买不进）
+        _auction_row("600003", pct=4.0, ratio=5.0, amount=1e6),   # 成交额不到 500 万
+        _auction_row("600004", pct=4.0, ratio=0.3, unmatched=None),  # 高开 2 + 成交额 1 = 3 分
+        _auction_row("600005", pct=0.5, ratio=0.3, unmatched=None),  # 只有成交额 1 分 → 不够
+    ])
+    scan = it.auction_scan(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW, slot="09:20")
+    kept = {hit["symbol"] for hit in scan["hits"]}
+    assert "600001" not in kept and scan["skipped"].get("涨幅下限") == 1
+    assert "600002" not in kept and scan["skipped"].get("涨幅上限") == 1
+    assert "600003" not in kept and scan["skipped"].get("成交额") == 1
+    assert "600005" not in kept
+    assert kept == {"600004"}
+
+
+def test_auction_scan_ranks_by_score_and_caps_items(cfg, monkeypatch) -> None:
+    """按**分数**排序、条数上限（默认 10、上限 50）—— 上限之外的只落库不推送。"""
+    monkeypatch.setattr(it, "auction_scan_pause", lambda seconds: None)
     symbols = [f"60000{i}" for i in range(1, 9)]
-    _seed_targets(cfg, pool=symbols)
-    rows = [_auction_row(s, pct=5.0, ratio=5.0) for s in symbols]
+    _seed_market(cfg, symbols=symbols)
+    # 全部都是满分 6 分（高开 2 + 放量 2 + 买盘 1 + 成交额 1），靠**涨幅**分名次
+    rows = [_auction_row(s, pct=6.0 if s == "600003" else 4.0, ratio=4.0,
+                         unmatched=2000.0) for s in symbols]
     client = FakeSignalClient(auction_rows=rows)
+    cfg.auction_alert_max_items = 3
+    scan = it.auction_scan(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW, slot="09:25")
+    assert [h["symbol"] for h in scan["hits"]][0] == "600003"     # 分数最高的排第一
+    assert len(scan["alerts"]) == 3
+    assert [a["symbol"] for a in scan["alerts"]] == [h["symbol"] for h in scan["hits"][:3]]
+    assert len(scan["hits"]) == 8                                  # 全部命中仍然都在
+    assert scan["title"] == "⚡ 竞价扫描（9:25）｜共命中 8 只，推送前 3："
 
-    alerts = it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW)
-    assert len(alerts) == 5                                # 默认 5
-    cfg.auction_alert_max_items = 8
-    assert len(it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg,
-                                now=AUCTION_NOW)) == 8
-    cfg.auction_alert_max_items = 99                       # 写超上限 → 夹到 10
-    cfg.__post_init__()
-    assert cfg.auction_alert_max_items == 10
-    assert len(it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg,
-                                now=AUCTION_NOW)) == 8     # 只有 8 只候选
+
+def test_auction_scan_summary_line_format(cfg, monkeypatch) -> None:
+    """汇总文案：`名称（代码）` + 板块标签 + 原始数值 + 分数（用户要能核对）。"""
+    monkeypatch.setattr(it, "auction_scan_pause", lambda seconds: None)
+    _seed_market(cfg, symbols=["300001", "688001"])
+    client = FakeSignalClient(auction_rows=[
+        _auction_row("300001", pct=5.21, ratio=3.2, unmatched=3400.0, amount=2.1e8,
+                     name="创业板样本"),
+        _auction_row("688001", pct=3.0, ratio=2.0, unmatched=-800.0, amount=6e7,
+                     name="科创样本"),
+    ])
+    scan = it.auction_scan(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW, slot="09:25")
+    first = scan["lines"][0]
+    assert first.startswith("1. 创业板样本（300001） 创业板 +5.21% 量比3.20 ")
+    assert "成交额2.1亿" in first and "买盘剩余3,400手" in first and "（分6）" in first
+    assert "卖盘剩余800手" in scan["lines"][1]
+    assert "科创板" in scan["lines"][1]
+    # 缺失的字段整段不出现（不写 `量比None` 这种垃圾）
+    no_ratio = it.auction_scan_line({"name": "甲", "symbol": "600001", "board": "main",
+                                     "pct": 3.0, "amount": 6e6, "score": 3})
+    assert "量比" not in no_ratio and "剩余" not in no_ratio
+    assert it.amount_text(2.1e8) == "2.1亿" and it.amount_text(6e7) == "6,000万"
+
 
 
 def test_fetch_auction_carries_score_for_the_ui(cfg) -> None:
@@ -337,52 +401,6 @@ def test_fetch_auction_carries_score_for_the_ui(cfg) -> None:
     snapshot = it.fetch_auction(cfg.db_path, cfg, client=client, now=AUCTION_NOW)
     assert snapshot["600001"]["score"] == 6
     assert "高开+2.00%" in snapshot["600001"]["reasons"]
-
-
-def test_auction_alerts_skip_outside_the_window(cfg) -> None:
-    """**非竞价时段不推送**：不在 9:15–9:30 时一次请求都不发。"""
-    _seed_targets(cfg)
-    client = FakeSignalClient(auction_rows=[_auction_row("600001", pct=9.0, ratio=9.0)])
-    assert it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg, now=CLOSED_NOW) == []
-    assert client.calls == []                            # 连请求都没发
-    # 9:25 之后的终态窗口仍然取（拿到的是终态数据）
-    assert it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg, now=TAIL_NOW)
-    assert [c[0] for c in client.calls] == ["auction"]
-
-
-def test_auction_alerts_off_by_config(cfg) -> None:
-    """`intraday_auction = false` → 不取、不推。"""
-    _seed_targets(cfg)
-    cfg.intraday_auction = False
-    client = FakeSignalClient(auction_rows=[_auction_row("600001", pct=9.0, ratio=9.0)])
-    assert it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW) == []
-    assert client.calls == []
-
-
-def test_auction_alerts_batches_over_100_symbols(cfg) -> None:
-    """池子+自选+持仓超过 100 只时**自动分批**（接口上限 100）。"""
-    symbols = [f"{600000 + i:06d}" for i in range(130)]
-    _seed_targets(cfg, pool=symbols)
-    client = FakeSignalClient(auction_rows=[
-        _auction_row(s, pct=3.0, ratio=3.0) for s in symbols[:3]
-    ])
-    alerts = it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW)
-    # 分批发生在**客户端**里（见 `test_auction_snapshot_batches_over_the_limit`）：
-    # 这里断言的是"130 只一次交给客户端、由它自己按 100 分批"，不重复实现一遍分批
-    assert len(client.calls) == 1
-    assert len(client.calls[0][1]) == 130
-    assert len(alerts) == 3
-
-
-def test_auction_alerts_cover_watchlist_and_positions(cfg) -> None:
-    """竞价/异动看的票 = **池子 + 自选 + 持仓**（去重），不只是池子。"""
-    _seed_targets(cfg, pool=["600001"], watch=["600002"], positions=["600003"])
-    client = FakeSignalClient(auction_rows=[
-        _auction_row("600002", pct=4.0, ratio=4.0),                     # 自选：强
-        _auction_row("600003", pct=-4.0, ratio=0.2, unmatched=-900.0),  # 持仓：低开+卖盘 → 弱
-    ])
-    alerts = it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW)
-    assert {a["symbol"] for a in alerts} == {"600002", "600003"}
 
 
 def test_fetch_auction_returns_fields_by_symbol(cfg) -> None:
@@ -466,36 +484,85 @@ def test_anomaly_failure_does_not_break_other_alerts(cfg) -> None:
     _seed_targets(cfg)
     client = FakeSignalClient(fail=hx.HithinkError(5001, "测试假客户端：异动接口挂了"))
     assert it.anomaly_alerts(client, db_path=cfg.db_path, cfg=cfg) == []
-    assert it.auction_alerts(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW) == []
 
 
-def test_build_alerts_includes_auction_and_anomaly(cfg, monkeypatch) -> None:
-    """两者都并进同一次循环（不再加定时器）：`build_alerts` 一轮就能拿到。"""
+def test_build_alerts_includes_anomaly_but_not_auction(cfg) -> None:
+    """异动并进同一次循环；**竞价不在 `build_alerts` 里**（到点才扫，见 `run_once`）。
+
+    为什么要把竞价摘出去：`build_alerts` 是"每分钟一拍"的路径，
+    竞价扫描要是混进来就变成"每分钟扫一次全市场"（56 请求 × 10 分钟 = 560 请求）。
+    """
     _seed_targets(cfg)
     client = FakeSignalClient(
         auction_rows=[_auction_row("600001", pct=3.5, ratio=3.0)],
         anomalies=[_anomaly("600001", "RAPID_RALLY")],
     )
-    monkeypatch.setattr(it, "auction_fetch_window", lambda now=None: True)
     engine = DataEngine(cfg.db_path)
     alerts = it.build_alerts(engine, client, cfg=cfg)
     kinds = {a["kind"] for a in alerts}
-    assert "auction_strong" in kinds
     assert "anomaly_rapid_rally" in kinds
+    assert "auction_strong" not in kinds
+    assert [c for c in client.calls if c[0] == "auction"] == []     # 一次竞价请求都没发
 
 
-def test_run_once_allows_the_auction_window(cfg, monkeypatch) -> None:
-    """9:20（还没到 9:30）也要跑这一轮 —— 否则竞价提醒永远不会触发。"""
-    _seed_targets(cfg)
+def test_run_once_scans_only_at_the_configured_slots(cfg, monkeypatch) -> None:
+    """到点才扫：9:20 与 9:25 各一次；9:23（宽限窗口外）/9:40 一次请求都不发。"""
+    _seed_market(cfg, count=120)
     engine = DataEngine(cfg.db_path)
     monkeypatch.setattr(it, "in_session", lambda now=None: False)
-    monkeypatch.setattr(it, "auction_fetch_window", lambda now=None: True)
     monkeypatch.setattr(it, "is_trading_day", lambda *a, **k: True)
-    report = it.run_once(engine, cfg, dry_run=True,
-                         client=FakeSignalClient(
-                             auction_rows=[_auction_row("600001", pct=4.0, ratio=4.0)]))
-    assert report["trading_day"] is True
-    assert report["hits"] >= 1
+    monkeypatch.setattr(it, "auction_scan_pause", lambda seconds: None)
+    client = FakeSignalClient(auction_rows=[_auction_row("600001", pct=4.0, ratio=4.0)])
+    sent: list[tuple[str, list[str]]] = []
+
+    report = it.run_once(engine, cfg, client=client, notifier=lambda t, l: sent.append((t, l)),
+                         now=datetime(2026, 9, 15, 9, 20, 5))
+    assert report["auction"]["slot"] == "09:20"
+    assert [c for c in client.calls if c[0] == "auction"]              # 扫了
+    assert sent and sent[0][0].startswith("⚡ 竞价扫描（9:20）")
+
+    # 同一档再跑一次（调度器每分钟一拍）→ 不再扫
+    client.calls.clear()
+    it.run_once(engine, cfg, client=client, notifier=lambda t, l: None,
+                now=datetime(2026, 9, 15, 9, 21, 5))
+    assert [c for c in client.calls if c[0] == "auction"] == []
+
+    # 09:23（09:20 那档的宽限窗口已过，09:25 那档还没到）→ 不扫
+    client.calls.clear()
+    it.run_once(engine, cfg, client=client, notifier=lambda t, l: None,
+                now=datetime(2026, 9, 15, 9, 23, 0), ignore_session=True)
+    assert [c for c in client.calls if c[0] == "auction"] == []
+
+    # 09:25 那一档（终态）→ 扫，并且汇总推送带"（9:25）"
+    client.calls.clear()
+    sent.clear()
+    it.run_once(engine, cfg, client=client, notifier=lambda t, l: sent.append((t, l)),
+                now=datetime(2026, 9, 15, 9, 25, 30))
+    assert [c for c in client.calls if c[0] == "auction"]
+    assert sent and sent[0][0].startswith("⚡ 竞价扫描（9:25）")
+
+
+def test_auction_scan_records_alerts_and_results(cfg, monkeypatch) -> None:
+    """扫描结果：全部命中落 `auction_scan` 表，前 N 只另外登进提醒表（浮窗/列表看得到）。"""
+    _seed_market(cfg, count=120)
+    engine = DataEngine(cfg.db_path)
+    monkeypatch.setattr(it, "in_session", lambda now=None: False)
+    monkeypatch.setattr(it, "is_trading_day", lambda *a, **k: True)
+    monkeypatch.setattr(it, "auction_scan_pause", lambda seconds: None)
+    cfg.auction_alert_max_items = 3
+    rows = [_auction_row(f"{600000 + i:06d}", pct=4.0 + i * 0.1, ratio=4.0,
+                         unmatched=2000.0) for i in range(5)]
+    client = FakeSignalClient(auction_rows=rows)
+    it.run_once(engine, cfg, client=client, notifier=lambda t, l: None,
+                now=datetime(2026, 9, 15, 9, 25, 30))
+
+    with storage.connect(cfg.db_path) as conn:
+        saved = storage.load_auction_scan(conn, "2026-09-15")
+    assert len(saved) == 5                                   # 全部命中都落库
+    assert [r["pushed"] for r in saved] == [1, 1, 1, 0, 0]    # 前 3 只标 ★
+    assert saved[0]["board"] == "main" and saved[0]["name"]
+    alerts = [a for a in it.alert_rows(cfg.db_path, limit=20) if a["kind"] == "auction_strong"]
+    assert len(alerts) == 3                                  # 提醒表只有前 N 只
 
 
 # ── 涨停原因 ──
@@ -540,48 +607,61 @@ def _enable_auction(cfg):
     cfg.intraday_auction = True
     cfg.intraday_anomaly = True
 
-def test_auction_is_off_by_default_and_sends_no_request(cfg) -> None:
-    """**竞价默认关闭**（口径待确认）：用默认配置跑，一次竞价请求都不发。
+def test_auction_is_off_by_default_and_sends_no_request(cfg, monkeypatch) -> None:
+    """**竞价默认关闭**（口径待确认）：用默认配置跑一整轮，一次竞价请求都不发。
 
     这条钉的是"功能已就绪但不启用"这个状态本身 —— 用户明确要求先别把竞价接进默认流程。
     （本文件其余竞价用例用的是显式打开开关的 `cfg`，见上面的 `_enable_auction` fixture。）
     """
-    _seed_targets(cfg)
+    _seed_market(cfg, count=120)
     default_cfg = Config()
+    default_cfg.data_dir = cfg.data_dir
     assert default_cfg.intraday_auction is False
+    engine = DataEngine(cfg.db_path)
     client = FakeSignalClient(auction_rows=[_auction_row("600001", pct=9.0, ratio=9.0)])
-    assert it.auction_alerts(client, db_path=cfg.db_path, cfg=default_cfg,
-                             now=AUCTION_NOW) == []
+    monkeypatch.setattr(it, "is_trading_day", lambda *a, **k: True)
+    monkeypatch.setattr(it, "in_session", lambda now=None: False)
+    report = it.run_once(engine, default_cfg, client=client,
+                         notifier=lambda t, l: None,
+                         now=datetime(2026, 9, 15, 9, 20, 5))
+    assert report["auction"] == {}                  # 连"到点判断"都不做
     assert it.fetch_auction(cfg.db_path, default_cfg, client=client,
                             now=AUCTION_NOW) == {}
-    assert client.calls == []                       # 一个请求都没发
+    assert [c for c in client.calls if c[0] == "auction"] == []
 
 
 def test_new_intraday_config_defaults_and_fallback(cfg) -> None:
-    """5 个新配置项的默认值与非法值回退。"""
+    """竞价那一组的默认值与非法值回退（其余的见 `test_config.py`）。"""
     fresh = Config()
     # 竞价**默认关**：功能已就绪，但口径与阈值待用户确认后才打开
     assert fresh.intraday_auction is False
-    assert fresh.auction_alert_min_pct == 2.0
-    assert fresh.auction_alert_min_volume_ratio == 2.0
+    assert fresh.auction_min_pct == 2.0
+    assert fresh.auction_min_volume_ratio == 2.0
     assert fresh.intraday_anomaly is True
     assert fresh.anomaly_alert_tags == []
 
-    bad = Config(auction_alert_min_pct=0, auction_alert_min_volume_ratio=-1,
+    bad = Config(auction_min_pct=0, auction_min_volume_ratio=-1,
                  anomaly_alert_tags=" rapid_rally ,, limit_down ")
-    assert bad.auction_alert_min_pct == 2.0
-    assert bad.auction_alert_min_volume_ratio == 2.0
+    assert bad.auction_min_pct == 2.0
+    assert bad.auction_min_volume_ratio == 2.0
     assert bad.anomaly_alert_tags == ["RAPID_RALLY", "LIMIT_DOWN"]
 
 
 def test_new_intraday_config_from_env(monkeypatch) -> None:
-    """环境变量覆盖（界面上临时调试/分发时改口径用）。"""
+    """环境变量覆盖（界面上临时调试/分发时改口径用）；**旧名也继续认**。"""
     monkeypatch.setenv("INTRADAY_AUCTION", "false")
-    monkeypatch.setenv("AUCTION_ALERT_MIN_PCT", "3.5")
+    monkeypatch.setenv("AUCTION_ALERT_MIN_PCT", "3.5")      # 旧名
+    monkeypatch.setenv("AUCTION_MIN_PCT", "4.5")            # 新名同时给了 → 新名赢
+    monkeypatch.setenv("AUCTION_MIN_SCORE", "4")
+    monkeypatch.setenv("AUCTION_SCAN_AT", "09:18, 09:24")
+    monkeypatch.setenv("AUCTION_BOARDS", "chinext,star")
     monkeypatch.setenv("INTRADAY_ANOMALY", "0")
     monkeypatch.setenv("ANOMALY_ALERT_TAGS", "limit_up,limit_down")
     cfg = config_mod.load_config(None, use_env=True)
     assert cfg.intraday_auction is False
-    assert cfg.auction_alert_min_pct == 3.5
+    assert cfg.auction_min_pct == 4.5
+    assert cfg.auction_min_score == 4
+    assert cfg.auction_scan_at == ["09:18", "09:24"]
+    assert cfg.auction_boards == ["chinext", "star"]
     assert cfg.intraday_anomaly is False
     assert cfg.anomaly_alert_tags == ["LIMIT_UP", "LIMIT_DOWN"]

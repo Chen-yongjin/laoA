@@ -1253,11 +1253,10 @@ def test_pool_card_shows_limit_up_reason_and_auction(pool_window, qapp,
     assert limit_card.auction_label.styleSheet() == f"color:{market.COLOR_UP}"
     plain_card = next(c for c in window.pool_cards if c.symbol == "600003")
     assert plain_card.auction_label.styleSheet() == f"color:{market.COLOR_DOWN}"
-    # "看全部竞价"的位置：详情弹窗里有按分排序的一览（★ = 会被推送的前 N 只）
+    # "看全部竞价"的位置：详情弹窗里列**全市场扫描结果**（没有扫描结果时说明去哪儿开）
     details = window._status_details()
-    assert "竞价一览" in details
-    assert "半导体甲（600002）" in details
-    assert "★" in details
+    assert "竞价扫描" in details
+    assert "设置页" in details
     assert plain_card.limit_up_label.isVisible() is False      # 不是涨停票 → 没有这一行
     assert plain_card.limit_up_label.text() == ""
     # 表格视图也有「涨停」列

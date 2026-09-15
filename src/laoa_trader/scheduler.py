@@ -30,6 +30,7 @@ from typing import Any
 from laoa_trader import intraday, pool, state
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import sync
+from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
 from laoa_trader import hints
 from laoa_trader.data import preflight
@@ -788,15 +789,34 @@ class Scheduler:
         return True
 
     def _maybe_intraday(self, now: datetime) -> None:
+        """交易时段内按间隔跑盘中提醒；**竞价扫描时刻即使还没开盘也要跑一轮**。
+
+        为什么把"竞价扫描到点"单独放行：9:20 / 9:25 都还没到 09:30（不在交易时段里），
+        只按 `in_session` 判断的话**竞价扫描永远不会触发** —— 而它恰恰是开盘前最有用的那一步。
+        代价是每分钟只多一次"到没到点"的本地判断（查一次 `auction_scan` 表），零请求。
+        """
         if self._intraday_paused:
             return
-        if not intraday.in_session(now):
+        scan_due = False
+        if bool(getattr(self.cfg, "intraday_auction", False)):
+            try:
+                with storage.connect(self.engine.db_path) as conn:
+                    scanned = storage.auction_scan_slots(
+                        conn, intraday.now_shanghai(now).strftime("%Y-%m-%d")
+                    )
+                scan_due = bool(intraday.auction_scan_due(now, self.cfg, scanned))
+            except Exception as exc:  # noqa: BLE001 - 到点判断失败就当没到点
+                logger.debug(f"竞价扫描到点判断失败：{exc}")
+        if not intraday.in_session(now) and not scan_due:
             return
         interval = max(int(self.cfg.intraday_interval), 5)
-        if time.time() - self._last_intraday_ts < interval:
+        # 到点的竞价扫描**不受轮询间隔限制**：09:20/09:25 是硬时刻，
+        # 而"每分钟一拍 + 宽限 3 分钟"两条叠加起来有可能正好错过（例如上一拍在 09:22:30、
+        # 下一拍就到 09:23:30，那一档已经作废）—— 宁可这一刻多跑一轮常规提醒，也别漏扫。
+        if time.time() - self._last_intraday_ts < interval and not scan_due:
             return
         self._last_intraday_ts = time.time()
-        report = intraday.run_once(self.engine, self.cfg)
+        report = intraday.run_once(self.engine, self.cfg, now=now)
         self._last_intraday_report = report
         if report.get("error"):
             self._last_error = str(report["error"])

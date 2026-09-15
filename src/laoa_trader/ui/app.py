@@ -155,6 +155,7 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
         QCheckBox,
         QComboBox,
         QDialog,
+        QDoubleSpinBox,
         QFrame,
         QGridLayout,
         QHBoxLayout,
@@ -1607,9 +1608,118 @@ if QT_AVAILABLE:
             row.addStretch(1)
             layout.addLayout(row)
 
+            layout.addWidget(QLabel("─" * 60))
+
+            # ── 竞价扫描（全市场扫描 + 过滤规则）──
+            #
+            # 为什么把这一组放在界面上：这一版竞价是"**全市场扫一遍再按规则过滤**"，
+            # 规则就是用户手里那几个数字（涨幅区间、板块、成交额、分数、条数、扫描时刻）——
+            # 让他为了改一个 2.0% 去手改 TOML 是不合理的。
+            layout.addWidget(QLabel(
+                "竞价扫描（全市场，9:15–9:25 的真实买卖盘；默认关，勾上才取数）"
+            ))
+            self.auction_on_box = QCheckBox("启用竞价扫描（勾上后默认 09:20 / 09:25 各扫一次）")
+            self.auction_on_box.setChecked(bool(getattr(self.cfg, "intraday_auction", False)))
+            self.auction_on_box.setToolTip(
+                "全市场约 5600 只、按 100 只一批 → 约 56 个请求/次（20~30 秒，后台线程跑）；\n"
+                "所以只在下面两个时刻各扫一次，不是每分钟扫。"
+            )
+            layout.addWidget(self.auction_on_box)
+
+            pct_row = QHBoxLayout()
+            pct_row.addWidget(QLabel("竞价涨幅："))
+            self.auction_min_pct_box = QDoubleSpinBox()
+            self.auction_min_pct_box.setRange(0.0, 20.0)
+            self.auction_min_pct_box.setSingleStep(0.5)
+            self.auction_min_pct_box.setDecimals(1)
+            self.auction_min_pct_box.setSuffix(" %")
+            self.auction_min_pct_box.setValue(float(getattr(self.cfg, "auction_min_pct", 2.0)))
+            self.auction_min_pct_box.setToolTip("低于它的直接过滤（默认 +2.0%）")
+            pct_row.addWidget(self.auction_min_pct_box)
+            pct_row.addWidget(QLabel("~"))
+            self.auction_max_pct_box = QDoubleSpinBox()
+            self.auction_max_pct_box.setRange(0.0, 21.0)
+            self.auction_max_pct_box.setSingleStep(0.5)
+            self.auction_max_pct_box.setDecimals(1)
+            self.auction_max_pct_box.setSuffix(" %")
+            self.auction_max_pct_box.setValue(float(getattr(self.cfg, "auction_max_pct", 9.0)))
+            self.auction_max_pct_box.setToolTip(
+                "≥ 它的直接过滤：一字板/接近涨停**买不进**，推了也没用（默认 9.0%）"
+            )
+            pct_row.addWidget(self.auction_max_pct_box)
+            pct_row.addWidget(QLabel("　成交额 ≥"))
+            self.auction_amount_box = QDoubleSpinBox()
+            self.auction_amount_box.setRange(0.0, 100000.0)
+            self.auction_amount_box.setSingleStep(100.0)
+            self.auction_amount_box.setDecimals(0)
+            self.auction_amount_box.setSuffix(" 万")
+            self.auction_amount_box.setValue(
+                float(getattr(self.cfg, "auction_min_amount", 5e6)) / 1e4
+            )
+            self.auction_amount_box.setToolTip(
+                "竞价成交额不到这个数不参与（挡掉小盘爆表噪声）。\n"
+                "默认 500 万 —— 全市场只有 8.7% 的股票过线；嫌严可以调到 300 万"
+            )
+            pct_row.addWidget(self.auction_amount_box)
+            pct_row.addStretch(1)
+            layout.addLayout(pct_row)
+
+            board_row = QHBoxLayout()
+            board_row.addWidget(QLabel("板块（多选）："))
+            self.auction_board_boxes: dict[str, Any] = {}
+            chosen_boards = set(getattr(self.cfg, "auction_boards", None)
+                                or config.AUCTION_BOARDS)
+            for key in config.AUCTION_BOARDS:
+                box = QCheckBox(config.AUCTION_BOARD_LABELS[key])
+                box.setChecked(key in chosen_boards)
+                box.setToolTip("一个都不勾 = 不限制（等于全选）")
+                self.auction_board_boxes[key] = box
+                board_row.addWidget(box)
+            board_row.addStretch(1)
+            layout.addLayout(board_row)
+
+            score_row = QHBoxLayout()
+            score_row.addWidget(QLabel("打分 ≥"))
+            self.auction_score_box = QSpinBox()
+            self.auction_score_box.setRange(*config.AUCTION_SCORE_RANGE)
+            self.auction_score_box.setValue(int(getattr(self.cfg, "auction_min_score", 2)))
+            self.auction_score_box.setToolTip(
+                "竞价强度打分（满分 6）：涨幅 2 + 量比 2 + 买盘剩余 1 + 成交额 1。\n"
+                "默认 2 —— 真实数据上命中面（覆盖当日后期涨停 24% vs 20%）比 3 划算"
+            )
+            score_row.addWidget(self.auction_score_box)
+            score_row.addWidget(QLabel("　推送条数 ≤"))
+            self.auction_items_box = QSpinBox()
+            self.auction_items_box.setRange(*config.AUCTION_ITEMS_RANGE)
+            self.auction_items_box.setValue(
+                int(getattr(self.cfg, "auction_alert_max_items", 10))
+            )
+            self.auction_items_box.setToolTip("按分数排序取前 N 只（1~50）")
+            score_row.addWidget(self.auction_items_box)
+            score_row.addWidget(QLabel("　扫描时刻："))
+            self.auction_scan_at_edit = QLineEdit(
+                ", ".join(getattr(self.cfg, "auction_scan_at", None) or ["09:20", "09:25"])
+            )
+            self.auction_scan_at_edit.setPlaceholderText("09:20, 09:25")
+            self.auction_scan_at_edit.setToolTip(
+                "逗号分隔的时刻（HH:MM）。9:25 那次拿到的是**竞价终态**。\n"
+                "为什么不填就每分钟扫：56 个请求 × 10 分钟会把配额打光"
+            )
+            score_row.addWidget(self.auction_scan_at_edit)
+            score_row.addStretch(1)
+            layout.addLayout(score_row)
+
+            self.auction_hint = QLabel("")
+            self.auction_hint.setWordWrap(True)
+            layout.addWidget(self.auction_hint)
+            self.save_auction_button = QPushButton("保存竞价设置")
+            self.save_auction_button.clicked.connect(self.on_save_auction)
+            layout.addWidget(self.save_auction_button)
+
             layout.addStretch(1)
             self._refresh_channel_hints()
             self._refresh_run_hint()
+            self._refresh_auction_hint()
 
             # 滚动区只是"外套"：里层控件、顺序、层级都与原来完全一致
             scroll = QScrollArea()
@@ -2177,32 +2287,50 @@ if QT_AVAILABLE:
                 label.setVisible(bool(text))       # 空 → 整项不显示（不是显示一个空壳）
 
         def _auction_detail_lines(self) -> list[str]:
-            """状态详情里的**竞价一览**（按分排序，★ = 前 N 只）。
+            """状态详情里的**竞价扫描结果**（全市场扫描的**全部命中**，按分排序）。
 
-            为什么放这里：卡片与提醒默认只显示前 `auction_alert_max_items` 只（避免刷屏），
-            但用户要能"看全部竞价" —— 详情弹窗就是那个地方；
-            每行给的是**原始数值 + 分**（只给一个分，用户没法核对）。
+            为什么要单独存一张表（`auction_scan`）而不是只靠推送文本：
+            推送只列前 N 只，而用户要能"看全部竞价" —— 详情弹窗就是那个地方
+            （可滚动、可复制）。每行给**原始数值 + 板块 + 分**（只给一个分没法核对），
+            ★ = 已经在推送里发过的那几只，`（池内）` = 这只同时在自己的池子/自选/持仓里。
             """
-            if not self.auction_snapshot:
-                return []
-            def _key(fields: dict) -> tuple:
-                score = fields.get("score")
-                return (score if score is not None else -99,
-                        abs(fields.get("pct") or 0.0))
+            from laoa_trader.data import storage as storage_mod
 
-            rows = sorted(self.auction_snapshot.values(), key=_key, reverse=True)
             try:
-                top = int(getattr(self.cfg, "auction_alert_max_items", 5) or 5)
-            except (TypeError, ValueError):
-                top = 5
-            lines = [f"竞价一览（共 {len(rows)} 只，★ = 推送前 {top} 只）"]
-            for index, fields in enumerate(rows):
-                mark = "★" if index < top else "·"
-                lines.append(
-                    f"  {mark} {fields.get('name')}（{fields.get('symbol')}）"
-                    f"{intraday.auction_detail(fields, fields.get('score'))}"
-                )
+                with storage_mod.connect(self.cfg.db_path) as conn:
+                    rows = storage_mod.load_auction_scan(conn)
+            except Exception as exc:  # noqa: BLE001 - 读不到就不显示这一节
+                logger.debug(f"读竞价扫描结果失败：{exc}")
+                return []
+            if not rows:
+                return ["竞价扫描：还没有结果（默认 09:20 / 09:25 各扫一次全市场；"
+                        "开关与阈值在设置页「竞价扫描」那一组）"]
+            slot = str(rows[0].get("slot") or "")
+            day = str(rows[0].get("day") or "")
+            total = int(rows[0].get("total") or len(rows))
+            top = int(sum(1 for row in rows if row.get("pushed")))
+            in_pool = set(self._pool_symbols())
+            shown = f"，这里列前 {len(rows)} 只" if total > len(rows) else ""
+            lines = [f"竞价扫描（{day} {slot}）共命中 {total} 只{shown}，"
+                     f"★ = 已推送前 {top} 只"]
+            for row in rows:
+                mark = "★" if row.get("pushed") else "·"
+                inside = "（池内）" if str(row.get("symbol")) in in_pool else ""
+                # 直接复用汇总推送那一行的写法（名称（代码）+ 板块 + 数值 + 分），
+                # 只在行尾补一个「（池内）」—— 自己再拼一遍格式，迟早和推送里的不一致
+                lines.append(f"  {mark} {intraday.auction_scan_line(row)}{inside}")
             return lines
+
+        def _pool_symbols(self) -> list[str]:
+            """当前盯的代码（池子 + 自选）：竞价结果里标"池内"用。
+
+            取不到就返回空列表（这只是锦上添花，绝不能因为它让详情打不开）。
+            """
+            try:
+                return list(intraday.watch_targets(self.cfg.db_path)[0])
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"取池子代码失败（竞价结果不标池内）：{exc}")
+                return []
 
         def _status_details(self, facts: dict | None = None) -> str:
             """状态详情：多行中文说明，tooltip 与【详情】弹窗**共用这一份**。
@@ -3306,6 +3434,86 @@ if QT_AVAILABLE:
                 )
                 return
             self._save_updates(updates, "通知设置已保存")
+
+        # ── 竞价扫描设置（全市场扫描 + 过滤规则）──
+
+        def _panel_auction_updates(self) -> dict:
+            """把"竞价扫描"面板的当前状态收集成 {键: 值}（保存用）。"""
+            boards = [key for key, box in self.auction_board_boxes.items() if box.isChecked()]
+            if not boards:
+                # 一个都不勾 = 不限制：显式写成全部，别让用户看到"保存了空列表 = 什么都不扫"
+                boards = list(config.AUCTION_BOARDS)
+            good, bad = config.split_scan_at(self.auction_scan_at_edit.text())
+            return {
+                "intraday_auction": self.auction_on_box.isChecked(),
+                "auction_min_pct": float(self.auction_min_pct_box.value()),
+                "auction_max_pct": float(self.auction_max_pct_box.value()),
+                "auction_min_amount": float(self.auction_amount_box.value()) * 1e4,
+                "auction_min_score": int(self.auction_score_box.value()),
+                "auction_alert_max_items": int(self.auction_items_box.value()),
+                "auction_boards": boards,
+                "auction_scan_at": good or ["09:20", "09:25"],
+                "_bad_scan_at": bad,          # 只给提示用，不写进配置文件
+            }
+
+        def on_save_auction(self) -> None:
+            """保存竞价设置：**先校验**（涨幅上下限不能倒挂、时刻要能认出来），再写文件。"""
+            updates = self._panel_auction_updates()
+            bad = updates.pop("_bad_scan_at", [])
+            lo, hi = updates["auction_min_pct"], updates["auction_max_pct"]
+            if hi > 0 and hi <= lo:
+                message = f"❌ 涨幅上限（{hi:g}%）必须大于下限（{lo:g}%）（未写入配置）"
+                self._toast(message)
+                self._refresh_auction_hint(message)
+                return
+            extra = f"；⚠️ 认不出的时刻已忽略：{'、'.join(bad)}" if bad else ""
+            state = "开" if updates["intraday_auction"] else "关"
+            self._save_updates(
+                updates,
+                f"竞价设置已保存：{state}；涨幅 {lo:g}%~{hi:g}%、"
+                f"成交额 ≥ {updates['auction_min_amount'] / 1e4:,.0f} 万、"
+                f"打分 ≥ {updates['auction_min_score']}、推前 "
+                f"{updates['auction_alert_max_items']} 只、"
+                f"扫描 {', '.join(updates['auction_scan_at'])}" + extra,
+            )
+            self._refresh_auction_hint(extra)
+            self._refresh_status()
+
+        def _refresh_auction_hint(self, extra: str = "") -> None:
+            """竞价那一组的说明行：把"开关 + 上次扫描 + 请求量级"写清楚（看得出设定生效了）。"""
+            if not hasattr(self, "auction_hint"):
+                return
+            lines = []
+            if not bool(getattr(self.cfg, "intraday_auction", False)):
+                lines.append("竞价扫描当前**关着**：一次请求都不发（勾上「启用竞价扫描」并保存即可开）")
+            else:
+                slots = ", ".join(getattr(self.cfg, "auction_scan_at", None) or [])
+                lines.append(f"已启用：每个交易日 {slots} 各扫一次全市场"
+                             "（约 56 个请求/次，后台线程跑，界面不会卡）")
+            last = self._last_auction_scan_text()
+            if last:
+                lines.append(last)
+            if extra:
+                lines.append(extra)
+            self.auction_hint.setText("　｜　".join(lines))
+
+        def _last_auction_scan_text(self) -> str:
+            """上一次扫描的结论（读 `auction_scan` 表）：`上次扫描 09:25：命中 37 只`。"""
+            from laoa_trader.data import storage as storage_mod
+
+            try:
+                with storage_mod.connect(self.cfg.db_path) as conn:
+                    rows = storage_mod.load_auction_scan(conn)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"读上次竞价扫描失败：{exc}")
+                return ""
+            if not rows:
+                return "还没有扫描结果"
+            day = str(rows[0].get("day") or "")
+            slot = str(rows[0].get("slot") or "")
+            total = int(rows[0].get("total") or len(rows))
+            pushed = sum(1 for row in rows if row.get("pushed"))
+            return f"上次扫描 {day} {slot}：命中 {total} 只（推送 {pushed} 只）"
 
         # ── 手动跑（与定时任务共用同一套流程，保证幂等）──
 

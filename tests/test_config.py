@@ -510,3 +510,117 @@ def test_example_config_documents_notify_popup() -> None:
     assert data["notify_flash_seconds"] == 6
     assert "点击行为不受" in text          # 为什么不走 Windows 系统通知
     assert "别打扰我" in text              # notify_popup = false 的实际含义
+
+
+# ── 竞价扫描（全市场扫描 + 过滤规则）的那一组 ──
+
+
+def test_auction_scan_defaults() -> None:
+    """默认：关；9:20/9:25 各扫一次；涨幅 2%~9%；四板块全选；500 万；2 分；推 10 只。"""
+    cfg = load_config(use_env=False)
+    assert cfg.intraday_auction is False            # 口径确认之前**保持关闭**
+    assert cfg.auction_scan_at == ["09:20", "09:25"]
+    assert cfg.auction_min_pct == 2.0
+    assert cfg.auction_max_pct == 9.0
+    assert cfg.auction_boards == ["main", "chinext", "star", "bj"]
+    assert cfg.auction_min_amount == 5e6
+    assert cfg.auction_min_score == 2
+    assert cfg.auction_min_volume_ratio == 2.0
+    assert cfg.auction_alert_max_items == 10
+
+
+def test_auction_scan_invalid_values_fall_back(tmp_path: Path) -> None:
+    """写错就收拾干净：涨幅倒挂、板块写错、时刻写错、分数/条数越界。"""
+    path = _write(tmp_path, """
+auction_min_pct = 6.0
+auction_max_pct = 5.0
+auction_boards = ["chinext", "zzz"]
+auction_scan_at = ["9:5", "25:00", "09:05"]
+auction_min_score = 99
+auction_alert_max_items = 999
+""")
+    cfg = load_config(path, use_env=False)
+    assert cfg.auction_max_pct == 9.0               # 上限 ≤ 下限 → 回默认
+    assert cfg.auction_min_pct == 6.0               # 下限本身合法，保留
+    assert cfg.auction_boards == ["chinext"]        # 认不出的板块丢掉
+    assert cfg.auction_scan_at == ["09:05"]         # 补零 + 去重 + 丢掉 25:00
+    assert cfg.auction_min_score == 6               # 夹到满分（6）
+    assert cfg.auction_alert_max_items == 50        # 夹到上限 50
+
+
+def test_auction_scan_zero_or_negative_falls_back(tmp_path: Path) -> None:
+    """阈值 0/负数会让"过滤"失真（什么都过）→ 回默认；板块空列表 = 不限制（全选）。"""
+    path = _write(tmp_path, """
+auction_min_pct = 0
+auction_min_amount = -1
+auction_max_pct = 0
+auction_boards = []
+auction_scan_at = "abc"
+auction_min_score = 0
+""")
+    cfg = load_config(path, use_env=False)
+    assert cfg.auction_min_pct == 2.0
+    assert cfg.auction_min_amount == 5e6
+    assert cfg.auction_max_pct == 9.0
+    assert cfg.auction_boards == ["main", "chinext", "star", "bj"]
+    assert cfg.auction_scan_at == ["09:20", "09:25"]
+    assert cfg.auction_min_score == 1               # 0 → 夹到下限 1
+
+
+def test_auction_scan_legacy_key_names_still_work(tmp_path: Path) -> None:
+    """上一版的键名（`auction_alert_min_*`）继续认，但**新名优先**。"""
+    path = _write(tmp_path, "auction_alert_min_pct = 3.5\nauction_alert_max_items = 7\n")
+    cfg = load_config(path, use_env=False)
+    assert cfg.auction_min_pct == 3.5
+    assert cfg.auction_alert_max_items == 7
+
+    both = _write(tmp_path, "auction_alert_min_pct = 3.5\nauction_min_pct = 4.5\n")
+    assert load_config(both, use_env=False).auction_min_pct == 4.5
+
+
+def test_auction_scan_env_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """环境变量：新名字都要能覆盖（含板块与扫描时刻这两个列表）。"""
+    monkeypatch.setenv("AUCTION_MIN_PCT", "3.0")
+    monkeypatch.setenv("AUCTION_MAX_PCT", "7.5")
+    monkeypatch.setenv("AUCTION_MIN_AMOUNT", "3000000")
+    monkeypatch.setenv("AUCTION_MIN_SCORE", "4")
+    monkeypatch.setenv("AUCTION_ALERT_MAX_ITEMS", "20")
+    monkeypatch.setenv("AUCTION_BOARDS", "chinext,star")
+    monkeypatch.setenv("AUCTION_SCAN_AT", "09:19,09:26")
+    cfg = load_config(tmp_path / "none.toml")
+    assert cfg.auction_min_pct == 3.0 and cfg.auction_max_pct == 7.5
+    assert cfg.auction_min_amount == 3e6
+    assert cfg.auction_min_score == 4
+    assert cfg.auction_alert_max_items == 20
+    assert cfg.auction_boards == ["chinext", "star"]
+    assert cfg.auction_scan_at == ["09:19", "09:26"]
+
+    # 环境变量写错也一样回默认（0 秒那种写法不该让过滤失效）
+    monkeypatch.setenv("AUCTION_MIN_PCT", "0")
+    monkeypatch.setenv("AUCTION_SCAN_AT", "乱写")
+    monkeypatch.setenv("AUCTION_BOARDS", "zzz")
+    cfg2 = load_config(tmp_path / "none.toml")
+    assert cfg2.auction_min_pct == 2.0
+    assert cfg2.auction_scan_at == ["09:20", "09:25"]
+    assert cfg2.auction_boards == ["main", "chinext", "star", "bj"]
+
+
+def test_example_config_documents_auction_scan() -> None:
+    """config.example.toml 里要能看到这一组，并写清"为什么只扫两次"和涨跌幅上下限的理由。"""
+    import tomllib
+    from pathlib import Path as P
+
+    example = P(__file__).resolve().parents[1] / "config.example.toml"
+    text = example.read_text(encoding="utf-8")
+    data = tomllib.loads(text)
+    assert data["intraday_auction"] is False
+    assert data["auction_scan_at"] == ["09:20", "09:25"]
+    assert data["auction_min_pct"] == 2.0
+    assert data["auction_max_pct"] == 9.0
+    assert data["auction_boards"] == ["main", "chinext", "star", "bj"]
+    assert data["auction_min_amount"] == 5000000.0
+    assert data["auction_min_score"] == 2
+    assert data["auction_alert_max_items"] == 10
+    assert "全市场" in text                          # 扫的是全市场，不是只看自己的票
+    assert "配额" in text                            # 为什么不每分钟扫
+    assert "买不进" in text                          # 涨幅上限的理由
