@@ -104,6 +104,21 @@ HIDDEN = [
     "laoa_trader.ui",
     "laoa_trader.ui.app",
     "laoa_trader.ui.formula_page",
+    # 下面这些本来是**静态导入**（PyInstaller 的静态分析会自己跟进），列出来是"多一道保险"：
+    # 打包版跑不起来是最难查的一类问题（本机全绿、exe 一开就 ImportError），
+    # 代价只是清单长几行。新增模块时顺手加一条。
+    "laoa_trader.assets",
+    "laoa_trader.hints",
+    "laoa_trader.market",
+    "laoa_trader.state",
+    "laoa_trader.data.preflight",
+    "laoa_trader.data.sources",
+    "laoa_trader.data.eastmoney",
+    "laoa_trader.notify.sound",
+    "laoa_trader.research.scorecard",
+    "laoa_trader.ui.alert_popup",
+    "laoa_trader.ui.quotes",
+    "laoa_trader.ui.theme",
     # PySide6 里被动态加载的插件模块
     "PySide6.QtCore",
     "PySide6.QtGui",
