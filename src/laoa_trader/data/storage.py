@@ -714,6 +714,27 @@ def load_recent_alerts(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def load_alerts_of_day(
+    conn: sqlite3.Connection, day: str, kinds: Iterable[str] | None = None
+) -> list[dict]:
+    """**某一天**的提醒（可按 kind 过滤），按 `pushed_at` **升序**。
+
+    为什么不用 `load_recent_alerts` + 本地过滤：那是"最近 N 条"（倒序、跨天），
+    而持仓页的「今日T提示」列要的是"今天这只票发过什么"，跨天会把昨天的提示显示成今天的。
+    升序（而不是倒序）是因为调用方要的是"同一天里**最后**一条 = 最新结论"，
+    升序遍历时后写的自然覆盖先写的，不用自己比时间戳。
+    """
+    sql = ("SELECT date, symbol, kind, price, detail, pushed_at FROM intraday_alert "
+           "WHERE date = ?")
+    params: list[Any] = [day]
+    wanted = [str(k) for k in (kinds or []) if str(k)]
+    if wanted:
+        sql += f" AND kind IN ({','.join('?' * len(wanted))})"   # noqa: S608 - 只拼问号个数
+        params.extend(wanted)
+    sql += " ORDER BY pushed_at, rowid"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
 # ── 竞价扫描结果（全市场扫描；界面"看全部"用）──
 
 

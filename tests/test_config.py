@@ -626,6 +626,80 @@ def test_example_config_documents_auction_scan() -> None:
     assert "买不进" in text                          # 涨幅上限的理由
 
 
+# ── 持仓做T 的近似提示（开关 + 四个阈值）──
+
+
+def test_position_t_switch_defaults_on_and_reads_toml(tmp_path: Path) -> None:
+    """做T提示**默认开着**（用户点名的功能）；开关与四个阈值都能从 config.toml 改。"""
+    assert load_config(use_env=False).intraday_t is True
+    assert load_config(use_env=False).t_high_min_gain_pct == 2.0
+
+    path = _write(tmp_path, """
+intraday_t = false
+t_high_min_gain_pct = 3.0
+t_high_pullback_pct = 2.0
+t_low_min_drop_pct = 2.5
+t_low_rebound_pct = 1.2
+""")
+    cfg = load_config(path, use_env=False)
+    assert cfg.intraday_t is False
+    assert cfg.t_high_min_gain_pct == 3.0
+    assert cfg.t_high_pullback_pct == 2.0
+    assert cfg.t_low_min_drop_pct == 2.5
+    assert cfg.t_low_rebound_pct == 1.2
+
+
+def test_position_t_switch_written_wrong_stays_default_on(tmp_path: Path) -> None:
+    """开关写错（`"maybe"`）→ **回到默认开着**，不是把功能悄悄关掉（与浮窗/提示音同一口径）。"""
+    path = _write(tmp_path, 'intraday_t = "maybe"\n')
+    assert load_config(path, use_env=False).intraday_t is True
+    # 但那四个阈值写坏（0/负数/乱码）→ 回各自的默认值（0 会让"涨过 0%"变成永远触发）
+    path2 = _write(tmp_path, """
+t_high_min_gain_pct = 0
+t_high_pullback_pct = -1
+t_low_min_drop_pct = "abc"
+t_low_rebound_pct = 0.0
+""")
+    cfg = load_config(path2, use_env=False)
+    assert (cfg.t_high_min_gain_pct, cfg.t_high_pullback_pct,
+            cfg.t_low_min_drop_pct, cfg.t_low_rebound_pct) == (2.0, 1.5, 2.0, 1.0)
+
+
+def test_position_t_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """环境变量：`INTRADAY_T` 关掉、`T_*` 改阈值（写错也一样回默认）。"""
+    monkeypatch.setenv("INTRADAY_T", "0")
+    monkeypatch.setenv("T_HIGH_MIN_GAIN_PCT", "3.5")
+    monkeypatch.setenv("T_LOW_REBOUND_PCT", "0.8")
+    cfg = load_config(tmp_path / "none.toml")
+    assert cfg.intraday_t is False
+    assert cfg.t_high_min_gain_pct == 3.5
+    assert cfg.t_low_rebound_pct == 0.8
+
+    monkeypatch.setenv("INTRADAY_T", "maybe")          # 写错 → 回默认（开着）
+    monkeypatch.setenv("T_HIGH_MIN_GAIN_PCT", "0")
+    cfg2 = load_config(tmp_path / "none.toml")
+    assert cfg2.intraday_t is True
+    assert cfg2.t_high_min_gain_pct == 2.0
+
+
+def test_example_config_documents_position_t() -> None:
+    """`config.example.toml` 要给全五个键，并写清"近似、不可回测、阈值是手工设定"。"""
+    import tomllib
+    from pathlib import Path as P
+
+    example = P(__file__).resolve().parents[1] / "config.example.toml"
+    text = example.read_text(encoding="utf-8")
+    data = tomllib.loads(text)
+    assert data["intraday_t"] is True                  # 用户点名的功能：默认开着
+    assert data["t_high_min_gain_pct"] == 2.0
+    assert data["t_high_pullback_pct"] == 1.5
+    assert data["t_low_min_drop_pct"] == 2.0
+    assert data["t_low_rebound_pct"] == 1.0
+    assert "T+1" in text                               # 反T/正T 的前提要写出来
+    assert "回测" in text and "近似" in text            # 说白了：近似、回测不了
+    assert "券商" in text                               # 能卖多少只有券商知道
+
+
 # ── 用户拍板后的默认策略集与 3 年导入窗口 ──
 
 

@@ -784,13 +784,27 @@ if QT_AVAILABLE:
             self.tabs.addTab(self._build_market_page(), "大盘概览")
             self.tabs.addTab(self._build_pool_page(), "股票池")
 
-            self.position_table = QTableWidget(0, 7)
+            self.position_table = QTableWidget(0, 8)
             # 「盈亏比例」紧跟在「成本」后面：成本和比例挨着看，"赚了几个点"一眼就出来
             # （以前这里没有这一列，比例只在状态栏/详情里）
+            # 「今日T提示」放在最后一列：它是**近似**提示（60 秒快照算的，无法回测），
+            # 排在止损/止盈那些硬参数后面，不喧宾夺主；单元格只放短标签
+            # （如「高抛（近似）」），整句话在 tooltip 里 —— 见 `_refresh_positions`
             self.position_table.setHorizontalHeaderLabels(
-                ["代码", "名称", "数量", "成本", "盈亏比例", "止损", "止盈"]
+                ["代码", "名称", "数量", "成本", "盈亏比例", "止损", "止盈", "今日T提示"]
             )
             self._stretch(self.position_table)
+            t_header = self.position_table.horizontalHeaderItem(7)
+            if t_header is not None:
+                # 列头 tooltip = 这一列的说明书：用户不用去翻 README 就知道"近似"是什么意思
+                t_header.setToolTip(
+                    "持仓股今天的做T提示（**近似**，只提示部分仓位，可卖数量以券商为准）：\n"
+                    "· 高抛（近似）= 反T 前半段：卖部分**昨仓**，回落后当天接回等量；\n"
+                    "· 低吸（近似）= 正T：用**现金**低吸，反弹后当天卖出等量昨仓。\n"
+                    "只有 60 秒一张的行情快照，没有分时/逐笔/Level-2 数据 → **无法回测**；\n"
+                    "四个阈值是手工设定的起点（见 config.toml 的 t_* 项），不是拟合出来的。\n"
+                    "鼠标停到单元格上可看完整那句（现价/涨幅/回落/均价）。"
+                )
             self.tabs.addTab(
                 self._build_table_page(self._build_position_row(), self.position_table),
                 "持仓",
@@ -2684,7 +2698,11 @@ if QT_AVAILABLE:
                 from laoa_trader.data import storage
 
                 positions = storage.load_positions(conn)
+            # 「今日T提示」：从提醒表读**今天**已发过的做T提示（不在界面里现算 ——
+            # 现算就等于把阈值逻辑放到两个地方，还会出现"推送说高抛、界面显示没有"）。
+            # 没有持仓就一次都不查：这个刷新每 5 秒跑一轮，没持仓的用户不该为它付一次查询。
             rows = list(positions.values())
+            hints = intraday.t_hints_today(self.cfg.db_path) if rows else {}
             self.position_table.setRowCount(len(rows))
             for i, row in enumerate(rows):
                 cost = float(row.get("avg_cost") or 0)
@@ -2702,6 +2720,12 @@ if QT_AVAILABLE:
                 self.position_table.setItem(
                     i, 6, QTableWidgetItem(_fmt_float(cost * (1 + self.cfg.take_profit)))
                 )
+                # 「今日T提示」：没有提示就画 `—`（与「盈亏比例」缺价同一种写法，
+                # 不用空字符串 —— 空单元格看不出"今天没有提示"还是"这一列坏了"）
+                hint = hints.get(str(row["symbol"]))
+                hint_item = QTableWidgetItem(intraday.t_hint_cell(hint) or market.DASH)
+                hint_item.setToolTip(intraday.t_hint_tooltip(hint))
+                self.position_table.setItem(i, 7, hint_item)
 
         @staticmethod
         def _position_change_item(cost: float, price: float | None) -> Any:

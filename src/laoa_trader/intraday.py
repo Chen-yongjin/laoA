@@ -21,11 +21,34 @@
 | 买入 | `break_high` | 放量突破 20 日高点（涨 2%~9%，成交额 ≥ 日均 ×0.5） |
 | 买入 | `pullback_ma5_buy` | 池内标的回踩 5 日线 ±1.5% 且盘中转强 |
 
+另有两条**只对自己持仓的票**发的"做T近似提示"（`t_high` / `t_low`，见下一节）——
+它们与上面 6 条**不是一类东西**：上面 6 条是有历史数据可回测的规则，这两条没有。
+
 > **已下线**：原来的"打板提醒"（kind `first_board`：实时涨停池里"首板 + 封单 ≥5000 万"）
 > 已于本轮删除 —— 依赖**封单额**的打板信号没有可验证的边际（见策略成绩单那套口径），
 > 用户也明确说"没有意义"。`limit_up_pool` 的同步、连板数与封单额字段**都还在**
 > （池子要显示"涨停：2 连板 · 原因"，公式里的 `连板()` / `涨停天数()` 也依赖它），
 > 只是不再用它产生提醒。
+
+持仓做T 的近似提示（`t_high` / `t_low`）
+---------------------------------------
+| 类型 | 规则 | 触发 |
+|---|---|---|
+| 提示 | `t_high`（近似·T高抛） | 现价较昨收涨 ≥ `t_high_min_gain_pct`（2.0%）**且** 从今日最高回落 ≥ `t_high_pullback_pct`（1.5%）**且** 现价仍在分时均价上方 |
+| 提示 | `t_low`（近似·T低吸） | 现价较昨收跌 ≥ `t_low_min_drop_pct`（2.0%）**且** 从今日最低反弹 ≥ `t_low_rebound_pct`（1.0%）**且** 未跌破（或刚收回）分时均价 |
+
+**A 股 T+1 是这两条提示的地基**：当天买的票当天不能卖，所以持仓股一天只能做两种"T"——
+**反T（先卖后买）**：卖部分**昨仓** → 当天更低时接回等量，成本降低、收盘股数不变；
+**正T（先买后卖）**：用**可用现金**低吸 → 当天反弹后卖出**等量的昨仓**，收盘股数不变。
+所以提示里绝不会出现"现在买/现在卖"这种裸指令，而且一定带「部分」——
+程序不知道用户今天又买过多少、有多少被冻结，**能卖多少只有券商知道**。
+`opened_at` 是今天的持仓**不发高抛（反T，要先卖）提示**（当天新建仓 T+1 不可卖），
+但可以发低吸提示（正T 用的是现金，不卖出任何股票）。
+
+> ⚠️ **这两条提示是近似的、且无法回测**：只有 60 秒一张的行情快照，没有分时/逐笔/Level-2，
+> 更没有历史的分时数据来验证阈值 —— 这四个阈值是**手工设定的起点，不是拟合出来的**。
+> 它们**不参与选股、也不会混进当天的池子推送**，只走盘中提醒那几条通道。
+> 开关：`intraday_t`（**默认 true**，环境变量 `INTRADAY_T`）。详见 README「持仓做T（近似提示）」。
 
 设计要点（继承服务器版）
 ------------------------
@@ -123,6 +146,10 @@ KIND_LABELS = {
     # 竞价强度：强/弱分开成两种 kind，去重键 (date, symbol, kind) 天然一天只推一次
     "auction_strong": "⚡ 竞价强度",
     "auction_weak": "⚡ 竞价走弱",
+    # 持仓做T 的**近似**提示：标签里直接写「近似」，用户在推送/浮窗/提醒页一眼能分辨
+    # （它们与上面那些有历史数据支撑的规则不是一回事，见模块 docstring）
+    "t_high": "🔁 近似·T高抛（反T：先卖后买）",
+    "t_low": "🔁 近似·T低吸（正T：先买后卖）",
 }
 
 # 异动的 kind 按标签区分（同一只票同一天同一标签只推一次；标签变了可以再推一条）
@@ -543,6 +570,282 @@ def evaluate_pool_buy_rules(symbol: str, snap: dict, ctx: dict) -> list[tuple[st
     return []
 
 
+# ── 持仓做T 的近似提示（`t_high` / `t_low`）──
+#
+# 语义前提（A 股 **T+1**，这是整个功能的地基，改代码前先把这三行读一遍）：
+#   当天买入的股票**当天不能卖**，所以"现在买、等会儿卖"的裸指令是**不合法**的。
+#   一个持仓股当天能做的只有两件事：
+#     反T（先卖后买）：卖掉**昨仓**的一部分 → 当天更低时买回等量 → 成本降低、收盘股数不变；
+#     正T（先买后卖）：用**可用现金**低吸      → 当天反弹后卖出**等量的昨仓** → 收盘股数不变。
+#   所以本模块发出的每一条都必须写成这两种之一，而且必须带「部分」——
+#   程序既不知道用户今天又买过多少（那部分不能卖），也不知道有多少股被挂单冻结，
+#   **能卖多少只有券商的持仓页说了算**。
+#
+# 数据来源与"近似"到什么程度（不要在这里许下做不到的承诺）：
+#   只有每 60 秒一张的实时快照（`client.snapshot`），**没有分时、逐笔、Level-2**，
+#   更没有历史分时数据可以回测 —— 所以这四个阈值是**手工设定的起点，不是拟合出来的**，
+#   提示里的价格也只是一个瞬时快照值，具体成交价要用户自己用限价单去争取。
+#   这些话在 README、模块 docstring、`KIND_LABELS` 的标签里都写了一遍（用户看得到的地方）。
+
+#: 做T提示的两个 kind。与上面 6 条规则**故意分开**：标签里带「近似」，
+#: 用户一眼能分辨"这是快照规则给的提示"还是"有历史数据支撑的信号"。
+T_HIGH_KIND = "t_high"
+T_LOW_KIND = "t_low"
+T_KINDS: tuple[str, ...] = (T_HIGH_KIND, T_LOW_KIND)
+
+#: 持仓页「今日T提示」列里的短文本（**整句话**放在 tooltip 里，见 `t_hint_tooltip`）
+T_HINT_SHORT_LABELS: dict[str, str] = {
+    T_HIGH_KIND: "高抛（近似）",
+    T_LOW_KIND: "低吸（近似）",
+}
+
+#: 低吸判据里"站上均价"的容差：现价不比均价低过这个比例就算"已收回均价"。
+#: 为什么给容差而不是硬要求 `现价 >= 均价`：60 秒一张的快照价格会在均价上下反复跳，
+#: 严格判据会把"刚刚收回"的那一分钟读成"还在水下" —— 而那正是最该提示的一分钟。
+#: 0.5% 与其它阈值一样是**手工设定**的（没有分时数据，无从拟合）。
+T_LOW_VWAP_TOL = 0.005
+
+#: 均价合理性校验的容差：算出来的分时均价必须落在当日 [最低, 最高] 区间里（留 0.5% 余量）。
+T_VWAP_RANGE_TOL = 0.005
+
+
+#: `opened_at` 的宽松写法：写入方（`storage.upsert_position` 的 `_now()`）给的是
+#: `2026-09-16 09:31:00`；`2026/9/16`、`2026.09.16` 这两种是**防老库/手工导入**的假设
+#: （没有实测样本，多认几种写法的代价只是几行正则）。
+_OPENED_AT_RE = re.compile(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})")
+
+
+def _day_of(raw: Any) -> str:
+    """把 `opened_at` 之类的文本取成 `YYYY-MM-DD`（取不出来返回空串）。
+
+    为什么手写而不用 `datetime.fromisoformat`：这一列是自由文本（程序自己写的是
+    `2026-09-16 09:31:00`，而老库/手工导入可能是空串或别的写法），
+    而**解析失败绝不能抛** —— 抛出去就等于"持仓页的做T提示整个功能没了"。
+    月/日越界（`2026-13-40`）也当"认不出来"：与其猜，不如让它走"建仓日未知"那条路。
+    """
+    match = _OPENED_AT_RE.match(str(raw or "").strip())
+    if not match:
+        return ""
+    year, month, day = (int(part) for part in match.groups())
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return ""
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def held_positions(db_path: str) -> dict[str, dict]:
+    """做T提示的观察面：**有持仓的票**（`quantity > 0`）→ `{symbol: position 行}`。
+
+    为什么单独取一遍而不复用观察池（`watch_targets`）：观察池是"今天要买的票"
+    （股票池 + 自选），**持仓完全可能不在里面**（池子天天重建，用户手上的票却没变）。
+    只盯池子会出现"我明明持有它，做T提示却从来不提它"——那是这个功能最不能有的毛病。
+    """
+    with storage.connect(db_path) as conn:
+        return storage.load_positions(conn)
+
+
+def sellable_note(position: dict, today: str) -> tuple[bool, str]:
+    """这只持仓今天**能不能卖**（T+1）→ `(可卖?, 要写进提示里的一句话)`。
+
+    判据只有一条：`opened_at` 的**日期**是不是今天。
+      - 是今天 → 今日新建仓，当天不可卖（反T 那一步根本做不到）；
+      - 更早   → 可卖，没有附加说明；
+      - 空/NULL/解析不出来 → **按"可卖"处理**，但提示里写明「建仓日未知，按可卖处理」。
+        为什么不按"不可卖"处理：这一列老库可能根本没填，按不可卖会让高抛提示**永远不发**，
+        用户看不到任何反应只会以为功能坏了；按可卖 + 明说，用户自己一眼就能判断。
+        （与项目一贯的"宁可说清、不要静默"一致，见 `config.py` 的 `history_warning`。）
+    """
+    opened = _day_of(position.get("opened_at"))
+    if not opened:
+        return True, "建仓日未知，按可卖处理"
+    if opened == today:
+        return False, "今日新建仓，T+1 当天不可卖"
+    return True, ""
+
+
+def intraday_vwap(snap: dict) -> float | None:
+    """分时均价 = **累计成交额 ÷ 累计成交量**（快照里没有均价字段，只能自己算）。
+
+    为什么这么算：`/a-share/prices/snapshot` 的 `PriceSnapshotItem` 只有
+    `last_price / open_price / high_price / low_price / prev_price / volume / turnover`
+    （见数据源文档 `docs/api/endpoints-prices.md`），**既没有均价，也没有买一卖一**。
+    文档里 `volume` 的单位是**股**、`turnover` 是成交额（元），相除就是元/股；
+    同一份 `turnover` 早就被 `evaluate_buy_rules` 当"当日累计成交额"在用
+    （拿它跟 20 日均额比），所以这两个字段是**当日累计值**。
+
+    这个口径是**拿真实快照核对过的**（2026-09-16 上午，不是照文档猜的）：
+
+    * 全市场 **5573 只**：`turnover ÷ volume` 落在当日 `[low, high]` 内的 **5550 只**、
+      越界的 **0 只**（其余 23 只无量/无价，跳过）。若单位是"手"，均价会差 100 倍、
+      **每一只**都会越界 —— 不可能是这个结果；
+    * 同一批票隔 75 秒取两次：`volume` 与 `turnover` 都**单调增加**
+      （茅台 1601022→1615722 股、20.21→20.39 亿元），增量隐含均价 1256.69 元
+      正是当时的现价 —— 两个字段都是"当日累计"，不是"最后一分钟"。
+
+    调用方仍然要走一道 `vwap_reasonable()`：那道校验现在防的是**数据故障**
+    （停牌半天、high/low 与 volume/turnover 不同步）与将来的接口变更，
+    而不是防单位换算 —— 见函数注释。
+    """
+    amount = _num(snap.get("turnover"))
+    volume = _num(snap.get("volume"))
+    if amount is None or volume is None or amount <= 0 or volume <= 0:
+        return None
+    return amount / volume
+
+
+def vwap_reasonable(vwap: float | None, low: float | None, high: float | None) -> bool:
+    """均价是否落在当日 [最低, 最高] 区间内（留 `T_VWAP_RANGE_TOL` 的余量）。
+
+    这是一道**自我校验**，防的是两类事故：
+    1. 快照的 high/low 与 volume/turnover **不是同一时刻的**（停牌半天、字段缺失、
+       接口变更）—— 算出来的"均价"根本不代表当天的成交；
+    2. 单位或口径变了的兜底（`volume` 单位若从"股"变成"手"，均价差 100 倍，一眼可见）。
+       真实快照上这道校验**今天一只都不会拦**（2026-09-16 全市场 5573 只，0 只越界，
+       见 `intraday_vwap()`），所以它不会误伤正常数据。
+    判不过就把均价当"没有"：**宁可这一次不提，也不给一个错的数** ——
+    提示里写着「均价 12.10 上方」，用户就会照着这个数下单。
+    """
+    if vwap is None or not low or not high or high <= 0 or low <= 0:
+        return False
+    return low * (1 - T_VWAP_RANGE_TOL) <= vwap <= high * (1 + T_VWAP_RANGE_TOL)
+
+
+def _t_thresholds(cfg: Config | None = None) -> tuple[float, float, float, float]:
+    """四个做T阈值：`(高抛涨幅, 高抛回落, 低吸跌幅, 低吸反弹)`。
+
+    配置写坏/缺失一律回默认（`config.Config.__post_init__` 已经归一过一次，
+    这里再防一层：调用方可能传一个"仿 Config"的简单对象过来）。
+    """
+    cfg = cfg or get_config()
+
+    def one(name: str, fallback: float) -> float:
+        try:
+            value = float(getattr(cfg, name, fallback))
+        except (TypeError, ValueError):
+            return fallback
+        return value if value > 0 else fallback
+
+    return (one("t_high_min_gain_pct", 2.0), one("t_high_pullback_pct", 1.5),
+            one("t_low_min_drop_pct", 2.0), one("t_low_rebound_pct", 1.0))
+
+
+def evaluate_t_rules(
+    symbol: str, snap: dict, position: dict, today: str, cfg: Config | None = None
+) -> list[tuple[str, float, str]]:
+    """持仓做T 的近似提示：返回 `[(kind, price, detail)]`（**未去重**）。
+
+    判据（四个阈值见 `config.py` / `config.example.toml`，默认 2.0 / 1.5 / 2.0 / 1.0）：
+
+    - `t_high`（高抛 = 反T 前半段）：现价较**昨收**涨 ≥ 2.0% **且** 较**今日最高**
+      回落 ≥ 1.5% **且** 现价仍在分时均价上方（回落但没破位）；
+    - `t_low`（低吸 = 正T，或反T 的后半段接回）：现价较昨收跌 ≥ 2.0% **且** 较
+      **今日最低**反弹 ≥ 1.0% **且** 未跌破（或刚收回，容差 `T_LOW_VWAP_TOL`）均价。
+
+    三条判据**缺一不可**（包括均价）：只有"冲高回落"或只有"跌深反弹"都不构成提示 ——
+    "回落"本身可能就是趋势反转的第一步，"跌深"本身可能是继续跌。
+    所以均价取不到（成交量/成交额缺失或越界）时**整条不发**，绝不用半个判据凑一条提示。
+
+    Args:
+        snap: 一张 60 秒快照（字段名照抄接口：`last_price` / `high_price` / `low_price` /
+            `prev_price` / `price_change_ratio_pct` / `volume` / `turnover`）。
+        position: 该标的的持仓行（**调用方已保证 `quantity > 0`**）。
+        today: 北京时间的今天（`YYYY-MM-DD`，用 `now_shanghai()` 取，别用机器本地时间）。
+
+    注意：**今日最高/最低不跨轮自己累积**，直接用快照自带的 `high_price` / `low_price`
+    （接口给的就是当日累计高低点）。自己攒一份跨轮状态要多维护一个"跟实际不符"的来源
+    （进程重启、跳过几轮、跑在别的机器上都会错），而快照里本来就有这个数。
+    """
+    cfg = cfg or get_config()
+    last = _num(snap.get("last_price"))
+    if last is None or last <= 0:
+        return []
+    high = _num(snap.get("high_price"))
+    low = _num(snap.get("low_price"))
+    prev = _num(snap.get("prev_price"))
+    pct = _num(snap.get("price_change_ratio_pct"))
+    if pct is None and prev and prev > 0:
+        # 没有现成的涨跌幅就按快照的昨收算。**只用快照的昨收**：
+        # 本地日线是后复权视图（`stock_daily_hfq` = 原始价 × factor），
+        # 拿它跟实时价相除，对有过分红送股的票会算出离谱的涨跌幅。
+        pct = (last / prev - 1) * 100
+    if pct is None:
+        return []                     # 昨收也拿不到：不发（不猜一个基准价）
+    vwap = intraday_vwap(snap)
+    if vwap is not None and not vwap_reasonable(vwap, low, high):
+        vwap = None
+    gain_min, pull_min, drop_min, rebound_min = _t_thresholds(cfg)
+    sellable, sell_note = sellable_note(position, today)
+
+    hits: list[tuple[str, float, str]] = []
+    # ── 高抛：反T 的前半段（卖部分昨仓）──
+    if sellable and high and high > 0:
+        pullback = (high - last) / high * 100
+        if pct >= gain_min and pullback >= pull_min and vwap is not None and last >= vwap:
+            note = f"（{sell_note}）" if sell_note else ""
+            hits.append((T_HIGH_KIND, last,
+                         f"现价 {last:.2f}（{pct:+.1f}%），较今日最高 {high:.2f} "
+                         f"回落 {pullback:.1f}%，仍在均价 {vwap:.2f} 上方 → "
+                         f"可卖出【部分昨仓】（反T：先卖后买），回落后当天再买回等量；"
+                         f"只提示部分仓位，可卖数量以券商为准{note}"))
+    # ── 低吸：正T（先买后卖），也可能是在把前面高抛掉的仓位接回来 ──
+    if low and low > 0:
+        rebound = (last - low) / low * 100
+        if pct <= -drop_min and rebound >= rebound_min and vwap is not None:
+            gap = (last / vwap - 1) * 100
+            if gap >= 0:
+                vwap_text = f"已站上均价 {vwap:.2f}"
+            elif gap >= -T_LOW_VWAP_TOL * 100:
+                vwap_text = f"刚收回均价 {vwap:.2f}（仍低 {abs(gap):.1f}%）"
+            else:
+                vwap_text = ""
+            if vwap_text:
+                note = f"（{sell_note}）" if not sellable else ""
+                hits.append((T_LOW_KIND, last,
+                             f"现价 {last:.2f}（{pct:+.1f}%），较今日最低 {low:.2f} "
+                             f"反弹 {rebound:.1f}%，{vwap_text} → 可用现金低吸"
+                             f"（正T：先买后卖），当天反弹后卖出等量昨仓；"
+                             f"只提示部分仓位，可卖数量以券商为准{note}"))
+    return hits
+
+
+def t_hints_today(db_path: str, day: str | None = None) -> dict[str, dict]:
+    """今天已经发过的做T提示：`{symbol: 最新一条}`（持仓页「今日T提示」列用）。
+
+    为什么从 `intraday_alert` 读、而不是在界面里拿快照现算：提示是**提醒服务那一轮**
+    的结论（同一张快照、同一套阈值、同一条去重记录）。界面上再算一遍就有了两个真相，
+    很容易出现"推送说高抛了、界面上却显示没有"这种自相矛盾；而且界面每 5 秒刷一次，
+    现算等于要求界面也去取实时行情（多一份请求与失败路径）。
+    """
+    day = day or now_shanghai().strftime("%Y-%m-%d")
+    with storage.connect(db_path) as conn:
+        rows = storage.load_alerts_of_day(conn, day, T_KINDS)
+    out: dict[str, dict] = {}
+    for row in rows:                 # 升序遍历 → 后面的覆盖前面的 = 同一天里最新一条
+        symbol = str(row.get("symbol") or "")
+        if symbol:
+            out[symbol] = row
+    return out
+
+
+def t_hint_cell(row: dict | None) -> str:
+    """「今日T提示」单元格的短文本（没提示过 → 空串，界面自己画 `—`）。"""
+    kind = str((row or {}).get("kind") or "")
+    return T_HINT_SHORT_LABELS.get(kind, "")
+
+
+def t_hint_tooltip(row: dict | None) -> str:
+    """「今日T提示」的 tooltip：**整句话**（数字 + 动作 + 免责说明）都在这儿。
+
+    为什么要 tooltip：表格里只能放 4~5 个字的短标签，而用户真正要看的是
+    "凭什么提示"（现价/涨幅/回落/均价）与"我该做什么"（反T 还是正T）——
+    这两件事都在 `detail` 里，鼠标停上去就能看到完整那句。
+    """
+    if not row:
+        return ("今天还没有做T提示：只有持仓股、且同时满足「冲高回落没破位」或"
+                "「跌深反弹已收回均价」才会提示（近似提示，60 秒快照算的，无法回测）")
+    label = KIND_LABELS.get(str(row.get("kind") or ""), str(row.get("kind") or ""))
+    return f"{label}\n时间：{row.get('pushed_at') or '—'}\n{row.get('detail') or ''}"
+
+
 # ── 一轮执行 ──
 
 
@@ -551,6 +854,7 @@ def build_alerts(
     client: hx.HithinkClient,
     scan_market: bool = False,
     cfg: Config | None = None,
+    today: str | None = None,
 ) -> list[dict]:
     """跑一轮规则，返回本轮命中的提醒（**未去重**）。
 
@@ -558,14 +862,32 @@ def build_alerts(
     **竞价不在这里**：它是"全市场扫描 + 到点才扫 + 汇总推送"（见 `auction_scan`），
     由 `run_once` 按 `auction_scan_due` 单独驱动 —— 混进这一轮会让"每分钟一拍"
     变成"每分钟扫一次全市场"，配额会被打光。
+
+    Args:
+        today: 北京时间的今天（`YYYY-MM-DD`）；做T提示要用它判断"是不是今天新建的仓"。
+            默认按 `now_shanghai()` 取 —— 但 `run_once` 会把它的 `now` 传进来，
+            这样测试注入一个固定时刻时，这里的时间也是同一个（不会一半注入一半真实）。
     """
+    cfg = cfg or get_config()
+    today = today or now_shanghai().strftime("%Y-%m-%d")
     pool, pool_symbols = watch_targets(engine.db_path)
+    # 做T提示只看**持仓**（quantity > 0）；关掉功能时连持仓都不查，一次库都不多读
+    held = held_positions(engine.db_path) if bool(getattr(cfg, "intraday_t", True)) else {}
     symbols = list(pool)
+    # 持仓**不一定在观察池里**（池子天天重建、用户手上的票却没变），所以要把
+    # "不在池子里的持仓"补进这一轮的快照请求；只补几只，仍在同一个 100 只批次里，不额外发请求。
+    # 补进来的标的一律**只跑做T规则**：止损止盈那几条的观察池口径是"池子/自选/近期信号"，
+    # 顺手扩大它们的作用面等于悄悄改了另一个功能的行为，不在这次改动范围内。
+    extra = [s for s in held if s and s not in pool]
+    symbols += extra
     if not symbols:
         logger.info("股票池与近期信号都为空，无标的可盯")
     else:
-        logger.info(f"本轮盯 {len(symbols)} 只（其中股票池 {len(pool_symbols)} 只）")
-    ctx = history_context(engine.db_path, symbols)
+        logger.info(f"本轮盯 {len(symbols)} 只（其中股票池 {len(pool_symbols)} 只"
+                    + (f"，补进来的持仓 {len(extra)} 只" if extra else "") + "）")
+    # 历史上下文只给池内标的算：补进来的持仓不需要（做T提示只用快照自己的字段，
+    # 而且本地日线是**后复权**价，跟实时价根本不是一套口径，不能拿来算涨跌幅）
+    ctx = history_context(engine.db_path, list(pool))
 
     alerts: list[dict] = []
     for i in range(0, len(symbols), 100):
@@ -585,6 +907,15 @@ def build_alerts(
                 continue
             context = ctx.get(symbol, {})
             info = pool.get(symbol) or {}
+            position = held.get(symbol)
+            if position is not None:
+                # 做T提示：只有持仓股才跑（`position` 非 None 就等价于"在持仓表里"）
+                t_base = str(position.get("name") or info.get("name") or symbol)
+                for kind, price, detail in evaluate_t_rules(symbol, snap, position, today, cfg):
+                    alerts.append({"symbol": symbol, "name": t_base, "kind": kind,
+                                   "price": price, "detail": detail})
+            if symbol not in pool:
+                continue          # 补进来的持仓：除做T外不跑别的规则（见上面的注释）
             ref = info.get("close")
             base = info.get("name") or symbol
             name = _display_name(base, info)
@@ -599,7 +930,6 @@ def build_alerts(
                     alerts.append({"symbol": symbol, "name": name, "kind": kind,
                                    "price": price, "detail": detail})
 
-    cfg = cfg or get_config()
     # 当日异动：全市场一条请求，本地只留自己的票
     alerts.extend(anomaly_alerts(client, db_path=engine.db_path, cfg=cfg))
 
@@ -621,6 +951,8 @@ def format_message(
 
     L2 半自动：**顺带给出可直接抄进券商条件单的参数**（触发价/委托价/数量/止损/止盈）。
     有持仓时用真实成本价算止损止盈；没有则按提醒时点价格推算。
+    例外：**做T提示（`t_high` / `t_low`）不给条件单** —— 它是同一天两次操作，
+    一张条件单表达不了，硬塞一张还会把正T写成"卖出"（理由见循环里的注释）。
     """
     cfg = cfg or get_config()
     positions: dict[str, dict] = {}
@@ -638,6 +970,12 @@ def format_message(
         lines.append(f"{label}｜{alert['name']}（{alert['symbol'] or '—'}）{alert['detail']}")
         symbol = alert.get("symbol") or ""
         if not symbol or not alert.get("price"):
+            continue
+        if alert.get("kind") in T_KINDS:
+            # 做T提示**不生成条件单**：做T是同一天两次操作（先卖后买 / 先买后卖），
+            # 一张条件单表达不了。而且持仓股会走 `plan_sell`，那会把"正T：先买后卖"
+            # 也写成一张【条件单｜卖出】—— 方向都说错了，比不说更糟。
+            # 该说的数字与动作已经在上面那句 detail 里（含"部分仓位"的边界）。
             continue
         try:
             if symbol in positions:
@@ -1540,7 +1878,7 @@ def run_once(
 
     try:
         client = client or hx.HithinkClient(api_key=cfg.hithink_api_key or None, pace=0.05)
-        alerts = build_alerts(engine, client, cfg=cfg)
+        alerts = build_alerts(engine, client, cfg=cfg, today=today)
         result["hits"] = len(alerts)
         fresh = record_alerts(engine.db_path, alerts, today)
         result["fresh"] = len(fresh)

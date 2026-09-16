@@ -2,7 +2,7 @@
 
 为什么单独一份用例
 ------------------
-这四件事都是"用户明确点名要"的功能，而且各有各的坑：
+这五件事都是"用户明确点名要"的功能，而且各有各的坑：
 
 1. **提醒里的标的要显示成 `名称（代码）`**（推送文本本来就是，界面原来只有代码）；
 2. **涨停原因**：涨停池里早就有 `reason_type`（= 接口的 `limit_up_reason`）与 `continue_day_text`，
@@ -11,7 +11,10 @@
    把它当"卖压"会把最强的票读成最弱的票 —— 这条必须钉死；另外"非竞价时段"是**正常状态**，
    不是错误（不推送、不显示 0）；
 4. **异动提醒**：全市场一条请求 + 本地只留自己的票（池子/自选/持仓），
-   同一只票同一天同一标签只推一次。
+   同一只票同一天同一标签只推一次；
+5. **持仓做T 的近似提示**（`t_high` / `t_low`，见文件末尾那一节）：只对**持仓股**发，
+   说法必须落在"反T（先卖后买）"或"正T（先买后卖）"这两种**T+1 下合法**的操作上，
+   而且必须写清"只提示部分仓位、可卖数量以券商为准"。
 
 Qt 界面那几条（提醒表格、卡片上的竞价/涨停行）在 `tests/test_ui_smoke.py`。
 """
@@ -28,7 +31,7 @@ from laoa_trader.config import Config
 from laoa_trader.data import hithink as hx
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
-from tests.conftest import FakeResponse, FakeSession
+from tests.conftest import FakeClient, FakeResponse, FakeSession
 
 
 class FakeSignalClient:
@@ -685,3 +688,365 @@ def test_new_intraday_config_from_env(monkeypatch) -> None:
     assert cfg.auction_boards == ["chinext", "star"]
     assert cfg.intraday_anomaly is False
     assert cfg.anomaly_alert_tags == ["LIMIT_UP", "LIMIT_DOWN"]
+
+
+# ── ⑤ 持仓做T 的近似提示（`t_high` / `t_low`）──
+#
+# 地基是 A 股 **T+1**：当天买的票当天不能卖。所以这里每条断言都要能回答两件事 ——
+#   1. 这条提示说的是**反T（先卖后买）**还是**正T（先买后卖）**？
+#   2. 有没有写清"只提示部分仓位、可卖数量以券商为准"？
+#      （程序不知道用户今天又买过多少、有多少被挂单冻结，能卖多少只有券商知道。）
+# 四个阈值默认 2.0 / 1.5 / 2.0 / 1.0（%），都是**手工设定的起点**：
+# 只有 60 秒快照、没有分时/逐笔数据，回测不了（README「持仓做T（近似提示）」有说明）。
+
+T_DAY = "2026-09-16"          # 固定的"今天"（北京时间）；CI 跑在 UTC，绝不能用真实日期
+T_NOW = datetime(2026, 9, 16, 10, 30)
+
+
+def _t_snap(symbol="600001", *, last, high, low, prev, vwap=None, volume=1e6, pct=None):
+    """一张 60 秒快照：字段名照抄接口，`turnover = 均价 × 成交量`（两者都是当日累计值）。"""
+    amount = (vwap if vwap is not None else last) * volume
+    return {
+        "ticker": symbol, "thscode": hx.to_thscode(symbol),
+        "last_price": last, "high_price": high, "low_price": low, "prev_price": prev,
+        "price_change_ratio_pct": pct if pct is not None else (last / prev - 1) * 100,
+        "volume": volume, "turnover": amount,
+    }
+
+
+def _t_pos(cfg, symbol="600001", *, opened_at="2026-01-05 09:31:00",
+           quantity=1000, cost=10.0, name="持仓样本"):
+    """写一条持仓并返回它（`opened_at` 显式指定：T+1 的判据全看这一列）。
+
+    `storage.upsert_position` 会把 `opened_at` 写成"现在"，所以再用一条 UPDATE 覆盖掉 ——
+    测"昨日建仓 / 今日建仓 / 建仓日未知"这三种情况必须能精确控制它。
+    """
+    storage.init_db(cfg.db_path)
+    with storage.connect(cfg.db_path) as conn:
+        storage.upsert_position(conn, symbol, name=name, quantity=quantity, avg_cost=cost)
+        conn.execute("UPDATE position SET opened_at = ? WHERE symbol = ?", (opened_at, symbol))
+        conn.commit()
+    with storage.connect(cfg.db_path) as conn:
+        return storage.load_positions(conn)[symbol]
+
+
+def _t_day(cfg, days=(T_DAY,)) -> None:
+    """把这些天写进交易日历（真实路径：`is_trading_day` 查的就是这张表）。"""
+    with storage.connect(cfg.db_path) as conn:
+        storage.write_calendar(conn, list(days))
+
+
+# ── 高抛（反T 前半段）──
+
+
+def test_t_high_fires_with_all_the_numbers(cfg) -> None:
+    """高抛：涨 2.8% + 从今日最高回落 3.4% + 仍在均价上方 → 提示"卖部分昨仓"。"""
+    pos = _t_pos(cfg)
+    snap = _t_snap(last=12.34, high=12.78, low=12.05, prev=12.0, vwap=12.10, pct=2.83)
+    hits = it.evaluate_t_rules("600001", snap, pos, T_DAY, cfg)
+    assert [h[0] for h in hits] == ["t_high"]
+    kind, price, detail = hits[0]
+    assert kind == "t_high" and price == 12.34
+    # 触发它的数字必须都在句子里（用户要能自己核对，而不是相信一个结论）
+    assert "现价 12.34（+2.8%）" in detail
+    assert "今日最高 12.78 回落 3.4%" in detail
+    assert "仍在均价 12.10 上方" in detail
+    # 说法必须是**反T**（先卖后买）+ 部分仓位 + 可卖数量未知
+    assert "反T：先卖后买" in detail and "部分昨仓" in detail
+    assert "可卖数量以券商为准" in detail and "部分仓位" in detail
+    # 标签里带「近似」：用户一眼能分辨它不是"有历史数据支撑的信号"
+    assert "近似" in it.KIND_LABELS["t_high"]
+
+
+def test_t_high_boundary_fires_at_threshold_and_not_just_below(cfg) -> None:
+    """三条判据**正好在门槛上**要发；任何一条差一点点就不发。
+
+    为什么这里敢钉"正好等于"：
+    - 涨幅直接用快照给的 `price_change_ratio_pct`（传 2.0 就是 2.0，不经过任何除法）；
+    - 回落那一对价格是**实测过浮点精确**的（`(25.00−24.625)/25.00×100 == 1.5` 恰好成立）。
+    顺带记一个踩过的坑：`(10.10−10.00)/10.00×100` 在浮点里是 `0.9999999999999963`，
+    所以"正好 1%"这类断言**不能**随手拿两个两位小数去写。
+    """
+    pos = _t_pos(cfg)
+    on = _t_snap(last=24.625, high=25.0, low=23.9, prev=24.14, vwap=24.0, pct=2.0)
+    assert [h[0] for h in it.evaluate_t_rules("600001", on, pos, T_DAY, cfg)] == ["t_high"]
+    # ① 涨幅差 0.01 个点
+    weak_gain = _t_snap(last=24.625, high=25.0, low=23.9, prev=24.14, vwap=24.0, pct=1.99)
+    assert it.evaluate_t_rules("600001", weak_gain, pos, T_DAY, cfg) == []
+    # ② 回落只有 1.48%（门槛 1.5%）
+    weak_pull = _t_snap(last=24.63, high=25.0, low=23.9, prev=24.14, vwap=24.0, pct=2.0)
+    assert it.evaluate_t_rules("600001", weak_pull, pos, T_DAY, cfg) == []
+    # ③ 现价跌破均价（回落但破了位）
+    below_vwap = _t_snap(last=24.625, high=25.0, low=23.9, prev=24.14, vwap=24.7, pct=2.0)
+    assert it.evaluate_t_rules("600001", below_vwap, pos, T_DAY, cfg) == []
+
+
+def test_t_high_skipped_for_position_opened_today(cfg) -> None:
+    """**今日新建仓 T+1 不可卖** → 不发高抛提示（这是整个功能最容易做错的一条）。"""
+    pos = _t_pos(cfg, opened_at=f"{T_DAY} 09:31:00")
+    assert it.sellable_note(pos, T_DAY) == (False, "今日新建仓，T+1 当天不可卖")
+    snap = _t_snap(last=12.34, high=12.78, low=12.05, prev=12.0, vwap=12.10, pct=2.83)
+    assert it.evaluate_t_rules("600001", snap, pos, T_DAY, cfg) == []
+
+
+def test_sellable_note_unknown_opened_at_is_sellable_with_a_note(cfg) -> None:
+    """`opened_at` 空/NULL（老库、手工导入）→ 按"可卖"处理，但**必须在提示里写明**。
+
+    为什么不按"不可卖"处理：这一列可能是空的，按不可卖会让高抛提示永远不发，
+    用户看不到任何反应只会以为功能坏了；按可卖 + 明说，用户自己一眼能判断。
+    """
+    pos = _t_pos(cfg, opened_at=None)
+    assert it.sellable_note(pos, T_DAY) == (True, "建仓日未知，按可卖处理")
+    snap = _t_snap(last=12.34, high=12.78, low=12.05, prev=12.0, vwap=12.10, pct=2.83)
+    hits = it.evaluate_t_rules("600001", snap, pos, T_DAY, cfg)
+    assert [h[0] for h in hits] == ["t_high"]
+    assert "建仓日未知，按可卖处理" in hits[0][2]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("2026-09-16 09:31:00", "2026-09-16"),
+        ("2026/9/16", "2026-09-16"),          # 单位数月/日也认（别当成"未知"）
+        ("2026.09.16", "2026-09-16"),
+        ("2026-09-15", "2026-09-15"),
+        ("", ""), (None, ""), ("乱写", ""), ("2026-13-40", ""),
+    ],
+)
+def test_day_of_parses_legacy_opened_at(raw, expected) -> None:
+    """`opened_at` 是自由文本（老库/手工导入），解析要宽松、**绝不抛异常**。"""
+    assert it._day_of(raw) == expected
+
+
+# ── 低吸（正T，或反T 的后半段接回）──
+
+
+def test_t_low_fires_and_says_it_is_a_positive_t(cfg) -> None:
+    """低吸：跌 2.4% + 从今日最低反弹 1.5% + 已站上均价 → 提示"用现金低吸（正T）"。"""
+    pos = _t_pos(cfg)
+    snap = _t_snap(last=9.76, high=10.0, low=9.62, prev=10.0, vwap=9.70, pct=-2.4)
+    hits = it.evaluate_t_rules("600001", snap, pos, T_DAY, cfg)
+    assert [h[0] for h in hits] == ["t_low"]
+    detail = hits[0][2]
+    assert "现价 9.76（-2.4%）" in detail
+    assert "今日最低 9.62 反弹 1.5%" in detail
+    assert "已站上均价 9.70" in detail
+    assert "正T：先买后卖" in detail and "可用现金低吸" in detail
+    assert "可卖数量以券商为准" in detail
+    assert "近似" in it.KIND_LABELS["t_low"]
+
+
+def test_t_low_still_fires_for_position_opened_today_and_says_why(cfg) -> None:
+    """正T 用**现金**买入、不卖任何股票，所以今日新建仓照样提示 —— 但要说明卖要等明天。"""
+    pos = _t_pos(cfg, opened_at=f"{T_DAY} 09:31:00")
+    snap = _t_snap(last=9.76, high=10.0, low=9.62, prev=10.0, vwap=9.70, pct=-2.4)
+    hits = it.evaluate_t_rules("600001", snap, pos, T_DAY, cfg)
+    assert [h[0] for h in hits] == ["t_low"]
+    assert "今日新建仓，T+1 当天不可卖" in hits[0][2]
+
+
+def test_t_low_boundary_and_vwap_tolerance(cfg) -> None:
+    """低吸的三条判据 + "刚收回均价"的 0.5% 容差（`T_LOW_VWAP_TOL`）。"""
+    pos = _t_pos(cfg)
+    # 正好在门槛上：跌幅 -2.0%（快照直接给）、反弹 1.0%（浮点精确的一对价格 12.5 → 12.625）
+    on = _t_snap(last=12.625, high=13.0, low=12.5, prev=12.883, vwap=12.60, pct=-2.0)
+    assert [h[0] for h in it.evaluate_t_rules("600001", on, pos, T_DAY, cfg)] == ["t_low"]
+    # 跌幅差 0.01 个点
+    assert it.evaluate_t_rules(
+        "600001", _t_snap(last=12.625, high=13.0, low=12.5, prev=12.883, vwap=12.60,
+                          pct=-1.99), pos, T_DAY, cfg) == []
+    # 反弹只有 0.96%（门槛 1.0%）
+    assert it.evaluate_t_rules(
+        "600001", _t_snap(last=12.62, high=13.0, low=12.5, prev=12.883, vwap=12.60,
+                          pct=-2.0), pos, T_DAY, cfg) == []
+    # 仍压在均价下方 0.59%（超过 0.5% 容差）→ "没收回"，不发
+    assert it.evaluate_t_rules(
+        "600001", _t_snap(last=12.625, high=13.0, low=12.5, prev=12.883, vwap=12.70,
+                          pct=-2.0), pos, T_DAY, cfg) == []
+    # 刚收回均价（低 0.28%，在容差内）→ 发，并且句子里写明"仍低多少"
+    recovered = _t_snap(last=12.625, high=13.0, low=12.5, prev=12.883, vwap=12.66, pct=-2.0)
+    hits = it.evaluate_t_rules("600001", recovered, pos, T_DAY, cfg)
+    assert [h[0] for h in hits] == ["t_low"]
+    assert "刚收回均价 12.66" in hits[0][2] and "仍低 0.3%" in hits[0][2]
+
+
+# ── 缺字段 / 口径不对：宁可少提示，不给错数 ──
+
+
+def test_t_rules_degrade_gracefully_when_fields_are_missing(cfg) -> None:
+    """缺字段一律"不发"，**一条都不许抛异常**（快照字段缺失是常态，不是异常）。"""
+    pos = _t_pos(cfg)
+    # 只有一个空字典 / 只有现价（连昨收都没有 → 算不出涨跌幅）
+    assert it.evaluate_t_rules("600001", {}, pos, T_DAY, cfg) == []
+    assert it.evaluate_t_rules("600001", {"last_price": 12.34}, pos, T_DAY, cfg) == []
+    assert it.evaluate_t_rules("600001", {"last_price": 0}, pos, T_DAY, cfg) == []
+    # 没有成交量/成交额 → 算不出均价 → 三条判据缺一条，整条不发
+    no_volume = _t_snap(last=12.34, high=12.78, low=12.05, prev=12.0, vwap=12.10,
+                        volume=1e6, pct=2.83)
+    no_volume["volume"] = 0
+    no_volume["turnover"] = 0
+    assert it.evaluate_t_rules("600001", no_volume, pos, T_DAY, cfg) == []
+    # 没有现成的涨跌幅、但有昨收 → 用快照的昨收自己算（照样能发）
+    computed = _t_snap(last=12.34, high=12.78, low=12.05, prev=12.0, vwap=12.10, pct=2.83)
+    computed.pop("price_change_ratio_pct")
+    assert [h[0] for h in it.evaluate_t_rules("600001", computed, pos, T_DAY, cfg)] == ["t_high"]
+
+
+def test_t_vwap_out_of_today_range_is_dropped(cfg) -> None:
+    """均价必须落在当日 [最低, 最高] 内 —— 这是防"单位/口径不对"的自我校验。
+
+    真实风险：接口文档写 `volume` 单位是**股**，但若它其实是**手**，均价会差 100 倍。
+    这种时候**整条不发**（宁可不说，也不给一个错的数：提示里写着「均价 12.10 上方」，
+    用户就会照着这个数下单）。
+    """
+    assert it.vwap_reasonable(12.10, 12.05, 12.78) is True
+    assert it.vwap_reasonable(1210.0, 12.05, 12.78) is False      # 单位差 100 倍
+    assert it.vwap_reasonable(11.0, 12.05, 12.78) is False        # 低于当日最低
+    assert it.vwap_reasonable(None, 12.05, 12.78) is False
+    assert it.vwap_reasonable(12.10, None, None) is False
+
+    pos = _t_pos(cfg)
+    wrong_unit = _t_snap(last=12.34, high=12.78, low=12.05, prev=12.0, vwap=12.10, pct=2.83)
+    wrong_unit["volume"] = 1e4                                    # 成交额不变、量小 100 倍
+    assert it.evaluate_t_rules("600001", wrong_unit, pos, T_DAY, cfg) == []
+    # 反过来：量给大了 100 倍 → 均价 0.12（远低于当日最低）。
+    # 这一条**必须单独有**：均价偏低时后面的 `现价 >= 均价` 判据会"恰好通过"，
+    # 只有这道区间校验拦得住它 —— 上面那条（均价偏高）是那条判据顺手拦住的，
+    # 不能算成校验的功劳（实测：把区间校验删掉，只有下面这条会红）。
+    too_low = _t_snap(last=12.34, high=12.78, low=12.05, prev=12.0, vwap=12.10, pct=2.83)
+    too_low["volume"] = 1e8
+    assert it.evaluate_t_rules("600001", too_low, pos, T_DAY, cfg) == []
+
+
+# ── 整条链路（run_once）：去重、配置开关、以及"持仓不在池子里" ──
+
+
+def test_run_once_pushes_t_hint_once_per_day(cfg, monkeypatch) -> None:
+    """整条链路：快照 → 提醒落库 → 推送文本；**同标的同 kind 当天只推一次**。
+
+    去重复用既有的 `intraday_alert(date, symbol, kind)` 主键（一天一条），
+    换一天（次日）会重新发 —— 所以这里连"次日再发一次"一起钉住。
+    """
+    monkeypatch.setenv("INTRADAY_POOL_ONLY", "1")
+    _t_pos(cfg)
+    _t_day(cfg, (T_DAY, "2026-09-17"))
+    client = FakeClient(snapshots=[_t_snap(last=12.34, high=12.78, low=12.05, prev=12.0,
+                                           vwap=12.10, pct=2.83)])
+    sent: list[tuple[str, list[str]]] = []
+    engine = DataEngine(cfg.db_path)
+
+    first = it.run_once(engine, cfg, ignore_session=True, client=client,
+                        notifier=lambda t, l: sent.append((t, l)), now=T_NOW)
+    assert first["hits"] == 1 and first["fresh"] == 1 and first["pushed"] is True
+    body = "\n".join(sent[0][1])
+    assert "近似·T高抛（反T：先卖后买）" in body
+    assert "现价 12.34" in body and "可卖数量以券商为准" in body
+    # 做T提示**不生成条件单**：一张条件单表达不了"先卖后买"，
+    # 而且持仓股会走 `plan_sell`，会把方向写成"卖出"（比不说更糟）
+    assert "条件单" not in body
+
+    # 同一张快照再来两轮：命中还在，但不再推（去重键含日期）
+    second = it.run_once(engine, cfg, ignore_session=True, client=client,
+                         notifier=lambda t, l: sent.append((t, l)),
+                         now=datetime(2026, 9, 16, 10, 31))
+    assert second["hits"] == 1 and second["fresh"] == 0 and second["pushed"] is False
+    third = it.run_once(engine, cfg, ignore_session=True, client=client,
+                        notifier=lambda t, l: sent.append((t, l)),
+                        now=datetime(2026, 9, 16, 14, 59))
+    assert third["fresh"] == 0
+    assert len(sent) == 1
+
+    # 次日：新的交易日，同一只票同样的形态 → 重新发（一天一条，不是"一辈子一条"）
+    next_day = it.run_once(engine, cfg, ignore_session=True, client=client,
+                           notifier=lambda t, l: sent.append((t, l)),
+                           now=datetime(2026, 9, 17, 10, 30))
+    assert next_day["fresh"] == 1 and next_day["pushed"] is True
+    assert len(sent) == 2
+
+
+def test_run_once_watches_held_symbols_outside_the_pool(cfg, monkeypatch) -> None:
+    """持仓**不在股票池里也要盯** —— 池子天天重建，用户手上的票却不会跟着变。
+
+    这条钉的是"补进快照请求"这件事本身：如果只盯池子，持仓票连快照都不会去取
+    （下面的 `asked` 断言就是这个），做T提示就成了"只有池子里的持仓才提示"。
+    """
+    from laoa_trader import pool as pool_mod
+
+    monkeypatch.setenv("INTRADAY_POOL_ONLY", "1")
+    _t_pos(cfg, "600009", name="在手票")
+    pool_mod.save_pool(cfg.db_path, [{"symbol": "600001", "name": "池内票", "score": 1.0,
+                                      "strategy": "ReversalStrategy"}], T_DAY)
+    _t_day(cfg)
+    client = FakeClient(snapshots=[
+        _t_snap("600009", last=12.34, high=12.78, low=12.05, prev=12.0, vwap=12.10, pct=2.83),
+        _t_snap("600001", last=10.0, high=10.1, low=9.9, prev=10.0, vwap=10.0, pct=0.0),
+    ])
+    it.run_once(DataEngine(cfg.db_path), cfg, ignore_session=True, client=client,
+                notifier=lambda t, l: None, now=T_NOW)
+
+    rows = it.alert_rows(cfg.db_path, limit=20)
+    t_rows = [r for r in rows if r["kind"] in it.T_KINDS]
+    assert [r["symbol"] for r in t_rows] == ["600009"]
+    assert t_rows[0]["label"] == it.KIND_LABELS["t_high"]
+    asked = [c[1] for c in client.calls if c[0] == "snapshot"]
+    assert "600009" in asked[0]                 # 持仓确实被放进了快照请求
+    # 补进来的持仓**只跑做T规则**（止损止盈那些的观察池口径没被顺手改掉）。
+    # 说明：它本来也拿不到历史上下文，所以这一条是"意图声明"，不是防某个活的 bug。
+    assert not [r for r in rows if r["symbol"] == "600009" and r["kind"] not in it.T_KINDS]
+
+
+def test_intraday_t_off_emits_nothing_and_asks_nothing(cfg, monkeypatch) -> None:
+    """`intraday_t = false`：一条做T提示都不发，**连持仓都不查、快照也不请求**。"""
+    monkeypatch.setenv("INTRADAY_POOL_ONLY", "1")
+    cfg.intraday_t = False
+    _t_pos(cfg, "600009")
+    _t_day(cfg)
+    client = FakeClient(snapshots=[
+        _t_snap("600009", last=12.34, high=12.78, low=12.05, prev=12.0, vwap=12.10, pct=2.83),
+    ])
+    result = it.run_once(DataEngine(cfg.db_path), cfg, ignore_session=True, client=client,
+                         notifier=lambda t, l: None, now=T_NOW)
+    assert result["hits"] == 0 and result["fresh"] == 0 and result["pushed"] is False
+    assert [r for r in it.alert_rows(cfg.db_path) if r["kind"] in it.T_KINDS] == []
+    assert [c for c in client.calls if c[0] == "snapshot"] == []
+
+
+def test_t_hints_never_enter_the_daily_pool_push(cfg, monkeypatch) -> None:
+    """做T提示只走**盘中提醒**通道：不写 `push_log`（池子推送去重表）、不动股票池。"""
+    monkeypatch.setenv("INTRADAY_POOL_ONLY", "1")
+    _t_pos(cfg)
+    _t_day(cfg)
+    client = FakeClient(snapshots=[_t_snap(last=12.34, high=12.78, low=12.05, prev=12.0,
+                                           vwap=12.10, pct=2.83)])
+    it.run_once(DataEngine(cfg.db_path), cfg, ignore_session=True, client=client,
+                notifier=lambda t, l: None, now=T_NOW)
+    with storage.connect(cfg.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM push_log").fetchone()[0] == 0
+        assert storage.load_pool(conn) == []
+
+
+# ── 持仓页「今日T提示」列的数据源 ──
+
+
+def test_t_hints_today_returns_latest_and_ignores_other_kinds_and_days(cfg) -> None:
+    """`t_hints_today` 只给"今天 + 做T kind"的最新一条（持仓页那一列的数据源）。"""
+    storage.init_db(cfg.db_path)
+    with storage.connect(cfg.db_path) as conn:
+        storage.record_alerts(conn, [{"symbol": "600001", "kind": "t_high", "price": 12.3,
+                                      "detail": "第一条"}], T_DAY)
+        storage.record_alerts(conn, [{"symbol": "600001", "kind": "t_low", "price": 9.7,
+                                      "detail": "第二条"}], T_DAY)
+        storage.record_alerts(conn, [{"symbol": "600002", "kind": "stop_loss", "price": 9.0,
+                                      "detail": "别的 kind"}], T_DAY)
+        storage.record_alerts(conn, [{"symbol": "600003", "kind": "t_high", "price": 1.0,
+                                      "detail": "昨天的"}], "2026-09-15")
+
+    hints = it.t_hints_today(cfg.db_path, T_DAY)
+    assert set(hints) == {"600001"}                      # 别的 kind、别的日期都不算
+    assert hints["600001"]["detail"] == "第二条"          # 同一天里最新一条
+    assert it.t_hint_cell(hints["600001"]) == "低吸（近似）"
+    tooltip = it.t_hint_tooltip(hints["600001"])
+    assert "第二条" in tooltip and "近似·T低吸（正T：先买后卖）" in tooltip
+    # 今天没有提示：单元格空串（界面自己画 `—`），tooltip 说明"什么时候才会有提示"
+    assert it.t_hint_cell(None) == ""
+    assert "今天还没有做T提示" in it.t_hint_tooltip(None)

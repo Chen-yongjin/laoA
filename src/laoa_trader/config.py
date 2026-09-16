@@ -111,9 +111,10 @@ DEFAULT_NOTIFY_FLASH_SECONDS = 6
 #: 为什么单独一群：概览是"看一眼"的辅助信息，把 `market_overview` 手滑写成
 #: `"maybe"` 应该是"没生效、仍是默认开着"，而不是"功能被悄悄关掉了"。
 #: 提醒浮窗与提示音同理 —— 写错一个词不该让"提醒"这个核心功能静默消失。
+#: `intraday_t` 也进这一群：它是用户点名的功能、默认开着，写错一个词不该变成"功能没了"。
 _STRICT_BOOL_FIELDS = frozenset(
     {"market_overview", "market_breadth", "notify_popup", "notify_sound",
-     "push_only_proven"}
+     "push_only_proven", "intraday_t"}
 )
 
 #: 严格的真值 / 假值（与 `_as_bool` 的真值表保持一致）
@@ -478,6 +479,24 @@ class Config:
     #: 只关心这些异动标签（空列表 = 全部）；取值见 `intraday.ANOMALY_TAGS`
     anomaly_alert_tags: list[str] = field(default_factory=list)
 
+    # ── 持仓做T 的**近似**提示（用户点名的功能）──
+    #: 总开关，**默认 true（开着）**。为什么默认开：这是用户明确要求的功能，
+    #: 而且它只对**自己持仓的票**发提示（不像竞价那样扫全市场），
+    #: 提示用的是**每 60 秒已经在取的那份快照**，不额外增加请求 —— 代价几乎为零。
+    #: 想关掉：config.toml 写 `intraday_t = false`，或环境变量 `INTRADAY_T=0`。
+    intraday_t: bool = True
+    #: 做T提示的四个阈值。**这四个数是手工设定的起点，没有拟合、也没有验证过**
+    #: （没有分时/逐笔/L2 数据，回测不了 —— 见 README「持仓做T（近似提示）」）。
+    #:   `t_high_min_gain_pct`：现价相对**昨收**至少涨这么多，才算"冲高"（默认 +2.0%）；
+    #:   `t_high_pullback_pct`：从**今日最高**回落这么多，才算"见顶回落"（默认 1.5%）；
+    #:   `t_low_min_drop_pct` ：现价相对**昨收**至少跌这么多，才算"杀跌"（默认 -2.0%）；
+    #:   `t_low_rebound_pct`  ：从**今日最低**反弹这么多，才算"止跌回稳"（默认 1.0%）。
+    #: 近似到什么程度：60 秒一个点、价格是快照瞬时值，具体成交价只能靠限价单自己去争取。
+    t_high_min_gain_pct: float = 2.0
+    t_high_pullback_pct: float = 1.5
+    t_low_min_drop_pct: float = 2.0
+    t_low_rebound_pct: float = 1.0
+
     # ── 大文件下载（dump 几百 MB：断点续传 + 过期自动重签）──
     #: 单次下载失败后的最大尝试次数（每次都会重新签 URL 并从断点继续）
     download_max_attempts: int = 5
@@ -592,6 +611,19 @@ class Config:
         self.notify_flash_seconds = _bounded_int(
             self.notify_flash_seconds, DEFAULT_NOTIFY_FLASH_SECONDS, 0, 120
         )
+        # 做T的四个阈值：0/负数会让判据失真（"涨过 0%" 等于任何一分钟都触发），
+        # 写坏（乱码/None）同理 → 一律回默认值。四个数**互不约束**：
+        # 回落幅度比涨幅还大是可能的（涨 3% 之后回落 2.5%），不该当成配置矛盾挡回去。
+        for name, fallback in (("t_high_min_gain_pct", 2.0),
+                               ("t_high_pullback_pct", 1.5),
+                               ("t_low_min_drop_pct", 2.0),
+                               ("t_low_rebound_pct", 1.0)):
+            raw = getattr(self, name, fallback)
+            try:
+                number = float(raw)
+            except (TypeError, ValueError):
+                number = fallback
+            setattr(self, name, number if number > 0 else fallback)
         # 异动标签统一成大写、去空（接口给的枚举是大写）
         tags = self.anomaly_alert_tags
         if isinstance(tags, str):
@@ -835,6 +867,11 @@ def _apply_env(cfg: Config) -> Config:
         ("AUCTION_MIN_VOLUME_RATIO", "auction_min_volume_ratio"),
         ("AUCTION_ALERT_MAX_ITEMS", "auction_alert_max_items"),
         ("INTRADAY_ANOMALY", "intraday_anomaly"),
+        # 做T的四个阈值（浮点）：名字不带 INTRADAY_ 前缀，与配置键 `t_*` 对齐，好记
+        ("T_HIGH_MIN_GAIN_PCT", "t_high_min_gain_pct"),
+        ("T_HIGH_PULLBACK_PCT", "t_high_pullback_pct"),
+        ("T_LOW_MIN_DROP_PCT", "t_low_min_drop_pct"),
+        ("T_LOW_REBOUND_PCT", "t_low_rebound_pct"),
         ("INTRADAY_STOP_LOSS", "stop_loss"),
         ("INTRADAY_TAKE_PROFIT", "take_profit"),
         ("UI_THEME", "ui_theme"),           # 界面主题（分发后可临时切回系统皮肤）
@@ -897,6 +934,8 @@ def _apply_env(cfg: Config) -> Config:
         ("NOTIFY_SOUND", "notify_sound"),
         # 推送过滤：写错（"maybe"）→ 回到默认（**全推**，与新默认一致）
         ("PUSH_ONLY_PROVEN", "push_only_proven"),
+        # 持仓做T近似提示：写错（"maybe"）→ 回到默认（**开着**，与 `intraday_t` 默认一致）
+        ("INTRADAY_T", "intraday_t"),
     ):
         raw = _env_str(env_name)
         if raw is not None:

@@ -1362,9 +1362,9 @@ def test_position_table_has_pnl_ratio_column_with_colors(window, seeded, qapp) -
     from laoa_trader import market
 
     table = window.position_table
-    assert table.columnCount() == 7
-    assert [table.horizontalHeaderItem(i).text() for i in range(7)] == [
-        "代码", "名称", "数量", "成本", "盈亏比例", "止损", "止盈",
+    assert table.columnCount() == 8
+    assert [table.horizontalHeaderItem(i).text() for i in range(8)] == [
+        "代码", "名称", "数量", "成本", "盈亏比例", "止损", "止盈", "今日T提示",
     ]
 
     # seeded 里 600001：成本 3.0、最新收盘 3.174 → +5.80%（两位小数，精确断言）
@@ -1441,10 +1441,11 @@ def test_position_pnl_ratio_is_weighted_by_cost(window, seeded, qapp) -> None:
 
 
 def test_position_table_columns_fit_at_960_logical_width(screen_window, qapp) -> None:
-    """≈用户那台（逻辑 960×900 → 窗口 920×760）：7 列持仓表铺满、不挤、也不顶大最小宽度。
+    """≈用户那台（逻辑 960×900 → 窗口 920×760）：8 列持仓表铺满、不挤、也不顶大最小宽度。
 
     这一条是给上一轮"窗口能缩到 760 宽"的成果上保险：多一列如果让表格的最小宽度变大，
     窗口就又被顶出屏幕了（那正是用户最初抱怨的"最下边看不见"）。
+    本轮加了第 8 列「今日T提示」，所以这条断言**必须继续成立**（不是放宽，是继续钉住）。
     """
     win = screen_window(960, 900)
     win.tabs.setCurrentWidget(_tab_page(win, "持仓"))
@@ -1452,13 +1453,52 @@ def test_position_table_columns_fit_at_960_logical_width(screen_window, qapp) ->
     qapp.processEvents()
 
     table = win.position_table
-    assert table.columnCount() == 7
-    widths = [table.columnWidth(i) for i in range(7)]
+    assert table.columnCount() == 8
+    widths = [table.columnWidth(i) for i in range(8)]
     assert all(width > 20 for width in widths), widths          # 每列都还看得清
     assert sum(widths) <= table.viewport().width() + 8          # Stretch：正好铺满
     assert table.horizontalScrollBar().isVisible() is False     # 不需要横向滚动
     assert win.minimumSizeHint().width() <= 960                 # 没把整窗最小宽度顶大
     assert _bottom_of(table, win) <= win.height()               # 表格没被窗口下沿切掉
+
+
+# ── 持仓页「今日T提示」列（做T 的**近似**提示）──
+
+
+def test_position_table_shows_today_t_hint_with_full_tooltip(window, seeded, qapp) -> None:
+    """第 8 列「今日T提示」：短标签 + **整句话**的 tooltip；今天没有提示就画 `—`。
+
+    为什么要这一列：做T提示是"盘中某一刻才可能来"的东西，用户不看提醒页就不知道它存在。
+    短标签解决"有没有"，tooltip 解决"凭什么、我该做什么"（现价/涨幅/回落/均价 + 反T还是正T）。
+    """
+    today = now_shanghai().strftime("%Y-%m-%d")
+    with storage.connect(seeded.db_path) as conn:
+        # 第二只持仓：**没有**任何做T提示（钉"空着要画 `—` 而不是空白"）
+        storage.upsert_position(conn, "600002", name="半导体甲", quantity=500, avg_cost=20.0)
+        storage.record_alerts(conn, [
+            {"symbol": "600001", "kind": "t_high", "price": 3.30,
+             "detail": "现价 3.30（+2.6%），较今日最高 3.42 回落 3.5%，仍在均价 3.20 上方 → "
+                       "可卖出【部分昨仓】（反T：先卖后买），回落后当天再买回等量；"
+                       "只提示部分仓位，可卖数量以券商为准"},
+        ], today)
+    window._refresh_positions()
+    qapp.processEvents()
+
+    table = window.position_table
+    assert table.horizontalHeaderItem(7).text() == "今日T提示"
+    header_tip = table.horizontalHeaderItem(7).toolTip()
+    # 列头自带"说明书"：近似、无法回测、阈值是手工设定、可卖数量以券商为准
+    assert "近似" in header_tip and "无法回测" in header_tip and "券商" in header_tip
+
+    rows = {table.item(i, 0).text(): i for i in range(table.rowCount())}
+    cell = table.item(rows["600001"], 7)
+    assert cell.text() == "高抛（近似）"
+    assert "反T：先卖后买" in cell.toolTip()            # 整句话在 tooltip 里
+    assert "可卖数量以券商为准" in cell.toolTip()
+
+    empty = table.item(rows["600002"], 7)
+    assert empty.text() == "—"                          # 不是空白（空白看不出是哪种情况）
+    assert "今天还没有做T提示" in empty.toolTip()
 
 
 # ── 「关于」对话框（版本 / 版权 / 数据来源）──
