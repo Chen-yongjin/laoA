@@ -130,6 +130,11 @@ WINDOW_MIN_FLOOR_SIZE = (360, 280)
 MARKET_ENTRY_MIN_WIDTH = 260
 #: 一行最多几个条目（再多就只有"稀"没有"密"了）
 MARKET_MAX_COLUMNS = 5
+
+#: 条目内各段之间、条目之间在算"最少要多宽"时要留的余量（像素）。
+#: 这两条只影响**列数**（宁可少一列，也不让文字被裁），不影响任何布局约束。
+MARKET_ITEM_GAP = 8
+MARKET_ITEM_MARGIN = 12
 #: 点位 / 涨跌幅两列的**轨道宽度取样串**：取"最宽的那种数字"量出列宽，
 #: 让不同条目的两列落在同一条竖线上（`-88888.88` 覆盖负号 + 5 位整数 + 2 位小数，
 #: 涨跌幅多一个 `%`）。取样串只用来量宽度，不当占位文本显示。
@@ -1754,12 +1759,45 @@ if QT_AVAILABLE:
             self._render_market_overview()   # 先画空骨架：第一秒就是"能看"的样子
             return page
 
+        def _market_item_need(self) -> int:
+            """一行条目"至少要多宽"，按**当前字体实测**（不是写死的常量）。
+
+            为什么要实测：写死 260 的算法在 Linux 上刚好，到 Windows 就出事 ——
+            同一段中文在 Windows 的 CJK 回退字体下更宽（CI 实测：整页最小宽度
+            1160 > 视口 866，横向就差 294px），而列数还按 260 算着 3 列，
+            于是每一列都不够宽、文字被裁、整页出现横向滚动条。
+            字体是唯一会变的变量，所以这里直接量 sizeHint：条目要多少就给多少，
+            给不了就少放几列（窗口变窄 → 列数从 5 降到 3/2/1，条目往下排）。
+
+            量的口径：各块里最宽的那个条目（指数条目是三段，行业行是四段，小条目两段）。
+            sizeHint 与当前宽度无关，所以这个值稳定、不会来回抖。
+            """
+            need = 0
+            for section in (getattr(self, "market_sections", None) or {}).values():
+                for entry in section.entries:
+                    labels = [label for label in (
+                        getattr(entry, "name_label", None),
+                        getattr(entry, "value_label", None),
+                        getattr(entry, "pct_label", None),
+                        getattr(entry, "limit_up_label", None),
+                        getattr(entry, "density_label", None),
+                        getattr(entry, "mom_label", None),
+                    ) if label is not None]
+                    if labels:
+                        need = max(need, sum(l.sizeHint().width() for l in labels)
+                                   + MARKET_ITEM_GAP * (len(labels) - 1))
+                for item in section.stats.values():
+                    need = max(need, item.title_label.sizeHint().width()
+                               + item.value_label.sizeHint().width() + MARKET_ITEM_GAP)
+            # 兜底：条目还没建出来（首屏空骨架）时用常量，免得算出 0 列
+            return max(MARKET_ENTRY_MIN_WIDTH, need + MARKET_ITEM_MARGIN)
+
         def _apply_market_columns(self) -> None:
-            """按可用宽度决定每组每行放几个条目（`clamp(可用宽 // 260, 1, 5)`）。
+            """按可用宽度与**实测条目宽度**决定每组每行放几个条目。
 
             为什么要响应式列数：用户要求"不出现横向滚动条或被截断"。
-            窗口变窄时列数自动从 5 降到 3/2/1，条目自己往下排（纵向滚动），
-            而不是把第三列挤没或者让文字被裁掉。
+            窗口变窄（或换一台字体更宽的机器）→ 列数自动从 5 降到 3/2/1，
+            条目自己往下排（纵向滚动），而不是把第三列挤没、或让文字被裁掉。
             """
             scroll = getattr(self, "market_scroll", None)
             sections = getattr(self, "market_sections", None)
@@ -1768,7 +1806,8 @@ if QT_AVAILABLE:
             # 用**滚动区**的宽度而不是视口宽度：视口宽度会随着纵向滚动条出现而少十几像素，
             # 拿它算列数容易出现"滚动条一出现列数就掉一档"的抖动
             width = max(scroll.width(), self.market_page.width()) - 2 * PAGE_MARGINS[0]
-            columns = max(1, min(MARKET_MAX_COLUMNS, width // MARKET_ENTRY_MIN_WIDTH))
+            need = self._market_item_need()
+            columns = max(1, min(MARKET_MAX_COLUMNS, width // need))
             if columns == self._market_columns:
                 return
             self._market_columns = columns

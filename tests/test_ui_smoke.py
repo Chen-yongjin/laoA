@@ -4057,13 +4057,16 @@ def test_market_hot_block_explains_itself_when_local_data_is_missing(
     finally:
         market.clear_cache()
 
-def test_overview_uses_three_columns_on_a_150pct_scaled_screen(
+def test_overview_columns_fit_the_screen_without_clipping(
     screen_window, qapp
 ) -> None:
-    """≈用户那台机器（逻辑可用 960×900 → 窗口 920×760）：概览页正好 **3 列**，整齐不挤不截断。
+    """≈用户那台机器（逻辑可用 960×900 → 窗口 920×760）：概览页**条目不被截、也不横向溢出**。
 
-    3 列是那一档的主力形态（920 ÷ 260 ≈ 3）：五只宽基排成 3+2、六项情绪排成两个 3；
-    每一块的"名称/点位/涨跌幅"（热门板块多一列密度）都要完整显示（不许被列宽截掉半个数字）。
+    为什么不写死"正好 3 列"：列数现在是**按当前字体实测**算出来的
+    （`_market_item_need()`）—— 同一段中文在 Windows 的 CJK 回退字体下更宽，
+    写死 3 列就会"每列都不够宽、文字被裁、整页出现横向滚动条"（CI 实测过：
+    整页最小宽度 1160 > 视口 866）。所以这里钉的是**不变的那条要求**：
+    每个数字都完整显示、内容不比视口宽、网格与报出来的列数一致。
     """
     from laoa_trader import market
     from laoa_trader.ui import app as ui_app
@@ -4074,13 +4077,24 @@ def test_overview_uses_three_columns_on_a_150pct_scaled_screen(
         assert (win.width(), win.height()) == (920, 760)
         win.refresh_market_overview(force=True, client=_market_fake())
         qapp.processEvents()
-        assert win._market_columns == 3
+        columns = win._market_columns
+        assert 1 <= columns <= ui_app.MARKET_MAX_COLUMNS
+        # 列数就得是"按实测宽度算出来"的那个值（不是拍脑袋的常量）
+        avail = max(win.market_scroll.width(), win.market_page.width()) \
+            - 2 * ui_app.PAGE_MARGINS[0]
+        assert columns == max(1, min(ui_app.MARKET_MAX_COLUMNS,
+                                     avail // win._market_item_need()))
         codes = [c for c, *_ in MARKET_EXPECTED_ENTRIES[ui_app.MARKET_SECTION_WIDE]]
-        assert _grid_rows(win.market_sections[ui_app.MARKET_SECTION_WIDE]) == [
-            codes[:3], codes[3:],
-        ]
-        assert [len(row) for row in
-                _grid_rows(win.market_sections[ui_app.MARKET_SECTION_SENTIMENT])] == [3, 3]
+        rows = _grid_rows(win.market_sections[ui_app.MARKET_SECTION_WIDE])
+        assert [c for row in rows for c in row] == codes          # 一个都没少
+        assert all(len(row) <= columns for row in rows)           # 每行不超过列数
+        assert len(rows) == -(-len(codes) // columns)             # 行数正好排满
+        sentiment_rows = _grid_rows(win.market_sections[ui_app.MARKET_SECTION_SENTIMENT])
+        assert all(len(row) <= columns for row in sentiment_rows)
+        # 内容不比视口宽 → 不会出现横向滚动条
+        assert win.market_content.minimumSizeHint().width() \
+            <= win.market_scroll.viewport().width()
+        assert win.market_scroll.horizontalScrollBar().isVisible() is False
 
         # 每一项三个标签都完整显示：宽度不少于自己的"需要宽度"（截断/挤压会小于它）
         for entry in win.market_entries:
@@ -4124,24 +4138,21 @@ def test_market_entry_columns_shrink_with_the_window(screen_window, qapp) -> Non
         qapp.processEvents()
         wide = win.market_sections[ui_app.MARKET_SECTION_WIDE]
         codes = [code for code, *_ in MARKET_EXPECTED_ENTRIES[ui_app.MARKET_SECTION_WIDE]]
-        assert win._market_columns == 4
-        assert _grid_rows(wide) == [codes[:4], codes[4:]]
+        wide_columns = win._market_columns
 
-        # 缩到 800 宽（现在最小宽度是 760，缩得下去）：列数掉到 2，条目往下排
+        # 缩到 800 宽（现在最小宽度是 760，缩得下去）：列数只会掉、不会涨，条目往下排
         win.resize(800, win.height())
         qapp.processEvents()
-        assert win._market_columns == 2
-        assert _grid_rows(wide) == [codes[:2], codes[2:4], codes[4:]]
+        assert win._market_columns <= wide_columns
         assert [c for row in _grid_rows(wide) for c in row] == codes
         assert win.market_scroll.horizontalScrollBar().isVisible() is False
         assert win.market_content.minimumSizeHint().width() \
             <= win.market_scroll.viewport().width()
 
-        # 再放大：列数涨到 5（一行装下五只宽基）
+        # 再放大：列数涨回去（窗口越宽，一行放得下越多条目）
         win.resize(1500, win.height())
         qapp.processEvents()
-        assert win._market_columns == 5
-        assert _grid_rows(wide) == [codes]
+        assert win._market_columns >= wide_columns
         assert win.market_content.minimumSizeHint().width() \
             <= win.market_scroll.viewport().width()
         # 小条目最多 3 列：列数 5 时它们仍然按 3 列排（摊在 5 列上会松得看不出关系），
