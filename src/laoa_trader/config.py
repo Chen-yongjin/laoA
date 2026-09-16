@@ -111,10 +111,13 @@ DEFAULT_NOTIFY_FLASH_SECONDS = 6
 #: 为什么单独一群：概览是"看一眼"的辅助信息，把 `market_overview` 手滑写成
 #: `"maybe"` 应该是"没生效、仍是默认开着"，而不是"功能被悄悄关掉了"。
 #: 提醒浮窗与提示音同理 —— 写错一个词不该让"提醒"这个核心功能静默消失。
-#: `intraday_t` 也进这一群：它是用户点名的功能、默认开着，写错一个词不该变成"功能没了"。
+#: 成立的前提是**该键的默认为 true**：写错→回到默认 与 写错→按 False 才有差别。
+#: `intraday_t` 因此退出了这一群：它的默认已改成 **false**（用户拍板：T策略默认关），
+#: 两条路都落在"关"上，留在群里只会让读代码的人以为它默认还开着。
+#: （`push_only_proven` 等其它项一律不动 —— 本次只改默认值，不顺手改别人的语义。）
 _STRICT_BOOL_FIELDS = frozenset(
     {"market_overview", "market_breadth", "notify_popup", "notify_sound",
-     "push_only_proven", "intraday_t"}
+     "push_only_proven"}
 )
 
 #: 严格的真值 / 假值（与 `_as_bool` 的真值表保持一致）
@@ -337,6 +340,15 @@ class Config:
 
     # ── 数据源 ──
     hithink_api_key: str = ""
+    #: 行情数据来源（**列表即启停，顺序即优先级**）。
+    #: 2026-09-16 用户拍板后这个键不再只是"留结构"：可填的 id 与各自的能力、
+    #: 要不要 Key，都写在 `data/sources.py` 的 `REGISTRY` 里（真源只有那一份）。
+    #: 目前内置两个：`hithink`（同花顺，要 Key，主来源）与
+    #: `eastmoney`（东方财富公开接口，**免 Key**，没填同花顺 Key 时靠它显示现价）。
+    #: **不给每个来源加 `xxx_enabled` 布尔键**：一个键只表达一件事，
+    #: 免得出现"列表里有、开关却是关"这种自相矛盾的状态。
+    #: 环境变量 `DATA_SOURCES`（逗号分隔，写法与 notify_channels 一致）。
+    data_sources: list[str] = field(default_factory=lambda: ["hithink"])
     data_dir: Path = field(default_factory=default_data_dir)
 
     # ── 策略组（跑哪几组 / 哪几条策略）──
@@ -373,15 +385,20 @@ class Config:
     #: （界面向导点"开始下载"、CLI 加 --auto-download）
     auto_download_on_start: bool = True
     #: 首次下载**导入**多少年历史（同花顺 dump 固定 10 年，导入时按这个值过滤）。
-    #: 默认 **3 年**（用户拍板）：全市场约 300 万行，库更小、首次导入更快。
-    #: 注意 dump 本身**没法只下 3 年**（端点固定 10 年数据集），只是导入时按这个值过滤。
+    #: 默认 **0.5 年 = 6 个月**（用户拍板：超短线不需要长历史）。
+    #: 改版前是 3 年（约 300 万行）；6 个月只有约 120 个交易日、约 50 万行，
+    #: 库更小、首次导入更快，而 `short` 组的持有期是 T+3、看的是最近几周的形态 ——
+    #: 长历史对这类超短策略没有增量信息。
+    #: ⚠️ 代价（说清楚，别让用户以为"没影响"）：`--scorecard` 的成绩单门槛是
+    #: 250 个交易日，6 个月的库**必然判"样本不足"**（它本来也只在做长样本回测时才有意义）。
+    #: 注意 dump 本身**没法只下 6 个月**（端点固定 10 年数据集），只是导入时按这个值过滤。
     #: 想要长样本（自己跑成绩单/回测）把它改成 10：下载文件一样，只是导入更多行。
-    history_years: float = 3.0
+    history_years: float = 0.5
     #: 历史跨度下限（年）——低于它就认为"历史不够，需要重新下载"。
-    #: **必须小于** history_years，否则 3 年的库会被永远判成"不足"（见 history_warning()）。
-    #: 2.5 的理由：3 年导入后实际跨度受交易日历与"最新交易日"影响会略小于 3，
-    #: 留 0.5 年的余量既不会误判"不足"，也仍然能挡住"只下了一年半"这种半成品。
-    min_history_years: float = 2.5
+    #: **必须小于** history_years，否则按配置导入的库会被永远判成"不足"（见 history_warning()）。
+    #: 0.4 的理由：6 个月（0.5 年）导入后实际跨度受交易日历与"最新交易日"影响会略小于 0.5，
+    #: 留 0.1 年的余量既不会误判"不足"，也仍然能挡住"只下了两三个月"这种半成品。
+    min_history_years: float = 0.4
     #: 最新交易日股票数下限——低于它说明只下了一部分
     min_symbols: int = 4000
     #: `ready` 允许的最大落后交易日数（0 = 必须是最新交易日）
@@ -398,10 +415,12 @@ class Config:
     feishu_app_secret: str = ""
     feishu_chat_id: str = ""
     receive_id_type: str = "chat_id"
-    #: 要用的通知频道（三选任意组合，**空列表 = 只入库不推送**）
-    notify_channels: list[str] = field(
-        default_factory=lambda: ["windows", "feishu", "tray"]
-    )
+    #: 要用的通知频道（三选任意组合）。**默认空列表**（用户拍板）：默认只走
+    #: `notify_popup`（QQ 式浮窗：响一声 + 图标闪烁 + 右下角列表），
+    #: 系统弹窗（windows）/ 托盘气泡（tray）/ 飞书（feishu）都由用户自己去勾 ——
+    #: 出厂设置里不要有"还会弹系统窗口"这种行为，不然第一次跑就被打断。
+    #: 空列表 = 这三路都不发（**信号照常入库、浮窗照常弹**，见 `notify_popup`）。
+    notify_channels: list[str] = field(default_factory=list)
     #: 飞书频道总开关（与 notify_channels 同时生效；缺凭证时自动跳过）
     feishu_on: bool = True
     #: Windows 弹窗是否带提示音
@@ -473,18 +492,22 @@ class Config:
     #: 一次扫描最多推几只（默认 10，**上限 50**）：全市场扫描命中面更宽，条数也放宽。
     auction_alert_max_items: int = 10
 
-    #: 当日异动（涨停/跌停/大幅上涨下跌/快速反弹跳水）实时提醒：默认开。
+    #: 当日异动（涨停/跌停/大幅上涨下跌/快速反弹跳水）实时提醒：**默认关**。
+    #: 为什么关（用户拍板）：异动是全市场一条请求、按自己的票过滤，额度不贵，
+    #: 但**消息太多** —— 手里的票一天能触发好几条，多是"无用消息"，把真正要看的提醒淹掉。
     #: 数据源是**全市场一条请求**，再在本地按"自己的票"过滤（不逐只问）。
-    intraday_anomaly: bool = True
+    #: 想开：config.toml 写 `intraday_anomaly = true`，或环境变量 `INTRADAY_ANOMALY=1`。
+    intraday_anomaly: bool = False
     #: 只关心这些异动标签（空列表 = 全部）；取值见 `intraday.ANOMALY_TAGS`
     anomaly_alert_tags: list[str] = field(default_factory=list)
 
     # ── 持仓做T 的**近似**提示（用户点名的功能）──
-    #: 总开关，**默认 true（开着）**。为什么默认开：这是用户明确要求的功能，
-    #: 而且它只对**自己持仓的票**发提示（不像竞价那样扫全市场），
-    #: 提示用的是**每 60 秒已经在取的那份快照**，不额外增加请求 —— 代价几乎为零。
-    #: 想关掉：config.toml 写 `intraday_t = false`，或环境变量 `INTRADAY_T=0`。
-    intraday_t: bool = True
+    #: 总开关，**默认 false（关）**（用户拍板：T策略默认关）。
+    #: 改版前默认是 true，理由是"只对持仓的票发提示、用的是已有的 60 秒快照，代价几乎为零"；
+    #: 但用户明确要求默认关 —— 这些阈值**没有验证过**（下面四行），
+    #: 默认开着等于拿没验证过的数去打扰人，"自己想用再开"才对。
+    #: 想开：config.toml 写 `intraday_t = true`，或环境变量 `INTRADAY_T=1`。
+    intraday_t: bool = False
     #: 做T提示的四个阈值。**这四个数是手工设定的起点，没有拟合、也没有验证过**
     #: （没有分时/逐笔/L2 数据，回测不了 —— 见 README「持仓做T（近似提示）」）。
     #:   `t_high_min_gain_pct`：现价相对**昨收**至少涨这么多，才算"冲高"（默认 +2.0%）；
@@ -505,9 +528,14 @@ class Config:
     #: 读取超时（秒）——两个数据块之间的最大间隔，给流式下载留足余量
     download_read_timeout: float = 90.0
 
-    # ── 定时（界面「设置 → 自动运行」可改；改完**立即生效**，不用重启）──
-    #: 是否每天自动运行（关掉则只在你手动点按钮时跑）
-    auto_run: bool = True
+    # ── 定时（config.toml 可改；改完**立即生效**，不用重启）──
+    #: 是否每天自动运行（关掉则只在你手动点按钮时跑）。
+    #: **默认 false**（用户拍板：选股随时手动，不做定时运行）——
+    #: 所以出厂状态下**不会有一天自己跑起来**：数据增量、选股、建池、推送都要你点一下。
+    #: 改版前默认 true；`run_at` / `run_at_fallback` 两个时间键仍保留（改回 true 就照常用），
+    #: 改版方案里"定时日更/定时推送"那一组界面入口按计划移除（阶段 B），
+    #: 之后只剩配置文件/CLI 这条路。
+    auto_run: bool = False
     #: 每天主跑时间（HH:MM）。默认 16:00 —— A 股 15:00 收盘，收盘后数据才齐
     run_at: str = "16:00"
     #: 补跑时间（HH:MM）：主跑**没成功**时到这个点再试一次
@@ -701,19 +729,24 @@ class Config:
         """`history_years` / `min_history_years` 写矛盾时的中文提示（空串 = 没问题）。
 
         为什么必须联动：自检的 ready 判据是"跨度 ≥ min_history_years"。
-        如果 min_history_years（默认 2.5）不小于 history_years（默认 3），
+        如果 min_history_years（默认 0.4）不小于 history_years（默认 0.5），
         那么**按配置导入的库永远达不到 ready**，用户会被反复催着重新下载 ——
         这个组合必须当场说清楚，不能让它表现成"数据老是缺"。
         """
-        years = float(getattr(self, "history_years", 3) or 0)
-        floor = float(getattr(self, "min_history_years", 2.5) or 0)
+        years = float(getattr(self, "history_years", 0.5) or 0)
+        floor = float(getattr(self, "min_history_years", 0.4) or 0)
         if years <= 0:
             return f"history_years 必须大于 0（当前 {years:g}）"
         if floor >= years:
+            # 建议值的口径：比导入年限留 0.5 年余量（够挡"只下了一半"）；
+            # 但**导入年限本身很小时**（例如用户把 history_years 填成 0.3）这个余量
+            # 会算出一个 ≥ history_years 的数 —— 等于把矛盾原样还给他，
+            # 所以再取一个"年限 × 0.8"，保证建议值永远 < history_years。
+            suggestion = max(years - 0.5, years * 0.8)
             return (
                 f"配置矛盾：min_history_years（{floor:g}）必须**小于** history_years（{years:g}），"
                 f"否则按 {years:g} 年导入的库永远达不到自检要求、会被反复要求重新下载。"
-                f"建议 min_history_years 设为 {max(years - 0.5, 0.5):g}"
+                f"建议 min_history_years 设为 {suggestion:g}"
             )
         return ""
 
@@ -904,6 +937,7 @@ def _apply_env(cfg: Config) -> Config:
         ("LAOA_ENABLED_STRATEGIES", "enabled_strategies"),
         ("LAOA_ENABLED_FORMULAS", "enabled_formulas"),
         ("NOTIFY_CHANNELS", "notify_channels"),
+        ("DATA_SOURCES", "data_sources"),       # 数据来源（主来源=同花顺；为辅助来源留结构）
         ("AUCTION_SCAN_AT", "auction_scan_at"),
         ("AUCTION_BOARDS", "auction_boards"),
         ("MARKET_INDICES", "market_indices"),
@@ -934,7 +968,7 @@ def _apply_env(cfg: Config) -> Config:
         ("NOTIFY_SOUND", "notify_sound"),
         # 推送过滤：写错（"maybe"）→ 回到默认（**全推**，与新默认一致）
         ("PUSH_ONLY_PROVEN", "push_only_proven"),
-        # 持仓做T近似提示：写错（"maybe"）→ 回到默认（**开着**，与 `intraday_t` 默认一致）
+        # 持仓做T近似提示：写错（"maybe"）→ 回到默认（**关着**，与 `intraday_t` 新默认一致）
         ("INTRADAY_T", "intraday_t"),
     ):
         raw = _env_str(env_name)

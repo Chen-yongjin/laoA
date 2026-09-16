@@ -70,9 +70,29 @@ def _doctor(cfg, startup_problem: str = "") -> None:
     print(f"日志文件    : {Path(cfg.data_dir) / 'logs' / 'laoa-trader.log'}")
     print("-" * 56)
     print(f"同花顺 Key  : {_mask(cfg.hithink_api_key)}")
+    # 数据来源现在是一张**可添加的列表**（`data_sources`，顺序即取数优先级）：
+    # 内置的同花顺要 Key，东方财富那个公开接口免 Key。只打 id 容易对不上号，
+    # 所以连注册表里的中文名与"要不要 Key"一起打（注册表读不出来也不能让体检失败）。
+    try:
+        from laoa_trader.data import sources as sources_mod
+
+        described = [f"{info.name}（{'要 Key' if info.needs_key else '免 Key'}）"
+                     for info in sources_mod.active_sources(cfg)]
+        source_text = "、".join(described) or "（空）"
+        unknown = [s for s in cfg.data_sources if s not in sources_mod.REGISTRY]
+        if unknown:
+            source_text += f"；未实现：{'、'.join(unknown)}"
+    except Exception:  # noqa: BLE001 - 体检不能因为注册表读不出来就失败
+        source_text = "、".join(cfg.data_sources) or "（空）"
+    print(f"数据来源    : {source_text}")
     print(f"飞书凭证    : AppID {_mask(cfg.feishu_app_id)} / Secret {_mask(cfg.feishu_app_secret)}"
           f" / 会话 {cfg.feishu_chat_id or '（自动发现）'}")
     print(f"通知开关    : 飞书 {cfg.notify_feishu}、Windows {cfg.notify_windows}、托盘 {cfg.notify_tray}")
+    # `notify_channels` 是"实际发哪几路"的**总闸**，默认空 = 三路都不发（只走自绘浮窗）。
+    # 只打三个单频道开关会让人误以为"现在是发着的"（默认已经改成空列表了），所以两行都打。
+    chosen = "、".join(cfg.channels) or (
+        f"无（只走自绘浮窗 notify_popup={cfg.notify_popup}）")
+    print(f"通知频道    : notify_channels = {cfg.notify_channels}；实际发送 {chosen}")
     print(f"交易参数    : 资金 {cfg.trade_capital:.0f} 元、单票 {cfg.trade_position_pct:.0%}、"
           f"最多 {cfg.trade_max_positions} 只、止损 {cfg.stop_loss:.0%}、止盈 {cfg.take_profit:.0%}")
     _run_info = next_run_info(cfg, cfg.db_path)
@@ -700,10 +720,18 @@ def cli(argv: list[str] | None = None) -> int:
         print(f"股票池（{len(rows)} 只，{rows[0].get('date')}）：")
         for i, row in enumerate(rows, start=1):
             note = f"｜备注 {row['note']}" if row.get("note") else ""
-            print(f"  {i:>2}. {row['name']}（{row['symbol']}）"
-                  f"{row.get('label') or ''}｜来源 {row.get('source_label') or '—'}｜"
+            # 组别与持有期**单独一栏**：改版后「来源」列写的是"哪条策略"
+            # （`策略·短期反转`），策略名与组名不再挤在同一格里 —— 命令行这边
+            # 也不再重复打印策略名（那正是"同一件事说两遍"）。
+            group = str(row.get("group_label") or "—")
+            horizon = int(row.get("horizon") or 0)
+            group_text = f"{group}（T+{horizon}）" if horizon and group != "—" else group
+            # 标的写法与界面两张表一致：**半角**括号 `名称(代码)`（见 docs/改版方案.md 第四节）
+            print(f"  {i:>2}. {row['name']}({row['symbol']})｜"
+                  f"来源 {row.get('source_label') or '—'}｜组别 {group_text}｜"
                   f"{row.get('industry') or '—'}｜{row.get('reason') or ''}{note}")
-        print("来源说明：策略=按策略组选出；自选=你自己加的；策略+自选=两者都有（只出现一行）")
+        print("来源说明：策略·xxx=哪条内置策略选出来的；公式·xxx=你自己写的公式；"
+              "自选=手工加的；带 +自选 = 两者都有（只出现一行）")
         return 0
 
     # 只有"要写数据"的命令才因为目录不可用而终止；
@@ -735,7 +763,7 @@ def cli(argv: list[str] | None = None) -> int:
 
         from laoa_trader.strategy import groups as groups_mod
 
-        # 数据闸门（与界面【选股建池】、调度线程同一口径）：
+        # 数据闸门（与界面【开始选股】、调度线程同一口径）：
         # 没数据就跑策略 = 选出错的票，所以这里明确拒绝并返回非零退出码
         gate = data_gate(cfg, DataEngine(cfg.db_path))
         if not gate["ok"]:

@@ -12,7 +12,7 @@ import pytest
 
 from laoa_trader.config import Config
 from laoa_trader.data import preflight, storage
-from tests.conftest import seed_ready_db
+from tests.conftest import seed_ready_db, workdays_ending
 
 
 def _trading_days(count: int, end: str = "2026-09-11") -> list[str]:
@@ -42,10 +42,10 @@ def _cfg(tmp_path, **kwargs) -> Config:
 
 
 def test_default_thresholds_match_spec() -> None:
-    """默认：导入 3 年、跨度门槛 2.5 年（否则 3 年的库会被永远判不足）。"""
+    """默认：导入 0.5 年（6 个月）、跨度门槛 0.4 年（否则按配置导入的库会被永远判不足）。"""
     cfg = Config()
-    assert cfg.history_years == 3
-    assert cfg.min_history_years == 2.5
+    assert cfg.history_years == 0.5
+    assert cfg.min_history_years == 0.4
     assert cfg.min_history_years < cfg.history_years      # 联动约束
     assert cfg.history_warning() == ""
     assert cfg.min_symbols == 4000
@@ -95,6 +95,55 @@ def test_short_history_needs_full(tmp_path) -> None:
     result = preflight.check(cfg.db_path, cfg)
     assert result["status"] == preflight.NEEDS_FULL
     assert "历史跨度" in result["reason"]
+
+
+# ── 新默认（0.5 年导入 / 0.4 年门槛）必须与真实库联动 ──
+
+
+def _full_market_symbols(count: int = 4000):
+    """够 `min_symbols` 的合成标的（真实默认是 4000 —— 小样本库过不了这道闸）。"""
+    return tuple((f"{600000 + i:06d}", f"样本{i}", "银行") for i in range(count))
+
+
+def _six_months_cfg(tmp_path):
+    """**真实默认阈值** + 6 个月（约 120 个交易日）的库。"""
+    cfg = Config(data_dir=tmp_path / "data", hithink_api_key="")
+    cfg.ensure_dirs()
+    days = workdays_ending(datetime.now().strftime("%Y-%m-%d"), 120)
+    seed_ready_db(cfg, symbols=_full_market_symbols(), days=120, trading_days=days)
+    return cfg
+
+
+def test_six_month_db_is_ready_with_the_real_defaults(tmp_path) -> None:
+    """6 个月（约 120 个交易日）的库，用**真默认值**必须判 `ready`。
+
+    为什么单独立一条：默认值改成 0.5 年之后最容易踩的坑是 `min_history_years`
+    没跟着降（旧值 2.5）—— 那样"按配置导入的库"永远判不足，用户会被反复催着重下
+    180MB 历史，而提示只会说"数据老是缺"。这条用例**不改任何阈值**（连 min_symbols
+    都用默认的 4000，所以种子库得造满 4000 只），就是为了钉住这个联动。
+    """
+    cfg = _six_months_cfg(tmp_path)
+    assert (cfg.history_years, cfg.min_history_years) == (0.5, 0.4)   # 用的就是默认值
+    result = preflight.check(cfg.db_path, cfg)
+    assert result["status"] == preflight.READY, result["reason"]
+    assert result["needs_download"] == preflight.DOWNLOAD_NONE
+    assert 0.4 <= result["span_years"] < 0.5      # 6 个月的实际跨度（略小于 0.5）
+    assert result["stale_trading_days"] == 0
+
+
+def test_short_db_tells_the_user_the_span_and_the_fix(tmp_path) -> None:
+    """只下了 22 个交易日（约 1 个月）→ 判 needs_full，且文案要给出**跨度与怎么改**。"""
+    cfg = Config(data_dir=tmp_path / "data", hithink_api_key="")
+    cfg.ensure_dirs()
+    days = workdays_ending(datetime.now().strftime("%Y-%m-%d"), 22)
+    seed_ready_db(cfg, symbols=_full_market_symbols(), days=22, trading_days=days)
+    result = preflight.check(cfg.db_path, cfg)
+    assert result["status"] == preflight.NEEDS_FULL
+    assert result["needs_download"] == preflight.DOWNLOAD_FULL
+    reason = result["reason"]
+    assert "历史跨度只有" in reason
+    assert "要求 ≥0.4 年" in reason                # 说清判据（就是新默认门槛）
+    assert "min_history_years" in reason and "history_years" in reason   # 两条出路
 
 
 def test_too_few_symbols_needs_full(tmp_path) -> None:

@@ -229,6 +229,11 @@ def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     ):
         monkeypatch.delenv(name, raising=False)
     config = Config(data_dir=tmp_path / "data", hithink_api_key="test-key")
+    # 三路频道**显式**清空：默认值现在是 `[]`（用户拍板：默认只走自绘浮窗），
+    # 这里再写一遍是因为这是"测试绝不发真实通知"这条保证的输入 ——
+    # 显式写死之后，就算将来默认值又改回三路，测试也不会突然真的往外发。
+    # 想验发送的用例自己 `cfg.notify_channels = list(KINDS)`（见 test_notify.py）。
+    config.notify_channels = []
     config.ensure_dirs()
     return config
 

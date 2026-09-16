@@ -166,16 +166,18 @@ def test_scorecard_can_be_limited_to_one_strategy(cfg, scorecard_config, tmp_pat
 
 
 def test_scorecard_warns_about_a_short_sample() -> None:
-    """3 年库（约 730 个交易日）要提示"逐年稳定性仅供参考"；长样本不提示。
+    """短样本库（这里是 730 个交易日 ≈ 2.9 年）要提示"逐年稳定性仅供参考"；长样本不提示。
 
-    为什么必须提示：分发包默认只导入 3 年，逐年分组只剩 3 个桶 ——
-    「每一年都为正 ✅」的说服力和 10 年样本不是一回事，用户据此决定策略去留时得知道。
+    为什么必须提示：年度分组只剩两三个桶时，「每一年都为正 ✅」的说服力和 10 年样本
+    完全不是一回事，用户据此决定策略去留时得知道。
+    注意默认导入年限是 **6 个月**（连 250 个交易日的门槛都过不了，根本走不到这里）——
+    能走到这句提示的都是**自己导了 1~4 年**的人，所以文案里不再写死"3 年"。
     """
     from laoa_trader.research import scorecard as sc
 
     short = {"days": 730, "start": "2023-01-03", "end": "2025-12-31"}
     note = sc.sample_note(short)
-    assert "3 年样本较短，逐年稳定性仅供参考" in note
+    assert "样本较短（< 4 年），逐年稳定性仅供参考" in note
     assert "2.9 年" in note or "2.8 年" in note          # 用交易日折算，不是日历跨度
     assert "history_years" in note                        # 想要长样本怎么改也说了
 
@@ -186,7 +188,7 @@ def test_scorecard_warns_about_a_short_sample() -> None:
 
 def test_short_sample_note_lands_in_the_report(cfg, scorecard_config, tmp_path,
                                                capsys) -> None:
-    """3 年库跑成绩单：控制台与 Markdown 报告里都要有那句提示。"""
+    """1.2 年左右的库跑成绩单：控制台与 Markdown 报告里都要有那句提示。"""
     _seed_flat_market(cfg.db_path, symbols=110, days=300)     # 300 个交易日 ≈ 1.2 年
     out_dir = tmp_path / "成绩单"
     code = cli(["--cli", "--config", scorecard_config, "--scorecard",

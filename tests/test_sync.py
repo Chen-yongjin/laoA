@@ -65,6 +65,11 @@ def dumps(cfg):
     # 写/读 Parquet 需要 pyarrow（pyproject 已声明）。开发机上没装时，
     # 依赖本 fixture 的用例**整组跳过**，而不是报一堆误导性的失败。
     pytest.importorskip("pyarrow", reason="未安装 pyarrow，跳过 dump 相关用例")
+    # 下面两个 dump 的日期是**写死**的（2026-01-01~10）——这里显式关掉导入窗口，
+    # 免得哪天它们落到默认窗口（现在是 0.5 年 = 6 个月）之外，整个文件变成
+    # "按 history_years 过滤后没有数据"（2026-09 实测就踩过）。
+    # 导入窗口本身的行为由 `tests/test_history_window.py` 专门钉。
+    cfg.history_years = 0
     cfg.ensure_dirs()
     source = cfg.data_dir / "dump_source"
     source.mkdir(parents=True, exist_ok=True)

@@ -96,6 +96,9 @@ def test_parse_run_at(text: str, expected: tuple[int, int]) -> None:
 
 
 def test_scheduler_start_stop_and_status(cfg, db) -> None:
+    # `auto_run` 默认已经改成 false（用户拍板：不设定时运行）——这里显式打开，
+    # 这条用例验的是"状态里如实报告开关与下次运行时间"，不是默认值本身。
+    cfg.auto_run = True
     sched = scheduler.Scheduler(cfg, DataEngine(db))
     assert sched.running is False
     assert sched.start() is True
@@ -192,7 +195,8 @@ def test_run_daily_survives_strategy_crash(cfg, db, monkeypatch) -> None:
 
     monkeypatch.setattr("laoa_trader.strategy.rules.run_all", boom)
     report = scheduler.run_daily(cfg, DataEngine(db), notify=False)
-    assert any("选股建池" in e for e in report["errors"])
+    # 错误里要能看出"哪一步炸了"（前缀是"选股："）+ 原始异常（用户据此报障）
+    assert any("选股：" in e and "策略全炸了" in e for e in report["errors"])
     assert report["pool"] == []
 
 
@@ -209,7 +213,12 @@ def test_run_intraday_now_records_report(cfg, db, monkeypatch) -> None:
 
 
 def test_scheduler_daily_fires_only_once_per_day(cfg, db, monkeypatch) -> None:
-    """定时任务：当天到点后只触发一次（不能每秒重跑）。"""
+    """定时任务：当天到点后只触发一次（不能每秒重跑）。
+
+    注意要显式打开 `auto_run`：默认已是 false，不开的话 `_maybe_daily()` 按设计
+    什么都不做（那条行为由 test_autorun.py 的 `auto_run=false` 用例覆盖）。
+    """
+    cfg.auto_run = True
     calls: list[int] = []
     sched = scheduler.Scheduler(cfg, DataEngine(db))
     monkeypatch.setattr(scheduler.intraday, "is_trading_day", lambda *a, **k: True)
@@ -237,6 +246,7 @@ def test_scheduler_skips_daily_before_run_at(cfg, db, monkeypatch) -> None:
 
 
 def test_scheduler_skips_daily_on_non_trading_day(cfg, db, monkeypatch) -> None:
+    cfg.auto_run = True               # 默认已关，这里要验"非交易日不跑"
     calls: list[int] = []
     sched = scheduler.Scheduler(cfg, DataEngine(db))
     monkeypatch.setattr(sched, "run_daily_now", lambda **k: calls.append(1))

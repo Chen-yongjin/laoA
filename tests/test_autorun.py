@@ -124,9 +124,14 @@ def test_next_run_info_states() -> None:
 
 
 def test_next_run_info_uses_trading_calendar(cfg, db) -> None:
-    """有交易日历时，"明天"要跳到**下一个交易日**（周末不会说"周六 16:00"）。"""
+    """有交易日历时，"明天"要跳到**下一个交易日**（周末不会说"周六 16:00"）。
+
+    `auto_run` 现在是**默认 false**，所以这里要显式打开：不开的话这个函数按设计
+    返回"已关闭"（那种情况由 `test_next_run_info_states` 覆盖）。
+    """
     from laoa_trader.data import storage
 
+    cfg.auto_run = True
     with storage.connect(cfg.db_path) as conn:
         storage.write_calendar(conn, ["2026-09-11", "2026-09-14"])   # 周五 + 下周一
     friday_night = datetime(2026, 9, 11, 20, 0)

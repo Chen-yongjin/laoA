@@ -257,6 +257,7 @@ def test_needs_incremental_syncs_before_strategies(cfg, monkeypatch,
     落库的行情必须先补齐，池子才会按最新数据算。
     """
     auto_download_now = datetime.now()
+    cfg.auto_run = True            # `auto_run` 默认已关；这条验的是闸门与顺序
     _stale_db(cfg, lag=1, days=20)
     cfg.auto_download_on_start = auto_download
     assert preflight.check(cfg.db_path, cfg)["status"] == preflight.NEEDS_INCREMENTAL
@@ -283,6 +284,7 @@ def test_needs_incremental_without_auto_download_still_runs(cfg, monkeypatch,
     于是"先补数据再选股"这个顺序天然成立。区别只在日志里说清
     "没有因为 auto_download_on_start=false 而额外去补数据"。
     """
+    cfg.auto_run = True            # `auto_run` 默认已关；这条验的是闸门与顺序
     _stale_db(cfg, lag=1, days=20)
     cfg.auto_download_on_start = False
     assert preflight.check(cfg.db_path, cfg)["status"] == preflight.NEEDS_INCREMENTAL
@@ -307,6 +309,7 @@ def test_needs_incremental_without_auto_download_still_runs(cfg, monkeypatch,
 def test_needs_incremental_with_auto_download_logs_why(cfg, monkeypatch,
                                                       log_records) -> None:
     """`auto_download_on_start=true` 的同一场景：日志说法不同（说明会补数据）。"""
+    cfg.auto_run = True            # `auto_run` 默认已关；这条验的是日志说明
     _stale_db(cfg, lag=1, days=20)
     cfg.auto_download_on_start = True
     monkeypatch.setattr(sched.intraday, "is_trading_day", lambda *a, **k: True)
@@ -442,10 +445,15 @@ def test_doctor_still_works_on_empty_db(capsys, tmp_path, cfg) -> None:
 
 
 def test_default_thresholds_are_not_silently_relaxed(tmp_path) -> None:
-    """回归保护：默认门槛必须还是"4000 只 / 2.5 年"（别为了过测试偷偷放松）。"""
+    """回归保护：默认门槛必须还是"4000 只 / 0.4 年"（别为了过测试偷偷放松）。
+
+    0.4 年这个门槛是跟着默认导入年限（0.5 年 = 6 个月）走的：必须**小于**它，
+    否则按配置导入的库永远判"不足"（见 `Config.history_warning()`）。
+    """
     cfg = load_config(tmp_path / "nope.toml", use_env=False)
     assert cfg.min_symbols == 4000
-    assert cfg.min_history_years == 2.5
+    assert cfg.min_history_years == 0.4
+    assert cfg.min_history_years < cfg.history_years == 0.5
 
 
 def test_log_collector_fixture_works(log_records) -> None:

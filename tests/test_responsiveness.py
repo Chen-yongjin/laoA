@@ -35,6 +35,10 @@ from tests.conftest import FakeClient
 def _cfg(tmp_path) -> Config:
     cfg = Config(data_dir=tmp_path / "data", hithink_api_key="key")
     cfg.min_history_years, cfg.min_symbols = 0.0, 1
+    # `_write_dump` 造的行情从 2024-01-01 开始（写死的），而默认导入窗口已经是
+    # **0.5 年（6 个月）**——不关掉窗口就会被过滤成空、整个文件红。
+    # 这一组测的是"GIL/进度"，与导入窗口无关（窗口另有 test_history_window.py）。
+    cfg.history_years = 0
     cfg.ensure_dirs()
     return cfg
 

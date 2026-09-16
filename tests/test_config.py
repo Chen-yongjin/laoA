@@ -22,7 +22,7 @@ def test_defaults() -> None:
     cfg = load_config(use_env=False)
     assert cfg.run_at == "16:00"              # 新默认：收盘后主跑
     assert cfg.run_at_fallback == "19:15"     # 主跑没成功时的补跑
-    assert cfg.auto_run is True
+    assert cfg.auto_run is False              # 用户拍板：不设定时运行（选股随时手动）
     assert cfg.intraday_interval == 60
     assert cfg.stop_loss == 0.05
     assert cfg.take_profit == 0.10
@@ -211,7 +211,7 @@ def test_config_example_file_is_valid() -> None:
         assert key in data, f"config.example.toml 缺少 {key}"
     assert data["run_at"] == "16:00"          # 主跑：收盘后
     assert data["run_at_fallback"] == "19:15"  # 补跑
-    assert data["auto_run"] is True
+    assert data["auto_run"] is False
     # 示例文件里不能带真实凭证
     assert data["hithink_api_key"] == ""
     assert data["feishu_app_secret"] == ""
@@ -253,13 +253,13 @@ def test_example_config_documents_watchlist() -> None:
 
 
 def test_autorun_defaults_and_toml(tmp_path: Path) -> None:
-    """自动运行三件套：开关 + 主跑 + 补跑。"""
+    """自动运行三件套：开关 + 主跑 + 补跑（开关默认 **false**，两个时间键照旧）。"""
     cfg = load_config(tmp_path / "none.toml", use_env=False)
-    assert (cfg.auto_run, cfg.run_at, cfg.run_at_fallback) == (True, "16:00", "19:15")
+    assert (cfg.auto_run, cfg.run_at, cfg.run_at_fallback) == (False, "16:00", "19:15")
 
-    path = _write(tmp_path, 'auto_run = false\nrun_at = "16:30"\nrun_at_fallback = "20:00"\n')
+    path = _write(tmp_path, 'auto_run = true\nrun_at = "16:30"\nrun_at_fallback = "20:00"\n')
     cfg2 = load_config(path, use_env=False)
-    assert cfg2.auto_run is False
+    assert cfg2.auto_run is True
     assert cfg2.run_at == "16:30"
     assert cfg2.run_at_fallback == "20:00"
 
@@ -629,30 +629,34 @@ def test_example_config_documents_auction_scan() -> None:
 # ── 持仓做T 的近似提示（开关 + 四个阈值）──
 
 
-def test_position_t_switch_defaults_on_and_reads_toml(tmp_path: Path) -> None:
-    """做T提示**默认开着**（用户点名的功能）；开关与四个阈值都能从 config.toml 改。"""
-    assert load_config(use_env=False).intraday_t is True
+def test_position_t_switch_defaults_off_and_reads_toml(tmp_path: Path) -> None:
+    """做T提示**默认关**（用户拍板：T策略默认关，阈值又没验证过）；开关与阈值都能从 config.toml 改。"""
+    assert load_config(use_env=False).intraday_t is False
     assert load_config(use_env=False).t_high_min_gain_pct == 2.0
 
     path = _write(tmp_path, """
-intraday_t = false
+intraday_t = true
 t_high_min_gain_pct = 3.0
 t_high_pullback_pct = 2.0
 t_low_min_drop_pct = 2.5
 t_low_rebound_pct = 1.2
 """)
     cfg = load_config(path, use_env=False)
-    assert cfg.intraday_t is False
+    assert cfg.intraday_t is True
     assert cfg.t_high_min_gain_pct == 3.0
     assert cfg.t_high_pullback_pct == 2.0
     assert cfg.t_low_min_drop_pct == 2.5
     assert cfg.t_low_rebound_pct == 1.2
 
 
-def test_position_t_switch_written_wrong_stays_default_on(tmp_path: Path) -> None:
-    """开关写错（`"maybe"`）→ **回到默认开着**，不是把功能悄悄关掉（与浮窗/提示音同一口径）。"""
+def test_position_t_switch_written_wrong_stays_default_off(tmp_path: Path) -> None:
+    """开关写错（`"maybe"`）→ **回到默认（关）**。
+
+    改成默认关之后，这一条和"写错按 False"结果一样了（这条断言是回归保护：
+    就算有人把默认改回 true，也不该出现"写错 = 功能被打开"这种更坏的结果）。
+    """
     path = _write(tmp_path, 'intraday_t = "maybe"\n')
-    assert load_config(path, use_env=False).intraday_t is True
+    assert load_config(path, use_env=False).intraday_t is False
     # 但那四个阈值写坏（0/负数/乱码）→ 回各自的默认值（0 会让"涨过 0%"变成永远触发）
     path2 = _write(tmp_path, """
 t_high_min_gain_pct = 0
@@ -666,19 +670,19 @@ t_low_rebound_pct = 0.0
 
 
 def test_position_t_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """环境变量：`INTRADAY_T` 关掉、`T_*` 改阈值（写错也一样回默认）。"""
-    monkeypatch.setenv("INTRADAY_T", "0")
+    """环境变量：`INTRADAY_T` 打开、`T_*` 改阈值（写错也一样回默认）。"""
+    monkeypatch.setenv("INTRADAY_T", "1")
     monkeypatch.setenv("T_HIGH_MIN_GAIN_PCT", "3.5")
     monkeypatch.setenv("T_LOW_REBOUND_PCT", "0.8")
     cfg = load_config(tmp_path / "none.toml")
-    assert cfg.intraday_t is False
+    assert cfg.intraday_t is True
     assert cfg.t_high_min_gain_pct == 3.5
     assert cfg.t_low_rebound_pct == 0.8
 
-    monkeypatch.setenv("INTRADAY_T", "maybe")          # 写错 → 回默认（开着）
+    monkeypatch.setenv("INTRADAY_T", "maybe")          # 写错 → 回默认（关）
     monkeypatch.setenv("T_HIGH_MIN_GAIN_PCT", "0")
     cfg2 = load_config(tmp_path / "none.toml")
-    assert cfg2.intraday_t is True
+    assert cfg2.intraday_t is False
     assert cfg2.t_high_min_gain_pct == 2.0
 
 
@@ -690,7 +694,7 @@ def test_example_config_documents_position_t() -> None:
     example = P(__file__).resolve().parents[1] / "config.example.toml"
     text = example.read_text(encoding="utf-8")
     data = tomllib.loads(text)
-    assert data["intraday_t"] is True                  # 用户点名的功能：默认开着
+    assert data["intraday_t"] is False                 # 用户拍板：T策略默认关
     assert data["t_high_min_gain_pct"] == 2.0
     assert data["t_high_pullback_pct"] == 1.5
     assert data["t_low_min_drop_pct"] == 2.0
@@ -700,7 +704,7 @@ def test_example_config_documents_position_t() -> None:
     assert "券商" in text                               # 能卖多少只有券商知道
 
 
-# ── 用户拍板后的默认策略集与 3 年导入窗口 ──
+# ── 用户拍板后的默认策略集与 6 个月导入窗口 ──
 
 
 def test_default_strategy_set_is_short_only() -> None:
@@ -718,13 +722,86 @@ def test_default_strategy_set_is_short_only() -> None:
     assert set(groups_mod.GROUPS) == {"ultra", "short", "swing"}
 
 
-def test_default_history_window_is_three_years() -> None:
-    """默认导入 3 年、跨度门槛 2.5 年（必须 < 3，否则 3 年的库永远判"不足"）。"""
+def test_default_history_window_is_six_months() -> None:
+    """默认导入 0.5 年（6 个月）、跨度门槛 0.4 年（必须 < 0.5，否则库永远判"不足"）。
+
+    为什么是 0.5（用户拍板）：超短线（short 组持有期 T+3）不需要长历史 ——
+    6 个月约 120 个交易日、约 50 万行，库更小、首次导入更快。
+    """
     cfg = load_config(use_env=False)
-    assert cfg.history_years == 3.0
-    assert cfg.min_history_years == 2.5
+    assert cfg.history_years == 0.5
+    assert cfg.min_history_years == 0.4
     assert cfg.min_history_years < cfg.history_years
     assert cfg.history_warning() == ""              # 默认配置不矛盾
+
+
+def test_default_switches_are_off() -> None:
+    """出厂设置里"会自己动"的东西一律关掉（用户拍板）：
+    不设定时运行（选股随时手动）、T策略默认关、当日异动默认关（减少无用消息）。
+    """
+    cfg = load_config(use_env=False)
+    assert cfg.auto_run is False
+    assert cfg.intraday_t is False
+    assert cfg.intraday_anomaly is False
+
+
+def test_default_notify_goes_popup_only() -> None:
+    """默认只走 QQ 式浮窗：`notify_channels` 空、`notify_popup` 开。
+
+    为什么：系统弹窗/托盘气泡/飞书都由用户自己勾 —— 出厂状态不该有"还会弹系统窗口"，
+    但提醒本身要看得见（浮窗 + 声音 + 闪烁），所以这三项仍是默认开。
+    """
+    cfg = load_config(use_env=False)
+    assert cfg.notify_channels == []
+    assert cfg.channels == []                       # 空列表 = 这三路一个都不发
+    assert cfg.notify_popup is True
+    assert cfg.notify_sound is True
+    assert cfg.notify_flash_seconds == 6
+
+
+def test_data_sources_default_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`data_sources`（新增键）：默认就是内置的同花顺，环境变量 `DATA_SOURCES` 可覆盖。
+
+    这个键目前只"留结构"（辅助来源是什么还没拍板，见改版方案第七节）——
+    所以测试只钉两件事：默认值是 `["hithink"]`，且环境变量真的接上了
+    （逗号分隔，与 notify_channels 同一套 `_as_list` 写法）。
+    """
+    cfg = load_config(tmp_path / "none.toml", use_env=False)
+    assert cfg.data_sources == ["hithink"]
+
+    monkeypatch.setenv("DATA_SOURCES", "hithink,csv")
+    cfg2 = load_config(tmp_path / "none.toml")
+    assert cfg2.data_sources == ["hithink", "csv"]
+
+    monkeypatch.setenv("DATA_SOURCES", "hithink，csv")   # 中文逗号也认
+    assert load_config(tmp_path / "none.toml").data_sources == ["hithink", "csv"]
+
+
+def test_data_sources_in_example_config() -> None:
+    """`config.example.toml` 要带上这个新键（否则用户拿示例覆盖后它就"消失"了）。"""
+    import tomllib
+    from pathlib import Path as P
+
+    example = P(__file__).resolve().parents[1] / "config.example.toml"
+    text = example.read_text(encoding="utf-8")
+    assert tomllib.loads(text)["data_sources"] == ["hithink"]
+    assert "同花顺" in text
+
+
+def test_default_history_window_is_pinned_in_example_config() -> None:
+    """示例配置（会分发给用户）里的默认值必须与代码一致 —— 两处漂移是最容易出的事。"""
+    import tomllib
+    from pathlib import Path as P
+
+    example = P(__file__).resolve().parents[1] / "config.example.toml"
+    data = tomllib.loads(example.read_text(encoding="utf-8"))
+    cfg = load_config(use_env=False)
+    assert data["history_years"] == cfg.history_years == 0.5
+    assert data["min_history_years"] == cfg.min_history_years == 0.4
+    assert data["auto_run"] is cfg.auto_run is False
+    assert data["intraday_t"] is cfg.intraday_t is False
+    assert data["intraday_anomaly"] is cfg.intraday_anomaly is False
+    assert data["notify_channels"] == cfg.notify_channels == []
 
 
 def test_push_only_proven_defaults_to_off() -> None:

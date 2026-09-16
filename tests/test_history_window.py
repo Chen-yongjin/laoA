@@ -1,6 +1,6 @@
-"""分发给别人时只导 5 年：导入按年过滤、复权事件全留、自检门槛联动。
+"""导入窗口按年过滤：复权事件全留、自检门槛联动、摘要说清导了什么。
 
-覆盖需求「分发给别人时只下 5 年数据（默认）」的验收点：
+覆盖需求「分发给别人时只导一小段历史（现默认 6 个月）」的验收点：
 
 1. `history_years=5` 时按日期过滤：跨 6 年的 dump 只写入最近 5 年；
 2. 复权事件**不过滤**：窗口之前的除权事件仍参与因子计算（否则序列会差一个常数）；
@@ -244,11 +244,31 @@ def test_span_three_years_needs_full(tmp_path) -> None:
 
 
 def test_config_linkage_defaults() -> None:
+    """默认 0.5 年导入 / 0.4 年门槛（用户拍板：超短线不需要长历史）。
+
+    门槛必须**严格小于**导入年限，否则"按配置导入的库"永远判不足。
+    """
     cfg = Config()
-    assert cfg.history_years == 3
-    assert cfg.min_history_years == 2.5
+    assert cfg.history_years == 0.5
+    assert cfg.min_history_years == 0.4
     assert cfg.min_history_years < cfg.history_years
     assert cfg.history_warning() == ""
+
+
+def test_old_floor_with_new_import_years_is_caught() -> None:
+    """只把导入年限改小而**忘了降门槛**（旧默认 2.5）→ 必须当场判"配置矛盾"。
+
+    这就是本次改默认值最危险的组合：`history_years = 0.1`（1 个月）+ `2.5`（旧门槛）。
+    没有这道检测，用户拿到的表现只是"数据老是缺、老让我重下"，根本猜不到是配置写错。
+    """
+    cfg = Config(history_years=0.1, min_history_years=2.5)
+    warning = cfg.history_warning()
+    assert "配置矛盾" in warning
+    assert "2.5" in warning and "0.1" in warning
+    # 建议值本身不能再是矛盾值（老的 `years-0.5` 在年限很小时会算出 0.5 > 0.1）
+    assert "建议 min_history_years 设为 0.08" in warning
+    # 新默认这一对是干净的
+    assert Config().history_warning() == ""
 
 
 def test_config_linkage_warning_and_no_download(tmp_path) -> None:
