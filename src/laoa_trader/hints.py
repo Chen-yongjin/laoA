@@ -14,18 +14,26 @@
 
 from __future__ import annotations
 
-# ── 顶部按钮名（与界面上真的画出来的按钮必须一字不差）──
+# ── 按钮名（与界面上真的画出来的按钮必须一字不差）──
+#: 【下载数据】【刷新数据】这两个按钮改版后住在**「系统设置」页的「数据来源」那一组**里
+#: （原来挤在标题区那一排，与"选股"混在一起分不清）—— 所以下面的指路文案里
+#: 必须带上"在【系统设置】里"，否则用户会满窗找一个不存在的按钮。
 BTN_DOWNLOAD_TEXT = "下载数据"
-BTN_RUN_TEXT = "选股建池"
+BTN_RUN_TEXT = "开始选股"
 BTN_REFRESH_TEXT = "刷新数据"
 
+#: 页面名（指路文案里要用它说明"去哪个页签"）
+TAB_SETTINGS_TEXT = "系统设置"
+
 #: 全量/增量历史行情缺失时的指路（数据闸门、CLI、向导共用）
-DOWNLOAD_HINT = f"请先下载：点界面上的【{BTN_DOWNLOAD_TEXT}】，或命令行运行 --download"
+DOWNLOAD_HINT = (f"请先下载：在界面【{TAB_SETTINGS_TEXT}】页点【{BTN_DOWNLOAD_TEXT}】，"
+                 f"或命令行运行 --download")
 
 #: **轻量数据**（交易日历 / 行业归属 / 指数）缺失时的指路。
 #: 为什么单独一句：这三项各是一两个请求的目录类数据，点一下【刷新数据】几秒钟就补上，
 #: 而全量历史是 180MB、十几分钟的大动作 —— 指路指错了，用户白等一场。
-SYNC_LIGHT_HINT = f"点【{BTN_REFRESH_TEXT}】补齐即可（不用重下历史行情）"
+SYNC_LIGHT_HINT = (f"在【{TAB_SETTINGS_TEXT}】页点【{BTN_REFRESH_TEXT}】补齐即可"
+                   f"（不用重下历史行情）")
 
 #: 轻量项都列一遍，方便文案里点名"缺的是哪一类"
 LIGHT_ITEM_NAMES = "交易日历 / 行业归属 / 指数"

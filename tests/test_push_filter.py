@@ -120,7 +120,7 @@ def test_split_push_rows_keeps_proven_and_self_selected() -> None:
     assert [r["symbol"] for r in keep] == ["600001", "600003", "600004"]
     assert [r["symbol"] for r in skipped] == ["600002"]
     assert "依赖开盘" in pool.skipped_push_note(skipped)
-    assert "乙（600002）" in pool.skipped_push_note(skipped)
+    assert "乙(600002)" in pool.skipped_push_note(skipped)
     assert pool.skipped_push_note([]) == ""
 
 

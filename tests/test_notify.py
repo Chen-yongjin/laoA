@@ -13,6 +13,7 @@ from tests.conftest import FakeResponse, FakeSession
 
 def test_notify_all_returns_per_channel_results(cfg) -> None:
     """三路都要有结果（缺凭证/平台不支持也是"有结果"，不是异常）。"""
+    cfg.notify_channels = list(KINDS)      # 默认是 []（只走浮窗）；这条验的是三路本身
     cfg.notify_tray = True
     results = notify_all("测试标题", ["第一行", "第二行"], cfg=cfg)
     assert set(results) == set(KINDS)
@@ -27,6 +28,7 @@ def test_notify_all_returns_per_channel_results(cfg) -> None:
 
 def test_notify_all_windows_degrades_on_non_windows(cfg) -> None:
     """非 Windows 平台必须优雅降级为"不支持"，而不是抛 ImportError。"""
+    cfg.notify_channels = list(KINDS)      # 默认空 → 不显式打开就只会得到"未启用，已跳过"
     results = notify_all("标题", ["正文"], kinds=("windows",), cfg=cfg)
     if windows.SUPPORTED:  # pragma: no cover - 只在 Windows 上走这里
         assert "ok" in results["windows"]
@@ -42,6 +44,7 @@ def test_notify_all_never_raises_when_channel_explodes(cfg, monkeypatch) -> None
         raise RuntimeError("飞书炸了")
 
     monkeypatch.setattr(feishu, "notify", boom)
+    cfg.notify_channels = list(KINDS)      # 默认空 → 不显式打开就永远走不到"发送失败"这条
     results = notify_all("标题", ["正文"], cfg=cfg)
     assert results["feishu"]["ok"] is False
     assert "飞书炸了" in results["feishu"]["detail"]

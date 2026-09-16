@@ -296,7 +296,9 @@ def run_daily(
 ) -> dict:
     """跑一次完整的日更流程：数据增量（可选）→ 策略 → 建池 → 推送。
 
-    **界面上的【选股建池】与 19:15 的定时任务共用这一个函数** ——
+    **界面上的【开始选股】（「策略选股」页，或托盘菜单里的同名项）与 CLI `--once`
+    共用这一个函数** —— 按钮名取自 `hints.BTN_RUN_TEXT`，别处不许自己写一个
+    （改版后那个按钮叫【开始选股】，老文档里的【选股建池】已经不存在了）。
     口径一致才谈得上幂等：信号按 (行情日, 策略, 代码) upsert、池子按
     (行情日, 代码) upsert、推送按内容指纹去重（同一天同一批内容只推一次）。
 
@@ -379,8 +381,8 @@ def run_daily(
             engine, cfg, picks=picks_all, selection=selection, report=report
         )
     except Exception as exc:  # noqa: BLE001
-        report["errors"].append(f"选股建池：{type(exc).__name__}: {exc}")
-        logger.exception("选股建池失败")
+        report["errors"].append(f"选股：{type(exc).__name__}: {exc}")
+        logger.exception("选股失败")
 
     report["data_date"] = engine.get_latest_data_date()
     pool_rows = report["pool"]
@@ -461,9 +463,9 @@ def refresh_data(
     *,
     progress_cb: sync.ProgressCb | None = None,
 ) -> list[sync.SyncResult]:
-    """"只刷新数据"：跑一遍增量同步（行情 + 涨停池 + 日历 + 行业 + 指数），不选股、不推送。
+    """只刷新数据：跑一遍增量同步（行情 + 涨停池 + 日历 + 行业 + 指数），不选股、不推送。
 
-    界面上的【只刷新数据】按钮用它 —— 数据没好之前跑策略毫无意义，
+    界面上的【刷新数据】按钮用它（`hints.BTN_REFRESH_TEXT`）—— 数据没好之前跑策略毫无意义，
     所以单独给一个"只补数据"的动作。
 
     Returns:
@@ -635,7 +637,7 @@ class Scheduler:
         progress_cb: sync.ProgressCb | None = None,
         stage_cb: Any = None,
     ) -> dict:
-        """立刻跑一次（不受时间限制）：界面【选股建池】与 CLI --once 用。"""
+        """立刻跑一次（不受时间限制）：界面【开始选股】与 CLI `--once` 用。"""
         report = run_daily(
             self.cfg, self.engine, notify=notify, with_data=with_data,
             selection=selection, progress_cb=progress_cb, stage_cb=stage_cb,
@@ -739,7 +741,7 @@ class Scheduler:
         if state.is_downloading():
             self._block_daily(
                 "正在下载历史数据：已跳过本次自动选股；"
-                "下载完成后当天仍会自动补跑一次（也可以点【选股建池】）",
+                "下载完成后当天仍会自动补跑一次（也可以点【开始选股】）",
                 now,
             )
             return

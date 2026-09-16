@@ -48,7 +48,7 @@
 > ⚠️ **这两条提示是近似的、且无法回测**：只有 60 秒一张的行情快照，没有分时/逐笔/Level-2，
 > 更没有历史的分时数据来验证阈值 —— 这四个阈值是**手工设定的起点，不是拟合出来的**。
 > 它们**不参与选股、也不会混进当天的池子推送**，只走盘中提醒那几条通道。
-> 开关：`intraday_t`（**默认 true**，环境变量 `INTRADAY_T`）。详见 README「持仓做T（近似提示）」。
+> 开关：`intraday_t`（**默认 false = 关**，用户拍板；想开就写 `intraday_t = true` 或环境变量 `INTRADAY_T=1`）。详见 README「持仓做T（近似提示）」。
 
 设计要点（继承服务器版）
 ------------------------
@@ -412,6 +412,9 @@ def watch_targets(
 
     cfg = cfg or get_config()
     targets: dict[str, dict] = {}
+    # 已关闭监控的持仓：**从观察面里整体剔掉**，不管它是不是池内标的/自选
+    # （优先级见 `monitor_off_symbols` 的说明）
+    off = monitor_off_symbols(db_path)
     pool_rows = [
         row for row in pool_mod.load_pool(db_path)
         if _kept(row.get("strategies") or row.get("strategy") or "")
@@ -454,10 +457,26 @@ def watch_targets(
     # 有股票池就**只盯池子**（池子是精选的热门行业标的，盯得过来、响应快）；
     # 池子为空时才退回"近期信号"（例如当晚选股还没跑）。
     if targets and os.environ.get("INTRADAY_POOL_ONLY", "1") != "0":
-        return targets, pool_symbols
+        return _drop_unmonitored(targets, pool_symbols, off)
     for symbol, info in recent_signal_symbols(db_path, days, allowed).items():
         targets.setdefault(symbol, {**info, "source": "signal"})
-    return targets, pool_symbols
+    return _drop_unmonitored(targets, pool_symbols, off)
+
+
+def _drop_unmonitored(
+    targets: dict[str, dict], pool_symbols: set[str], off: set[str]
+) -> tuple[dict[str, dict], set[str]]:
+    """把"已关闭监控"的持仓从观察面（与池内标记）里剔掉。
+
+    只在**有东西要剔**时才建新容器：这是每一轮都要走的路（调度器 60 秒一拍），
+    空集合时原样返回，省掉两次全量拷贝。
+    """
+    if not off:
+        return targets, pool_symbols
+    return (
+        {s: info for s, info in targets.items() if s not in off},
+        {s for s in pool_symbols if s not in off},
+    )
 
 
 def history_context(
@@ -633,14 +652,53 @@ def _day_of(raw: Any) -> str:
 
 
 def held_positions(db_path: str) -> dict[str, dict]:
-    """做T提示的观察面：**有持仓的票**（`quantity > 0`）→ `{symbol: position 行}`。
+    """做T提示的观察面：**有持仓的票** → `{symbol: position 行}`。
 
     为什么单独取一遍而不复用观察池（`watch_targets`）：观察池是"今天要买的票"
     （股票池 + 自选），**持仓完全可能不在里面**（池子天天重建，用户手上的票却没变）。
     只盯池子会出现"我明明持有它，做T提示却从来不提它"——那是这个功能最不能有的毛病。
+
+    **"有持仓"的判据 = 未被显式平仓**（`storage.load_positions`），而不是 `quantity > 0`：
+    改版后界面只记 代码 + 成本价 + 备注，新加的持仓 `quantity = 0` ——
+    按老判据写，用户手工记的持仓**永远不会有做T提示**（加了却没反应）。
+    界面上右键【关闭监控】把 `monitor` 置 0 的持仓在这里被排除：
+    用户要表达的是"别盯它了"，而不是"我没有这只票"。
+
+    老库不受影响：`monitor` 是后加的列、默认 1（见 `storage._ADDED_COLUMNS`），
+    `quantity > 0` 的行也照旧在（见 `load_positions` 的说明）。
     """
     with storage.connect(db_path) as conn:
-        return storage.load_positions(conn)
+        positions = storage.load_positions(conn)
+    return {s: row for s, row in positions.items() if int(row.get("monitor", 1) or 0)}
+
+
+def monitor_off_symbols(db_path: str) -> set[str]:
+    """已经**关闭监控**的持仓代码（`position.monitor = 0`）→ 这一轮一律不提醒。
+
+    为什么单独一个函数：这条判据要在**三个地方**用同一份 ——
+    盘中观察面（`watch_targets`：止损/止盈/涨停打开/跌破 5 日线/放量突破/回踩买点/做T）、
+    竞价与异动的标的宇宙（`alert_universe`）、竞价全市场扫描（`auction_scan`）。
+    抄三遍必然抄歪一处，而漏掉任何一处都会让右键那句【关闭监控】**变成半真的**：
+    用户关了它，做T不提示了，止损止盈照推 —— 那比没有这个开关更糟。
+
+    **优先级（用户拍板）**：某只票同时是策略标的或自选时，**以持仓上的监控开关为准**。
+    理由：右键那一行菜单是用户对"这只票"最具体、最新的一次表态，
+    而"它在池子里"是几天前跑策略留下的结果；池子每天重建，表态不该被它覆盖。
+
+    读不到持仓表时返回空集合（= 不做排除）：这是一个"少打扰"的开关，
+    库读不出来时宁可多提醒一次，也不能因为读库失败把**全部**提醒关掉。
+    """
+    try:
+        with storage.connect(db_path) as conn:
+            positions = storage.load_positions(conn)
+    except Exception as exc:  # noqa: BLE001 - 见上：读不到就不排除
+        logger.debug(f"读持仓监控开关失败（本轮不做排除）：{exc}")
+        return set()
+    return {
+        str(symbol)
+        for symbol, row in positions.items()
+        if not int(row.get("monitor", 1) or 0)
+    }
 
 
 def sellable_note(position: dict, today: str) -> tuple[bool, str]:
@@ -826,6 +884,75 @@ def t_hints_today(db_path: str, day: str | None = None) -> dict[str, dict]:
     return out
 
 
+def alerts_today_by_symbol(db_path: str, day: str | None = None) -> dict[str, dict]:
+    """**今天**每只票最新一条提醒：`{symbol: 提醒行}`（两张表的「提醒」列用）。
+
+    与 `t_hints_today()` 是同一个套路，但**不过滤 kind**：表格里的「提醒」列要回答的是
+    "这只票今天出过什么事"，止损/止盈/涨停打开/跌破 5 日线/放量突破/回踩买点/做T/竞价/异动
+    都算 —— 只留做T那一类等于把最要紧的几条（触及止损！）藏起来。
+
+    为什么从库里读、不在界面里现算：提醒是盘中服务那一轮的结论（同一张快照、同一套阈值、
+    同一条去重记录）。界面上再算一遍就有两个真相，很容易"推送说了、表里没有"；
+    而且界面每 5 秒刷一次，现算就等于要求界面也去取实时行情。
+
+    升序遍历 + 后写覆盖前写 = 同一天里**最后**一条（`load_alerts_of_day` 已按 `pushed_at`
+    升序返回，见它的说明），所以"同标的多条 → 取最新"不必自己比时间戳。
+    """
+    day = day or now_shanghai().strftime("%Y-%m-%d")
+    with storage.connect(db_path) as conn:
+        rows = storage.load_alerts_of_day(conn, day)
+    out: dict[str, dict] = {}
+    for row in rows:
+        symbol = str(row.get("symbol") or "")
+        if not symbol:
+            continue
+        # 顺带带上中文标签：浮窗/表格/详情显示的是同一个词，标签只在 `KIND_LABELS`
+        # 定义一次，谁都不许自己拼一套
+        out[symbol] = {**row, "label": KIND_LABELS.get(str(row.get("kind") or ""),
+                                                       str(row.get("kind") or ""))}
+    return out
+
+
+#: 「提醒」列的**短标签**：表格里只能放 4~6 个字，而 `KIND_LABELS` 是给推送用的长句
+#: （`🔁 近似·T高抛（反T：先卖后买）` 这种在单元格里会把宽度顶爆）。
+#: 这里只压"显示"，不改 `KIND_LABELS` 本身 —— 推送、浮窗、详情用的仍是长句那一份。
+ALERT_CELL_SHORT: dict[str, str] = {
+    "stop_loss": "触及止损",
+    "take_profit": "触及止盈",
+    "break_ma5": "跌破5日线",
+    "limit_up_open": "涨停打开",
+    "break_high": "放量突破",
+    "pullback_ma5_buy": "回踩买点",
+    "auction_strong": "竞价强",
+    "auction_weak": "竞价弱",
+    "t_high": "T高抛",
+    "t_low": "T低吸",
+}
+
+
+def alert_cell_text(row: dict | None) -> str:
+    """「提醒」列的短文本（没提醒 → 空串，界面自己画 `—`）。"""
+    if not row:
+        return ""
+    kind = str(row.get("kind") or "")
+    if kind in ALERT_CELL_SHORT:
+        return ALERT_CELL_SHORT[kind]
+    if kind.startswith("anomaly_"):
+        return "异动"
+    # 认不出的 kind：用 `KIND_LABELS` 的中文（去掉 emoji 与空白）—— 宁可长一点，
+    # 也不能给一个空单元格（"这里坏了"和"今天没事"看起来是一样的）
+    return "".join(str(KIND_LABELS.get(kind, kind)).split()).lstrip("⚡🛑🎯📉🔓🚀🔁")
+
+
+def alert_cell_tooltip(row: dict | None) -> str:
+    """「提醒」列的 tooltip：**整句话**（触发数字与动作）+ 时间。"""
+    if not row:
+        return "今天还没有这只票的盘中提醒"
+    label = KIND_LABELS.get(str(row.get("kind") or ""), str(row.get("kind") or ""))
+    return (f"{label}\n时间：{row.get('pushed_at') or '—'}\n"
+            f"{row.get('detail') or ''}")
+
+
 def t_hint_cell(row: dict | None) -> str:
     """「今日T提示」单元格的短文本（没提示过 → 空串，界面自己画 `—`）。"""
     kind = str((row or {}).get("kind") or "")
@@ -967,7 +1094,8 @@ def format_message(
     lines = []
     for alert in sorted(alerts, key=lambda a: a["kind"]):
         label = KIND_LABELS.get(alert["kind"], alert["kind"])
-        lines.append(f"{label}｜{alert['name']}（{alert['symbol'] or '—'}）{alert['detail']}")
+        # 标的写法 **半角括号**：与界面两张表的列头 `名称(代码)` 一致（改版方案第四节）
+        lines.append(f"{label}｜{alert['name']}({alert['symbol'] or '—'}){alert['detail']}")
         symbol = alert.get("symbol") or ""
         if not symbol or not alert.get("price"):
             continue
@@ -1349,9 +1477,16 @@ def auction_scan(
                 f"取回 {len(rows)} 条")
     skipped: dict[str, int] = {}
     hits: list[dict] = []
+    # 已关闭监控的持仓：**这一次扫描照常取数，但不推它**。
+    # 为什么不禁掉取数：取数是按 100 只一批的整批请求（剔掉一两只不省一个请求），
+    # 而"不推"才是用户右键【关闭监控】时想要的那件事（见 `monitor_off_symbols`）。
+    off = monitor_off_symbols(db_path)
     for row in rows:
         symbol = code_map.get(str(row.get("thscode") or ""))
         if not symbol:
+            continue
+        if symbol in off:
+            skipped["已关闭监控"] = skipped.get("已关闭监控", 0) + 1
             continue
         fields = auction_fields(row, name=universe.get(symbol, ""))
         fields["board"] = board_of(str(row.get("thscode") or symbol))
@@ -1407,7 +1542,7 @@ def auction_scan(
     result["title"], result["lines"] = title, lines
     if hits:
         logger.info(f"竞价扫描命中 {len(hits)} 只（推送前 {len(top)} 只）："
-                    + "、".join(f"{h['name']}（{h['symbol']}）分{h['score']}" for h in top[:5])
+                    + "、".join(f"{h['name']}({h['symbol']})分{h['score']}" for h in top[:5])
                     + ("…" if len(top) > 5 else ""))
     else:
         logger.info(f"竞价扫描 0 只命中（{skipped or '无数据'}）")
@@ -1435,13 +1570,13 @@ def amount_text(amount: Any) -> str:
 
 
 def auction_scan_line(hit: dict) -> str:
-    """汇总推送里的一行：`名称（代码） 创业板 +5.21% 量比3.20 成交额2.1亿 买盘剩余3,400手（分6）`。
+    """汇总推送里的一行：`名称(代码) 创业板 +5.21% 量比3.20 成交额2.1亿 买盘剩余3,400手（分6）`。
 
-    与卡片那一行（`auction_card_text`）**同一套写法**（`名称（代码）`、`买盘剩余/卖盘剩余`），
+    与卡片那一行（`auction_card_text`）**同一套写法**（`名称(代码)`、`买盘剩余/卖盘剩余`），
     再补上板块标签、成交额与分数 —— 用户要能一眼看出"哪只、哪个板、凭什么上榜"。
     缺的字段（量比/未匹配量取不到）**整段不显示**，不写 `量比None` 这种垃圾。
     """
-    parts = [f"{hit.get('name')}（{hit.get('symbol')}）"]
+    parts = [f"{hit.get('name')}({hit.get('symbol')})"]
     label = board_label(str(hit.get("board") or ""))
     if label:
         parts.append(label)
@@ -1643,6 +1778,11 @@ def alert_universe(db_path: str, cfg: Config | None = None) -> dict[str, str]:
     为什么三类都要：竞价强度与异动只对"用户关心的票"有意义 ——
     池子是要买的、持仓是已经买了的、自选是盯着的；漏掉哪一类用户都会当成 bug。
     名称以 `stock_basic` 为准（池子/自选里存的是建池那天的名字，可能已经改名）。
+
+    **已经关闭监控的持仓（`position.monitor = 0`）在这里被剔掉**：竞价与异动也属于
+    "这只票的盘中提醒"，右键【关闭监控】必须把它们一起管住 —— 否则用户看到的是
+    "我关了监控，止损不推了，异动照推"，只会以为开关是坏的。
+    优先级见 `monitor_off_symbols`：同时是策略标的/自选时，**以持仓的开关为准**。
     """
     from laoa_trader import pool as pool_mod
 
@@ -1668,7 +1808,8 @@ def alert_universe(db_path: str, cfg: Config | None = None) -> dict[str, str]:
             ):
                 if name:
                     symbols[str(symbol)] = str(name)
-    return {s: n for s, n in symbols.items() if s}
+    off = monitor_off_symbols(db_path)
+    return {s: n for s, n in symbols.items() if s and s not in off}
 
 
 def fetch_auction(

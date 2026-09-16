@@ -1,20 +1,20 @@
-"""「公式选股」页（`ui/formula_page.py`）的**离屏**界面测试。
+"""「策略选股」页（`ui/formula_page.py`）的**离屏**界面测试。
 
-为什么值得单写一份
-------------------
-这一页是"小白友好"的落点，而最容易做错、又最难在代码里看出来的是**交互细节**：
+这一页现在是三块（`docs/改版方案.md` TAB 4）：统一策略列表（内置 + 公式同一张表）、
+按需展开的傻瓜式公式编辑器、以及【开始选股】。最容易做错、又最难在代码里看出来的
+是**交互细节**，所以这里逐条钉住：
 
 * 点按钮是**插到光标处**还是追加到末尾（追加也能"跑通"，但会把用户改到一半的公式
   静默改坏 —— 见 `FormulaPage.insert_token` 的注释）；
-* 函数骨架插完光标在不在括号里（不在的话用户得自己点回去，等于白做面板）；
 * `AND` 前后有没有空格（没有就变成 `A>1AND B` 这种"看不懂的语法错"）；
-* 名称必填、重名要二次确认（覆盖是**不可逆**的）；
-* 勾「参与选股」有没有真的写回 `config.toml`；
-* 两个重活（【试算】【看成绩单】）**在不在后台线程里跑**（用户实报过"窗口未响应"）。
-
-最后一条尤其要在这里测：它是"看得见的行为"而不是"代码里的一行" ——
-`on_preview()` 返回时活儿必须还没干完（按钮还是灰的、进度条还在转），
-结果只能由工作线程的信号**稍后**写进提示区；提示文案必须与改造前**逐字一致**。
+* 列表的两类行：内置策略的备注只能是**真实字段**（证据），公式的备注来自文件的注释头；
+* 「状态」列写回**哪个键**：公式写 `enabled_formulas`，内置策略**同时**写
+  `enabled_groups` + `enabled_strategies`（只写一个会踩交集语义的坑，见页面里的注释）；
+* 右键菜单：内置可启停但**不可删**（置灰 + 理由），公式可删（二次确认）；
+* 备注能写进公式文件的 `# 说明:` 注释头、也能从那里读回界面；
+* 【开始选股】**只 emit `start_pick_requested`**，自己绝不跑流程；
+* 「本次选股结果」区与【全部加为自选】（写入 + `watchlist_max` 上限提示）；
+* 【试算】**在后台线程里跑**（用户实报过"窗口未响应"）。
 
 这些只有把页面真的建出来、真的点一遍才测得到。用 Qt 的 `offscreen` 平台插件，
 无显示器也能跑；没装 PySide6 的机器整个文件跳过（与 `test_ui_smoke.py` 同一约定）。
@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import threading
 import time
@@ -47,6 +48,7 @@ from laoa_trader import formulas as lib  # noqa: E402
 from laoa_trader.config import Config  # noqa: E402
 from laoa_trader.data import storage  # noqa: E402
 from laoa_trader.strategy import formula as fm  # noqa: E402
+from laoa_trader.strategy import groups, rules  # noqa: E402
 from laoa_trader.ui import formula_page as fp  # noqa: E402
 from tests.conftest import workdays_ending  # noqa: E402
 
@@ -113,7 +115,7 @@ def page(page_cfg: Config, tmp_path: Path, qapp):
     # 留一个还在跑的 QThread 给下一个用例：它的信号会打到已经删掉的控件上，
     # 而且事件循环里一直有活儿 —— 整个文件的耗时会成倍劣化（界面用例踩过这个坑）。
     for attr in ("scorecard_worker", "preview_worker"):
-        worker = getattr(widget, attr)
+        worker = getattr(widget, attr, None)          # 成绩单线程已随界面一起移除
         if worker is not None and worker.isRunning():
             worker.wait(5_000)
     widget.close()
@@ -131,6 +133,18 @@ def _put_caret(widget, position: int) -> None:
 def _click(widget, token: str) -> None:
     """点右侧面板上某个按钮（按 token 取，不爬布局层级）。"""
     widget.palette_buttons[token].click()
+
+
+def _open_editor(page) -> None:
+    """展开公式编辑器（改版后它默认收起，点【策略编辑】才出现）。
+
+    为什么测试也要走这一步而不是直接把控件 `show()`：焦点、Tab 键、插入位置
+    这三样都要求控件**真的可见**（Qt 的 `hasFocus()` 对隐藏控件恒为 False）。
+    手动 show 会让这些用例在一个界面上根本不存在的状态里通过。
+    """
+    page.btn_edit.click()
+    assert page.bottom_stack.isVisible() is True
+    assert page.bottom_stack.currentWidget() is page.editor_page
 
 
 def _spin_until(qapp, predicate, timeout: float = 5.0) -> bool:
@@ -167,6 +181,7 @@ def _wait_preview(page, qapp, timeout: float = PREVIEW_TIMEOUT) -> None:
 
 def test_click_inserts_at_caret_not_at_end(page) -> None:
     """**这一页最核心的一条**：点变量 = 插到光标处，不是追加到末尾。"""
+    _open_editor(page)
     page.editor.setPlainText("C>MA(C,5)")
     _put_caret(page, 3)          # 光标落在 `C>M|A(C,5)`
     page.editor.setFocus()
@@ -305,6 +320,7 @@ def test_editor_uses_monospace_font(page) -> None:
 
 def test_tab_inserts_spaces_and_keeps_focus(page) -> None:
     """`Tab` 插 4 个空格、**不跳焦点**（跳了的话用户正在打的公式会跑到名称框）。"""
+    _open_editor(page)
     page.editor.setPlainText("C>MA(C,5)")
     _put_caret(page, 0)
     page.editor.setFocus()
@@ -354,11 +370,14 @@ def test_palette_is_two_columns_scrollable_and_fixed_width(page) -> None:
 
 
 def test_page_hint_is_two_lines_and_gray(page) -> None:
-    """顶部那行灰字说明要在（且是"点右边按钮"这种一句话级别）。"""
-    assert "点右边的按钮就能插入" in fp.PAGE_HINT
-    assert "最后一行是选股条件" in fp.PAGE_HINT
+    """顶部那行灰字说明要在（且是"点一下就知道下一步"这种一句话级别）。"""
+    assert "状态" in fp.PAGE_HINT and "开始选股" in fp.PAGE_HINT
     assert len(fp.PAGE_HINT.splitlines()) <= 2
     assert page.page_hint.objectName() == "statusTag"     # 小号灰字（主题里定义）
+    # 编辑器自己那行说明（旧版顶部那句话，现在跟着编辑器一起展开）**一个字都没丢**
+    assert "点右边的按钮就能插入" in fp.EDITOR_HINT
+    assert "最后一行是选股条件" in fp.EDITOR_HINT
+    assert page.editor_hint.text() == fp.EDITOR_HINT
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -430,6 +449,7 @@ def test_preview_returns_immediately_and_shows_progress(page, qapp) -> None:
     这就是"不卡界面"的证据。改造前是在按钮回调里同步扫全库（真实 3 年库实测 3.7 秒、
     全市场 5000+ 只要 7~8 秒），窗口整个冻住、连"正在算"都看不见。
     """
+    _open_editor(page)          # 编辑器默认收起着；收起时进度条的 isVisible() 恒为 False
     page.editor.setPlainText("C>MA(C,5)")
 
     page.on_preview()
@@ -489,8 +509,9 @@ def test_preview_reports_known_hits_as_name_and_code(page, page_cfg, qapp) -> No
     hint = page.hint_text
     assert "最近交易日 2026-09-11" in hint
     assert "命中 2 只" in hint
-    assert "甲样本（600001）" in hint and "丙样本（600003）" in hint
-    assert "乙样本（600002）" not in hint
+    # 标的写法是**半角** `名称(代码)`（改版方案第四节：全项目一套写法）
+    assert "甲样本(600001)" in hint and "丙样本(600003)" in hint
+    assert "乙样本(600002)" not in hint            # 下跌那只不该出现
 
 
 def test_preview_with_no_hits_says_why(page, qapp) -> None:
@@ -526,17 +547,18 @@ def test_preview_hit_message_keeps_truncation_hint_and_skipped_errors(
         "hits": [{"symbol": "600001", "name": "甲样本"},
                  {"symbol": "600003", "name": "丙样本"}],
         "scanned": 30, "skipped": 1,
-        "errors": ["乙样本（600002）：本地涨停池还没攒够"]})
+        "errors": ["乙样本(600002)：本地涨停池还没攒够"]})
     page.editor.setPlainText("连板()>=2")
 
     page.btn_preview.click()
     _wait_preview(page, qapp)
 
     assert page.hint_text == (
-        "最近交易日 2026-09-11 命中 5 只：甲样本（600001）、丙样本（600003）"
+        "最近交易日 2026-09-11 命中 5 只：甲样本(600001)、丙样本(600003)"
         " …（只列前 2 只）"
         "\n⚠️ " + lib.LIMIT_UP_HINT
-        + "\n（1 只票算不出来，已跳过：乙样本（600002）：本地涨停池还没攒够）"
+        # 错误那一行是**原样透传** `preview_hits()` 给的文本（写法由库里决定）
+        + "\n（1 只票算不出来，已跳过：乙样本(600002)：本地涨停池还没攒够）"
     )
 
 
@@ -620,6 +642,7 @@ def test_preview_data_error_is_reported_as_data_problem(page, qapp,
         raise fm.FormulaDataError("本地数据库不存在：/x/trader.db（请先在界面点【下载数据】）")
 
     monkeypatch.setattr(lib, "preview_hits", boom)
+    _open_editor(page)
     page.editor.setPlainText("C>MA(C,5)")
 
     page.on_preview()
@@ -637,6 +660,7 @@ def test_preview_unexpected_error_is_reported_in_chinese(page, qapp,
         raise RuntimeError("库文件被占用")
 
     monkeypatch.setattr(lib, "preview_hits", boom)
+    _open_editor(page)
     page.editor.setPlainText("C>MA(C,5)")
 
     page.on_preview()
@@ -648,64 +672,25 @@ def test_preview_unexpected_error_is_reported_in_chinese(page, qapp,
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 7) 成绩单：后台线程（不卡界面）
+# 7) 【看成绩单】【复制成绩单】**已按改版方案从界面移除**
 # ══════════════════════════════════════════════════════════════════════════
+#
+# 原本这里有 3 个用例（后台线程跑成绩单 / 失败说中文 / 复制成绩单）。
+# 删掉的理由（`docs/改版方案.md` TAB 4 与第七节第 3 条）：数据只有 6 个月，
+# 而成绩单自己有 250 个交易日的样本门槛 —— 放在界面上永远只会显示"样本不足"。
+# **能力没有消失**：`formulas.run_scorecard()` 保留（`tests/test_formula_lib.py`
+# 里那几条成绩单用例一条没少），CLI `--scorecard` 照旧。
 
 
-def test_scorecard_runs_in_background_thread_with_progress(page, qapp,
-                                                          monkeypatch: pytest.MonkeyPatch) -> None:
-    """【看成绩单】走后台线程，**入参与进度回调**都要对（界面不能卡住）。"""
-    calls: dict = {}
-
-    def fake_scorecard(formula, db_path, *, progress_cb=None, **kwargs):
-        calls["label"] = formula.label
-        calls["db_path"] = db_path
-        calls["progress_cb"] = progress_cb
-        calls["kwargs"] = kwargs
-        progress_cb("公式成绩单", 1, 3)          # 模拟进度回传
-        progress_cb("公式成绩单", 3, 3)
-        return {"formula": formula.label, "text": "📊 公式成绩单\n⚠️ 连板() 的历史坑",
-                "hint": lib.LIMIT_UP_HINT}
-
-    monkeypatch.setattr(lib, "run_scorecard", fake_scorecard)
-    page.editor.setPlainText("C>MA(C,5)")
-    page.btn_scorecard.click()
-
-    worker = page.scorecard_worker
-    assert worker is not None, "成绩单必须在后台线程里跑"
-    assert _spin_until(qapp, lambda: not worker.isRunning() and page.scorecard_result)
-    qapp.processEvents()
-
-    assert calls["progress_cb"] is not None           # 进度回调真的传下去了
-    assert calls["db_path"] == page.cfg.db_path
-    assert calls["kwargs"]["conv_key"] == lib.DEFAULT_CONVENTION_KEY
-    assert page.scorecard_result is not None
-    assert "公式成绩单" in page.scorecard_text
-    assert page.btn_scorecard.isEnabled() is True     # 跑完要把按钮还回来
-    assert page.progress.isVisible() is False
-
-
-def test_scorecard_failure_is_shown_in_chinese(page, qapp,
-                                              monkeypatch: pytest.MonkeyPatch) -> None:
-    """成绩单算不出来（库坏了之类）→ 中文提示，界面不崩。"""
-    def boom(*_args, **_kwargs):
-        raise RuntimeError("库文件被占用")
-
-    monkeypatch.setattr(lib, "run_scorecard", boom)
-    page.editor.setPlainText("C>MA(C,5)")
-    page.btn_scorecard.click()
-
-    assert _spin_until(qapp, lambda: "成绩单算不出来" in page.hint_text)
-    assert "库文件被占用" in page.hint_text
-    assert page.btn_scorecard.isEnabled() is True
-
-
-def test_copy_scorecard_puts_text_in_clipboard(page) -> None:
-    page.scorecard_text = "📊 公式成绩单\n样本：10 笔"
-
-    page.btn_copy_scorecard.click()
-
-    assert QApplication.clipboard().text() == page.scorecard_text
+def test_scorecard_entry_points_are_gone_from_the_page(page) -> None:
+    """界面里不能再有成绩单的入口（按钮/线程/结果字段），否则就是"改版没改干净"。"""
+    assert not hasattr(page, "btn_scorecard")
+    assert not hasattr(page, "btn_copy_scorecard")
+    assert not hasattr(page, "scorecard_worker")
+    assert not hasattr(page, "scorecard_text")
+    assert not hasattr(page, "on_scorecard")
+    # 库函数留着（CLI 与将来长样本回测还要用）
+    assert callable(lib.run_scorecard)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -738,7 +723,9 @@ def test_save_sanitizes_name_and_reads_back(page) -> None:
     assert [spec.name for spec in specs] == ["5日线_放量"]
     assert specs[0].ok
     assert specs[0].source.strip() == "M5:=MA(C,5)\nC>M5"
-    assert page.table.rowCount() == 1                     # 列表里立刻出现
+    # 列表里立刻出现（内置 5 条常驻在前，公式追加在后）
+    assert page.table.rowCount() == 5 + 1
+    assert page.table.item(5, 0).text() == "5日线_放量"
     assert "已保存" in page.hint_text
 
 
@@ -797,7 +784,9 @@ def test_delete_removes_file_after_confirm(page, monkeypatch: pytest.MonkeyPatch
     page.btn_delete.click()
 
     assert lib.formula_files(page.directory) == []
-    assert page.table.rowCount() == 0
+    # 内置 5 条常驻（它们**不可删**），被删掉的那条公式行没了
+    assert page.table.rowCount() == 5
+    assert all(page.table.item(row, 0).text() != "要删的" for row in range(5))
     assert page.editor.toPlainText() == ""
     assert "已删除" in page.hint_text
 
@@ -815,58 +804,217 @@ def test_delete_can_be_cancelled(page, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 9) 已保存列表：状态标红、选中载入
+# 9) 统一策略列表：列头、两类行、备注来源
 # ══════════════════════════════════════════════════════════════════════════
 
 
+def _row_index(page, name: str) -> int:
+    """按名称找表格行号（**不写死行号**：内置 5 条在前面，公式的先后由文件名定）。"""
+    for row in range(page.table.rowCount()):
+        if page.table.item(row, 0).text() == name:
+            return row
+    raise AssertionError(f"列表里没有「{name}」")
+
+
+def _notes(page) -> dict[str, str]:
+    """{行名: 备注列文本}（按列头取，不猜列号）。"""
+    return {page.table.item(row, 0).text(): page.table.item(row, 1).text()
+            for row in range(page.table.rowCount())}
+
+
+def _write_formula(folder: Path, name: str, body: str, description: str = "") -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{name}.txt"
+    path.write_text(lib.formula_text(name, body, description), encoding="utf-8")
+    return path
+
+
+def test_list_columns_are_exactly_name_note_state(page) -> None:
+    """列头就是用户给定的三个字：`名称 | 备注 | 状态`（不多一列也不少一列）。"""
+    columns = [page.table.horizontalHeaderItem(i).text()
+               for i in range(page.table.columnCount())]
+
+    assert columns == list(fp.LIST_COLUMNS) == ["名称", "备注", "状态"]
+
+
+def test_builtin_rows_come_first_and_show_real_evidence(page) -> None:
+    """内置 5 条常驻在前，备注列写的是**代码里已有的证据字段**（界面不编数字）。"""
+    assert page.table.rowCount() == 5
+    assert [row.key for row in page.rows] == fp.builtin_order() == [
+        "LadderPullbackStrategy", "ReversalStrategy", "DryUpExpansionStrategy",
+        "FirstLimitUpStrategy", "LowPriceStrategy",
+    ]
+    assert [row.name for row in page.rows] == [
+        "连板回踩低吸", "短期反转", "地量后放量变盘", "首板缩量整理", "低价股",
+    ]
+
+    notes = _notes(page)
+    ultra = fp.groups.GROUPS["ultra"]
+    swing = fp.groups.GROUPS["swing"]
+    short = fp.groups.GROUPS["short"]
+    # ⛔ 组默认关闭 → 备注就是那句停用理由（一个字都没加）
+    assert notes["连板回踩低吸"] == "⛔ 默认关闭：" + ultra.disabled_reason
+    assert notes["低价股"] == "⛔ 默认关闭：" + swing.disabled_reason
+    # ⚠️ 策略自己写了 evidence_note（正 α 只在"开盘买"口径存在）→ 原样搬过来
+    assert notes["地量后放量变盘"] == (
+        "⚠️ " + rules.STRATEGIES["DryUpExpansionStrategy"].evidence_note
+    )
+    assert notes["首板缩量整理"] == (
+        "⚠️ " + rules.STRATEGIES["FirstLimitUpStrategy"].evidence_note
+    )
+    # 两套口径都为正的那条：evidence 字段的语义 + **组**的实测区间（标明是组数字）
+    assert notes["短期反转"] == "两套口径都为正 · 组实测 " + short.note.split("：", 1)[1]
+    # 数字只能来自上面这些字段：备注里出现的每个数字，都能在源字段里找到
+    for name, note in notes.items():
+        spec = fp.rules_mod.STRATEGIES[[
+            row.key for row in page.rows if row.name == name][0]]
+        source = " ".join([
+            str(getattr(spec, "evidence_note", "") or ""), ultra.disabled_reason,
+            swing.disabled_reason, short.note, ultra.note, swing.note,
+        ])
+        for chunk in note.replace("⚠️", "").replace("⛔", "").replace("：", " ").split():
+            if any(ch.isdigit() for ch in chunk):
+                assert chunk in source, f"{name} 的备注里出现了源字段里没有的数字：{chunk!r}"
+
+
+def test_builtin_rows_are_readonly_and_status_column_is_a_checkbox(page) -> None:
+    """「状态」列是勾选框（勾上 = 参与选股），勾选状态来自 `groups.resolve_from_config()`。"""
+    from PySide6.QtWidgets import QCheckBox
+
+    boxes = {}
+    for index, row in enumerate(page.rows):
+        holder = page.table.cellWidget(index, 2)
+        box = holder.findChild(QCheckBox)
+        assert box is not None, f"{row.name} 的「状态」列不是勾选框"
+        boxes[row.key] = box.isChecked()
+        assert "参与选股" in box.toolTip()
+
+    enabled = fp.builtin_enabled(page.cfg)
+    assert boxes == {row.key: (row.key in enabled) for row in page.rows}
+    # 出厂默认只开 `short`（三条），超短与波段那两条默认关
+    assert boxes["ReversalStrategy"] is True
+    assert boxes["LadderPullbackStrategy"] is False
+    assert boxes["LowPriceStrategy"] is False
+
+
+def test_formula_rows_are_appended_after_builtins_with_file_note(page) -> None:
+    """自定义公式追加在内置之后，「备注」列 = 公式文件里的 `# 说明:`。"""
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5)", "站上5日线且放量")
+    page.reload()
+
+    assert page.table.rowCount() == 5 + 1
+    assert page.table.item(5, 0).text() == "放量上攻"
+    assert page.table.item(5, 1).text() == "站上5日线且放量"
+
+
 def test_list_marks_broken_formula_with_reason(page) -> None:
-    """语法错的公式在列表里标 ❌ 并给出原因（一条坏公式不影响别的）。"""
-    page.directory.mkdir(parents=True, exist_ok=True)
-    (page.directory / "坏公式.txt").write_text("# 名称: 坏公式\nC>MAA(C,5)\n",
-                                               encoding="utf-8")
-    (page.directory / "好公式.txt").write_text("# 名称: 好公式\nC>MA(C,5)\n",
-                                               encoding="utf-8")
+    """语法错的公式在列表里标出来并给原因（一条坏公式不影响别的）。"""
+    _write_formula(page.directory, "坏公式", "C>MAA(C,5)")
+    _write_formula(page.directory, "好公式", "C>MA(C,5)", "没问题的")
 
     page.reload()
 
-    assert page.table.rowCount() == 2
-    status = {page.table.item(row, 0).text(): page.table.item(row, 2)
-              for row in range(2)}
-    assert status["好公式"].text() == "✅ 校验通过"
-    assert status["坏公式"].text().startswith("❌")
-    assert "未知函数" in status["坏公式"].text()
-    assert "第 1 行" in status["坏公式"].toolTip()        # 全文（含行号列号）在 tooltip 里
+    assert page.table.rowCount() == 5 + 2
+    notes = _notes(page)
+    assert notes["好公式"] == "没问题的"
+    assert "⛔ 语法错" in notes["坏公式"]
+    assert "未知函数" in notes["坏公式"]
+    # 全文（含行号列号）在 tooltip 里
+    assert "第 1 行" in page.table.item(_row_index(page, "坏公式"), 1).toolTip()
+    # 编译不过的公式**勾了也跑不了**：勾选框置灰，而不是"勾上却没有反应"
+    from PySide6.QtWidgets import QCheckBox
+
+    broken = page.table.cellWidget(_row_index(page, "坏公式"), 2).findChild(QCheckBox)
+    assert broken.isEnabled() is False
 
 
 def test_list_shows_runtime_error_from_last_run(page, monkeypatch) -> None:
     """运行期出错（数据不够之类）也要在列表里标出来 —— 只有日志是不够的。"""
-    page.directory.mkdir(parents=True, exist_ok=True)
-    (page.directory / "用连板的.txt").write_text("# 名称: 用连板的\n连板()>=2\n",
-                                                 encoding="utf-8")
+    _write_formula(page.directory, "用连板的", "连板()>=2")
     monkeypatch.setattr(fp.formula_group, "last_status",
                         lambda: {"用连板的": "3 只票算不出来：本地涨停池还没攒够"})
 
     page.reload()
 
-    assert page.table.item(0, 2).text().startswith("⚠️ 运行时出错")
-    assert "涨停池" in page.table.item(0, 2).toolTip()
+    assert page.table.item(5, 1).text().startswith("⚠️ 运行时出错")
+    assert "涨停池" in page.table.item(5, 1).toolTip()
+
+
+def test_clicking_builtin_row_opens_readonly_detail(page, qapp) -> None:
+    """单击内置策略行 → **只读详情**（条件说明 + 证据 + 当前状态），可复制。"""
+    page.on_open_editor()                                  # 先把编辑器打开
+    page.editor.setPlainText("C>MA(C,5)")                  # 用户正在写的草稿
+    page.select_row("LowPriceStrategy")
+    qapp.processEvents()
+
+    assert page.bottom_stack.currentWidget() is page.detail_page
+    assert page.detail_view.isReadOnly() is True
+    assert page.detail_text.startswith("低价股（LowPriceStrategy）")
+    assert "条件说明" in page.detail_text
+    assert inspect.getdoc(rules.STRATEGIES["LowPriceStrategy"]) in page.detail_text
+    assert "证据" in page.detail_text
+    assert fp.groups.GROUPS["swing"].disabled_reason in page.detail_text
+    assert "当前状态：☐ 未参与选股" in page.detail_text
+    # 内置策略**不进编辑器**：用户手里的草稿一个字都没被换掉
+    assert page.editor.toPlainText() == "C>MA(C,5)"
+    assert page.name_edit.text() == ""
+
+    page.btn_copy_detail.click()
+    assert QApplication.clipboard().text() == page.detail_text
+
+
+def test_builtin_detail_state_follows_the_checkbox(page, qapp) -> None:
+    """勾上内置策略后，详情里的"当前状态"立刻跟着变（两处说法不能打架）。"""
+    page.select_row("LowPriceStrategy")
+    qapp.processEvents()
+    assert "未参与选股" in page.detail_text
+
+    page._builtin_boxes["LowPriceStrategy"].setChecked(True)
+    qapp.processEvents()
+
+    assert "当前状态：✅ 参与选股" in page.detail_text
+    assert "swing" in page.detail_text            # 状态说明里写着现在启用了哪些组
 
 
 def test_selecting_row_loads_formula_into_editor(page, qapp) -> None:
-    """点一行 → 载入左侧编辑区（可以直接改、再保存覆盖）。"""
+    """点公式行 → 展开编辑器并载入（名称 + 备注 + 正文），可以直接改再保存。"""
     page.name_edit.setText("甲公式")
+    page.note_edit.setText("甲的备注")
     page.editor.setPlainText("C>MA(C,5)")
     page.btn_save.click()
     page.name_edit.setText("乙公式")
+    page.note_edit.clear()
     page.editor.setPlainText("C<MA(C,5)")
     page.btn_save.click()
+    page.on_close_panel()
 
     page.select_row("甲公式")
     qapp.processEvents()
 
+    assert page.bottom_stack.currentWidget() is page.editor_page
     assert page.name_edit.text() == "甲公式"
+    assert page.note_edit.text() == "甲的备注"        # 备注也跟着载入
     assert page.editor.toPlainText() == "C>MA(C,5)"
     assert "已载入" in page.hint_text
+
+
+def test_reload_does_not_clobber_editor_draft_or_open_panels(page, qapp) -> None:
+    """主窗口选完股会调 `reload()`：它**绝不能**换掉用户正在写的草稿或弹出编辑器。
+
+    旧版 `reload()` 会顺手选中第一行并把它载入编辑框；在"列表在上、编辑器按需展开"
+    的布局里，那会变成"每次选完股，编辑器自己弹出来并顶掉我正在写的公式"。
+    """
+    page.editor.setPlainText("写到一半的草稿")
+    page.name_edit.setText("草稿")
+    assert page.bottom_stack.isVisible() is False          # 编辑器本来是收起的
+
+    page.reload()
+    qapp.processEvents()
+
+    assert page.editor.toPlainText() == "写到一半的草稿"
+    assert page.name_edit.text() == "草稿"
+    assert page.bottom_stack.isVisible() is False
+    assert page.selected_row() is None                     # 也不会偷偷选中一行
 
 
 def test_reload_keeps_enabled_checkbox_state_from_config(page, page_cfg) -> None:
@@ -878,15 +1026,17 @@ def test_reload_keeps_enabled_checkbox_state_from_config(page, page_cfg) -> None
     page.reload()
 
     assert page._row_boxes["甲公式"].isChecked() is True
+    assert page._builtin_boxes["ReversalStrategy"].isChecked() is True   # 内置那三条照旧
+    assert page._builtin_boxes["LowPriceStrategy"].isChecked() is False
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 10) 勾「参与选股」→ 写回 config.toml
+# 10) 勾「参与选股」→ 写回 config.toml（**三种键**）
 # ══════════════════════════════════════════════════════════════════════════
 
 
 def test_enable_checkbox_writes_config_toml(page, page_cfg, qapp) -> None:
-    """勾上 → config.toml 出现 enabled_formulas，**用户注释与未知键都保留**。"""
+    """勾公式 → config.toml 出现 enabled_formulas，**用户注释与未知键都保留**。"""
     page.name_edit.setText("放量上攻")
     page.editor.setPlainText("C>MA(C,5)")
     page.btn_save.click()
@@ -898,6 +1048,8 @@ def test_enable_checkbox_writes_config_toml(page, page_cfg, qapp) -> None:
 
     text = page_cfg.source_path.read_text(encoding="utf-8")
     assert 'enabled_formulas = ["放量上攻"]' in text
+    assert "enabled_groups" not in text.split("enabled_formulas")[0].replace(
+        'enabled_groups = ["short"]', "")     # 勾公式**不动**内置那两个键
     assert "# 用户自己的注释（保存设置后必须还在）" in text
     assert 'my_own_key = "别动我"' in text
     assert page_cfg.enabled_formulas == ["放量上攻"]
@@ -940,8 +1092,418 @@ def test_enable_write_failure_reverts_checkbox(page, page_cfg, qapp,
     assert "保存失败" in page.hint_text
 
 
+def test_builtin_check_writes_both_group_and_strategy_keys(page, page_cfg, qapp) -> None:
+    """勾内置策略 → **同时**写 `enabled_groups` 与 `enabled_strategies`。
+
+    为什么两个都要写（这页最容易踩的坑）：`groups.resolve()` 在两者都非空时取**交集**，
+    而 `enabled_groups` 的出厂值是 `["short"]`。只写 `enabled_strategies` 的话，
+    勾上「低价股」（swing 组）会算出**空交集** → 整轮选股被跳过（"勾了却不跑"）。
+    """
+    box = page._builtin_boxes["LowPriceStrategy"]
+    assert box.isChecked() is False
+
+    box.setChecked(True)
+    qapp.processEvents()
+
+    text = page_cfg.source_path.read_text(encoding="utf-8")
+    assert 'enabled_groups = ["short", "swing"]' in text
+    assert ('enabled_strategies = ["ReversalStrategy", "DryUpExpansionStrategy", '
+            '"FirstLimitUpStrategy", "LowPriceStrategy"]') in text
+    assert "# 用户自己的注释（保存设置后必须还在）" in text
+    assert 'my_own_key = "别动我"' in text
+    # 两条路都要真的生效：解析出来的策略就是这四条（交集不为空）
+    assert fp.builtin_enabled(page_cfg) == {
+        "ReversalStrategy", "DryUpExpansionStrategy", "FirstLimitUpStrategy",
+        "LowPriceStrategy",
+    }
+    assert "已参与选股" in page.hint_text
+    assert "enabled_groups" in page.hint_text and "enabled_strategies" in page.hint_text
+
+
+def test_uncheck_one_short_member_keeps_the_other_two(page, page_cfg, qapp) -> None:
+    """出厂配置（只写组、没写策略）下取消勾选**一条**：另外两条必须还在。"""
+    page._builtin_boxes["ReversalStrategy"].setChecked(False)
+    qapp.processEvents()
+
+    assert page_cfg.enabled_groups == ["short"]
+    assert page_cfg.enabled_strategies == [
+        "DryUpExpansionStrategy", "FirstLimitUpStrategy"
+    ]
+    assert fp.builtin_enabled(page_cfg) == {
+        "DryUpExpansionStrategy", "FirstLimitUpStrategy"
+    }                                          # 旧的「组=short 全选」语义被收紧成两条
+
+
+def test_uncheck_all_builtins_writes_explicit_off(page, page_cfg, qapp) -> None:
+    """全部取消勾选 → 写 `enabled_groups = ["none"]`（= 只盯自选股）。
+
+    为什么不能写空列表：`resolve()` 里"两个键都空"是**全选**这个安全默认，
+    写空会反过来变成"五条策略一起跑"—— 与用户的意图正好相反。
+    """
+    for box in list(page._builtin_boxes.values()):
+        box.setChecked(False)
+    qapp.processEvents()
+
+    assert page_cfg.enabled_groups == [fp.OFF_GROUP_KEY] == ["none"]
+    assert page_cfg.enabled_strategies == []
+    selection = groups.resolve_from_config(page_cfg)
+    assert selection.explicit_off is True
+    assert selection.strategies == ()
+    assert "只盯自选股" in page.hint_text
+
+
+def test_builtin_write_failure_reverts_checkbox(page, page_cfg, qapp,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    """内置策略写不进去时同样退回勾选（界面不能显示成"已经开了"）。"""
+    box = page._builtin_boxes["LowPriceStrategy"]
+
+    def boom(*_args, **_kwargs):
+        raise OSError("只读文件系统")
+
+    monkeypatch.setattr("laoa_trader.config.save_settings", boom)
+    box.setChecked(True)
+    qapp.processEvents()
+
+    assert box.isChecked() is False
+    assert "保存失败" in page.hint_text
+    assert fp.builtin_enabled(page_cfg) == {
+        "ReversalStrategy", "DryUpExpansionStrategy", "FirstLimitUpStrategy"
+    }                                          # 配置一个字都没变
+
+
 # ══════════════════════════════════════════════════════════════════════════
-# 11) 载入示例
+# 11) 右键菜单：启用/关闭、删除（内置不可删）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_row_menu_for_formula_offers_toggle_and_delete(page, monkeypatch) -> None:
+    """公式行：菜单里是【启用】+【删除】；删除**先二次确认**，确认后文件才没。"""
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5)")
+    page.reload()
+
+    picked = page.row_menu(page.row_of("放量上攻"))
+    assert [action.text() for action in picked.menu.actions()] == ["启用", "删除"]
+    assert picked.delete.isEnabled() is True
+
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.StandardButton.Yes)
+    picked.delete.trigger()
+
+    assert lib.formula_files(page.directory) == []
+    assert "已删除" in page.hint_text
+    assert page.table.rowCount() == 5                      # 只剩内置那 5 条
+
+
+def test_row_menu_delete_can_be_cancelled(page, monkeypatch) -> None:
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5)")
+    page.reload()
+
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.StandardButton.No)
+    page.row_menu(page.row_of("放量上攻")).delete.trigger()
+
+    assert len(lib.formula_files(page.directory)) == 1
+    assert "已取消删除" in page.hint_text
+
+
+def test_row_menu_on_builtin_cannot_delete(page, page_cfg) -> None:
+    """内置策略：删除项**置灰并写明理由**（不是悄悄消失 —— 那会像"程序坏了"）。"""
+    picked = page.row_menu(page.row_of("LowPriceStrategy"))
+
+    assert [action.text() for action in picked.menu.actions()] == [
+        "启用", fp.MENU_DELETE_BUILTIN,
+    ]
+    assert fp.MENU_DELETE_BUILTIN == "删除（内置策略不可删）"
+    assert picked.delete.isEnabled() is False
+    assert "只能启用/关闭" in picked.delete.toolTip()
+    # 菜单里没有【删除】的落点，点它也不会动内置策略或配置
+    before = page_cfg.source_path.read_text(encoding="utf-8")
+    picked.delete.trigger()                    # 置灰动作触发是空操作
+    assert page_cfg.source_path.read_text(encoding="utf-8") == before
+    assert len(page.rows) == 5                 # 内置策略还在列表里
+
+
+def test_row_menu_toggle_matches_and_updates_the_row_state(page, page_cfg, qapp) -> None:
+    """菜单第一项**按当前状态只出现一个**，触发之后状态与配置同步变化。"""
+    picked = page.row_menu(page.row_of("LowPriceStrategy"))
+    assert picked.toggle.text() == "启用"      # 它现在是关的
+
+    picked.toggle.trigger()
+    qapp.processEvents()
+
+    assert page_cfg.enabled_groups == ["short", "swing"]
+    assert page._builtin_boxes["LowPriceStrategy"].isChecked() is True
+    # 状态变了 → 菜单文案必须跟着变（不跟着变就等于告诉用户相反的事实）
+    assert page.row_menu(page.row_of("LowPriceStrategy")).toggle.text() == "关闭"
+    assert "已参与选股" in page.hint_text
+
+    page.row_menu(page.row_of("LowPriceStrategy")).toggle.trigger()
+    qapp.processEvents()
+    assert page_cfg.enabled_groups == ["short"]
+    assert page._builtin_boxes["LowPriceStrategy"].isChecked() is False
+
+
+def test_right_click_wires_to_show_menu_for_the_clicked_row(page, qapp, monkeypatch) -> None:
+    """右键某一行 → 弹的是**那一行**的菜单（顺带钉住：右键**不展开**编辑器）。"""
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5)")
+    page.reload()
+    captured: list = []
+    monkeypatch.setattr(page, "_show_menu",
+                        lambda menu, pos: captured.append(menu))
+    page.table.customContextMenuRequested.emit(
+        page.table.visualItemRect(page.table.item(5, 0)).center()
+    )
+
+    assert len(captured) == 1
+    assert captured[0].objectName() == "rowMenu:formula:放量上攻"
+    assert page.selected_row().key == "放量上攻"
+    assert page.bottom_stack.isVisible() is False       # 右键不该把编辑器顶出来
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 12) 【开始选股】：只 emit 信号（流程在主窗口里）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_start_pick_only_emits_the_signal(page, monkeypatch) -> None:
+    """点【开始选股】→ `start_pick_requested` 出手；**这一页自己不跑流程**。"""
+    from laoa_trader import scheduler
+
+    def boom(*_args, **_kwargs):               # 谁在这里调选股流程，这条就会炸
+        raise AssertionError("公式页自己跑起了选股流程（应该只 emit 信号）")
+
+    monkeypatch.setattr(scheduler, "run_daily", boom)
+    seen: list = []
+    page.start_pick_requested.connect(lambda: seen.append("go"))
+    told: list = []
+    page.status_cb = told.append
+
+    page.btn_start_pick.click()
+
+    assert seen == ["go"]
+    assert told and "开始选股" in told[0]
+
+
+def test_start_pick_signal_is_a_real_signal_on_the_page(page) -> None:
+    """信号得挂在 `FormulaPage` 上（主窗口 `connect` 的就是它）。"""
+    from PySide6.QtCore import SignalInstance
+
+    assert isinstance(page.start_pick_requested, SignalInstance)
+    assert hasattr(fp.FormulaPage, "start_pick_requested")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 13) 本次选股结果 + 【全部加为自选】
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _seed_pool(cfg: Config) -> None:
+    """往本地库存一份"最近一次建池"的结果（3 只：两条内置 + 一条公式）。"""
+    with storage.connect(cfg.db_path) as conn:
+        storage.write_stock_basic(conn, [("600001", "甲样本", "银行"),
+                                         ("600002", "乙样本", "白酒"),
+                                         ("600003", "丙样本", "半导体")])
+        storage.save_pool(conn, [
+            {"symbol": "600001", "name": "甲样本", "strategy": "ReversalStrategy",
+             "strategies": "ReversalStrategy,DryUpExpansionStrategy",
+             "score": 2.0, "reason": "短期反转"},
+            {"symbol": "600002", "name": "乙样本", "strategy": "公式·放量上攻",
+             "strategies": "公式·放量上攻", "score": 1.0, "reason": "公式：放量上攻"},
+            {"symbol": "600003", "name": "丙样本", "strategy": "LowPriceStrategy",
+             "strategies": "LowPriceStrategy", "score": 0.5, "reason": "低价股"},
+        ], "2026-09-11")
+
+
+def _result_rows(page) -> list[tuple[str, str]]:
+    return [(page.result_table.item(row, 0).text(), page.result_table.item(row, 1).text())
+            for row in range(page.result_table.rowCount())]
+
+
+def test_result_area_reads_the_latest_pool_from_the_local_db(page, page_cfg) -> None:
+    """没接线也能看到结果：`reload()`（主窗口选完后会调）从本地库读最近一次建池。"""
+    _seed_pool(page_cfg)
+
+    page.reload()
+
+    assert page.result_box.isVisible() is True
+    assert page.result_date == "2026-09-11"
+    assert _result_rows(page) == [
+        ("甲样本(600001)", "短期反转、地量后放量变盘"),
+        ("乙样本(600002)", "公式·放量上攻"),
+        ("丙样本(600003)", "低价股"),
+    ]
+    assert "共选出 3 只" in page.result_summary.text()
+    assert "自选股池" in page.result_summary.text()
+
+
+def test_show_pick_result_accepts_the_pipeline_report(page) -> None:
+    """主窗口直接把 `run_daily()` 的 report 递进来也认（pool + data_date）。"""
+    report = {
+        "data_date": "2026-09-11",
+        "pool": [
+            {"symbol": "600001", "name": "甲样本", "strategy": "ReversalStrategy",
+             "strategies": "ReversalStrategy"},
+            {"symbol": "600009", "name": "自选样本", "strategy": "", "strategies": ""},
+        ],
+    }
+
+    page.show_pick_result(report)
+
+    assert _result_rows(page) == [("甲样本(600001)", "短期反转")]   # 纯自选的行不算"选出"
+    assert "行情日 2026-09-11" in page.result_summary.text()
+
+    # 收回 → 退回本地库那条路（这个用例的库里还没有池子 → 结果区收起来）
+    page.show_pick_result(None)
+    assert page.result_rows == []
+    assert page.result_box.isVisible() is False
+
+
+def test_add_all_to_watchlist_writes_and_never_duplicates(page, page_cfg, qapp) -> None:
+    """【全部加为自选】：写进 `watchlist`（本地库），再点一次不会重复添加。"""
+    _seed_pool(page_cfg)
+    page.reload()
+
+    page.btn_add_all.click()
+    qapp.processEvents()
+
+    with storage.connect(page_cfg.db_path) as conn:
+        rows = storage.load_watchlist(conn, enabled_only=False)
+    assert [row["symbol"] for row in rows] == ["600001", "600002", "600003"]
+    assert rows[0]["name"] == "甲样本"
+    assert rows[0]["note"] == "选股来源：短期反转、地量后放量变盘"      # 来源留在备注里
+    assert rows[1]["note"] == "选股来源：公式·放量上攻"
+    assert "已加 3 只" in page.hint_text
+
+    page.btn_add_all.click()                   # 再来一次：幂等
+    qapp.processEvents()
+    with storage.connect(page_cfg.db_path) as conn:
+        again = storage.load_watchlist(conn, enabled_only=False)
+    assert [row["symbol"] for row in again] == ["600001", "600002", "600003"]
+    assert [row["note"] for row in again] == [row["note"] for row in rows]   # 备注没被改
+    assert "没有新增自选" in page.hint_text      # 而不是含糊的"已加 0 只"
+    assert "没有重复添加" in page.hint_text
+
+
+def test_add_all_respects_watchlist_max_and_says_so(page, page_cfg, qapp) -> None:
+    """超过 `watchlist_max`：加得进几只就加几只，**其余的明确说清楚**（绝不静默丢）。"""
+    page_cfg.watchlist_max = 1
+    _seed_pool(page_cfg)
+    page.reload()
+
+    page.btn_add_all.click()
+    qapp.processEvents()
+
+    with storage.connect(page_cfg.db_path) as conn:
+        rows = storage.load_watchlist(conn, enabled_only=False)
+    assert [row["symbol"] for row in rows] == ["600001"]        # 只加得进 1 只
+    assert "watchlist_max=1" in page.hint_text
+    assert "还有 2 只" in page.hint_text
+    assert "乙样本(600002)" in page.hint_text                    # 没加进去的**点名**
+    # 结果区里也留一句"这一轮到底加了几只"（用户不用回头翻提示区）
+    assert "已加 1 只" in page.result_hint.text()
+    assert "超额未加 2 只" in page.result_hint.text()
+
+
+def test_add_all_button_is_disabled_when_there_is_no_result(page, page_cfg) -> None:
+    """还没有结果时按钮是灰的，硬调也只说"先去选股"（不会去动自选表）。"""
+    assert page.result_box.isVisible() is False
+    assert page.btn_add_all.isEnabled() is False
+
+    page.on_add_all_to_watchlist()             # 按钮点不动，直接调处理函数也得拦住
+
+    assert "还是空的" in page.hint_text
+    with storage.connect(page_cfg.db_path) as conn:
+        assert storage.load_watchlist(conn, enabled_only=False) == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 14) 编辑器：按需展开 / 备注写进文件注释头
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_editor_is_collapsed_until_asked_for(page) -> None:
+    """编辑器默认收起（用户给定："点击打开策略编辑器"），点【策略编辑】才展开。"""
+    assert page.bottom_stack.isVisible() is False
+
+    page.btn_edit.click()
+
+    assert page.bottom_stack.isVisible() is True
+    assert page.bottom_stack.currentWidget() is page.editor_page
+
+    page.btn_close_editor.click()
+    assert page.bottom_stack.isVisible() is False
+
+
+def test_note_is_written_into_the_file_comment_header(page) -> None:
+    """备注 → 公式文件的 `# 说明:` 注释头（存完回显、读回界面也是同一句）。"""
+    page.name_edit.setText("放量上攻")
+    page.note_edit.setText("站上5日线并且放量")
+    page.editor.setPlainText("C>MA(C,5)")
+
+    page.btn_save.click()
+
+    text = (page.directory / "放量上攻.txt").read_text(encoding="utf-8")
+    assert "# 说明: 站上5日线并且放量" in text
+    assert lib.formula_files(page.directory)[0].description == "站上5日线并且放量"
+    assert page.table.item(5, 1).text() == "站上5日线并且放量"       # 列表备注列
+    # 重新载入界面 → 备注从文件读回（两处不会各说各话）
+    page.note_edit.clear()
+    page.table.clearSelection()          # 同一行再点一次不会触发"选中变化"（Qt 语义）
+    page.select_row("放量上攻")
+    assert page.note_edit.text() == "站上5日线并且放量"
+
+
+def test_note_left_empty_gets_auto_described(page) -> None:
+    """备注留空 → 用库自己生成的"用到的字段/函数"（小白不用手写说明），并回显给用户。"""
+    page.name_edit.setText("放量上攻")
+    page.note_edit.clear()
+    page.editor.setPlainText("M5:=MA(C,5)\nC>M5")
+
+    page.btn_save.click()
+
+    text = (page.directory / "放量上攻.txt").read_text(encoding="utf-8")
+    assert "# 说明: " in text and "字段：C" in text
+    assert page.note_edit.text().startswith("字段：")
+
+
+def test_note_with_newline_is_flattened(page) -> None:
+    """备注里的换行必须**拍平**：注释头只有一行，换行会把公式体挤坏。
+
+    真踩过的那种坑：`# 说明: 第一行\\n第二行` 之后，第二行不以 `#` 开头 ——
+    引擎读文件时把它当成**公式正文**，用户下次打开这条公式看到的是"未知字段"报错，
+    而他明明没有改过公式。
+    """
+    page.name_edit.setText("多行备注")
+    page.note_edit.setText("第一行\n第二行")
+    page.editor.setPlainText("C>MA(C,5)")
+
+    page.btn_save.click()
+
+    text = (page.directory / "多行备注.txt").read_text(encoding="utf-8")
+    assert "# 说明: 第一行 第二行" in text
+    assert text.count("\n") == text.count("# ") + 2       # 注释头没被拆成两行
+    spec = lib.formula_files(page.directory)[0]
+    assert spec.ok is True                               # 公式照样能编译
+    assert spec.source.strip() == "C>MA(C,5)"
+    assert spec.description == "第一行 第二行"
+
+
+def test_overlong_note_is_rejected_not_truncated(page) -> None:
+    """备注超长：**拒绝保存并说清楚**（静默截断会让用户以为自己写的还在）。"""
+    page.name_edit.setText("超长备注")
+    page.note_edit.setText("字" * (fp.MAX_NOTE_CHARS + 1))
+    page.editor.setPlainText("C>MA(C,5)")
+
+    page.btn_save.click()
+
+    assert "备注太长" in page.hint_text
+    assert f"最多 {fp.MAX_NOTE_CHARS} 字" in page.hint_text
+    assert lib.formula_files(page.directory) == []        # 什么都没写下去
+    assert page.editor.toPlainText() == "C>MA(C,5)"       # 公式也还在
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 15) 载入示例
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -949,6 +1511,7 @@ def test_load_sample_falls_back_to_builtin_when_dir_empty(page) -> None:
     """目录里没有示例文件时给一条内置的兜底公式（小白第一步一定走得通）。"""
     page.on_load_sample()
 
+    assert page.bottom_stack.currentWidget() is page.editor_page
     assert page.editor.toPlainText() == fp.SAMPLE_TEXT
     assert page.name_edit.text() == fp.SAMPLE_NAME
     assert "已载入" in page.hint_text
@@ -958,20 +1521,17 @@ def test_load_sample_falls_back_to_builtin_when_dir_empty(page) -> None:
 
 def test_load_sample_prefers_the_bundled_sample(page) -> None:
     """目录里有示例公式（随包分发的那条）时，载入它本体。"""
-    page.directory.mkdir(parents=True, exist_ok=True)
-    (page.directory / "放量上攻.txt").write_text(
-        "# 名称: 放量上攻\n# 说明: 示例\nC>MA(C,5) AND V>MA(V,5)*1.5\n",
-        encoding="utf-8",
-    )
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5) AND V>MA(V,5)*1.5", "示例")
 
     page.on_load_sample()
 
     assert page.editor.toPlainText() == "C>MA(C,5) AND V>MA(V,5)*1.5"
+    assert page.note_edit.text() == "示例"
     assert "放量上攻" in page.hint_text
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 12) 提示区：可复制
+# 16) 提示区：可复制、超长截断
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -985,17 +1545,12 @@ def test_hint_area_is_selectable_and_multiline(page) -> None:
     assert page.hint_label.wordWrap() is True
 
 
-def test_long_scorecard_is_trimmed_in_hint_but_kept_for_copy(page) -> None:
-    """成绩单很长：提示区只显示前几行，完整文本留在【复制成绩单】里。"""
+def test_long_hint_is_trimmed_but_kept_in_full(page) -> None:
+    """很长的提示（多行错误之类）：界面只显示前几行，**完整文本留档**可复制。"""
     long_text = "\n".join(f"第 {i} 行" for i in range(1, 31))
 
     page._set_hint(long_text)
 
-    assert page.scorecard_text or True                 # 提示区是独立的
-    assert page.hint_text == long_text                 # 完整文本留档
+    assert page.hint_text == long_text                 # 完整文本留档（可选中复制）
     assert len(page.hint_label.text().splitlines()) == fp.HINT_MAX_LINES + 1
-    assert "复制成绩单" in page.hint_label.text()
-
-    page.scorecard_text = long_text
-    page.btn_copy_scorecard.click()
-    assert QApplication.clipboard().text() == long_text
+    assert f"还有 {30 - fp.HINT_MAX_LINES} 行没显示" in page.hint_label.text()

@@ -92,6 +92,24 @@ def to_xueqiu_code(code: str) -> str:
     return f"SZ{code}"
 
 
+def xueqiu_url(symbol: str) -> str:
+    """纯数字代码 → 雪球个股页地址；**不是 6 位数字就返回空串**。
+
+    为什么单独一个函数（而不是各处自己拼 `f"https://xueqiu.com/S/{...}"`）：
+    这个地址现在有两个用户 —— Windows Toast 的"打开雪球"按钮（上面）与界面里
+    "单击表格里的名称(代码)就开个股页"（`ui/app.py`）。两处各拼一遍，将来改域名
+    （雪球换过路径）必然漏掉一处。
+
+    **校验放在这里**：界面上点的是表格单元格，而单元格里可能是空行/一串说明文字
+    （理论上不该有，但"点一下没反应"远好过"打开一个 `xueqiu.com/S/SZ` 的 404 页"），
+    所以调用方可以直接用空串判断"这一行不可跳转"。
+    """
+    code = (symbol or "").strip()
+    if not (len(code) == 6 and code.isdigit()):
+        return ""
+    return f"https://xueqiu.com/S/{to_xueqiu_code(code)}"
+
+
 def first_symbol(title: str, lines: list[str]) -> str:
     """从正文里挑出第一个可跳转的 6 位股票代码（标题里的数字不算）。"""
     import re

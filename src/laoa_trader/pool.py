@@ -82,7 +82,7 @@ def build_pool(
     """跑入选策略并合成当日股票池。
 
     除了内置策略，这里还会**自动并入 `enabled_formulas` 里勾选的自定义公式**
-    （作为与 short 等并列的「公式」组）—— 界面【选股建池】、定时日更、CLI 三条路
+    （作为与 short 等并列的「公式」组）—— 界面【开始选股】、定时日更、CLI 三条路
     都走这个函数，所以放在这里就不可能有哪条路"忘了带公式"。默认（没勾公式时）
     一次库都不读，行为与以前完全一致。
 
@@ -121,7 +121,7 @@ def build_pool(
     # ── 「公式」组：用户自己在「公式选股」页勾的自定义公式 ──
     #
     # 为什么放在这里（而不是让调用方先合并好）：**建池是唯一必须并入公式的地方** ——
-    # 界面上的【选股建池】、定时任务、CLI 三条路都会走到 `build_pool`，
+    # 界面上的【开始选股】、定时任务、CLI 三条路都会走到 `build_pool`，
     # 放在这里就不可能出现"某一条路忘了带公式"（那种 bug 极难发现：
     # 用户勾了公式，手动建池有、定时建池没有）。
     #
@@ -534,7 +534,7 @@ def skipped_push_note(skipped: list[dict]) -> str:
     """被跳过的那些标的，在推送正文末尾/日志里的**中文说明**（说清"为什么没推"）。"""
     if not skipped:
         return ""
-    names = "、".join(f"{r.get('name')}（{r.get('symbol')}）" for r in skipped[:5])
+    names = "、".join(f"{r.get('name')}({r.get('symbol')})" for r in skipped[:5])
     more = f" 等 {len(skipped)} 只" if len(skipped) > 5 else ""
     return (f"另有 {len(skipped)} 只只由「{OPEN_ONLY_TAG}」的策略选出（正 α 只在开盘买口径"
             f"下存在），按 `push_only_proven = true` 未推送：{names}{more}；"
@@ -542,30 +542,36 @@ def skipped_push_note(skipped: list[dict]) -> str:
 
 
 def push_tag(row: dict) -> str:
-    """推送正文里的标签：**策略中文名**（多条用「、」连接）。
+    """推送正文里的标签：**策略中文名**（多条用「、」连接）；没有策略就是空串。
 
     这里**必须翻译**成中文，不能像服务器版那样把类名截断直接用
     （`.replace("Strategy", "")`）——那是服务器版的内部叫法，而推送是给**手机上的
-    人**看的：用户收到的会是 `1. 平安银行（000001）LowPrice｜…`，
+    人**看的：用户收到的会是 `1. 平安银行(000001)LowPrice｜…`，
     而界面同一只票写的是「低价股」（`strategy_label()`）。同一件事两个名字，
-    用户根本分不清是"哪条策略选的"，也没法拿它去对照设置页的勾选框。
+    用户根本分不清是"哪条策略选的"，也没法拿它去对照「策略选股」列表。
 
-    自定义公式的合成名（`公式·放量上攻`）`strategy_label()` 认不出来会**原样返回**，
-    正是我们要的：用户自己起的名字不能被翻译掉。
+    **与「来源」列的关系**：界面那一列写 `策略·低价股`（只写主策略，列宽只够一条），
+    推送这一行把**所有**命中的策略名都列出来（`低价股、短期反转`）——
+    手机上一行没有 tooltip，多写几个字比少一条信息好。两处的中文名**同一个来源**
+    （都出自 `strategy_names()`），所以是"详细程度不同"，不是"两套说法"。
 
     兼容已有的库/配置：老行里的 `strategies` 可能已经是中文名（用户用
     `enabled_strategies = ["低价股"]` 这种写法存进去的），翻译函数对中文名
-    原样返回，所以**重复调用是幂等的**。
+    原样返回，所以**重复调用是幂等的**；`strategies` 为空时退回 `strategy` 那条。
     """
-    names = [n for n in str(row.get("strategies") or "").split(",") if n.strip()]
-    return "、".join(rules.strategy_label(name) for name in names)
+    return "、".join(strategy_names(row))
 
 
 def format_pool_lines(pool: list[dict]) -> list[str]:
-    """把池子整理成推送正文行（`1. 名称（代码）策略中文名｜理由`）。
+    """把池子整理成推送正文行（`1. 名称(代码)策略中文名｜理由`）。
 
     自选标的没有策略名，改用「自选」+ 备注，避免出现空标签。
     标签的中文名来自 `push_tag()`（理由见那里：推送是给手机看的一行字）。
+
+    括号是**半角**：`docs/改版方案.md` 第四节把全项目给人看的标的写法统一成
+    `名称(代码)` —— 界面两张表的列头就是这么写的，推送正文再写全角就等于
+    同一只票在两处长得不一样（用户要拿推送去对照表格里的那一行）。
+    注意：**只改给人看的字符串**，CSV/JSON/库里的字段一个都没动。
     """
     lines = []
     for i, row in enumerate(pool, start=1):
@@ -576,8 +582,52 @@ def format_pool_lines(pool: list[dict]) -> list[str]:
         elif str(row.get("source") or "").endswith("+自选"):
             # 既是策略/公式选中又是自选：标出来，免得用户以为"我加的自选没生效"
             tag += "+自选" + (f"（{note}）" if note else "")
-        lines.append(f"{i}. {row['name']}（{row['symbol']}）{tag}｜{row.get('reason') or ''}")
+        lines.append(f"{i}. {row['name']}({row['symbol']}){tag}｜{row.get('reason') or ''}")
     return lines
+
+
+#: 界面「来源」列里内置策略的前缀（用户给定的写法：`策略·短期反转`）。
+#: 为什么要一个常量：这个前缀会出现在「来源」列、行 tooltip、CLI 打印与文档示例里，
+#: 散着写迟早会出现"一处 `策略：`、一处 `策略·`"这种对不上的情况。
+STRATEGY_SOURCE_PREFIX = "策略·"
+
+
+def strategy_names(row: dict) -> list[str]:
+    """这一行被哪些策略/公式选中 → **中文名列表**（按库里的顺序，去重）。
+
+    为什么要有这一层（原来每个调用方各自 split/翻译）：
+    - `strategies` 是后加的列，**老库/手写的池子行可能只有 `strategy`** ——
+      那时推送正文会退化成"自选"，把策略标的写成自选是最难查的那类错；
+    - 中文名只有一份来源（`rules.strategy_label`）：手机上、表格里、tooltip 里
+      看到的必须是同一个词，否则用户没法拿它去对照「策略选股」列表。
+
+    自定义公式的合成名（`公式·放量上攻`）`strategy_label()` 认不出来会原样返回 ——
+    正是我们要的：用户自己起的名字不能被翻译掉。
+    """
+    raw = [n.strip() for n in str(row.get("strategies") or "").split(",") if n.strip()]
+    if not raw:
+        primary = str(row.get("strategy") or "").strip()
+        raw = [primary] if primary else []
+    out: list[str] = []
+    for name in raw:
+        label = rules.strategy_label(name)
+        if label and label not in out:
+            out.append(label)
+    return out
+
+
+def primary_strategy_name(row: dict) -> str:
+    """**主策略**的中文名（`strategy` 字段那条；没有就退回第一条）。
+
+    "主策略"是建池时按分数定下来的那一条（`pool.build_pool` 写进 `strategy`），
+    也是界面「来源」列显示的那一条 —— 列宽只够写一条，其余的在 tooltip 里（见
+    `source_detail_lines`）。
+    """
+    primary = str(row.get("strategy") or "").strip()
+    if primary:
+        return rules.strategy_label(primary)
+    names = strategy_names(row)
+    return names[0] if names else ""
 
 
 def source_kind(row: dict, watch_entry: dict | None) -> str:
@@ -601,31 +651,64 @@ def source_kind(row: dict, watch_entry: dict | None) -> str:
 
 
 def source_label(row: dict, watch_entry: dict | None) -> str:
-    """界面「来源」列的文本：策略组名 / 公式名 / 自选 / 两者拼接。
+    """界面「来源」列 / CLI 那一列的文本：**是哪条策略选出来的** / 公式名 / 自选 / 组合。
 
-    需求要求"别搞出两列重复信息"：所以组别与来源合成**一列**：
-        策略标的      → `波段·T+10（T+10）`
-        自定义公式    → `公式·放量上攻`
-        纯自选        → `自选`
-        策略 + 自选   → `波段·T+10（T+10） + 自选`
-    备注单独一列（自选备注是用户自己写的，值得单独看）。
+    用户明确要求这一列回答"是哪条策略"，而不是只写组别（`波段·T+10（T+10）`
+    回答不了"凭什么选它"）。所以：
 
-    自定义公式**直接写合成名**（`公式·放量上攻`）而不是"公式（T+0）"：
-    用户勾了好几条公式时，"公式"两个字回答不了"是哪一条选出来的"。
+        内置策略标的 → `策略·短期反转`（中文名来自 `rules.strategy_label`）
+        自定义公式   → `公式·放量上攻`（合成名本身就是这个意思，原样显示）
+        纯自选       → `自选`
+        策略 + 自选  → `策略·短期反转+自选`
+
+    **组别与持有期不再进这一列**：它们回答的是"这条策略属于哪一组"，
+    而"来源"要回答的是"哪条策略"。两者都在行 tooltip 里（`source_detail_lines`）。
+    一行被多条策略选中时这里只写**主策略**：列数被用户定死成 6 列，
+    其余策略名同样收进 tooltip。
+
+    与**推送正文**的关系（`format_pool_lines` 的 `push_tag`）：推送那一行仍然把
+    **所有**命中的策略名都列出来（`低价股、短期反转`）—— 手机上一行没有 tooltip，
+    多写几个字比少一条信息好；两处用的是**同一个中文名**（都出自 `strategy_label`），
+    所以不存在"同一件事两套说法"，只是详细程度不同。
     """
-    strategy = row.get("strategy") or ""
-    group_key = groups.group_of(strategy)
+    strategy = str(row.get("strategy") or "")
     parts: list[str] = []
     if strategy:
         if groups.is_formula_strategy(strategy):
             parts.append(strategy)
         else:
-            label = groups.group_label(group_key) if group_key else rules.strategy_label(strategy)
-            horizon = groups.group_horizon(group_key) if group_key else 0
-            parts.append(f"{label}（T+{horizon}）" if horizon else label)
+            name = primary_strategy_name(row)
+            parts.append(f"{STRATEGY_SOURCE_PREFIX}{name}" if name else "策略")
     if watch_entry is not None or row.get("watchlist"):
         parts.append("自选")
-    return " + ".join(parts) if parts else "—"
+    return "+".join(parts) if parts else "—"
+
+
+def source_detail_lines(row: dict) -> list[str]:
+    """一行的**来源明细**（行 tooltip 用）：哪条策略 / 哪个组 / 同批还被谁选中。
+
+    列数被用户定死成 6 列，塞不进第二列策略名，但"这一行到底是谁选出来的"必须查得到：
+    - `来源：策略·地量后放量变盘（依赖开盘）` —— 与「来源」列同一个文本 + 证据标记；
+    - `组别：短线·T+3（T+3）` —— 组别与持有期（原来挤在「来源」列里）；
+    - `同批选中：短期反转` —— 只在这一行被**多条**策略/公式选中时出现；
+    - 「依赖开盘」那段解释（`open_only_tooltip`）也在这份明细的最后一行 ——
+      它是"要不要照这个信号动手"的依据，不能从界面上消失。
+    """
+    lines: list[str] = []
+    label = str(row.get("source_label") or "").strip() or "—"
+    evidence = str(row.get("evidence_text") or "")
+    lines.append(f"来源：{label}{evidence}")
+    group_label = str(row.get("group_label") or "")
+    horizon = int(row.get("horizon") or 0)
+    if group_label and group_label != "—":
+        lines.append(f"组别：{group_label}" + (f"（T+{horizon}）" if horizon else ""))
+    primary = primary_strategy_name(row)
+    others = [name for name in strategy_names(row) if name != primary]
+    if others:
+        lines.append("同批选中：" + "、".join(others))
+    if evidence and primary and str(row.get("evidence")) == EVIDENCE_OPEN_ONLY:
+        lines.append(open_only_tooltip(f"{STRATEGY_SOURCE_PREFIX}{primary}"))
+    return lines
 
 
 def limit_up_annotations(db_path: str, day: str | None = None) -> dict[str, dict]:
@@ -668,6 +751,94 @@ def limit_up_text(row: dict) -> str:
     return text or "涨停"
 
 
+def watchlist_only_rows(db_path: str, day: str | None = None) -> list[dict]:
+    """**不在今日池子里**的自选股 → 与 `pool_table_rows` 同形状的行。
+
+    为什么必须有这一层：`pool_table_rows` 读的是 `stock_pool` 表 —— 那是**建池那一刻**
+    的快照，只包含"策略/公式选中的 + 当时已存在的自选"。用户在两次建池之间手工加的自选
+    根本不在里面，而「自选股池」这一页按用户要求是"唯一入口"：**加了就必须看得见**，
+    不能等到今晚重新建池才出现（"我明明加了它，界面上没有"是最容易被当成 bug 的行为）。
+
+    返回的行补上 `source_label = "自选"`、`industry`、`note`，以及 `is_limit_up`
+    （今日涨停池里的信息，与池内行同一套口径）—— 界面上那一行与策略选出来的行
+    长得一样、能用同样的交互，用户不需要知道"这两行其实是两个来源"。
+    """
+    with storage.connect(db_path) as conn:
+        watch = storage.load_watchlist(conn)
+        industries = {
+            r[0]: r[1]
+            for r in conn.execute(
+                "SELECT symbol, industry FROM stock_basic WHERE industry IS NOT NULL"
+            )
+        }
+        names = {
+            r[0]: r[1]
+            for r in conn.execute("SELECT symbol, name FROM stock_basic")
+        }
+    in_pool = set(pool_symbols(db_path, day))
+    limit_up = limit_up_annotations(db_path, day)
+    out: list[dict] = []
+    for entry in watch:
+        symbol = str(entry.get("symbol") or "")
+        if not symbol or symbol in in_pool:
+            continue
+        enabled = int(entry.get("enabled", 1)) == 1
+        out.append({
+            "symbol": symbol,
+            "name": str(entry.get("name") or names.get(symbol) or ""),
+            "strategy": "",
+            "strategies": "",
+            "score": None,
+            "reason": "自选股",
+            "label": "",
+            "group": "",
+            "group_label": "—",
+            "horizon": 0,
+            "is_formula": False,
+            "source": "自选",
+            # 停用的自选**照样显示**（用户要能看见自己停用过的票并把它打开），
+            # 所以来源里点明状态：`自选（已停用）`
+            "source_label": "自选" if enabled else "自选（已停用）",
+            "note": str(entry.get("note") or ""),
+            "watchlist_enabled": enabled,
+            "evidence": "",
+            "evidence_text": "",
+            "industry": industries.get(symbol, ""),
+            "is_limit_up": symbol in limit_up,
+            "continue_day_text": (limit_up.get(symbol) or {}).get("continue_day_text", ""),
+            "limit_up_reason": (limit_up.get(symbol) or {}).get("reason", ""),
+        })
+    return out
+
+
+def pool_page_rows(db_path: str, day: str | None = None) -> list[dict]:
+    """「自选股池」页的**全部行**：精选池（策略/公式/当时已有的自选）+ 后来手工加的自选。
+
+    顺序：池内行在前（沿用 `pool_table_rows` 的分数降序），后来手工加的自选按
+    `watchlist` 表的顺序追加在后 —— 用户刚加的那只排在末尾，正好在视线落点上。
+    """
+    rows = pool_table_rows(db_path, day)
+    known = {str(r.get("symbol") or "") for r in rows}
+    rows.extend(r for r in watchlist_only_rows(db_path, day)
+                if str(r.get("symbol") or "") not in known)
+    return rows
+
+
+def pool_counts(rows: list[dict]) -> tuple[int, int, int]:
+    """`(共 N, 策略 M, 自选 K)`：「自选股池」表头那一行小字用。
+
+    口径：
+    - **策略 M** = 有 `strategy` 的行（内置策略与自定义公式都算，界面上靠「来源」列区分）；
+    - **自选 K** = 在自选表里的行（`source` 带「自选」，含"策略+自选"那种重合行）；
+    - M + K 可能大于 N：同一只票既是策略选中又是自选时只算一行（那是用户自己加的重合），
+      表头把两个数都写出来正是为了说明这件事（`共 12 只（策略 10 · 自选 4）`）。
+    """
+    total = len(rows)
+    strategy = sum(1 for r in rows if str(r.get("strategy") or ""))
+    watch = sum(1 for r in rows if "自选" in str(r.get("source") or ""))
+    return total, strategy, watch
+
+
 def pool_table_rows(db_path: str, day: str | None = None) -> list[dict]:
     """界面表格用：给每条池子记录补上行业、来源（组/自选）、自选备注与涨停信息。"""
     rows = load_pool(db_path, day)
@@ -701,7 +872,8 @@ def pool_table_rows(db_path: str, day: str | None = None) -> list[dict]:
             "horizon": groups.group_horizon(group_key) if group_key else 0,
             # 是不是自定义公式（界面/推送想单独标一句时用；**不打证据标记**）
             "is_formula": is_formula,
-            # 来源：策略组名 / 公式名 / 自选 / 策略+自选（与组别合成一列）
+            # 来源列：**哪条策略选出来的**（`策略·短期反转`）/ 公式名 / 自选 / 组合。
+            # 组别与持有期改由 `group_label` / `horizon` 单独带着，进 tooltip
             "source": source_kind(row, entry),
             "source_label": source_label(row, entry),
             "note": note,

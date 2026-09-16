@@ -88,7 +88,7 @@ def test_groups_override_runs_only_that_group(capsys, seeded) -> None:
     assert cli(args + ["--groups", "swing"]) == 0
     out = capsys.readouterr().out
     assert "波段·T+10" in out                     # 选择摘要
-    assert "低价样本（600001）" in out            # 只跑了 swing
+    assert "低价样本(600001)" in out            # 只跑了 swing
     # 池子里不该出现别的策略（低价股策略自己选中 600003 是合理的：
     # 它 12 元、跌幅没到跌停、流动性够，确实符合"低价股"的条件；
     # 所以这里断言"策略"而不是"股票"）
@@ -112,7 +112,7 @@ def test_strategies_override_accepts_chinese_names(capsys, seeded) -> None:
     assert cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"]),
                 "--strategies", "短期反转"]) == 0
     out = capsys.readouterr().out
-    assert "反转样本（600003）" in out
+    assert "反转样本(600003)" in out
     assert "低价样本" not in out
     with storage.connect(seeded["cfg"].db_path) as conn:
         strategies = {r[0] for r in conn.execute("SELECT DISTINCT strategy FROM signal")}

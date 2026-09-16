@@ -35,6 +35,25 @@ DAY = "2026-01-05"
 # ── 夹具 ──
 
 
+
+@pytest.fixture(autouse=True)
+def _no_live_quotes(monkeypatch: pytest.MonkeyPatch):
+    """实时快照一律换成假的：界面测试不做任何真实外呼。
+
+    为什么显式换掉（socket 层已经会拒）：交易时段里跑测试时，主窗口会按配置去取
+    "现价"——被 socket 层拦下会变成一条**报错日志**，那是"报错"而不是"安静地不取"。
+    换成记录用的假函数之后，这一路在测试里就是确定性的空数据，
+    表格退回本地收盘价（带 `*` 标记），断言与几点钟跑测试无关。
+    """
+    from laoa_trader.ui import quotes as quotes_mod
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        quotes_mod, "fetch_snapshot_prices",
+        lambda cfg, symbols, *, client=None: calls.append(list(symbols)) or {},
+    )
+    return calls
+
 @pytest.fixture()
 def qapp():
     from PySide6.QtWidgets import QApplication
@@ -50,7 +69,7 @@ def _item(symbol: str = "600000", name: str = "样本股", kind: str = "break_hi
     return {
         "date": DAY,
         "symbol": symbol,
-        "target": f"{name}（{symbol}）",
+        "target": f"{name}({symbol})",
         "name": name,
         "kind": kind,
         "kind_label": "🚀 放量突破20日高",
@@ -106,12 +125,12 @@ def win(cfg, qapp, monkeypatch):
     window._auction_timer.stop()
     window._flash_timer.stop()
     window.scheduler.stop()
+    window.quotes.stop()               # 实时快照的工作线程也要收（不然后台还在飞）
     if window.alert_popup is not None:
         window.alert_popup.hide_popup()
         window.alert_popup.close()
     if window.alert_detail_dialog is not None:
         window.alert_detail_dialog.close()
-    window.wizard and window.wizard.close()
     window.tray.hide()
     window.close()
     window.deleteLater()
@@ -131,7 +150,7 @@ def _add_alerts(cfg, rows: list[dict]) -> None:
 def test_row_text_is_name_and_code_like_the_push_text() -> None:
     """行文本 = `名称（代码）  类型  价格`（与推送、提醒列表同一个写法）。"""
     text = popup_mod.row_text(_item())
-    assert "样本股（600000）" in text
+    assert "样本股(600000)" in text
     assert "🚀 放量突破20日高" in text
     assert "12.34" in text
 
@@ -149,7 +168,8 @@ def test_popup_lists_items_with_count_title(popup) -> None:
     assert popup.isVisible()
     assert len(popup.rows) == 2
     assert popup.title_label.text() == "⚡ 盘中提醒 · 2 条"
-    assert all("（" in row.text() and "）" in row.text() for row in popup.rows)
+    # 标的写法是**半角**括号 `名称(代码)`（与推送正文、两张表的列头同一套口径）
+    assert all("(" in row.text() and ")" in row.text() for row in popup.rows)
 
 
 def test_long_row_is_elided_but_tooltip_keeps_the_full_text(popup) -> None:
@@ -249,7 +269,7 @@ def test_clicking_a_row_emits_it_and_hides(popup) -> None:
     popup.rows[1].click()
     assert len(seen) == 1
     assert seen[0]["symbol"] == "000001"
-    assert seen[0]["target"] == "平安银行（000001）"
+    assert seen[0]["target"] == "平安银行(000001)"
     assert not popup.isVisible()
 
 
@@ -352,9 +372,9 @@ def test_new_alert_sounds_flashes_and_pops_up(win, cfg, qapp, traces, monkeypatc
     # 名称+代码在**行文本**里（省略是从中间挖的，开头一定保得住）；
     # 类型那一段改看 **tooltip（全文）**：`text()` 是按可用宽度做中间省略后的结果，
     # 而省略位置取决于字体宽度 —— Windows 的微软雅黑比 Linux 那套宽，行文本会变成
-    # `样本股（600000）  …突破20日高  12.34`，拿 text() 断言类型文案在 CI 上必红。
+    # `样本股(600000)  …突破20日高  12.34`，拿 text() 断言类型文案在 CI 上必红。
     row = win.alert_popup.rows[0]
-    assert "样本股（600000）" in row.text()
+    assert "样本股(600000)" in row.text()
     assert "🚀 放量突破20日高" in row.toolTip()
 
 
@@ -460,14 +480,18 @@ def test_row_click_opens_detail_with_push_text(win, cfg, qapp) -> None:
     qapp.processEvents()
     assert win.alert_detail_dialog is not None and win.alert_detail_dialog.isVisible()
     text = win.alert_detail_box.toPlainText()
-    assert "样本股（600000）" in text
+    assert "样本股(600000)" in text
     assert "时间：" in text
     assert "【条件单｜买入】" in text and "触发：价格 ≥" in text     # L2 参数与推送同一份
     assert not win.alert_popup.isVisible()
 
 
-def test_view_all_switches_to_the_alerts_page(win, cfg, qapp) -> None:
-    """【查看全部】→ 显示主窗口并切到「盘中提醒」页。"""
+def test_view_all_switches_to_the_watch_pool_tab(win, cfg, qapp) -> None:
+    """【查看全部】→ 显示主窗口并切到「自选股池」页。
+
+    「盘中提醒」那一页已按用户要求取消，提醒现在住在两张表的「提醒」列里 ——
+    而「自选股池」是池子的唯一入口（"哪几只票出了什么事"一眼一行）。
+    """
     _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
                        "detail": "现价 12.34 突破 20 日高点"}])
     win._tick()
@@ -475,7 +499,8 @@ def test_view_all_switches_to_the_alerts_page(win, cfg, qapp) -> None:
     win.alert_popup.btn_all.click()
     qapp.processEvents()
     assert win.isVisible()
-    assert win.tabs.currentWidget() is win.alert_table
+    assert win.tabs.currentWidget() is win.watch_page
+    assert win.tabs.tabText(win.tabs.currentIndex()) == "自选股池"
 
 
 def test_tray_menu_has_recent_alerts_item(win, cfg, qapp) -> None:
@@ -489,7 +514,7 @@ def test_tray_menu_has_recent_alerts_item(win, cfg, qapp) -> None:
     next(a for a in menu.actions() if a.text() == "最近提醒").trigger()
     qapp.processEvents()
     assert win.alert_popup is not None and win.alert_popup.isVisible()
-    assert "样本股（600000）" in win.alert_popup.rows[0].text()
+    assert "样本股(600000)" in win.alert_popup.rows[0].text()
 
 
 def test_tray_left_click_raises_popup_or_shows_window(win, cfg, qapp) -> None:
@@ -519,10 +544,47 @@ def test_recent_alerts_popup_lists_recent_rows(win, cfg, qapp) -> None:
     assert win.show_alert_popup(recent=True) is True
     qapp.processEvents()
     assert len(win.alert_popup.rows) == 2
-    assert "平安银行（000001）" in win.alert_popup.rows[0].text()
+    assert "平安银行(000001)" in win.alert_popup.rows[0].text()
 
 
 def test_popup_shows_nothing_when_there_are_no_alerts(win, qapp) -> None:
     """库里一条提醒都没有时不弹空浮窗（只提示一句）。"""
     assert win.show_alert_popup(recent=True) is False
     assert win.alert_popup is None
+
+
+def test_flash_and_sound_still_work_with_no_notify_channels(win, cfg, qapp, traces) -> None:
+    """`notify_channels == []`（改版后的默认）+ 浮窗开 = **响声 + 闪图标 + 浮窗照旧**。
+
+    用户拍板的新默认是"平时躺在任务栏，有消息就给声音提醒和图标闪烁"：
+    空频道列表只表示"不走系统弹窗/托盘气泡/飞书"，与自绘浮窗那一套**互不相干** ——
+    这条用例就是为了防止将来有人把"没勾任何频道"顺手写成"什么都不提醒"。
+    """
+    cfg.notify_channels = []
+    _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
+                       "detail": "现价 12.34 突破 20 日高点"}])
+    win._tick()
+    qapp.processEvents()
+
+    assert traces["sound"] == [sound.DEFAULT_ALIAS]          # 响了
+    assert win._flashing is True                             # 闪了
+    assert win._flash_timer.isActive() is True
+    assert win.alert_popup is not None and win.alert_popup.isVisible()   # 也弹了
+    win._stop_alert_flash()
+
+
+def test_tray_menu_has_pause_intraday_item(win, qapp) -> None:
+    """托盘的【暂停提醒】可勾选：窗口收在托盘里时，这是暂停提醒最顺手的入口。"""
+    from laoa_trader.ui import app as ui_app
+
+    texts = [a.text() for a in win.tray_menu.actions()]
+    assert "显示主窗口" in texts and "最近提醒" in texts and "退出" in texts
+    assert ui_app.BTN_START_TEXT in texts                    # 【开始选股】也在托盘上
+    act = next(a for a in win.tray_menu.actions() if a.text() == "暂停提醒")
+    assert act.isCheckable() is True
+    assert act.isChecked() is False
+    act.trigger()
+    qapp.processEvents()
+    assert win.scheduler.status()["intraday_paused"] is True
+    assert act.isChecked() is True
+    assert win.btn_pause.text() == ui_app.BTN_RESUME_TEXT     # 设置页那个按钮同步了

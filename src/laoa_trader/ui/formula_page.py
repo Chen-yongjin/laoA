@@ -1,37 +1,63 @@
-"""「公式选股」页：**点按钮就能写公式**的编辑器（小白友好是硬要求）。
+"""「策略选股」页：**统一策略列表 + 傻瓜式公式编辑器 + 开始选股**。
 
 用户原话
 --------
-> 「所有变量和运算符都在界面右边，直接点击就能输入，输入公式名称就能保存，
->   这样小白都能轻松操作。」
+> 「策略选股 -策略编辑（可直接兼容通达信成品公式）
+>   点击打开策略编辑器(傻瓜式编辑器左右界面，左边编辑框，右边变量+运算符)
+>   编辑完成命名(可添加备注)一下可以保存到公式列表。
+>   -策略列表 （名称-备注-状态）
+>   点击打开公式详情，可修改保存。右键菜单删除和启用/关闭。
+>   -开始选股(选好的股发送消息，直接添加自选。)」
 
-所以这一页的每一处交互都是围绕"**不会写公式的人**"设计的：
+这一页就按这三块摆（`docs/改版方案.md` TAB 4）：
 
-1. 右边是"点一下就输入"的面板：变量 / 函数 / 运算符各一组，每个按钮都是一个大字
-   token（`C`、`MA`、`AND`），tooltip 里写着"是什么 + 一个例子"；
-2. 点按钮 = **在当前光标处插入**（见 `insert_token` 那段注释：为什么不能追加到末尾）；
-   函数插入的是带括号的骨架、光标落在括号里，接着打字就是参数；
-3. 左边是常规编辑区：名称 + 公式体 + 【校验】【试算】【看成绩单】【保存】；
-4. 所有报错都是**中文原文**（直接取自 `FormulaError.to_dict()`），带行号列号，
-   还会给"是不是想写 CLOSE"这类建议 —— 这一页不需要再翻译一遍错误。
+1. **策略列表**（上半）：**内置 5 条策略与自定义公式合成同一张表**，列固定为
+   `名称 | 备注 | 状态`。内置在前、公式在后；备注列写的是**真实证据** ——
+   内置取自 `strategy/rules.py` 的 `evidence`/`evidence_note` 与 `strategy/groups.py`
+   的组结论 / `disabled_reason`，公式取自文件里的 `# 说明:` 注释头。
+   **界面自己一个数字都不编**（见 `builtin_strategy_note`：它只搬字段，不做加法）。
+   单击一行：内置 → 只读详情（条件说明 + 证据 + 当前状态，可复制）；
+   公式 → 载入编辑器（可改可存）。右键：启用/关闭、删除（内置不可删）。
+2. **策略编辑器**（下半，点【策略编辑】或点列表里的公式行才展开）：左边框、
+   右边"点一下就插入"的按钮面板（变量 / 函数 / 运算符）。每个按钮中文 tooltip，
+   `MA` 自动带括号、光标落在括号里，`AND` 自动补空格 —— 这些交互是**实测过的**，
+   见下面 `insert_token` / `insert_operator` 的注释（别回退）。
+   底部【校验】【试算】【保存】【另存为】【删除】，名称旁边多了**备注**（写进文件的
+   `# 说明:` 注释头）。
+3. **【开始选股】**（右上角）：本页**只 emit `start_pick_requested()`** ——
+   增量数据 → 跑策略与公式 → 建池 → 推送这一整套在主窗口（`ui/app.py`）里，
+   这一页不碰它（也不联网）。选完之后主窗口调 `reload()`，本页把结果摆进
+   「本次选股结果」区，并给一个【全部加为自选】按钮让这些票长期留在自选股池里。
+
+为什么这里**没有**「成绩单」
+----------------------------
+旧版右下角有两个按钮（【看成绩单】【复制成绩单】）。改版把它们**从界面移除**：
+数据只有 6 个月（`history_years = 0.5`），而成绩单自己有 250 个交易日的样本门槛
+（`research/scorecard.py`）—— 放在界面上永远只会显示"样本不足，无法评估"，
+点一次要扫全库几十秒。**能力没有删除**：`formulas.run_scorecard()` 保留，
+CLI `--scorecard` 照旧（数据下到 ≥1 年时它才有意义）。
 
 为什么单独一个模块而不是塞进 `ui/app.py`
 --------------------------------------
-`app.py` 已经 3900 行。这一页有 40 多个控件与自己的后台线程，塞进去会让
+`app.py` 已经 4300 行。这一页有 40 多个控件与自己的后台线程，塞进去会让
 "主窗口接线"与"公式编辑"两件事互相干扰；分开之后，这一页可以用 Qt 的 offscreen
-平台插件**单独**建出来测（`tests/test_formula_lib.py` / `test_formula_page.py`），
-不用把整个主窗口拉起来。主窗口那边只留一行 `addTab`。
+平台插件**单独**建出来测（`tests/test_formula_page.py` / `test_formula_lib.py`），
+不用把整个主窗口拉起来。主窗口那边只留 `addTab` 与信号接线。
 """
 
 from __future__ import annotations
 
+import inspect
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Sequence
 
 from laoa_trader import formulas as formulas_lib
 from laoa_trader.config import get_config
 from laoa_trader.log import get_logger
+from laoa_trader.strategy import base as base_mod
 from laoa_trader.strategy import formula as fm
-from laoa_trader.strategy import formula_group
+from laoa_trader.strategy import formula_group, groups
+from laoa_trader.strategy import rules as rules_mod
 
 logger = get_logger(__name__)
 
@@ -41,6 +67,7 @@ try:  # Qt 缺失时不应该 import 就炸（与 ui/app.py 同一个约定）
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
+        QFrame,
         QGridLayout,
         QGroupBox,
         QHBoxLayout,
@@ -48,6 +75,7 @@ try:  # Qt 缺失时不应该 import 就炸（与 ui/app.py 同一个约定）
         QInputDialog,
         QLabel,
         QLineEdit,
+        QMenu,
         QMessageBox,
         QPlainTextEdit,
         QProgressBar,
@@ -55,11 +83,11 @@ try:  # Qt 缺失时不应该 import 就炸（与 ui/app.py 同一个约定）
         QScrollArea,
         QSizePolicy,
         QSplitter,
+        QStackedWidget,
         QTableWidget,
         QTableWidgetItem,
         QVBoxLayout,
         QWidget,
-        QFrame,
     )
 
     QT_AVAILABLE = True
@@ -82,8 +110,8 @@ TAB_SPACES = "    "
 #: 【试算】结果里最多列几只（与 `formulas.PREVIEW_LIMIT` 一致）
 PREVIEW_LIMIT = formulas_lib.PREVIEW_LIMIT
 
-#: 提示区最多显示多少行（成绩单很长，全塞进 QLabel 会把下面的列表挤没；
-#: 完整文本留在 `self.scorecard_text`，用【复制成绩单】拿走）
+#: 提示区最多显示多少行（多行错误/很长的命中清单全塞进 QLabel 会把列表挤没；
+#: 完整文本留在 `self.hint_text`，鼠标选中就能复制）
 HINT_MAX_LINES = 14
 
 #: 收尾时等后台线程真正退出的上限（毫秒）。见 `FormulaPage._finish_preview`：
@@ -91,8 +119,51 @@ HINT_MAX_LINES = 14
 #: 这时候放掉最后一个引用会让 QThread 在"线程还在跑"时析构 —— Qt 直接崩进程。
 THREAD_JOIN_MS = 3_000
 
-#: 顶部那两行灰字说明（小白第一眼看的就是它）
+#: 「本次选股结果」表最多占多高（它是"看一眼就走"的东西，不该把策略列表挤没）
+RESULT_MAX_HEIGHT = 190
+
+# ── 统一策略列表的两类行 ──
+ROW_BUILTIN = "builtin"      # 内置策略（写在 `strategy/rules.py` 里，只读、不可删）
+ROW_FORMULA = "formula"      # 自定义公式（`formulas/` 目录里的文件，可改可删）
+
+#: 列表列头（用户给定，**一个字都不加**）
+LIST_COLUMNS: tuple[str, ...] = ("名称", "备注", "状态")
+
+#: 「本次选股结果」两列
+RESULT_COLUMNS: tuple[str, ...] = ("名称(代码)", "来源策略")
+
+#: 右键菜单项文案
+MENU_ENABLE = "启用"
+MENU_DISABLE = "关闭"
+MENU_DELETE = "删除"
+#: 内置策略的「删除」是**置灰**而不是藏起来 —— 藏起来用户会以为"程序坏了"，
+#: 写上"不可删"他立刻明白为什么（见 `FormulaPage.row_menu`）。
+MENU_DELETE_BUILTIN = "删除（内置策略不可删）"
+
+#: `config.toml` 里"关掉全部策略"的写法（`groups.resolve()` 认得它 → `explicit_off`）。
+#: 为什么必须有一个明确值：**两个键都空 = 全选**是安全默认，
+#: 所以"所有勾都取消"不能用空列表表达，否则会反过来变成"全跑"。
+OFF_GROUP_KEY = "none"
+
+#: 备注（写进 `# 说明:` 注释头）的长度上限。为什么这里要拦：
+#: 注释头是**一行**，超长的说明会把文件第一屏占满，用户用记事本打开公式时
+#: 得先翻过大段文字才看得见公式本身（同一个上限库里有 `MAX_DESC_CHARS`）。
+MAX_NOTE_CHARS = formulas_lib.MAX_DESC_CHARS
+
+#: 顶部那行灰字说明（用户打开这一页先看到的东西）
 PAGE_HINT = (
+    "勾「状态」列 = 这条策略/公式参与选股；单击一行看详情（公式会载入编辑器）；"
+    "右键 = 启用 / 关闭 / 删除；点【开始选股】跑一轮。"
+)
+
+#: 策略列表上方那句灰字
+LIST_HINT = (
+    "策略列表：内置 5 条固定在前（备注列是它的实测证据，只读），"
+    "你自己的公式追加在后（备注来自公式文件的「# 说明:」）。"
+)
+
+#: 编辑器里那行灰字说明（小白第一眼看的就是它）
+EDITOR_HINT = (
     "点右边的按钮就能插入；最后一行是选股条件。"
     "写完点【校验】→【试算】→【保存】。"
 )
@@ -169,749 +240,1260 @@ OPERATORS: tuple[tuple[str, str, int | None], ...] = (
 _SPACED_OPERATORS = ("AND", "OR", "NOT")
 
 
-class ScorecardWorker(QThread):
-    """这一页的后台线程：**【看成绩单】与【试算】都用它**。
+# ══════════════════════════════════════════════════════════════════════════
+# 统一策略列表的"行"与它的备注/详情（**纯数据**，不依赖 Qt）
+# ══════════════════════════════════════════════════════════════════════════
 
-    为什么必须后台跑：成绩单要扫全库（10 年数据下是几千只 × 上千根 K 线），
-    试算要逐只票读 K 线并在最后一根上跑公式（真实 3 年库实测 3.7 秒，全市场
-    5000+ 只要 7~8 秒）。在主线程里跑就是"窗口未响应"——用户以为程序死了，
-    其实是它正在算。这里是 Qt 里唯一安全的做法：工作线程只算数，
-    结果通过信号回主线程再碰控件。
 
-    `with_progress`：**不是每个被后台化的函数都收 `progress_cb`**
-    （`preview_hits` 就只有 `limit`/`start`/`symbols`）。与其为了让 worker 统一
-    而给库函数加一个假参数，不如让调用方声明"这次要不要进度回调"
-    （与 `ui/app.py` 的 `Worker` 同一个约定）。
+@dataclass(frozen=True)
+class StrategyRow:
+    """统一列表里的一行：内置策略与自定义公式**共用**同一个结构。
 
-    `failed` 递的是**异常对象**而不是一句话：两种失败在界面上的说法不同
-    （`FormulaDataError` = 数据问题，该去下载数据；其它 = 程序问题），
-    工作线程不该替界面决定措辞 —— 主线程拿到类型才分得清
-    （见 `FormulaPage._on_preview_failed`）。
+    为什么要合成一种行：列表要"合成同一张表"（用户给定），而两类行的交互又不同
+    （内置只读、公式可改；内置不可删）。用 `kind` 区分、把差别写进数据里，
+    表格与右键菜单就都只认这一种结构，不用到处 `isinstance`。
     """
 
-    progress = Signal(str, int, int)
-    finished_ok = Signal(object)
-    failed = Signal(object)
+    #: `ROW_BUILTIN` / `ROW_FORMULA`
+    kind: str
+    #: 内置 = 策略类名（`LowPriceStrategy`）；公式 = 公式名（= 文件名）
+    key: str
+    #: 展示名（内置 = 中文名）
+    name: str
+    #: 「备注」列的文本
+    note: str
+    #: 「备注」列的 tooltip（完整证据/错误全文）
+    note_tip: str
+    #: 是否参与选股（内置查 `enabled_groups`/`enabled_strategies`，公式查 `enabled_formulas`）
+    enabled: bool
+    #: 内置策略的只读详情（条件说明 + 证据 + 当前状态）；公式行为空串
+    detail: str = ""
+    #: 公式行对应的 `FormulaSpec`；内置行为 None
+    spec: Any = None
 
-    def __init__(self, fn: Callable[..., Any], *args: Any,
-                 with_progress: bool = False, **kwargs: Any) -> None:
-        super().__init__()
-        self._fn = fn
-        self._args = args
-        self._kwargs = kwargs
-        self._with_progress = with_progress
-
-    def run(self) -> None:  # noqa: D102 - QThread 约定
-        try:
-            kwargs = dict(self._kwargs)
-            if self._with_progress:
-                kwargs["progress_cb"] = self.progress.emit
-            result = self._fn(*self._args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - 后台异常必须回主线程说人话
-            logger.exception("公式后台任务失败")
-            self.failed.emit(exc)
-        else:
-            self.finished_ok.emit(result)
+    @property
+    def is_builtin(self) -> bool:
+        return self.kind == ROW_BUILTIN
 
 
-class FormulaPage(QWidget):
-    """「公式选股」页。
+def builtin_order() -> list[str]:
+    """内置策略的展示顺序：按组（超短 → 短线 → 波段），未归组的排在最后。
 
-    属性里刻意留着测试与外部要用的引用（`name_edit` / `editor` / `hint_label` /
-    `table` / `palette_buttons` / `scorecard_worker` / `preview_worker`），
-    不要去爬控件层级 —— 这一页的控件多，按层级取值的测试一改布局就集体失效。
+    与 `rules.run_all()` 的遍历顺序同一口径 —— 界面上看到的先后，
+    就是"实际跑的先后 + 池子权重"的先后，用户不用记两套顺序。
     """
+    order = list(groups.all_strategies())
+    order += [name for name in rules_mod.STRATEGIES if name not in order]
+    return order
 
-    def __init__(
-        self,
-        cfg: Any = None,
-        parent: Any = None,
-        *,
-        status_cb: Callable[[str], None] | None = None,
-        directory: Any = None,
-    ) -> None:
-        """建页。
 
-        Args:
-            cfg: 配置对象（默认全局单例）；公式目录与 `enabled_formulas` 都读它。
-            status_cb: 给主窗口显示一句话（状态栏），不传就只写日志。
-            directory: 公式目录（默认 `formulas_lib.formula_dir()`；测试传 tmp_path）。
-        """
-        super().__init__(parent)
-        self.cfg = cfg if cfg is not None else get_config()
-        self.status_cb = status_cb
-        self.directory = directory
+def builtin_enabled(cfg: Any) -> set[str]:
+    """当前**真正参与选股**的内置策略名。
 
-        #: 当前列出的公式（`FormulaSpec` 列表，顺序 = 目录里的文件名顺序）
-        self.specs: list[Any] = []
-        #: 右侧面板按钮：{token: QPushButton}（测试按 token 点，不爬布局）
-        self.palette_buttons: dict[str, Any] = {}
-        #: 【看成绩单】的后台线程与结果
-        self.scorecard_worker: ScorecardWorker | None = None
-        self.scorecard_result: dict | None = None
-        self.scorecard_text: str = ""
-        #: 【试算】的后台线程；跑完置回 None（测试就等这一条来判断"落地了"）
-        self.preview_worker: ScorecardWorker | None = None
-        #: 【试算】按下按钮那一刻的公式快照（结果属于它，不属于编辑框里现在的内容）
-        self.preview_formula: Any = None
-        self.hint_text: str = ""
-        self._loading = False          # 载入行时别把"选中变化"当成用户点击
+    直接问 `groups.resolve_from_config()`，**不另算一套**：
+    配置里 `enabled_groups` 与 `enabled_strategies` 谁空谁不空、两者取交集的规则，
+    只有 `resolve()` 一个地方说得清；界面自己推一遍必然漂移
+    （表现就是"列表里勾着、实际却没跑"，这种 bug 用户根本猜不到原因）。
+    """
+    return set(groups.resolve_from_config(cfg).strategies)
 
-        self._build_ui()
-        self.reload()
 
-    # ── 界面搭建 ──────────────────────────────────────────────────────
+def _group_of_builtin(class_name: str) -> Any:
+    key = groups.group_of(class_name)
+    return groups.GROUPS.get(key) if key else None
 
-    def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 12)
-        layout.setSpacing(8)
 
-        # 顶部：一行灰字说明 + 右侧【载入示例】（小白的第一站）
-        top = QHBoxLayout()
-        self.page_hint = QLabel(PAGE_HINT)
-        self.page_hint.setObjectName("statusTag")      # 小号灰字（与状态区同一档）
-        self.page_hint.setWordWrap(True)
-        top.addWidget(self.page_hint, 1)
-        self.btn_sample = QPushButton("载入示例")
-        self.btn_sample.setToolTip("把一条能跑通的示例公式放进编辑框，照着改就行")
-        self.btn_sample.clicked.connect(self.on_load_sample)
-        top.addWidget(self.btn_sample, 0)
-        layout.addLayout(top)
+def _group_note_tail(group: Any) -> str:
+    """取组结论里"数字那一段"（`…：T+2~T+3 t≈1.7~2.1` → `T+2~T+3 t≈1.7~2.1`）。
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self._build_editor_side())
-        splitter.addWidget(self._build_palette_side())
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        self.splitter = splitter
-        layout.addWidget(splitter, 1)
+    只做拆分、不做改写：组结论的写法是 `成员：结论`，逐条内置策略的备注里
+    重复一遍成员名没有意义（那一行本来就写着是哪条策略）。
+    """
+    note = str(getattr(group, "note", "") or "")
+    if not note:
+        return ""
+    for sep in ("：", ":"):
+        if sep in note:
+            return note.split(sep, 1)[1].strip()
+    return note.strip()
 
-    def _build_editor_side(self) -> Any:
-        """左侧：名称 + 编辑框 + 三个按钮 + 提示区 + 已保存公式列表。"""
-        side = QWidget()
-        layout = QVBoxLayout(side)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
 
-        # ── 名称行 ──
-        name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("公式名称："))
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("例如：5日线上放量")
-        self.name_edit.setToolTip("这就是保存后的文件名，也是池子/推送里显示的名字")
-        name_row.addWidget(self.name_edit, 1)
+def builtin_strategy_note(class_name: str) -> str:
+    """内置策略「备注」列的那句话 —— **只搬真实字段，一个字都不编**。
 
-        self.btn_save = QPushButton("保存")
-        self.btn_save.setObjectName("primaryAction")     # 主操作按钮（主题里精确命中）
-        self.btn_save.setToolTip("把编辑框里的公式存到公式目录（重名会先问一句）")
-        self.btn_save.clicked.connect(self.on_save)
-        name_row.addWidget(self.btn_save)
+    取材顺序（都是代码里已有的结论，界面不做任何"计算"）：
 
-        self.btn_save_as = QPushButton("另存为")
-        self.btn_save_as.setToolTip("换一个名字再存一份（原来的那份不动）")
-        self.btn_save_as.clicked.connect(self.on_save_as)
-        name_row.addWidget(self.btn_save_as)
+    1. 组**默认关闭**且写了原因 → `⛔ 默认关闭：<disabled_reason>`
+       （例如"两套口径显著为负：B 口径 −1.21%(t=−5.36)…"）；
+    2. 策略自己写了 `evidence_note`（正 α 只在"开盘买"口径存在的那两条）→ `⚠️ <note>`
+       （含两套口径的真实数字）；
+    3. 其余 = `evidence == EVIDENCE_PROVEN`，也就是 `base.py` 里写明的
+       "两套执行口径（D+1 开盘买 / D+1 尾盘买）都为正" → 写 `两套口径都为正`，
+       再把**所属组**的实测区间跟在后面，并标明它是**组**的数字（不是这条策略自己的）：
+       `两套口径都为正 · 组实测 T+2~T+3 t≈1.7~2.1`。
 
-        self.btn_delete = QPushButton("删除")
-        self.btn_delete.setToolTip("删掉当前这条公式文件（会先问一句）")
-        self.btn_delete.clicked.connect(self.on_delete)
-        name_row.addWidget(self.btn_delete)
-        layout.addLayout(name_row)
+    为什么第 3 条要写"组实测"三个字：逐条策略的历史数字代码里**没有**
+    （只有组结论），把组的区间写成这条策略的成绩就是编数据。宁可多三个字。
+    """
+    cls = rules_mod.STRATEGIES.get(class_name)
+    if cls is None:
+        return ""
+    group = _group_of_builtin(class_name)
 
-        # ── 编辑框 ──
-        self.editor = QPlainTextEdit()
-        self.editor.setPlaceholderText(
-            "在这里写公式，例如：\nM5:=MA(C,5)\nC>M5 AND V>MA(V,5)*1.5"
+    if group is not None and not group.enabled_by_default and group.disabled_reason:
+        return "⛔ 默认关闭：" + group.disabled_reason
+
+    note = str(getattr(cls, "evidence_note", "") or "").strip()
+    if note:
+        return "⚠️ " + note
+
+    if str(getattr(cls, "evidence", "") or "") == base_mod.EVIDENCE_PROVEN:
+        tail = _group_note_tail(group)
+        return "两套口径都为正" + (f" · 组实测 {tail}" if tail else "")
+    # 证据类型认不出来（将来新增取值）：**宁可什么都不说**，也不要猜
+    return ""
+
+
+def builtin_strategy_tip(class_name: str) -> str:
+    """内置策略「备注」列的 tooltip：把来源与出处写清楚（用户不用翻代码/文档）。"""
+    cls = rules_mod.STRATEGIES.get(class_name)
+    group = _group_of_builtin(class_name)
+    lines = [f"{rules_mod.strategy_label(class_name)}（{class_name}）"]
+    if group is not None:
+        weight = groups.STRATEGY_WEIGHTS.get(class_name, 0)
+        lines.append(f"所属组：{group.label}（{group.key}）· T+{group.horizon} · 池子权重 {weight}")
+        if group.note:
+            lines.append("组结论：" + group.note)
+        if group.disabled_reason:
+            lines.append("⛔ 默认关闭：" + group.disabled_reason)
+    note = str(getattr(cls, "evidence_note", "") or "") if cls is not None else ""
+    if note:
+        lines.append("证据：" + note)
+    lines.append(
+        "备注来自 strategy/rules.py 与 strategy/groups.py 里的字段（界面不另算数字）；"
+        "内置策略只能启用/关闭，不能改也不能删"
+    )
+    return "\n".join(lines)
+
+
+def builtin_strategy_detail(class_name: str, cfg: Any) -> str:
+    """内置策略的**只读详情**（单击一行时展开）：条件说明 + 证据 + 当前状态。
+
+    条件说明直接用策略类自己的 docstring（`strategy/rules.py` 里那份"规则：…"），
+    **不在界面里重写一遍** —— 重写就会与代码漂移，而漂移之后的说明比没有说明更糟。
+    """
+    cls = rules_mod.STRATEGIES.get(class_name)
+    group = _group_of_builtin(class_name)
+    weight = groups.STRATEGY_WEIGHTS.get(class_name, 0)
+    enabled = class_name in builtin_enabled(cfg)
+    lines = [f"{rules_mod.strategy_label(class_name)}（{class_name}）"]
+    if group is not None:
+        lines.append(
+            f"所属组：{group.label}（{group.key}）· 目标持有期 T+{group.horizon} · 池子权重 {weight}"
         )
-        self.editor.setMinimumHeight(EDITOR_MIN_HEIGHT)
-        self.editor.setTabChangesFocus(False)
-        # 等宽字体：公式里的括号与逗号要能对齐，"哪一层括号"才看得出来
-        font = QFont()
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setFamily("Consolas")
-        font.setFixedPitch(True)
-        self.editor.setFont(font)
-        # Tab 插入空格而不是切焦点（见 `TAB_SPACES` 的说明）
-        self.editor.installEventFilter(self)
-        layout.addWidget(self.editor, 1)
+    lines.append("当前状态：" + ("✅ 参与选股" if enabled else "☐ 未参与选股"))
+    lines.append(
+        "状态由 config.toml 的 enabled_groups / enabled_strategies 决定"
+        f"（现在：enabled_groups={_cfg_list(cfg, 'enabled_groups')}、"
+        f"enabled_strategies={_cfg_list(cfg, 'enabled_strategies')}）"
+    )
+    lines.append("")
+    lines.append("── 条件说明（写在 strategy/rules.py 里，只读）──")
+    doc = inspect.getdoc(cls) if cls is not None else None
+    lines.append(doc or "（这条策略没有写说明）")
+    lines.append("")
+    lines.append("── 证据 ──")
+    note = builtin_strategy_note(class_name)
+    lines.append(note or "（这条策略没有写证据字段）")
+    if group is not None and group.note:
+        # 组结论单独一行：它是**这一组**的实测数字，与上面那条策略自己的证据不是一回事
+        # （停用理由已经包含在 `builtin_strategy_note()` 里，这里不重复贴第二遍）
+        lines.append("组结论：" + group.note)
+    lines.append("")
+    lines.append("内置策略写在代码里：只能启用/关闭，不能修改、也不能删除。")
+    lines.append("想按自己的条件来，就照它写一条公式：【策略编辑】→ 写 →【保存】。")
+    return "\n".join(lines)
 
-        # ── 动作行 ──
-        action_row = QHBoxLayout()
-        self.btn_validate = QPushButton("校验")
-        self.btn_validate.setToolTip("检查公式写得对不对；通过时会告诉你用到哪些字段/函数")
-        self.btn_validate.clicked.connect(self.on_validate)
-        action_row.addWidget(self.btn_validate)
 
-        self.btn_preview = QPushButton("试算：当前库能选出几只")
-        self.btn_preview.setToolTip("不推送、不写库，只看看最近一个交易日命中几只")
-        self.btn_preview.clicked.connect(self.on_preview)
-        action_row.addWidget(self.btn_preview)
+def _cfg_list(cfg: Any, key: str) -> str:
+    """配置里的列表按 **TOML 的写法**显示（`["short", "swing"]`）。
 
-        self.btn_scorecard = QPushButton("看成绩单")
-        self.btn_scorecard.setToolTip("这条公式历史上行不行（后台计算，耗时长但不卡界面）")
-        self.btn_scorecard.clicked.connect(self.on_scorecard)
-        action_row.addWidget(self.btn_scorecard)
+    为什么不写成 `[short、swing]` 那种好看的中文列表：这几句话的用途就是"你去看
+    config.toml 的那一行"，写成能**照着抄**的形式最省事（用户改配置时不用想"那个顿号
+    到底是什么"）。
+    """
+    raw = [str(v) for v in (getattr(cfg, key, None) or [])]
+    return "[" + ", ".join(f'"{value}"' for value in raw) + "]"
 
-        self.btn_copy_scorecard = QPushButton("复制成绩单")
-        self.btn_copy_scorecard.setToolTip("把上一次成绩单的完整文本复制到剪贴板")
-        self.btn_copy_scorecard.clicked.connect(self.on_copy_scorecard)
-        action_row.addWidget(self.btn_copy_scorecard)
-        action_row.addStretch(1)
-        layout.addLayout(action_row)
 
-        # ── 进度条（只在跑成绩单时出现）──
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        self.progress.setRange(0, 100)
-        layout.addWidget(self.progress)
+def formula_row_note(spec: Any, runtime_error: str = "") -> tuple[str, str]:
+    """公式行「备注」列的 (文本, tooltip)。
 
-        # ── 提示区（多行、可复制）──
-        #
-        # 为什么用 QLabel + 可选文本而不是弹窗：校验/试算的结果是"要照着改"的东西，
-        # 弹窗点掉就没了；放在页面上可以边看边改，还能选中复制去搜索。
-        self.hint_label = QLabel("")
-        self.hint_label.setWordWrap(True)
-        self.hint_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+    备注 = 公式文件里的 `# 说明:`（保存时界面写进去的），再叠加两类**必须让人看见**的问题：
+
+    * 语法错（`⛔ 语法错：…`）—— 它勾上也跑不了（`formulas.enabled_names()` 会跳过它），
+      所以不能只藏在提示里；完整错误（带行号列号）进 tooltip；
+    * 上一次运行的运行期错误（`⚠️ 运行时出错：…`，`formula_group.last_status()`）。
+
+    为什么把这两条放「备注」列而不是「状态」列：用户给定的列头只有
+    `名称 | 备注 | 状态`，而「状态」列被"参与选股"这个勾占满了（一格一义），
+    把错误塞进同一格会让"这一格到底能不能点"变得要猜。
+    """
+    note = str(getattr(spec, "description", "") or "").strip()
+    tip = note
+    if not spec.ok:
+        full = str(spec.error_text or "").strip()
+        note = (note + " ｜" if note else "") + "⛔ 语法错：" + _one_line(full, 60)
+        tip = (tip + "\n\n" if tip else "") + "⛔ 这条公式现在编译不过：\n" + full
+    if runtime_error:
+        note = (note + " ｜" if note else "") + "⚠️ 运行时出错：" + _one_line(runtime_error, 40)
+        tip = (tip + "\n\n" if tip else "") + "⚠️ 上一次选股时出错：\n" + str(runtime_error)
+    return (note or "—"), tip
+
+
+def build_strategy_rows(
+    cfg: Any, specs: Sequence[Any], runtime: dict[str, str] | None = None
+) -> list[StrategyRow]:
+    """把「内置 5 条 + 目录里的公式」拼成统一列表的数据（内置在前，公式在后）。
+
+    读取的**全是已有来源**：状态来自 `groups.resolve_from_config()` 与
+    `cfg.enabled_formulas`，备注来自 `rules`/`groups` 的字段与公式文件的注释头。
+    """
+    runtime = runtime or {}
+    enabled_builtin = builtin_enabled(cfg)
+    known_formulas = set(str(n) for n in (getattr(cfg, "enabled_formulas", None) or []))
+
+    rows: list[StrategyRow] = []
+    for class_name in builtin_order():
+        rows.append(
+            StrategyRow(
+                kind=ROW_BUILTIN,
+                key=class_name,
+                name=rules_mod.strategy_label(class_name),
+                note=builtin_strategy_note(class_name) or "—",
+                note_tip=builtin_strategy_tip(class_name),
+                enabled=class_name in enabled_builtin,
+                detail=builtin_strategy_detail(class_name, cfg),
+            )
         )
-        self.hint_label.setMinimumHeight(40)
-        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(self.hint_label)
+    for spec in specs:
+        note, tip = formula_row_note(spec, runtime.get(spec.name, ""))
+        rows.append(
+            StrategyRow(
+                kind=ROW_FORMULA,
+                key=spec.name,
+                name=spec.name,
+                note=note,
+                note_tip=tip,
+                enabled=spec.name in known_formulas,
+                spec=spec,
+            )
+        )
+    return rows
 
-        # ── 已保存公式列表 ──
-        layout.addWidget(QLabel("已保存的公式（点一行就载入到上面改）"))
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["名称", "说明", "状态", "参与选股"])
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.itemSelectionChanged.connect(self.on_row_selected)
-        layout.addWidget(self.table, 1)
-        return side
 
-    def _build_palette_side(self) -> Any:
-        """右侧：**点一下就输入**的三组按钮（变量 / 函数 / 运算符）。
+# ══════════════════════════════════════════════════════════════════════════
+# 后台线程
+# ══════════════════════════════════════════════════════════════════════════
 
-        用 `QGroupBox` 而不是 `QToolBox`：折叠起来之后，小白会以为"函数不见了"——
-        三组一起看得见、函数多了就滚动，才是"所有东西都在右边"的本意。
+if QT_AVAILABLE:
+
+    class FormulaWorker(QThread):
+        """这一页的后台线程（**【试算】用它**）。
+
+        为什么必须后台跑：试算要逐只票读 K 线并在最后一根上跑公式（真实 3 年库实测
+        3.7 秒，全市场 5000+ 只要 7~8 秒）。在主线程里跑就是"窗口未响应"——用户以为
+        程序死了，其实是它正在算。这里是 Qt 里唯一安全的做法：工作线程只算数，
+        结果通过信号回主线程再碰控件。
+
+        `failed` 递的是**异常对象**而不是一句话：两种失败在界面上的说法不同
+        （`FormulaDataError` = 数据问题，该去下载数据；其它 = 程序问题），
+        工作线程不该替界面决定措辞 —— 主线程拿到类型才分得清
+        （见 `FormulaPage._on_preview_failed`）。
+
+        （旧版这里还兼跑"成绩单"，改版把成绩单的界面入口去掉了，
+        这个线程只服务【试算】；`formulas.run_scorecard()` 仍在，CLI 照用。）
         """
-        panel = QWidget()
-        panel.setFixedWidth(PANEL_WIDTH)
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
-        panel_layout.setSpacing(6)
 
-        title = QLabel("点一下，就插到光标那里")
-        title.setObjectName("statusTag")
-        panel_layout.addWidget(title)
+        progress = Signal(str, int, int)
+        finished_ok = Signal(object)
+        failed = Signal(object)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        inner = QWidget()
-        inner_layout = QVBoxLayout(inner)
-        inner_layout.setContentsMargins(0, 0, 0, 0)
-        inner_layout.setSpacing(8)
-        for name, items in (("变量", VARIABLES), ("函数", FUNCTIONS), ("运算符", OPERATORS)):
-            inner_layout.addWidget(self._build_group(name, items))
-        inner_layout.addStretch(1)
-        scroll.setWidget(inner)
-        panel_layout.addWidget(scroll, 1)
-        self.palette_panel = panel
-        return panel
+        def __init__(self, fn: Callable[..., Any], *args: Any,
+                     with_progress: bool = False, **kwargs: Any) -> None:
+            super().__init__()
+            self._fn = fn
+            self._args = args
+            self._kwargs = kwargs
+            self._with_progress = with_progress
 
-    def _build_group(self, title: str, items: Sequence[tuple[str, str, int | None]]) -> Any:
-        """一组按钮（两列网格）。每个按钮一个中文 tooltip（是什么 + 一个例子）。"""
-        box = QGroupBox(title)
-        grid = QGridLayout(box)
-        grid.setSpacing(4)
-        for index, (token, tip, args) in enumerate(items):
-            button = QPushButton(token)
-            button.setToolTip(tip)
-            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            # 运算符里的 `AND`/`OR`/`NOT` 走 `insert_operator`（要自动补空格），
-            # 其余（变量、短运算符、函数）都走 `insert_token`。
-            # 用默认参数把 token 绑进 lambda：循环变量在闭包里是**延迟求值**的，
-            # 不绑的话所有按钮都会插入最后一个 token（经典坑）
-            if args is None and token in _SPACED_OPERATORS:
-                button.clicked.connect(
-                    lambda _checked=False, text=token: self.insert_operator(text)
-                )
+        def run(self) -> None:  # noqa: D102 - QThread 约定
+            try:
+                kwargs = dict(self._kwargs)
+                if self._with_progress:
+                    kwargs["progress_cb"] = self.progress.emit
+                result = self._fn(*self._args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - 后台异常必须回主线程说人话
+                logger.exception("公式后台任务失败")
+                self.failed.emit(exc)
             else:
-                button.clicked.connect(
-                    lambda _checked=False, text=token, count=args: self.insert_token(
-                        text, args=count
-                    )
-                )
-            grid.addWidget(button, index // 2, index % 2)
-            self.palette_buttons[token] = button
-        return box
+                self.finished_ok.emit(result)
 
-    # ── 点选插入 ──────────────────────────────────────────────────────
 
-    def insert_token(self, token: str, args: int | None = None) -> None:
-        """把 `token` 插到**当前光标处**（函数会带上 `()` 并把光标放进括号里）。
+@dataclass
+class RowMenu:
+    """一行的右键菜单（**把菜单与两个动作一起递出来**，方便测试与接线）。
 
-        `args=None` = 原样插入（变量、短运算符）；`args` 是数字 = 函数骨架，
-        `0` 表示无参函数（光标落在 `)` 之后），`>0` 表示把光标放进括号里。
+    `menu` 是真正要 `exec()` 的东西；`toggle`/`delete` 是那两个动作。
+    单独包一层的原因：测试要在**不弹菜单**的前提下验证"这一行右键能做什么"
+    （`exec()` 会阻塞事件循环，离屏测试里没人去点它）。
+    """
 
-        **为什么必须在光标处插入，而不是追加到末尾**（这一页最容易做错的一处）：
-        用户修改公式是"边想边改"的 —— 他点了【载入示例】或载入了一条已保存的公式，
-        然后想改**中间那一行**（例如把 `MA(C,5)` 改成 `MA(C,10)`，或往第 2 行加个条件）。
-        如果按钮把 token 追加到末尾，他会看到：公式语法通过、但选出来的票完全不对 ——
-        而且**看不出哪里变了**（末尾多了一个 `AND ...`）。这种"静默改坏"比报错可怕得多。
-        插入到光标处 + 焦点回到编辑框 + 光标停在括号里，才是"点一下就接着打字"的手感；
-        追加到末尾则要用户自己再剪切粘贴一次，那这个面板就白做了。
+    menu: Any
+    toggle: Any
+    delete: Any
+
+
+if QT_AVAILABLE:
+
+    class FormulaPage(QWidget):
+        """「策略选股」页。
+
+        属性里刻意留着测试与主窗口要用的引用（`name_edit` / `note_edit` / `editor` /
+        `hint_label` / `table` / `rows` / `palette_buttons` / `preview_worker`），
+        不要去爬控件层级 —— 这一页的控件多，按层级取值的测试一改布局就集体失效。
         """
-        cursor = self.editor.textCursor()
-        if args is None:
-            cursor.insertText(token)
-        elif args > 0:
-            # 骨架 `NAME()`，再把光标左移一格 → 落在括号里，接着打字就是第一个参数
-            cursor.insertText(f"{token}()")
-            cursor.movePosition(QTextCursor.MoveOperation.Left)
-        else:
-            # 无参函数：`NAME()`，光标停在 `)` 之后（用户接着打 `>=2` 之类）
-            cursor.insertText(f"{token}()")
-        self.editor.setTextCursor(cursor)
-        # 焦点回到编辑框：用户是从右边面板点的按钮，不去抢回来的话
-        # 他接着敲键盘就是在别的控件上输入（一次都输不进去）
-        self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def insert_operator(self, operator: str) -> None:
-        """插入运算符；`AND`/`OR`/`NOT` 前后自动补空格。
+        #: 【开始选股】被点 → **只举手**，真正的流程在主窗口（见 `on_start_pick`）
+        start_pick_requested = Signal()
 
-        为什么要补：`A>1` 后面直接粘 `AND` 会变成 `A>1AND B` —— 这是**语法错误**，
-        而错误提示说的是"未知字段 A>1AND"之类，小白根本看不懂。宁可多一个空格。
-        """
-        if operator not in _SPACED_OPERATORS:
-            self.insert_token(operator)
-            return
-        text = self.editor.toPlainText()
-        position = self.editor.textCursor().position()
-        before, after = text[:position], text[position:]
-        lead = "" if (not before or before[-1].isspace()) else " "
-        trail = "" if (after and after[0].isspace()) else " "
-        self.insert_token(f"{lead}{operator}{trail}")
+        def __init__(
+            self,
+            cfg: Any = None,
+            parent: Any = None,
+            *,
+            status_cb: Callable[[str], None] | None = None,
+            directory: Any = None,
+        ) -> None:
+            """建页。
 
-    def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802 - Qt 命名
-        """`Tab` 键插入空格（不跳焦点）。
+            Args:
+                cfg: 配置对象（默认全局单例）；公式目录、`enabled_*`、`watchlist_max`、
+                    `db_path` 都读它。
+                status_cb: 给主窗口显示一句话（标题区的运行状态），不传就只写日志。
+                directory: 公式目录（默认 `formulas_lib.formula_dir()`；测试传 tmp_path）。
+            """
+            super().__init__(parent)
+            self.cfg = cfg if cfg is not None else get_config()
+            self.status_cb = status_cb
+            self.directory = directory
 
-        为什么：写多行公式时 Tab 是想缩进对齐，而 QPlainTextEdit 默认会插入制表符
-        （在不同编辑器里宽度不一样，粘贴到别处就歪）；跳焦点更糟 ——
-        用户正在打的公式会跑到名称框里。
-        """
-        if obj is self.editor and event.type() == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Tab:
-                cursor = self.editor.textCursor()
-                cursor.insertText(TAB_SPACES)
-                self.editor.setTextCursor(cursor)
-                return True
-        return super().eventFilter(obj, event)
+            #: 目录里的公式（`FormulaSpec` 列表，顺序 = 文件名顺序）
+            self.specs: list[Any] = []
+            #: 统一列表的行（内置 + 公式，与表格行号一一对应）
+            self.rows: list[StrategyRow] = []
+            #: 右侧面板按钮：{token: QPushButton}（测试按 token 点，不爬布局）
+            self.palette_buttons: dict[str, Any] = {}
+            #: 【试算】的后台线程；跑完置回 None（测试就等这一条来判断"落地了"）
+            self.preview_worker: FormulaWorker | None = None
+            #: 【试算】按下按钮那一刻的公式快照（结果属于它，不属于编辑框里现在的内容）
+            self.preview_formula: Any = None
+            self.hint_text: str = ""
+            #: 内置策略行的勾选框（键 = 类名）与公式行的勾选框（键 = 公式名）。
+            #: **两个字典**而不是一个：公式名与类名理论上可能撞（用户可以把公式
+            #: 命名成 `LowPriceStrategy`），撞了之后"写失败要退回哪个勾"就会错。
+            self._builtin_boxes: dict[str, Any] = {}
+            self._row_boxes: dict[str, Any] = {}
+            #: 载入行时别把"选中变化"当成用户点击，也别让刷列表打开编辑器
+            self._loading = False
+            #: 当前展开的内置策略详情（刷列表后要跟着更新）
+            self._detail_key = ""
+            #: 主窗口交过来的本次结果 `(行情日, [行])`；None = 还没人交过
+            self._pick_result: tuple[Any, list[dict]] | None = None
+            #: 本地库里最近一次建池的结果 `(行情日, [行])`（`_load_result_from_db` 填）
+            self._db_result: tuple[Any, list[dict]] | None = None
+            #: 最终选定的那一份（`_refresh_result` 按"谁更新"决定，见那里的说明）
+            self._chosen_result: tuple[Any, list[dict]] | None = None
+            #: 结果区的渲染数据（`名称(代码)` / 来源 / 代码 / 名称）
+            self.result_rows: list[dict] = []
+            self.result_date: Any = None
 
-    # ── 校验 / 试算 / 成绩单 ──────────────────────────────────────────
-
-    def compile_current(self, *, quiet: bool = False) -> Any:
-        """编译编辑框里的公式；失败时把**中文原文**写进提示区并返回 None。"""
-        text = self.editor.toPlainText()
-        if not text.strip():
-            if not quiet:
-                self._set_hint("❌ 公式还是空的：点右边的按钮就能插入，或者点【载入示例】")
-            return None
-        try:
-            return fm.compile_formula(text, name=self.name_edit.text().strip())
-        except fm.FormulaError as exc:
-            if not quiet:
-                # 直接取引擎结构化错误里的 `text`（=「第 3 行第 12 列：未知函数 "MAA"
-                # （可用函数：…）」这种中文原文），界面**一个字都不翻译** ——
-                # 引擎已经把行号列号、近似建议、可用清单都写好了，再润色一遍只会
-                # 引入新的不一致。`to_dict()` 里的 line/col 留着给将来"把光标跳到
-                # 出错位置"用。
-                self._set_hint("❌ " + str(exc.to_dict()["text"]))
-            return None
-
-    def on_validate(self) -> None:
-        """【校验】：显示用到的字段/函数/最少 K 线数；错就显示中文行号列号。"""
-        formula = self.compile_current()
-        if formula is None:
-            return
-        lines = [f"✅ 校验通过：{formula.describe()}"]
-        if formula.outputs:
-            lines.append("中间变量：" + "、".join(formula.outputs) + "（:= 只算不输出）")
-        if formula.min_history > 0:
-            lines.append(
-                f"提示：库里的历史不足 {formula.min_history} 根 K 线的票会自动跳过（缺值不产生信号）"
-            )
-        hint = formulas_lib.limit_up_hint(formula)
-        if hint:
-            lines.append("⚠️ " + hint)
-        self._set_hint("\n".join(lines))
-
-    def on_preview(self) -> None:
-        """【试算】：当前库的最近一个交易日能选出几只（名称（代码）格式）。
-
-        **后台线程 + 公式快照**（这一页第二处必须后台化的地方，第一处是成绩单）：
-        试算要逐只票读 K 线并在最后一根上跑公式，真实 3 年库实测 3.7 秒、
-        全市场 5000+ 只要 7~8 秒 —— 在主线程里跑就是"窗口未响应"
-        （用户已经为这件事抱怨过一次，那次是下载路径）。
-
-        为什么先编译一次、再把**同一个公式对象**交给线程：线程跑的是用户按下按钮
-        那一刻看到的公式。他在等待期间接着改编辑框（很常见：边等边琢磨条件），
-        编辑框里的新内容不会把结果污染成"另一条公式的答案"。
-        """
-        formula = self.compile_current()
-        if formula is None:
-            return
-        if self.preview_worker is not None and self.preview_worker.isRunning():
-            # 双击 / 上一次还没跑完又点一次：不动正在跑的那次
-            # （两个线程抢同一个库没有意义，只是白扫一遍）
-            self._set_hint("试算还在跑，请稍候…（跑完会写在这里）")
-            return
-        self.preview_formula = formula
-        self.btn_preview.setEnabled(False)
-        # 先设成"不确定进度"：总共有多少只票要扫，得先走一遍库才知道。
-        # 让进度条先动起来，比"停在 0% 七八秒"让人安心（与成绩单同一立场）。
-        self.progress.setRange(0, 0)
-        self.progress.setFormat("正在试算…")
-        self.progress.setVisible(True)
-        self._set_hint("正在试算…（在后台跑，界面可以继续用）")
-        worker = ScorecardWorker(
-            formulas_lib.preview_hits, formula, self.cfg.db_path, limit=PREVIEW_LIMIT
-        )
-        self.preview_worker = worker
-        worker.finished_ok.connect(self._on_preview_done)
-        worker.failed.connect(self._on_preview_failed)
-        worker.start()
-
-    @staticmethod
-    def _preview_text(formula: Any, result: dict) -> str:
-        """把 `preview_hits` 的返回值拼成提示区那段中文。
-
-        单独一个**纯函数**，是为了让"结果长什么样"与"它在哪个线程跑"解耦：
-        这次改造只是把计算挪到后台，文案一个字都不该变（用户已经见过这几句话），
-        所以格式化逻辑只此一份，谁调都是同一段文本。
-        """
-        if result["count"]:
-            names = "、".join(
-                f"{hit['name']}（{hit['symbol']}）" for hit in result["hits"]
-            )
-            text = (f"最近交易日 {result['date']} 命中 {result['count']} 只：{names}")
-            if result["count"] > result["shown"]:
-                text += f" …（只列前 {result['shown']} 只）"
-        else:
-            text = (f"最近交易日 {result['date']}：没有命中"
-                    f"（扫了 {result['scanned']} 只，{result['skipped']} 只因数据不足跳过）")
-        hint = formulas_lib.limit_up_hint(formula)
-        if hint:
-            text += "\n⚠️ " + hint
-        if result["errors"]:
-            text += f"\n（{len(result['errors'])} 只票算不出来，已跳过：{result['errors'][0]}）"
-        return text
-
-    def _on_preview_done(self, result: Any) -> None:
-        """试算回来了（回主线程执行）：先收起"正在跑"的样子，再写结果。"""
-        formula = self.preview_formula
-        self._finish_preview()
-        if not isinstance(result, dict):
-            self._set_hint("试算没有返回结果（请重试）")
-            return
-        self._set_hint(self._preview_text(formula, result))
-
-    def _on_preview_failed(self, exc: Any) -> None:
-        """试算失败：**数据问题**与**程序问题**分开说（下一步动作完全不同）。
-
-        注：这里的两句话与改造前的同步版本**逐字一致**。`failed` 递过来的是异常
-        对象（不是一句话），正是为了在这里用 `isinstance` 分清这两种情况 ——
-        工作线程不该替界面决定措辞。
-        """
-        self._finish_preview()
-        if isinstance(exc, fm.FormulaDataError):
-            # 库不存在/读不出来：这不是公式写错了，说清楚下一步
-            self._set_hint("❌ " + str(exc))
-        else:
-            self._set_hint(f"❌ 试算失败：{type(exc).__name__}: {exc}")
-
-    def _finish_preview(self) -> None:
-        """【试算】收尾：把按钮还回来、收掉进度条、放掉线程引用。
-
-        为什么"等它真的退出"再放引用：`finished_ok`/`failed` 是**跨线程排队**投递的，
-        在工作线程 `run()` 返回之前就可能已经排到主线程执行了；这时丢掉最后一个引用，
-        QThread 对象会在"线程还没真正结束"时就析构 —— Qt 会
-        `QThread: Destroyed while thread is still running` 直接把进程干掉。
-        线程此刻已经在收尾，`wait()` 只等几毫秒，比留一堆线程对象在 `self` 上干净。
-        """
-        worker = self.preview_worker
-        self.btn_preview.setEnabled(True)
-        self.progress.setVisible(False)
-        if worker is not None:
-            if worker.isRunning():
-                worker.wait(THREAD_JOIN_MS)
-            self.preview_worker = None
-
-    def on_scorecard(self) -> None:
-        """【看成绩单】：后台线程跑历史成绩单（**不卡界面**）。"""
-        formula = self.compile_current()
-        if formula is None:
-            return
-        if self.scorecard_worker is not None and self.scorecard_worker.isRunning():
-            self._set_hint("成绩单还在算，请稍候…")
-            return
-        if not self.scorecard_text:
-            self._set_hint("正在后台算成绩单…（数据多的时候要几十秒，界面可以继续用）")
-        self.scorecard_result = None
-        self.progress.setVisible(True)
-        # 先设成"不确定进度"：总分是多少要扫一遍库才知道，
-        # 让进度条先动起来，比"停在 0% 几十秒"让人安心
-        self.progress.setRange(0, 0)
-        self.btn_scorecard.setEnabled(False)
-        worker = ScorecardWorker(
-            formulas_lib.run_scorecard,
-            formula,
-            self.cfg.db_path,
-            with_progress=True,          # `run_scorecard` 收 `progress_cb`，试算不收
-            conv_key=formulas_lib.DEFAULT_CONVENTION_KEY,
-        )
-        self.scorecard_worker = worker
-        worker.progress.connect(self._on_scorecard_progress)
-        worker.finished_ok.connect(self._on_scorecard_done)
-        worker.failed.connect(self._on_scorecard_failed)
-        worker.start()
-
-    def _on_scorecard_progress(self, stage: str, done: int, total: int) -> None:
-        self.progress.setRange(0, max(total, 1))
-        self.progress.setValue(min(done, max(total, 1)))
-        self.progress.setFormat(f"{stage} {done}/{total}")
-
-    def _on_scorecard_done(self, result: Any) -> None:
-        self.btn_scorecard.setEnabled(True)
-        self.progress.setVisible(False)
-        if not isinstance(result, dict):
-            self._set_hint("成绩单没有返回结果（请重试）")
-            return
-        self.scorecard_result = result
-        self.scorecard_text = str(result.get("text") or "")
-        self._set_hint(self.scorecard_text)
-
-    def _on_scorecard_failed(self, exc: Any) -> None:
-        """成绩单失败：把线程递过来的异常写成人话（这句与改造前逐字一致）。"""
-        self.btn_scorecard.setEnabled(True)
-        self.progress.setVisible(False)
-        self._set_hint("❌ 成绩单算不出来：" + f"{type(exc).__name__}: {exc}")
-
-    def on_copy_scorecard(self) -> None:
-        """【复制成绩单】：把完整文本放进剪贴板（提示区只显示前几行）。"""
-        if not self.scorecard_text:
-            self._toast("还没有成绩单可复制：先点【看成绩单】")
-            return
-        clipboard = QApplication.clipboard()
-        if clipboard is not None:
-            clipboard.setText(self.scorecard_text)
-        self._toast("成绩单已复制到剪贴板")
-
-    # ── 保存 / 删除 / 载入 ────────────────────────────────────────────
-
-    def on_save(self) -> None:
-        """【保存】：名称必填；重名先问一句再覆盖。"""
-        raw = self.name_edit.text()
-        problem = formulas_lib.name_error(raw)
-        if problem:
-            # 空名**只用提示区**、不弹窗：这是用户马上能自己改的问题，
-            # 弹一个要点"确定"的框反而多一步（而覆盖是**不可逆**的，才必须拦一下）
-            self._set_hint("❌ " + problem)
-            self.name_edit.setFocus(Qt.FocusReason.OtherFocusReason)
-            return
-        name = formulas_lib.safe_name(raw)
-        path = formulas_lib.formula_path(name, self.directory)
-        if path.exists() and not self._confirm(f"公式「{name}」已存在，要覆盖它吗？\n"
-                                               f"（原来的内容会被替换，不可撤销）"):
-            self._set_hint(f"已取消保存：公式「{name}」保持原样（没有被改动）")
-            self._toast("已取消保存（原公式没有被改动）")
-            return
-        self._write(name)
-
-    def on_save_as(self) -> None:
-        """【另存为】：换个名字再存一份（原文件不动）。"""
-        default = formulas_lib.safe_name(self.name_edit.text()) or "新公式"
-        text, ok = QInputDialog.getText(self, "另存为", "新公式名称：", text=default)
-        if not ok:
-            return
-        problem = formulas_lib.name_error(text)
-        if problem:
-            self._set_hint("❌ " + problem)
-            return
-        name = formulas_lib.safe_name(text)
-        path = formulas_lib.formula_path(name, self.directory)
-        if path.exists() and not self._confirm(f"公式「{name}」已存在，要覆盖它吗？"):
-            self._set_hint(f"已取消另存为：公式「{name}」保持原样")
-            self._toast("已取消另存为")
-            return
-        self._write(name)
-
-    def on_delete(self) -> None:
-        """【删除】：删掉当前公式（先确认）。"""
-        name = self.current_name()
-        if not name:
-            self._set_hint("❌ 请先在下面的列表里选一条公式（或填上名称）")
-            return
-        if not self._confirm(f"确定删除公式「{name}」吗？\n（文件会被删掉，不可撤销）"):
-            return
-        try:
-            deleted = formulas_lib.delete_formula(name, self.directory)
-        except OSError as exc:
-            self._set_hint(f"❌ 删除失败：{exc}（文件可能正被其它程序占用）")
-            return
-        if deleted:
-            self.name_edit.clear()
-            self.editor.clear()
+            self._build_ui()
             self.reload()
-            self._set_hint(f"🗑 已删除公式「{name}」")
-        else:
-            self._set_hint(f"❌ 没找到公式「{name}」的文件")
 
-    def _write(self, name: str) -> None:
-        """真正落盘（名称已安全化、覆盖已确认）。"""
-        body = self.editor.toPlainText()
-        try:
-            path = formulas_lib.save_formula(name, body, directory=self.directory)
-        except ValueError as exc:
-            self._set_hint("❌ " + str(exc))
-            return
-        except OSError as exc:
-            self._set_hint(f"❌ 保存失败：{exc}（公式目录可能没有写权限，"
-                           "可以把程序放到有写权限的目录）")
-            return
-        # 把安全化后的名字回显：用户填 `涨/跌` 时看到的是 `涨_跌`，
-        # 与磁盘上的文件名一致（否则他会以为"我存的名字怎么不见了"）
-        self.name_edit.setText(name)
-        self.reload()
-        self.select_row(name)
-        self._set_hint(
-            f"✅ 已保存「{name}」（{len(body)} 字符）\n"
-            f"文件：{path}\n"
-            "想让它参与每天的选股，就在下面那一行勾上「参与选股」。"
-        )
-        self._toast(f"公式「{name}」已保存")
+        # ── 界面搭建 ──────────────────────────────────────────────────
 
-    def on_load_sample(self) -> None:
-        """【载入示例】：给小白一个**能跑通**的起点。"""
-        sample = None
-        for spec in formulas_lib.formula_files(self.directory):
-            if spec.ok and (sample is None or spec.name == SAMPLE_NAME):
-                sample = spec
-                if spec.name == SAMPLE_NAME:
-                    break
-        if sample is not None:
-            self.name_edit.setText(sample.name)
-            self.editor.setPlainText(sample.source)
-            self._set_hint(
-                f"已载入示例公式「{sample.name}」。\n"
-                "点【校验】看看它用到什么，点【试算】看它在你的库里能选出几只。"
+        def _build_ui(self) -> None:
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(14, 14, 14, 12)
+            layout.setSpacing(8)
+
+            # ── 顶部一行：【策略编辑】【开始选股】 + 一句灰字说明 ──
+            #
+            # 为什么操作按钮在这一页而不是标题区：改版方案的原则是"标题区不再放操作按钮，
+            # 数据在「系统设置」、选股在「策略选股」" —— 点下去会发生什么，在这一页看得见。
+            top = QHBoxLayout()
+            self.btn_edit = QPushButton("策略编辑")
+            self.btn_edit.setToolTip(
+                "打开公式编辑器：左边写公式、右边点按钮插入（点列表里的公式行也会打开它）"
             )
-        else:
-            self.name_edit.setText(SAMPLE_NAME)
-            self.editor.setPlainText(SAMPLE_TEXT)
-            self._set_hint(
-                "已载入内置示例公式（公式目录里还没有示例文件，这是兜底的那条）。\n"
-                "点【校验】→【试算】，再点【保存】就存到你的公式目录里了。"
+            # 用 lambda 吞掉 `clicked` 带来的 checked 参数：直接接 `on_open_editor`
+            # 的话那个 `False` 会被当成 spec 传进去（Qt 的经典坑，本文件里所有
+            # 带参数的槽都这么接）
+            self.btn_edit.clicked.connect(lambda _checked=False: self.on_open_editor())
+            top.addWidget(self.btn_edit)
+
+            self.btn_start_pick = QPushButton("开始选股")
+            self.btn_start_pick.setObjectName("primaryAction")   # 主操作按钮（主题精确命中）
+            self.btn_start_pick.setToolTip(
+                "按上面勾选的策略与公式跑一轮：结果直接进「自选股池」，"
+                "并按「系统设置」里的通知方式发一条消息"
             )
-        self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
+            self.btn_start_pick.clicked.connect(self.on_start_pick)
+            top.addWidget(self.btn_start_pick)
 
-    # ── 已保存公式列表 ────────────────────────────────────────────────
+            self.page_hint = QLabel(PAGE_HINT)
+            self.page_hint.setObjectName("statusTag")      # 小号灰字（与状态区同一档）
+            self.page_hint.setWordWrap(True)
+            top.addWidget(self.page_hint, 1)
+            layout.addLayout(top)
 
-    def reload(self) -> None:
-        """重建"已保存公式"列表（名称 / 说明 / 状态 / 参与选股）。"""
-        self.specs = formulas_lib.formula_files(self.directory)
-        runtime = formula_group.last_status()
-        enabled = set(str(n) for n in (getattr(self.cfg, "enabled_formulas", None) or []))
-        self.table.setRowCount(len(self.specs))
-        self._row_boxes = {}
-        for row, spec in enumerate(self.specs):
-            name_item = QTableWidgetItem(spec.name)
-            name_item.setToolTip(spec.path)
-            self.table.setItem(row, 0, name_item)
-            desc_item = QTableWidgetItem(spec.description or "—")
-            if spec.description:
-                desc_item.setToolTip(spec.description)
-            self.table.setItem(row, 1, desc_item)
+            splitter = QSplitter(Qt.Orientation.Vertical)
+            splitter.setChildrenCollapsible(False)
+            splitter.addWidget(self._build_list_side())
+            splitter.addWidget(self._build_bottom_stack())
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 1)
+            self.splitter = splitter
+            layout.addWidget(splitter, 1)
 
-            status_item = QTableWidgetItem(self._status_text(spec, runtime))
-            if not spec.ok:
-                status_item.setToolTip(spec.error_text)
-            elif spec.name in runtime:
-                status_item.setToolTip(runtime[spec.name])
-            self.table.setItem(row, 2, status_item)
+            # ── 提示区（多行、可复制）──
+            #
+            # 为什么放在**页面最下面**（而不是编辑器里）：校验/试算/保存/勾选的消息
+            # 都要看得见 —— 用户把编辑器收起来之后，消息还留在屏幕上；
+            # 而"提示区在编辑器里"时，收起来就什么都看不到了（用户会以为没反应）。
+            self.hint_label = QLabel("")
+            self.hint_label.setWordWrap(True)
+            self.hint_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            )
+            self.hint_label.setMinimumHeight(40)
+            self.hint_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            layout.addWidget(self.hint_label)
 
-            box = QCheckBox()
-            box.setChecked(spec.name in enabled)
-            box.setToolTip(
-                "勾上 = 这条公式参与每天的选股（写回 config.toml 的 enabled_formulas）；"
+            # 编辑器 / 内置详情默认都收起来：用户给定的是"点击打开策略编辑器"
+            self.bottom_stack.setVisible(False)
+
+        def _build_list_side(self) -> Any:
+            """上半：策略列表（名称 | 备注 | 状态） + 「本次选股结果」区。"""
+            side = QWidget()
+            layout = QVBoxLayout(side)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+
+            self.list_hint = QLabel(LIST_HINT)
+            self.list_hint.setObjectName("statusTag")
+            self.list_hint.setWordWrap(True)
+            layout.addWidget(self.list_hint)
+
+            self.table = QTableWidget(0, len(LIST_COLUMNS))
+            self.table.setHorizontalHeaderLabels(list(LIST_COLUMNS))
+            self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+            self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.table.customContextMenuRequested.connect(self.on_context_menu)
+            header = self.table.horizontalHeader()
+            # 名称/状态窄一点（它们内容短），备注吃掉剩下的宽度（证据那句话最长）
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            self._set_header_tooltip(0, "策略/公式的名字。内置策略的中文名来自 strategy/rules.py")
+            self._set_header_tooltip(1, "证据或说明：内置策略写它的实测证据（代码里的字段，界面不编数字）；"
+                                        "自定义公式写公式文件里的「# 说明:」")
+            self._set_header_tooltip(2, "勾上 = 参与选股。内置策略写回 config.toml 的 "
+                                        "enabled_groups + enabled_strategies；公式写回 enabled_formulas")
+            self.table.itemSelectionChanged.connect(self.on_row_selected)
+            layout.addWidget(self.table, 1)
+
+            layout.addWidget(self._build_result_box())
+            return side
+
+        def _set_header_tooltip(self, column: int, text: str) -> None:
+            """给表头写 tooltip（用户不用翻文档就知道这一列是什么口径）。"""
+            item = self.table.horizontalHeaderItem(column)
+            if item is not None:
+                item.setToolTip(text)
+
+        def _build_result_box(self) -> Any:
+            """「本次选股结果」区：一句话结论 + 命中的票 + 【全部加为自选】。
+
+            为什么放在这一页：用户点完【开始选股】最想知道的两件事是
+            "选出来没有"和"选出来的票在哪" —— 前者是一句话，后者是清单。
+            这些票**已经在自选股池里**（建池那一步做的），这里的清单是"这一轮是哪几条
+            策略/公式选出来的"，而【全部加为自选】是把它们**长期**留在自选股池表里
+            （池子按行情日重算，自选是用户自己的，不会跟着没了）。
+            """
+            box = QGroupBox("本次选股结果（选出来的票已经在「自选股池」里）")
+            box.setVisible(False)
+            layout = QVBoxLayout(box)
+            layout.setSpacing(6)
+
+            self.result_summary = QLabel("")
+            self.result_summary.setWordWrap(True)
+            layout.addWidget(self.result_summary)
+
+            self.result_table = QTableWidget(0, len(RESULT_COLUMNS))
+            self.result_table.setHorizontalHeaderLabels(list(RESULT_COLUMNS))
+            self.result_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.result_table.setMaximumHeight(RESULT_MAX_HEIGHT)
+            header = self.result_table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            layout.addWidget(self.result_table)
+
+            row = QHBoxLayout()
+            self.btn_add_all = QPushButton("全部加为自选")
+            self.btn_add_all.setToolTip(
+                "把这些票写进「自选股池」（只写本地库，不联网）：它们以后即使不进池，"
+                "也留在自选股池表里；已经在自选里的不会重复添加"
+            )
+            self.btn_add_all.clicked.connect(self.on_add_all_to_watchlist)
+            row.addWidget(self.btn_add_all)
+            self.result_hint = QLabel("")
+            self.result_hint.setObjectName("statusTag")
+            self.result_hint.setWordWrap(True)
+            row.addWidget(self.result_hint, 1)
+            layout.addLayout(row)
+
+            self.result_box = box
+            return box
+
+        def _build_bottom_stack(self) -> Any:
+            """下半：一叠两张 —— 公式编辑器 / 内置策略只读详情（同时只显示一张）。"""
+            stack = QStackedWidget()
+            stack.addWidget(self._build_editor_page())
+            stack.addWidget(self._build_detail_page())
+            self.bottom_stack = stack
+            return stack
+
+        def _build_editor_page(self) -> Any:
+            """编辑器整页：一行说明 + 左右分栏（左边编辑、右边点选面板）。"""
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+
+            head = QHBoxLayout()
+            self.editor_hint = QLabel(EDITOR_HINT)
+            self.editor_hint.setObjectName("statusTag")
+            self.editor_hint.setWordWrap(True)
+            head.addWidget(self.editor_hint, 1)
+            self.btn_sample = QPushButton("载入示例")
+            self.btn_sample.setToolTip("把一条能跑通的示例公式放进编辑框，照着改就行")
+            self.btn_sample.clicked.connect(self.on_load_sample)
+            head.addWidget(self.btn_sample)
+            self.btn_close_editor = QPushButton("收起编辑器")
+            self.btn_close_editor.setToolTip("收起这一块（公式已经保存的不会丢）")
+            self.btn_close_editor.clicked.connect(self.on_close_panel)
+            head.addWidget(self.btn_close_editor)
+            layout.addLayout(head)
+
+            splitter = QSplitter(Qt.Orientation.Horizontal)
+            splitter.setChildrenCollapsible(False)
+            splitter.addWidget(self._build_editor_side())
+            splitter.addWidget(self._build_palette_side())
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 0)
+            self.editor_splitter = splitter
+            layout.addWidget(splitter, 1)
+            self.editor_page = page
+            return page
+
+        def _build_detail_page(self) -> Any:
+            """内置策略的只读详情页（**可选中复制** + 一个【复制】按钮）。"""
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+
+            head = QHBoxLayout()
+            self.detail_title = QLabel("")
+            head.addWidget(self.detail_title, 1)
+            self.btn_copy_detail = QPushButton("复制")
+            self.btn_copy_detail.setToolTip("把这份详情复制到剪贴板（贴到记事本/群里都行）")
+            self.btn_copy_detail.clicked.connect(self.on_copy_detail)
+            head.addWidget(self.btn_copy_detail)
+            self.btn_close_detail = QPushButton("关闭")
+            self.btn_close_detail.setToolTip("收起详情")
+            self.btn_close_detail.clicked.connect(self.on_close_panel)
+            head.addWidget(self.btn_close_detail)
+            layout.addLayout(head)
+
+            # 只读 QPlainTextEdit 而不是 QLabel：内置策略的说明是**多段长文本**，
+            # 只有文本控件才能整段选中复制（QLabel 只能一小段一小段选）
+            self.detail_view = QPlainTextEdit()
+            self.detail_view.setReadOnly(True)
+            self.detail_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+            layout.addWidget(self.detail_view, 1)
+            self.detail_text = ""
+            self.detail_page = page
+            return page
+
+        def _build_editor_side(self) -> Any:
+            """左侧：名称 + 备注 + 编辑框 + 按钮行 + 进度条。"""
+            side = QWidget()
+            layout = QVBoxLayout(side)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(8)
+
+            # ── 名称 + 备注 + 三个文件按钮 ──
+            name_row = QHBoxLayout()
+            name_row.addWidget(QLabel("公式名称："))
+            self.name_edit = QLineEdit()
+            self.name_edit.setPlaceholderText("例如：5日线上放量")
+            self.name_edit.setToolTip("这就是保存后的文件名，也是池子/推送里显示的名字")
+            name_row.addWidget(self.name_edit, 1)
+
+            self.btn_save = QPushButton("保存")
+            self.btn_save.setObjectName("primaryAction")     # 主操作按钮（主题里精确命中）
+            self.btn_save.setToolTip("把编辑框里的公式存到公式目录（重名会先问一句）")
+            self.btn_save.clicked.connect(self.on_save)
+            name_row.addWidget(self.btn_save)
+
+            self.btn_save_as = QPushButton("另存为")
+            self.btn_save_as.setToolTip("换一个名字再存一份（原来的那份不动）")
+            self.btn_save_as.clicked.connect(self.on_save_as)
+            name_row.addWidget(self.btn_save_as)
+
+            self.btn_delete = QPushButton("删除")
+            self.btn_delete.setToolTip("删掉当前这条公式文件（会先问一句；内置策略不能删）")
+            self.btn_delete.clicked.connect(self.on_delete)
+            name_row.addWidget(self.btn_delete)
+            layout.addLayout(name_row)
+
+            note_row = QHBoxLayout()
+            note_row.addWidget(QLabel("备注："))
+            self.note_edit = QLineEdit()
+            self.note_edit.setPlaceholderText("这条公式是干什么的（可留空 —— 留空则自动填「用到的字段/函数」）")
+            self.note_edit.setToolTip(
+                "会写进公式文件的「# 说明:」注释头，列表的「备注」列显示的就是它；"
+                f"最长 {MAX_NOTE_CHARS} 字，不能换行（注释头只有一行）"
+            )
+            note_row.addWidget(self.note_edit, 1)
+            layout.addLayout(note_row)
+
+            # ── 编辑框 ──
+            self.editor = QPlainTextEdit()
+            self.editor.setPlaceholderText(
+                "在这里写公式，例如：\nM5:=MA(C,5)\nC>M5 AND V>MA(V,5)*1.5"
+            )
+            self.editor.setMinimumHeight(EDITOR_MIN_HEIGHT)
+            self.editor.setTabChangesFocus(False)
+            # 等宽字体：公式里的括号与逗号要能对齐，"哪一层括号"才看得出来
+            font = QFont()
+            font.setStyleHint(QFont.StyleHint.Monospace)
+            font.setFamily("Consolas")
+            font.setFixedPitch(True)
+            self.editor.setFont(font)
+            # Tab 插入空格而不是切焦点（见 `TAB_SPACES` 的说明）
+            self.editor.installEventFilter(self)
+            layout.addWidget(self.editor, 1)
+
+            # ── 动作行 ──
+            action_row = QHBoxLayout()
+            self.btn_validate = QPushButton("校验")
+            self.btn_validate.setToolTip("检查公式写得对不对；通过时会告诉你用到哪些字段/函数")
+            self.btn_validate.clicked.connect(self.on_validate)
+            action_row.addWidget(self.btn_validate)
+
+            self.btn_preview = QPushButton("试算：当前库能选出几只")
+            self.btn_preview.setToolTip("不推送、不写库，只看看最近一个交易日命中几只")
+            self.btn_preview.clicked.connect(self.on_preview)
+            action_row.addWidget(self.btn_preview)
+            action_row.addStretch(1)
+            layout.addLayout(action_row)
+
+            # ── 进度条（只在试算时出现）──
+            self.progress = QProgressBar()
+            self.progress.setVisible(False)
+            self.progress.setRange(0, 100)
+            layout.addWidget(self.progress)
+            return side
+
+        def _build_palette_side(self) -> Any:
+            """右侧：**点一下就输入**的三组按钮（变量 / 函数 / 运算符）。
+
+            用 `QGroupBox` 而不是 `QToolBox`：折叠起来之后，小白会以为"函数不见了"——
+            三组一起看得见、函数多了就滚动，才是"所有东西都在右边"的本意。
+            """
+            panel = QWidget()
+            panel.setFixedWidth(PANEL_WIDTH)
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(0, 0, 0, 0)
+            panel_layout.setSpacing(6)
+
+            title = QLabel("点一下，就插到光标那里")
+            title.setObjectName("statusTag")
+            panel_layout.addWidget(title)
+
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            inner = QWidget()
+            inner_layout = QVBoxLayout(inner)
+            inner_layout.setContentsMargins(0, 0, 0, 0)
+            inner_layout.setSpacing(8)
+            for name, items in (("变量", VARIABLES), ("函数", FUNCTIONS), ("运算符", OPERATORS)):
+                inner_layout.addWidget(self._build_group(name, items))
+            inner_layout.addStretch(1)
+            scroll.setWidget(inner)
+            panel_layout.addWidget(scroll, 1)
+            self.palette_panel = panel
+            return panel
+
+        def _build_group(self, title: str, items: Sequence[tuple[str, str, int | None]]) -> Any:
+            """一组按钮（两列网格）。每个按钮一个中文 tooltip（是什么 + 一个例子）。"""
+            box = QGroupBox(title)
+            grid = QGridLayout(box)
+            grid.setSpacing(4)
+            for index, (token, tip, args) in enumerate(items):
+                button = QPushButton(token)
+                button.setToolTip(tip)
+                button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                # 运算符里的 `AND`/`OR`/`NOT` 走 `insert_operator`（要自动补空格），
+                # 其余（变量、短运算符、函数）都走 `insert_token`。
+                # 用默认参数把 token 绑进 lambda：循环变量在闭包里是**延迟求值**的，
+                # 不绑的话所有按钮都会插入最后一个 token（经典坑）
+                if args is None and token in _SPACED_OPERATORS:
+                    button.clicked.connect(
+                        lambda _checked=False, text=token: self.insert_operator(text)
+                    )
+                else:
+                    button.clicked.connect(
+                        lambda _checked=False, text=token, count=args: self.insert_token(
+                            text, args=count
+                        )
+                    )
+                grid.addWidget(button, index // 2, index % 2)
+                self.palette_buttons[token] = button
+            return box
+
+        # ── 点选插入 ──────────────────────────────────────────────────
+
+        def insert_token(self, token: str, args: int | None = None) -> None:
+            """把 `token` 插到**当前光标处**（函数会带上 `()` 并把光标放进括号里）。
+
+            `args=None` = 原样插入（变量、短运算符）；`args` 是数字 = 函数骨架，
+            `0` 表示无参函数（光标落在 `)` 之后），`>0` 表示把光标放进括号里。
+
+            **为什么必须在光标处插入，而不是追加到末尾**（这一页最容易做错的一处）：
+            用户修改公式是"边想边改"的 —— 他点了【载入示例】或载入了一条已保存的公式，
+            然后想改**中间那一行**（例如把 `MA(C,5)` 改成 `MA(C,10)`，或往第 2 行加个条件）。
+            如果按钮把 token 追加到末尾，他会看到：公式语法通过、但选出来的票完全不对 ——
+            而且**看不出哪里变了**（末尾多了一个 `AND ...`）。这种"静默改坏"比报错可怕得多。
+            插入到光标处 + 焦点回到编辑框 + 光标停在括号里，才是"点一下就接着打字"的手感；
+            追加到末尾则要用户自己再剪切粘贴一次，那这个面板就白做了。
+            """
+            cursor = self.editor.textCursor()
+            if args is None:
+                cursor.insertText(token)
+            elif args > 0:
+                # 骨架 `NAME()`，再把光标左移一格 → 落在括号里，接着打字就是第一个参数
+                cursor.insertText(f"{token}()")
+                cursor.movePosition(QTextCursor.MoveOperation.Left)
+            else:
+                # 无参函数：`NAME()`，光标停在 `)` 之后（用户接着打 `>=2` 之类）
+                cursor.insertText(f"{token}()")
+            self.editor.setTextCursor(cursor)
+            # 焦点回到编辑框：用户是从右边面板点的按钮，不去抢回来的话
+            # 他接着敲键盘就是在别的控件上输入（一次都输不进去）
+            self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
+
+        def insert_operator(self, operator: str) -> None:
+            """插入运算符；`AND`/`OR`/`NOT` 前后自动补空格。
+
+            为什么要补：`A>1` 后面直接粘 `AND` 会变成 `A>1AND B` —— 这是**语法错误**，
+            而错误提示说的是"未知字段 A>1AND"之类，小白根本看不懂。宁可多一个空格。
+            """
+            if operator not in _SPACED_OPERATORS:
+                self.insert_token(operator)
+                return
+            text = self.editor.toPlainText()
+            position = self.editor.textCursor().position()
+            before, after = text[:position], text[position:]
+            lead = "" if (not before or before[-1].isspace()) else " "
+            trail = "" if (after and after[0].isspace()) else " "
+            self.insert_token(f"{lead}{operator}{trail}")
+
+        def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802 - Qt 命名
+            """`Tab` 键插入空格（不跳焦点）。
+
+            为什么：写多行公式时 Tab 是想缩进对齐，而 QPlainTextEdit 默认会插入制表符
+            （在不同编辑器里宽度不一样，粘贴到别处就歪）；跳焦点更糟 ——
+            用户正在打的公式会跑到名称框里。
+            """
+            if obj is self.editor and event.type() == QEvent.Type.KeyPress:
+                if event.key() == Qt.Key.Key_Tab:
+                    cursor = self.editor.textCursor()
+                    cursor.insertText(TAB_SPACES)
+                    self.editor.setTextCursor(cursor)
+                    return True
+            return super().eventFilter(obj, event)
+
+        # ── 策略列表：重建 / 单击 / 右键菜单 ──────────────────────────
+
+        def reload(self) -> None:
+            """重建统一策略列表（内置 + 公式）与「本次结果」区。
+
+            主窗口在选股完成后会调它（`_on_pipeline_done`），所以这里**绝不碰编辑区**：
+            用户可能正开着编辑器改公式，刷一次列表就把他的草稿换掉是不可接受的
+            （旧版 `reload()` 会顺手选中第一行并载入编辑框 —— 在"列表在上、编辑器按需展开"
+            的布局里那会变成"每次选完股，编辑器自己弹出来并顶掉我在写的东西"）。
+            """
+            self.specs = formulas_lib.formula_files(self.directory)
+            runtime = formula_group.last_status()
+            keep = self.selected_key()
+            self.rows = build_strategy_rows(self.cfg, self.specs, runtime)
+
+            self._loading = True
+            self.table.blockSignals(True)
+            try:
+                self._fill_table()
+            finally:
+                self.table.blockSignals(False)
+                self._loading = False
+
+            self._restore_selection(keep)
+            self._update_list_hint()
+            self._refresh_result()
+
+        def _fill_table(self) -> None:
+            """按 `self.rows` 铺表格（勾选框**先 setChecked 再接信号**）。"""
+            self._builtin_boxes = {}
+            self._row_boxes = {}
+            self.table.setRowCount(len(self.rows))
+            for index, row in enumerate(self.rows):
+                name_item = QTableWidgetItem(row.name)
+                name_item.setToolTip(
+                    f"内置策略（{row.key}）——只能启用/关闭" if row.is_builtin
+                    else f"公式文件：{getattr(row.spec, 'path', '')}"
+                )
+                self.table.setItem(index, 0, name_item)
+
+                note_item = QTableWidgetItem(row.note)
+                if row.note_tip:
+                    note_item.setToolTip(row.note_tip)
+                self.table.setItem(index, 1, note_item)
+
+                box = QCheckBox()
+                box.setChecked(row.enabled)
+                box.setToolTip(self._box_tooltip(row))
+                if row.kind == ROW_FORMULA and row.spec is not None and not row.spec.ok:
+                    # 语法错的公式勾上也跑不了（`formulas.enabled_names()` 会跳过它）：
+                    # 勾选框置灰 + 说明原因，而不是"让用户勾上、然后什么都不发生"
+                    box.setEnabled(False)
+                # **先 setChecked 再接信号**：否则建表时就会触发一次"保存设置"
+                box.stateChanged.connect(
+                    lambda state, r=row: self.set_row_enabled(r.kind, r.key, bool(state))
+                )
+                holder = QWidget()
+                holder_layout = QHBoxLayout(holder)
+                holder_layout.setContentsMargins(0, 0, 0, 0)
+                holder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                holder_layout.addWidget(box)
+                self.table.setCellWidget(index, 2, holder)
+
+                if row.is_builtin:
+                    self._builtin_boxes[row.key] = box
+                else:
+                    self._row_boxes[row.key] = box
+
+        @staticmethod
+        def _box_tooltip(row: StrategyRow) -> str:
+            """勾选框的 tooltip：**勾上会发生什么、写回哪个键**，逐类说清。"""
+            if row.is_builtin:
+                return (
+                    "勾上 = 这条内置策略参与选股（写回 config.toml 的 "
+                    "enabled_groups 与 enabled_strategies 两个键）；取消 = 退出\n"
+                    "内置策略只能启用/关闭，不能修改或删除"
+                )
+            return (
+                "勾上 = 这条公式参与选股（写回 config.toml 的 enabled_formulas）；"
                 "默认不勾 —— 你自己的公式要不要用，由你决定"
             )
-            # **先 setChecked 再接信号**：否则建表时就会触发一次"保存设置"
-            box.stateChanged.connect(
-                lambda state, n=spec.name: self.on_toggle_enabled(n, bool(state))
+
+        def _update_list_hint(self) -> None:
+            """列表上方那句灰字：默认文案；配置里的策略名写错时**把原因说出来**。
+
+            为什么要单独盯这一条：`enabled_groups` 与 `enabled_strategies` 同时非空时
+            取的是**交集**，用户手改 config.toml 时很容易配出"交集为空"——
+            表现是"列表里一个勾都没有、点选股什么都没跑"，而日志在他看不见的地方。
+            """
+            selection = groups.resolve_from_config(self.cfg)
+            if selection.warnings:
+                self.list_hint.setText(
+                    "⚠️ config.toml 里的策略设置有认不出来的名字（这会让勾选与实跑不一致）："
+                    + "；".join(selection.warnings)
+                    + "　改完点【开始选股】前先看一眼勾选是否与预期一致。"
+                )
+                return
+            self.list_hint.setText(LIST_HINT)
+
+        def selected_row(self) -> StrategyRow | None:
+            """当前选中的行（没有选中返回 None）。"""
+            model = self.table.selectionModel()
+            indexes = model.selectedRows() if model is not None else []
+            index = indexes[0].row() if indexes else -1
+            return self.rows[index] if 0 <= index < len(self.rows) else None
+
+        def selected_key(self) -> str:
+            row = self.selected_row()
+            return row.key if row is not None else ""
+
+        def selected_spec(self) -> Any:
+            """当前选中行对应的 `FormulaSpec`（内置策略行 / 没选中的公式 → None）。"""
+            row = self.selected_row()
+            if row is not None and not row.is_builtin:
+                return row.spec
+            # 没有选中行时按名称框找（用户手打了名字、还没保存过的情况）
+            name = self.current_name()
+            for spec in self.specs:
+                if spec.name == name:
+                    return spec
+            return None
+
+        def row_of(self, key: str) -> StrategyRow | None:
+            """按 key（类名 / 公式名）取行。"""
+            for row in self.rows:
+                if row.key == key:
+                    return row
+            return None
+
+        def select_row(self, name: str) -> None:
+            """按名称选中一行（**用户切行时才载入编辑区/展开详情**）。"""
+            for index, row in enumerate(self.rows):
+                if row.key == name:
+                    self.table.selectRow(index)
+                    return
+
+        def _restore_selection(self, key: str) -> None:
+            """刷列表后把选中恢复到原来那一行（**不触发**"打开"动作）。"""
+            if not key:
+                return
+            for index, row in enumerate(self.rows):
+                if row.key == key:
+                    self._loading = True
+                    try:
+                        self.table.selectRow(index)
+                    finally:
+                        self._loading = False
+                    return
+
+        def on_row_selected(self) -> None:
+            """单击一行：内置策略 → **只读详情**；公式 → 载入编辑器（可改可存）。"""
+            if self._loading:
+                return
+            row = self.selected_row()
+            if row is None:
+                return
+            if row.is_builtin:
+                self.show_builtin_detail(row)
+            else:
+                self.on_open_editor(row.spec)
+
+        def show_builtin_detail(self, row: StrategyRow) -> None:
+            """展开某条内置策略的只读详情（条件说明 + 证据 + 当前状态，可复制）。"""
+            self._detail_key = row.key
+            self.detail_title.setText(f"{row.name}（{row.key}）—— 内置策略，只读")
+            self.detail_text = row.detail or builtin_strategy_detail(row.key, self.cfg)
+            self.detail_view.setPlainText(self.detail_text)
+            self.bottom_stack.setCurrentWidget(self.detail_page)
+            self.bottom_stack.setVisible(True)
+            self._set_hint(
+                f"「{row.name}」是内置策略：只能启用/关闭（勾「状态」列，或右键【启用】/【关闭】），"
+                "不能改也不能删。\n"
+                "想按自己的条件来：点【策略编辑】照它写一条公式，保存后勾上「参与选股」。"
             )
-            holder = QWidget()
-            holder_layout = QHBoxLayout(holder)
-            holder_layout.setContentsMargins(0, 0, 0, 0)
-            holder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            holder_layout.addWidget(box)
-            self.table.setCellWidget(row, 3, holder)
-            self._row_boxes[spec.name] = box
-        if self.specs:
-            self.select_row(self.current_name() or self.specs[0].name)
 
-    @staticmethod
-    def _status_text(spec: Any, runtime: dict[str, str]) -> str:
-        """状态列文本：✅ 校验通过 / ❌ 语法错 / ⚠️ 运行时报错（带原因摘要）。"""
-        if not spec.ok:
-            return "❌ " + _one_line(spec.error_text, 80)
-        if spec.name in runtime:
-            return "⚠️ 运行时出错：" + _one_line(runtime[spec.name], 60)
-        return "✅ 校验通过"
+        def on_context_menu(self, pos: Any) -> None:
+            """右键某一行 → 弹菜单（【启用】↔【关闭】/【删除】）。"""
+            index = self.table.indexAt(pos)
+            if not index.isValid():
+                return
+            row_number = index.row()
+            if not (0 <= row_number < len(self.rows)):
+                return
+            # 右键**先把这一行选中**（用户期望"菜单作用于我点的那一行"），
+            # 但**不展开**编辑器/详情：`_loading` 让 `on_row_selected` 直接返回 ——
+            # 否则右键一条公式就会顺手把编辑器顶出来，盖住用户正在看的东西。
+            self._loading = True
+            try:
+                self.table.selectRow(row_number)
+            finally:
+                self._loading = False
+            picked = self.row_menu(self.rows[row_number])
+            self._show_menu(picked.menu, self.table.viewport().mapToGlobal(pos))
 
-    def current_name(self) -> str:
-        """当前选中的公式名（列表选中优先，其次名称框）。"""
-        name = self.name_edit.text().strip()
-        return formulas_lib.safe_name(name)
+        def _show_menu(self, menu: Any, global_pos: Any) -> None:
+            """真正弹菜单。**单独一个方法是为了让测试能拦住它** ——
+            `exec()` 会阻塞事件循环，离屏测试里没有用户去点它，直接把测试挂死。
+            """
+            menu.exec(global_pos)
 
-    def select_row(self, name: str) -> None:
-        """按名称选中一行（**用户切行时才载入编辑区**）。"""
-        for row, spec in enumerate(self.specs):
-            if spec.name == name:
-                self.table.selectRow(row)
+        def row_menu(self, row: StrategyRow) -> RowMenu:
+            """这一行的右键菜单。
+
+            三项规矩（用户逐条点到过）：
+            1. 【启用】↔【关闭】**按当前状态只出现一个**（菜单里同时出现两个，用户会猜
+               "哪个是现在的状态"）；名字写进 `objectName`，测试与调试一眼能看出是谁的菜单；
+            2. 【删除】只对公式有效；内置策略的删除项**置灰并写明"内置策略不可删"**，
+               而不是干脆不出现 —— 右键点开发现"什么都没有"时，用户的第一反应是
+               "程序坏了"，写上理由他立刻明白；
+            3. 菜单动作与勾选框走**同一个入口**（`set_row_enabled`），两处行为不可能不一致。
+            """
+            menu = QMenu(self.table)
+            menu.setObjectName(f"rowMenu:{row.kind}:{row.key}")
+            if row.enabled:
+                toggle = menu.addAction(MENU_DISABLE)
+                toggle.setToolTip(f"让「{row.name}」退出选股（下次【开始选股】不再跑它）")
+            else:
+                toggle = menu.addAction(MENU_ENABLE)
+                toggle.setToolTip(f"让「{row.name}」参与选股（下次【开始选股】就会跑它）")
+                if row.spec is not None and not row.spec.ok:
+                    # 语法错的公式**勾上也跑不了**（`formulas.enabled_names()` 会跳过它），
+                    # 所以"启用"这一项置灰并说明先修公式 —— 而不是让用户勾上之后
+                    # 什么都看不到（那会变成"我勾了公式，池子里却没有"这种最难查的现象）
+                    toggle.setEnabled(False)
+                    toggle.setToolTip(
+                        "这条公式现在编译不过，勾上也不会参与选股：先在编辑器里改好、"
+                        "点【校验】通过，再右键启用"
+                    )
+            toggle.triggered.connect(
+                lambda _checked=False, r=row: self.set_row_enabled(r.kind, r.key, not r.enabled)
+            )
+
+            delete = menu.addAction(MENU_DELETE)
+            if row.is_builtin:
+                delete.setText(MENU_DELETE_BUILTIN)
+                delete.setEnabled(False)
+                delete.setToolTip(
+                    "内置策略写在代码里（strategy/rules.py）：只能启用/关闭，不能删除。"
+                    "想按自己的条件来，就照它写一条公式"
+                )
+            else:
+                delete.setToolTip(f"删掉公式文件「{row.key}」（会先问一句）")
+                delete.triggered.connect(
+                    lambda _checked=False, r=row: self.on_delete_formula(r.key)
+                )
+            return RowMenu(menu=menu, toggle=toggle, delete=delete)
+
+        # ── 「参与选股」写回 config.toml ──────────────────────────────
+
+        def set_row_enabled(self, kind: str, key: str, checked: bool) -> None:
+            """统一的"启用/关闭"入口（勾选框与右键菜单都走这里 → 行为必然一致）。"""
+            if kind == ROW_BUILTIN:
+                self.on_toggle_builtin(key, checked)
+            else:
+                self.on_toggle_enabled(key, checked)
+
+        def on_toggle_builtin(self, class_name: str, checked: bool) -> None:
+            """内置策略的「参与选股」 → 写回 `enabled_groups` + `enabled_strategies`。
+
+            **为什么两个键都写**（这一页最容易踩的坑，实测过一次）：
+            `groups.resolve()` 的规则是"两个键同时非空时取**交集**"，而
+            `enabled_groups` 的出厂值是 `["short"]`。于是：
+
+            * **只写 `enabled_strategies`**：用户勾上「低价股」（swing 组）时，
+              交集 = `["LowPriceStrategy"] ∩ short 的成员` = **空** →
+              `selection.empty` → 整轮选股被跳过。表现是"我明明勾了它，点选股却什么都没选"，
+              而提示只说"没有可跑的策略"，用户根本猜不到是自己勾的那一下写法的问题；
+            * **只写 `enabled_groups`**：勾一条就把**整组**带进来（`short` 组三条没法单独关掉一条），
+              而用户给定的界面是按**条**勾选的。
+
+            所以这里按"用户勾了哪些策略"**同时**算出两个键：
+            组 = 勾上的策略所在的组，策略 = 勾上的那些 —— 交集恒等于用户勾的那一组。
+            全部取消勾选时写 `enabled_groups = ["none"]`：那是 `resolve()` 里明确定义的
+            "只盯自选股"（`explicit_off`）。**不能用空列表** —— 两个键都空在 `resolve()` 里
+            是"全选"这个安全默认，写空会反过来变成"全部策略一起跑"。
+            """
+            from laoa_trader.config import save_settings
+
+            wanted = builtin_enabled(self.cfg)
+            if checked:
+                wanted.add(class_name)
+            else:
+                wanted.discard(class_name)
+
+            order = builtin_order()
+            strategies = [name for name in order if name in wanted]
+            # 认不出来的策略名（用户手写的、或将来新增的）**原样保留**：
+            # 界面这一下改动的是"这 5 条内置策略"，不该顺手把用户写的东西删掉
+            extras = [
+                str(name) for name in (getattr(self.cfg, "enabled_strategies", None) or [])
+                if str(name) not in order
+            ]
+
+            if strategies or extras:
+                group_keys = [
+                    key for key in groups.GROUP_ORDER
+                    if any(groups.group_of(name) == key for name in strategies)
+                ]
+                selection = groups.resolve(group_keys, strategies + extras)
+                if selection.empty:
+                    self._sync_box(ROW_BUILTIN, class_name, not checked)
+                    self._set_hint(
+                        "❌ 这样勾完一条策略都不会跑：" + "；".join(selection.warnings)
+                        + "\n（至少留一条勾着；一条都不想跑就把它们全取消 —— 那时只盯自选股）"
+                    )
+                    return
+                updates: dict[str, Any] = {
+                    "enabled_groups": group_keys,
+                    "enabled_strategies": strategies + extras,
+                }
+            else:
+                updates = {"enabled_groups": [OFF_GROUP_KEY], "enabled_strategies": []}
+
+            try:
+                path, self.cfg = save_settings(self.cfg, updates)
+            except OSError as exc:
+                # 写不进去（只读盘）：把勾选状态**退回去**，免得界面显示的与实际生效的不一致
+                self._sync_box(ROW_BUILTIN, class_name, not checked)
+                self._set_hint(
+                    f"❌ 保存失败：{exc}（可手改 config.toml 的 enabled_groups / enabled_strategies）"
+                )
                 return
 
-    def selected_spec(self) -> Any:
-        """当前选中的 `FormulaSpec`（没有就 None）。"""
-        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
-        index = rows[0].row() if rows else -1
-        if 0 <= index < len(self.specs):
-            return self.specs[index]
-        # 没有选中行时按名称框找（用户手打了名字、还没保存过的情况）
-        name = self.current_name()
-        for spec in self.specs:
-            if spec.name == name:
-                return spec
-        return None
+            self._sync_box(ROW_BUILTIN, class_name, checked)
+            self._refresh_row_states()
+            name = rules_mod.strategy_label(class_name)
+            if checked:
+                self._set_hint(
+                    f"✅ 内置策略「{name}」已参与选股（写回 {path.name}）。\n"
+                    f"enabled_groups={_cfg_list(self.cfg, 'enabled_groups')}　"
+                    f"enabled_strategies={_cfg_list(self.cfg, 'enabled_strategies')}\n"
+                    "两个键必须一起写：`groups.resolve()` 在两者都非空时取交集，"
+                    "只写一个会出现「勾了却不跑」或「关不掉组里的一条」。"
+                )
+                self._toast(f"内置策略「{name}」已参与选股")
+            elif not updates["enabled_strategies"]:
+                self._set_hint(
+                    "已把内置策略**全部关闭**（config.toml 写成 enabled_groups=[\"none\"]）。\n"
+                    "下次【开始选股】只盯自选股 —— 想恢复就把某一条再勾上。"
+                )
+                self._toast("已关闭全部内置策略（只盯自选股）")
+            else:
+                self._set_hint(
+                    f"内置策略「{name}」已退出选股（{path.name} 已更新："
+                    f"enabled_groups={_cfg_list(self.cfg, 'enabled_groups')}）。"
+                )
+                self._toast(f"内置策略「{name}」已退出选股")
 
-    def on_row_selected(self) -> None:
-        """列表选中某一行 → 把那条公式**载入编辑区**（可以直接改、再保存覆盖）。"""
-        if self._loading:
-            return
-        spec = self.selected_spec()
-        if spec is None:
-            return
-        self._loading = True
-        try:
-            self.name_edit.setText(spec.name)
-            self.editor.setPlainText(spec.source)
+        def on_toggle_enabled(self, name: str, checked: bool) -> None:
+            """公式的「参与选股」 → 写回 `enabled_formulas`（保留注释与未知键）。"""
+            from laoa_trader.config import save_settings
+
+            names = [str(n) for n in (getattr(self.cfg, "enabled_formulas", None) or [])]
+            if checked:
+                if name not in names:
+                    names.append(name)
+            else:
+                names = [n for n in names if n != name]
+            try:
+                path, self.cfg = save_settings(self.cfg, {"enabled_formulas": names})
+            except OSError as exc:
+                # 写不进去（只读盘）：把勾选状态**退回去**，免得界面显示的与实际生效的不一致
+                self._sync_box(ROW_FORMULA, name, not checked)
+                self._set_hint(f"❌ 保存失败：{exc}（可手改 config.toml 的 enabled_formulas）")
+                return
+            self._sync_box(ROW_FORMULA, name, checked)
+            self._refresh_row_states()
+            if checked:
+                self._set_hint(
+                    f"✅ 「{name}」已加入选股（写回 {path.name}）。\n"
+                    "下次【开始选股】时它会作为「公式」组参与：进池的票来源会标成"
+                    f"「公式·{name}」。"
+                )
+                self._toast(f"公式「{name}」已参与选股")
+            else:
+                self._set_hint(f"「{name}」已退出选股（{path.name} 里的 enabled_formulas 已更新）")
+                self._toast(f"公式「{name}」已退出选股")
+
+        def _row_box(self, kind: str, key: str) -> Any:
+            folder = self._builtin_boxes if kind == ROW_BUILTIN else self._row_boxes
+            return folder.get(key)
+
+        def _sync_box(self, kind: str, key: str, checked: bool) -> None:
+            """把某一行的勾选框同步成 `checked`（**屏蔽信号**，避免再触发一次写回）。"""
+            box = self._row_box(kind, key)
+            if box is None:
+                return
+            box.blockSignals(True)
+            box.setChecked(checked)
+            box.blockSignals(False)
+
+        def _refresh_row_states(self) -> None:
+            """写回配置之后刷新**行数据**的勾选状态（详情里的"当前状态"也跟着变）。
+
+            为什么不重新 `reload()`：那会把整张表的控件重建一遍，
+            用户/测试手里那个 `QCheckBox` 对象会被销毁
+            （PySide 之后再访问它直接抛 `RuntimeError: Internal C++ object already deleted`）。
+            这里只换行数据 + 刷新正在显示的那份详情。
+
+            内置与公式**都要刷**：右键菜单的文案是"按当前状态只出现【启用】或【关闭】"，
+            行数据不跟着配置走的话，用户右键会看到与事实相反的菜单项
+            （刚勾上它，菜单却说【启用】）。
+            """
+            enabled_builtin = builtin_enabled(self.cfg)
+            enabled_formulas = set(
+                str(n) for n in (getattr(self.cfg, "enabled_formulas", None) or [])
+            )
+            self.rows = [
+                replace(
+                    row,
+                    enabled=(row.key in enabled_builtin if row.is_builtin
+                             else row.key in enabled_formulas),
+                    detail=builtin_strategy_detail(row.key, self.cfg) if row.is_builtin
+                    else row.detail,
+                )
+                for row in self.rows
+            ]
+            if self._detail_key:
+                row = self.row_of(self._detail_key)
+                if row is not None and row.is_builtin:
+                    self.detail_text = row.detail
+                    self.detail_view.setPlainText(row.detail)
+
+        # ── 编译器 / 校验 / 试算 ──────────────────────────────────────
+
+        def on_open_editor(self, spec: Any = None) -> None:
+            """打开公式编辑器（点【策略编辑】按钮，或点列表里的公式行）。"""
+            if spec is not None:
+                self._load_spec(spec)
+            elif not self.editor.toPlainText().strip() and not self.name_edit.text().strip():
+                # 头一次打开且编辑框是空的：给一句"下一步做什么"，不要让用户面对白板
+                self._set_hint(
+                    "照着示例改最快：点【载入示例】；右边按钮点一下就插到光标那里。"
+                )
+            self.bottom_stack.setCurrentWidget(self.editor_page)
+            self.bottom_stack.setVisible(True)
+            self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
+
+        def on_close_panel(self) -> None:
+            """收起下半块（编辑器 / 内置详情）。公式已经保存的不会丢。"""
+            self.bottom_stack.setVisible(False)
+
+        def _load_spec(self, spec: Any) -> None:
+            """把一条公式载入编辑区（名称 + 备注 + 正文）。"""
+            self._loading = True
+            try:
+                self.name_edit.setText(spec.name)
+                self.note_edit.setText(getattr(spec, "description", "") or "")
+                self.editor.setPlainText(spec.source)
+            finally:
+                self._loading = False
             if spec.ok and spec.formula is not None:
                 text = f"已载入「{spec.name}」：{spec.formula.describe()}"
                 hint = formulas_lib.limit_up_hint(spec.formula)
@@ -923,90 +1505,621 @@ class FormulaPage(QWidget):
                                "改完再点【校验】；点【保存】就会覆盖原文件。")
             else:
                 self._set_hint(f"已载入「{spec.name}」")
-        finally:
-            self._loading = False
 
-    def on_toggle_enabled(self, name: str, checked: bool) -> None:
-        """勾选「参与选股」→ **立刻写回 config.toml**（保留注释与未知键）。"""
-        from laoa_trader.config import save_settings
-
-        names = [str(n) for n in (getattr(self.cfg, "enabled_formulas", None) or [])]
-        if checked:
-            if name not in names:
-                names.append(name)
-        else:
-            names = [n for n in names if n != name]
-        try:
-            path, self.cfg = save_settings(self.cfg, {"enabled_formulas": names})
-        except OSError as exc:
-            # 写不进去（只读盘）：把勾选状态**退回去**，免得界面显示的与实际生效的不一致
-            box = getattr(self, "_row_boxes", {}).get(name)
-            if box is not None:
-                box.blockSignals(True)
-                box.setChecked(not checked)
-                box.blockSignals(False)
-            self._set_hint(f"❌ 保存失败：{exc}（可手改 config.toml 的 enabled_formulas）")
-            return
-        if checked:
-            self._set_hint(
-                f"✅ 「{name}」已加入选股（写回 {path.name}）。\n"
-                "下次【选股建池】时它会作为「公式」组参与：进池的票来源会标成"
-                f"「公式·{name}」。"
-            )
-            self._toast(f"公式「{name}」已参与选股")
-        else:
-            self._set_hint(f"「{name}」已退出选股（{path.name} 里的 enabled_formulas 已更新）")
-            self._toast(f"公式「{name}」已退出选股")
-
-    # ── 小工具 ────────────────────────────────────────────────────────
-
-    def _set_hint(self, text: str) -> None:
-        """写提示区（完整文本留一份给测试/复制）。"""
-        self.hint_text = text
-        lines = text.splitlines()
-        if len(lines) > HINT_MAX_LINES:
-            # 成绩单很长：提示区只显示前几行，完整文本在【复制成绩单】里
-            shown = lines[:HINT_MAX_LINES]
-            shown.append(f"…（还有 {len(lines) - HINT_MAX_LINES} 行，点【复制成绩单】拿全文）")
-            text = "\n".join(shown)
-        self.hint_label.setText(text)
-
-    def _toast(self, text: str) -> None:
-        """一句话提示：优先交给主窗口显示在状态栏，没有就只写日志。"""
-        logger.info(text)
-        if callable(self.status_cb):
+        def compile_current(self, *, quiet: bool = False) -> Any:
+            """编译编辑框里的公式；失败时把**中文原文**写进提示区并返回 None。"""
+            text = self.editor.toPlainText()
+            if not text.strip():
+                if not quiet:
+                    self._set_hint("❌ 公式还是空的：点右边的按钮就能插入，或者点【载入示例】")
+                return None
             try:
-                self.status_cb(text)
-            except Exception:  # noqa: BLE001 - 回调出错不该影响这一页
-                logger.debug("公式页状态回调出错", exc_info=True)
+                return fm.compile_formula(text, name=self.name_edit.text().strip())
+            except fm.FormulaError as exc:
+                if not quiet:
+                    # 直接取引擎结构化错误里的 `text`（=「第 3 行第 12 列：未知函数 "MAA"
+                    # （可用函数：…）」这种中文原文），界面**一个字都不翻译** ——
+                    # 引擎已经把行号列号、近似建议、可用清单都写好了，再润色一遍只会
+                    # 引入新的不一致。`to_dict()` 里的 line/col 留着给将来"把光标跳到
+                    # 出错位置"用。
+                    self._set_hint("❌ " + str(exc.to_dict()["text"]))
+                return None
 
-    def _confirm(self, question: str) -> bool:
-        """二次确认（覆盖/删除）。**可被 monkeypatch**（测试里模拟点"是"）。"""
-        answer = QMessageBox.question(
-            self,
-            "确认",
-            question,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        return answer == QMessageBox.StandardButton.Yes
+        def on_validate(self) -> None:
+            """【校验】：显示用到的字段/函数/最少 K 线数；错就显示中文行号列号。"""
+            formula = self.compile_current()
+            if formula is None:
+                return
+            lines = [f"✅ 校验通过：{formula.describe()}"]
+            if formula.outputs:
+                lines.append("中间变量：" + "、".join(formula.outputs) + "（:= 只算不输出）")
+            if formula.min_history > 0:
+                lines.append(
+                    f"提示：库里的历史不足 {formula.min_history} 根 K 线的票会自动跳过（缺值不产生信号）"
+                )
+            hint = formulas_lib.limit_up_hint(formula)
+            if hint:
+                lines.append("⚠️ " + hint)
+            self._set_hint("\n".join(lines))
+
+        def on_preview(self) -> None:
+            """【试算】：当前库的最近一个交易日能选出几只（名称（代码）格式）。
+
+            **后台线程 + 公式快照**：试算要逐只票读 K 线并在最后一根上跑公式，
+            真实 3 年库实测 3.7 秒、全市场 5000+ 只要 7~8 秒 —— 在主线程里跑就是
+            "窗口未响应"（用户已经为这件事抱怨过一次，那次是下载路径）。
+
+            为什么先编译一次、再把**同一个公式对象**交给线程：线程跑的是用户按下按钮
+            那一刻看到的公式。他在等待期间接着改编辑框（很常见：边等边琢磨条件），
+            编辑框里的新内容不会把结果污染成"另一条公式的答案"。
+            """
+            formula = self.compile_current()
+            if formula is None:
+                return
+            if self.preview_worker is not None and self.preview_worker.isRunning():
+                # 双击 / 上一次还没跑完又点一次：不动正在跑的那次
+                # （两个线程抢同一个库没有意义，只是白扫一遍）
+                self._set_hint("试算还在跑，请稍候…（跑完会写在这里）")
+                return
+            self.preview_formula = formula
+            self.btn_preview.setEnabled(False)
+            # 先设成"不确定进度"：总共有多少只票要扫，得先走一遍库才知道。
+            # 让进度条先动起来，比"停在 0% 七八秒"让人安心。
+            self.progress.setRange(0, 0)
+            self.progress.setFormat("正在试算…")
+            self.progress.setVisible(True)
+            self._set_hint("正在试算…（在后台跑，界面可以继续用）")
+            worker = FormulaWorker(
+                formulas_lib.preview_hits, formula, self.cfg.db_path, limit=PREVIEW_LIMIT
+            )
+            self.preview_worker = worker
+            worker.finished_ok.connect(self._on_preview_done)
+            worker.failed.connect(self._on_preview_failed)
+            worker.start()
+
+        @staticmethod
+        def _preview_text(formula: Any, result: dict) -> str:
+            """把 `preview_hits` 的返回值拼成提示区那段中文。
+
+            单独一个**纯函数**，是为了让"结果长什么样"与"它在哪个线程跑"解耦：
+            后台化只该换线程，不该换文案（用户已经见过这几句话），
+            所以格式化逻辑只此一份，谁调都是同一段文本。
+            """
+            if result["count"]:
+                # 标的写法与全项目一致：**半角** `名称(代码)`（改版方案第四节），
+                # 与「自选股池」表格、推送正文、错误信息里的写法逐字相同
+                names = "、".join(
+                    f"{hit['name']}({hit['symbol']})" for hit in result["hits"]
+                )
+                text = (f"最近交易日 {result['date']} 命中 {result['count']} 只：{names}")
+                if result["count"] > result["shown"]:
+                    text += f" …（只列前 {result['shown']} 只）"
+            else:
+                text = (f"最近交易日 {result['date']}：没有命中"
+                        f"（扫了 {result['scanned']} 只，{result['skipped']} 只因数据不足跳过）")
+            hint = formulas_lib.limit_up_hint(formula)
+            if hint:
+                text += "\n⚠️ " + hint
+            if result["errors"]:
+                text += f"\n（{len(result['errors'])} 只票算不出来，已跳过：{result['errors'][0]}）"
+            return text
+
+        def _on_preview_done(self, result: Any) -> None:
+            """试算回来了（回主线程执行）：先收起"正在跑"的样子，再写结果。"""
+            formula = self.preview_formula
+            self._finish_preview()
+            if not isinstance(result, dict):
+                self._set_hint("试算没有返回结果（请重试）")
+                return
+            self._set_hint(self._preview_text(formula, result))
+
+        def _on_preview_failed(self, exc: Any) -> None:
+            """试算失败：**数据问题**与**程序问题**分开说（下一步动作完全不同）。
+
+            注：这里的两句话与改造前的同步版本**逐字一致**。`failed` 递过来的是异常
+            对象（不是一句话），正是为了在这里用 `isinstance` 分清这两种情况 ——
+            工作线程不该替界面决定措辞。
+            """
+            self._finish_preview()
+            if isinstance(exc, fm.FormulaDataError):
+                # 库不存在/读不出来：这不是公式写错了，说清楚下一步
+                self._set_hint("❌ " + str(exc))
+            else:
+                self._set_hint(f"❌ 试算失败：{type(exc).__name__}: {exc}")
+
+        def _finish_preview(self) -> None:
+            """【试算】收尾：把按钮还回来、收掉进度条、放掉线程引用。
+
+            为什么"等它真的退出"再放引用：`finished_ok`/`failed` 是**跨线程排队**投递的，
+            在工作线程 `run()` 返回之前就可能已经排到主线程执行了；这时丢掉最后一个引用，
+            QThread 对象会在"线程还没真正结束"时就析构 —— Qt 会
+            `QThread: Destroyed while thread is still running` 直接把进程干掉。
+            线程此刻已经在收尾，`wait()` 只等几毫秒，比留一堆线程对象在 `self` 上干净。
+            """
+            worker = self.preview_worker
+            self.btn_preview.setEnabled(True)
+            self.progress.setVisible(False)
+            if worker is not None:
+                if worker.isRunning():
+                    worker.wait(THREAD_JOIN_MS)
+                self.preview_worker = None
+
+        # ── 保存 / 另存为 / 删除 ──────────────────────────────────────
+
+        def _note_text(self) -> str | None:
+            """备注 → 注释头那一行；空 = None（交给库自动生成"用到的字段/函数"）。
+
+            **换行必须拍平**：`# 说明:` 是注释头的**一行**，写进去一个换行就会让
+            后面那半行不再以 `#` 开头 —— 引擎读文件时把它当成公式正文，
+            用户下次点开这条公式就会看到"未知字段"的报错（而他明明没改过公式）。
+            这种坑在界面上完全看不出来，所以在入口拍平（`" ".join(split())`）。
+            """
+            raw = self.note_edit.text()
+            note = " ".join(raw.split())
+            if not note:
+                return None
+            return note[:MAX_NOTE_CHARS]
+
+        def _note_problem(self) -> str:
+            """备注合不合规（超长直接拒绝，**不静默截断**：用户要能自己决定删什么）。"""
+            note = " ".join(self.note_edit.text().split())
+            if len(note) > MAX_NOTE_CHARS:
+                return (f"备注太长了（{len(note)} 字，最多 {MAX_NOTE_CHARS} 字）："
+                        "它写在公式文件第一行的「# 说明:」注释头里，太长会把公式挤到看不见。")
+            return ""
+
+        def on_save(self) -> None:
+            """【保存】：名称必填；重名先问一句再覆盖。"""
+            raw = self.name_edit.text()
+            problem = formulas_lib.name_error(raw)
+            if problem:
+                # 空名**只用提示区**、不弹窗：这是用户马上能自己改的问题，
+                # 弹一个要点"确定"的框反而多一步（而覆盖是**不可逆**的，才必须拦一下）
+                self._set_hint("❌ " + problem)
+                self.name_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+                return
+            problem = self._note_problem()
+            if problem:
+                self._set_hint("❌ " + problem)
+                self.note_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+                return
+            name = formulas_lib.safe_name(raw)
+            path = formulas_lib.formula_path(name, self.directory)
+            if path.exists() and not self._confirm(f"公式「{name}」已存在，要覆盖它吗？\n"
+                                                   f"（原来的内容会被替换，不可撤销）"):
+                self._set_hint(f"已取消保存：公式「{name}」保持原样（没有被改动）")
+                self._toast("已取消保存（原公式没有被改动）")
+                return
+            self._write(name)
+
+        def on_save_as(self) -> None:
+            """【另存为】：换个名字再存一份（原文件不动）。"""
+            default = formulas_lib.safe_name(self.name_edit.text()) or "新公式"
+            text, ok = QInputDialog.getText(self, "另存为", "新公式名称：", text=default)
+            if not ok:
+                return
+            problem = formulas_lib.name_error(text)
+            if problem:
+                self._set_hint("❌ " + problem)
+                return
+            problem = self._note_problem()
+            if problem:
+                self._set_hint("❌ " + problem)
+                return
+            name = formulas_lib.safe_name(text)
+            path = formulas_lib.formula_path(name, self.directory)
+            if path.exists() and not self._confirm(f"公式「{name}」已存在，要覆盖它吗？"):
+                self._set_hint(f"已取消另存为：公式「{name}」保持原样")
+                self._toast("已取消另存为")
+                return
+            self._write(name)
+
+        def on_delete(self) -> None:
+            """【删除】按钮：删掉**当前**这条公式（先确认）。"""
+            name = self.current_name()
+            if not name:
+                self._set_hint("❌ 请先在上面列表里选一条公式（或填上名称）——内置策略不能删")
+                return
+            self.on_delete_formula(name)
+
+        def on_delete_formula(self, name: str) -> None:
+            """删除一条公式文件（右键菜单与【删除】按钮共用，**先二次确认**）。"""
+            if not name:
+                return
+            if not self._confirm(f"确定删除公式「{name}」吗？\n（公式文件会被删掉，不可撤销）"):
+                self._set_hint(f"已取消删除：公式「{name}」还在")
+                return
+            try:
+                deleted = formulas_lib.delete_formula(name, self.directory)
+            except OSError as exc:
+                self._set_hint(f"❌ 删除失败：{exc}（文件可能正被其它程序占用）")
+                return
+            if not deleted:
+                self._set_hint(f"❌ 没找到公式「{name}」的文件")
+                return
+            if self.current_name() == name:
+                # 删掉的正是编辑区里这条：把编辑区清空，免得用户以为"它还在、只是没保存"
+                self._loading = True
+                try:
+                    self.name_edit.clear()
+                    self.note_edit.clear()
+                    self.editor.clear()
+                finally:
+                    self._loading = False
+            self.reload()
+            self._set_hint(f"🗑 已删除公式「{name}」（文件已从公式目录移除）")
+            self._toast(f"公式「{name}」已删除")
+
+        def _write(self, name: str) -> None:
+            """真正落盘（名称已安全化、覆盖已确认）。"""
+            body = self.editor.toPlainText()
+            note = self._note_text()
+            try:
+                path = formulas_lib.save_formula(
+                    name, body, description=note, directory=self.directory
+                )
+            except ValueError as exc:
+                self._set_hint("❌ " + str(exc))
+                return
+            except OSError as exc:
+                self._set_hint(f"❌ 保存失败：{exc}（公式目录可能没有写权限，"
+                               "可以把程序放到有写权限的目录）")
+                return
+            # 把安全化后的名字、最终写进文件的备注都回显：用户填 `涨/跌` 时看到的是
+            # `涨_跌`，备注留空时看到的是自动生成的那句"用到的字段/函数" ——
+            # 他看到的与磁盘上的一致（否则他会以为"我存的东西怎么不见了"）
+            self.name_edit.setText(name)
+            saved = next((s for s in formulas_lib.formula_files(self.directory)
+                          if s.name == name), None)
+            if saved is not None:
+                self.note_edit.setText(saved.description or "")
+            self.reload()
+            self.select_row(name)
+            self._set_hint(
+                f"✅ 已保存「{name}」（{len(body)} 字符）\n"
+                f"文件：{path}\n"
+                "想让它参与选股，就在上面「状态」列勾上它。"
+            )
+            self._toast(f"公式「{name}」已保存")
+
+        def on_load_sample(self) -> None:
+            """【载入示例】：给小白一个**能跑通**的起点。"""
+            self.bottom_stack.setCurrentWidget(self.editor_page)
+            self.bottom_stack.setVisible(True)
+            sample = None
+            for spec in formulas_lib.formula_files(self.directory):
+                if spec.ok and (sample is None or spec.name == SAMPLE_NAME):
+                    sample = spec
+                    if spec.name == SAMPLE_NAME:
+                        break
+            if sample is not None:
+                self.name_edit.setText(sample.name)
+                self.note_edit.setText(getattr(sample, "description", "") or "")
+                self.editor.setPlainText(sample.source)
+                self._set_hint(
+                    f"已载入示例公式「{sample.name}」。\n"
+                    "点【校验】看看它用到什么，点【试算】看它在你的库里能选出几只。"
+                )
+            else:
+                self.name_edit.setText(SAMPLE_NAME)
+                self.note_edit.clear()
+                self.editor.setPlainText(SAMPLE_TEXT)
+                self._set_hint(
+                    "已载入内置示例公式（公式目录里还没有示例文件，这是兜底的那条）。\n"
+                    "点【校验】→【试算】，再点【保存】就存到你的公式目录里了。"
+                )
+            self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
+
+        # ── 本次选股结果 / 加自选 ────────────────────────────────────
+
+        def show_pick_result(self, rows: Any = None, *, data_date: str | None = None) -> None:
+            """主窗口在选股完成后调用：把本轮结果摆进「本次选股结果」区。
+
+            参数**两种都认**（主窗口手上有什么就给什么）：
+
+            * `run_daily()` 的 report（dict）→ 取 `report["pool"]` 与 `report["data_date"]`；
+            * 行列表：每行要有 `symbol`，以及 `strategy`/`strategies`（「来源策略」列靠它，
+              没有来源的行会被当成"纯自选"过滤掉）。
+
+            不传（`None`）时退回"读本地库最近一次建池的结果"（见 `_load_result_from_db`）——
+            这样即使主窗口没接线，用户跑完选股切回这一页也能看到结果，而不是空白。
+            """
+            if rows is None:
+                self._pick_result = None
+                self._refresh_result()
+                return
+            if isinstance(rows, dict):
+                report = rows
+                data_date = data_date or report.get("data_date")
+                rows = report.get("pool") or []
+            # 只留**选出来的票**（带 strategy/strategies 的行）：池子里还有"纯自选"
+            # 的行（那是用户自己加的，没有来源策略可写），把它们混进"本次选股结果"
+            # 会让用户以为"这些也是选出来的"。与本地库兜底（`_load_result_from_db`）
+            # 用同一条规则，两条路的结果才可能一致。
+            picked = [
+                self._result_row(r) for r in (rows or [])
+                if r.get("symbol") and str(r.get("strategy") or r.get("strategies") or "")
+            ]
+            self._pick_result = (data_date, picked)
+            # 走 `_refresh_result()` 而不是直接 `_render_result()`：本地库里可能已经
+            # 有**更新**的一次建池（另一个入口刚跑过），选择规则只此一处
+            self._refresh_result()
+
+        def _refresh_result(self) -> None:
+            """决定结果区显示哪一份数据，然后画出来。
+
+            **两份候选**：主窗口交过来的（`show_pick_result`，含它刚跑完那一轮的行情日）
+            与本地库里最近一次建池（`stock_pool`）。选择规则：
+
+            1. 本地库里有**更新**的行情日 → 以本地库为准（可能是别的入口又跑了一轮：
+               CLI、定时任务；界面不能一直显示上一轮的旧名单）；
+            2. 否则用主窗口交过来的那一份（它更"新鲜"，还带着推送/过滤的上下文）；
+            3. 主窗口没交过（没接线 / 用户刚打开这一页）→ 本地库。
+
+            为什么要读本地库这一步：`stock_pool` 是"这一轮选出来的票"唯一落库的地方
+            （建池那一步写进去的），而自选股池页展示的就是它 —— 让这一页读同一个来源，
+            用户在这两处看到的名单就不可能不一致。
+            """
+            self._load_result_from_db()
+            pinned = self._pick_result
+            fresh = self._db_result or (None, [])
+            if pinned is None:
+                chosen = fresh
+            elif pinned[0] and fresh[0] and str(fresh[0]) > str(pinned[0]):
+                chosen = fresh
+            else:
+                chosen = pinned
+            self._chosen_result = chosen
+            self._render_result()
+
+        def _load_result_from_db(self) -> None:
+            try:
+                # 延迟导入：`pool` 会拉起策略/因子那一串（这一页只在需要时才碰它）
+                from laoa_trader import pool as pool_mod
+
+                rows = pool_mod.pool_table_rows(self.cfg.db_path)
+            except Exception as exc:  # noqa: BLE001 - 读不到就当"还没有结果"，不该拦住界面
+                logger.debug(f"读取最近一次选股结果失败：{exc}")
+                self._db_result = (None, [])
+                return
+            picked = [self._result_row(r) for r in rows if str(r.get("strategy") or "")]
+            day = rows[0].get("date") if rows else None
+            self._db_result = (day, picked)
+
+        @staticmethod
+        def _result_row(row: dict) -> dict:
+            """池子行 → 结果区的一行。
+
+            `strategies` 在库里是逗号拼的类名（`ReversalStrategy,DryUpExpansionStrategy`），
+            这里翻成中文名显示（`短期反转、地量后放量变盘`）；`公式·xxx` 的合成名原样显示
+            （`rules.strategy_label()` 会把它当类名去掉 `Strategy` 后缀，
+            用户给公式起名 `我的Strategy` 时会被吃掉两个字 —— 所以公式名单独走一条路）。
+            """
+            symbol = str(row.get("symbol") or "")
+            name = str(row.get("name") or "") or symbol
+            raw = str(row.get("strategies") or row.get("strategy") or "")
+            keys = [part for part in raw.split(",") if part]
+            labels = [
+                key if groups.is_formula_strategy(key) else rules_mod.strategy_label(key)
+                for key in keys
+            ]
+            return {
+                "symbol": symbol,
+                "name": name,
+                # 半角 `名称(代码)`：与「自选股池」表格、推送正文同一套写法（改版方案第四节）
+                "text": f"{name}({symbol})",
+                "label": "、".join(labels) or "—",
+                "is_formula": any(groups.is_formula_strategy(key) for key in keys),
+            }
+
+        def _render_result(self) -> None:
+            """把当前选定的那份结果画到结果区（没有结果就整块收起来）。"""
+            date, picked = self._chosen_result or (None, [])
+            self.result_rows = [dict(row) for row in picked]
+            self.result_date = date
+            if not self.result_rows:
+                self.result_box.setVisible(False)
+                self.btn_add_all.setEnabled(False)
+                return
+
+            total = len(self.result_rows)
+            formula_rows = sum(1 for row in self.result_rows if row["is_formula"])
+            strategies = total - formula_rows
+            where = f"行情日 {date}" if date else "最近一次选股"
+            self.result_summary.setText(
+                f"✅ {where}：共选出 {total} 只（内置策略 {strategies} · 公式 {formula_rows}）"
+                "，它们已经在「自选股池」里。\n"
+                "想让它们**长期**留着（池子按行情日重算，自选不会）：点【全部加为自选】。"
+            )
+            self.result_table.setRowCount(total)
+            for index, row in enumerate(self.result_rows):
+                name_item = QTableWidgetItem(row["text"])
+                name_item.setToolTip(f"{row['name']}（{row['symbol']}）")
+                self.result_table.setItem(index, 0, name_item)
+                source_item = QTableWidgetItem(row["label"])
+                source_item.setToolTip("这条票是哪条策略/公式选出来的：" + row["label"])
+                self.result_table.setItem(index, 1, source_item)
+            self.result_box.setVisible(True)
+            self.btn_add_all.setEnabled(True)
+
+        def on_add_all_to_watchlist(self) -> None:
+            """【全部加为自选】：把本次结果的票写进 `watchlist`（**只写本地库，不联网**）。
+
+            三条口径，与 `pool.merge_watchlist()` 保持一致：
+
+            1. **不重复添加**：已经在自选表里的代码直接跳过（`upsert_watchlist` 本身幂等，
+               但我们也不去动用户的备注 —— 他给自己那只票写过什么，不该被这一下改掉）；
+            2. **尊重 `watchlist_max`**：上限只数**启用**的自选（与池子那边同一口径），
+               满了就**明确说**"还有哪几只没加进去、怎么解决"，绝不静默丢；
+            3. **保留来源**：新加的票在备注里写上"选股来源：<策略/公式>"——
+               池子重算后它们会离开池子，备注是这几只票"当初为什么在这"的唯一线索。
+            """
+            if not self.result_rows:
+                self._set_hint("❌ 「本次选股结果」还是空的：先点【开始选股】跑一轮")
+                return
+            from laoa_trader.data import storage
+
+            limit = max(int(getattr(self.cfg, "watchlist_max", 0) or 0), 0)
+            try:
+                with storage.connect(self.cfg.db_path) as conn:
+                    existing = storage.load_watchlist(conn, enabled_only=False)
+                    enabled_count = sum(1 for row in existing if int(row.get("enabled", 1)) == 1)
+                    known = {str(row["symbol"]) for row in existing}
+                    fresh = [row for row in self.result_rows if row["symbol"] not in known]
+                    room = max(limit - enabled_count, 0)
+                    added: list[dict] = []
+                    skipped: list[dict] = []
+                    for row in fresh:
+                        if len(added) >= room:
+                            skipped.append(row)
+                            continue
+                        storage.upsert_watchlist(
+                            conn, row["symbol"], name=row["name"],
+                            note=f"选股来源：{row['label']}",
+                        )
+                        added.append(row)
+            except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，不让按钮把界面带走
+                self._set_hint(f"❌ 加自选失败：{type(exc).__name__}: {exc}")
+                return
+
+            already = len(self.result_rows) - len(fresh)
+            if added:
+                lines = [
+                    f"✅ 已加 {len(added)} 只进「自选股池」"
+                    f"（现在共 {enabled_count + len(added)} 只自选，上限 {limit}）。"
+                ]
+            else:
+                # 一只都没加（全都已经在自选里、或上限已经满了）：**别写"已加 0 只"**
+                # 那种像是没生效的话，直接把真实情况说出来
+                lines = [
+                    f"ℹ️ 这次没有新增自选（现在共 {enabled_count} 只自选，上限 {limit}）："
+                    + ("都已经在自选里了。" if already else "自选已到上限。")
+                ]
+            if already:
+                lines.append(f"（其中有 {already} 只本来就在自选里，没有重复添加）")
+            if skipped:
+                names = "、".join(row["text"] for row in skipped[:5])
+                more = f" 等 {len(skipped)} 只" if len(skipped) > 5 else ""
+                lines.append(
+                    f"⚠️ 还有 {len(skipped)} 只因自选股上限（watchlist_max={limit}）**没有加入**："
+                    f"{names}{more}。\n"
+                    "  可以把上限调大（「系统设置」的自选股上限，或 config.toml 的 watchlist_max），"
+                    "或先在「自选股池」里删掉几只，再点一次这个按钮。"
+                )
+            self._set_hint("\n".join(lines))
+            self.result_hint.setText(
+                f"本轮 {len(self.result_rows)} 只：已加 {len(added)} 只"
+                + (f"、超额未加 {len(skipped)} 只" if skipped else "")
+                + (f"、本来就有 {already} 只" if already else "")
+            )
+            if added:
+                self._toast(
+                    f"已把 {len(added)} 只加进自选股池"
+                    + (f"（{len(skipped)} 只超过上限未加）" if skipped else "")
+                )
+            else:
+                self._toast("这批票都已经在自选股池里了（没有重复添加）")
+
+        # ── 小工具 ────────────────────────────────────────────────────
+
+        def current_name(self) -> str:
+            """当前编辑中的公式名（名称框内容；已做文件名安全化）。"""
+            return formulas_lib.safe_name(self.name_edit.text().strip())
+
+        def _set_hint(self, text: str) -> None:
+            """写提示区（完整文本留一份给测试/复制）。"""
+            self.hint_text = text
+            lines = text.splitlines()
+            if len(lines) > HINT_MAX_LINES:
+                # 太长的提示（多行错误、命中清单）：提示区只显示前几行，完整文本在
+                # `self.hint_text`（可选中复制），免得把下面的列表挤出屏幕
+                shown = lines[:HINT_MAX_LINES]
+                shown.append(f"…（还有 {len(lines) - HINT_MAX_LINES} 行没显示）")
+                text = "\n".join(shown)
+            self.hint_label.setText(text)
+
+        def _toast(self, text: str) -> None:
+            """一句话提示：优先交给主窗口显示在标题区的运行状态，没有就只写日志。"""
+            logger.info(text)
+            if callable(self.status_cb):
+                try:
+                    self.status_cb(text)
+                except Exception:  # noqa: BLE001 - 回调出错不该影响这一页
+                    logger.debug("公式页状态回调出错", exc_info=True)
+
+        def on_start_pick(self) -> None:
+            """【开始选股】：**只举手**（emit `start_pick_requested`）。
+
+            为什么这一页不自己跑选股：整条流程（数据闸门 → 增量 → 策略 → 公式 → 建池 →
+            推送 → 落库）都住在 `scheduler.run_daily()`，主窗口负责进度条与状态显示；
+            这一页要是自己调一遍，就会出现两套流程、两套状态、两套错误处理
+            （而且"这一页没跑数据闸门"会安静地跑出一个错的池子）。
+            主窗口把这个信号接到 `on_run_pipeline`，跑完再调 `reload()` 刷列表。
+            """
+            self._toast("开始选股：正在按勾选的策略与公式跑一轮…")
+            self.start_pick_requested.emit()
+
+        def on_copy_detail(self) -> None:
+            """【复制】：把内置策略详情放进剪贴板（贴到记事本/群里都行）。"""
+            if not self.detail_text:
+                self._toast("还没有可复制的详情：先在上面点一条内置策略")
+                return
+            clipboard = QApplication.clipboard()
+            if clipboard is not None:
+                clipboard.setText(self.detail_text)
+            self._toast("详情已复制到剪贴板")
+
+        def _confirm(self, question: str) -> bool:
+            """二次确认（覆盖/删除）。**可被 monkeypatch**（测试里模拟点"是"）。"""
+            answer = QMessageBox.question(
+                self,
+                "确认",
+                question,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            return answer == QMessageBox.StandardButton.Yes
 
 
-def _one_line(text: str, limit: int) -> str:
-    """多行错误压成一行（列表里只放得下一行；全文在 tooltip 与提示区）。"""
+def _one_line(text: Any, limit: int) -> str:
+    """多行文本压成一行（表格里只放得下一行；全文在 tooltip 与提示区）。"""
     flat = " ".join(str(text or "").split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 __all__ = [
+    "EDITOR_HINT",
     "FUNCTIONS",
     "FormulaPage",
+    "FormulaWorker",
+    "HINT_MAX_LINES",
+    "LIST_COLUMNS",
+    "LIST_HINT",
+    "MAX_NOTE_CHARS",
+    "MENU_DELETE",
+    "MENU_DELETE_BUILTIN",
+    "MENU_DISABLE",
+    "MENU_ENABLE",
+    "OFF_GROUP_KEY",
     "OPERATORS",
     "PAGE_HINT",
     "PANEL_WIDTH",
+    "PREVIEW_LIMIT",
+    "RESULT_COLUMNS",
+    "ROW_BUILTIN",
+    "ROW_FORMULA",
+    "RowMenu",
     "SAMPLE_NAME",
     "SAMPLE_TEXT",
-    "ScorecardWorker",
+    "StrategyRow",
     "TAB_SPACES",
+    "THREAD_JOIN_MS",
     "VARIABLES",
+    "build_strategy_rows",
+    "builtin_enabled",
+    "builtin_order",
+    "builtin_strategy_detail",
+    "builtin_strategy_note",
+    "builtin_strategy_tip",
+    "formula_row_note",
 ]

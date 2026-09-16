@@ -70,6 +70,25 @@ class FakeClient:
         return []
 
 
+
+@pytest.fixture(autouse=True)
+def _no_live_quotes(monkeypatch: pytest.MonkeyPatch):
+    """实时快照一律换成假的：界面测试不做任何真实外呼。
+
+    为什么显式换掉（socket 层已经会拒）：交易时段里跑测试时，主窗口会按配置去取
+    "现价"——被 socket 层拦下会变成一条**报错日志**，那是"报错"而不是"安静地不取"。
+    换成记录用的假函数之后，这一路在测试里就是确定性的空数据，
+    表格退回本地收盘价（带 `*` 标记），断言与几点钟跑测试无关。
+    """
+    from laoa_trader.ui import quotes as quotes_mod
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        quotes_mod, "fetch_snapshot_prices",
+        lambda cfg, symbols, *, client=None: calls.append(list(symbols)) or {},
+    )
+    return calls
+
 def _row(symbol: str, *, pct: float, ratio: float = 3.0, amount: float = 2e7,
          unmatched: float = 1000.0, name: str = "样本") -> dict:
     """一条竞价快照行（字段名照抄真实接口）。"""
@@ -377,6 +396,36 @@ def test_scan_one_batch_failure_does_not_stop_the_rest(cfg, monkeypatch, nopause
     assert scan["scanned"] == 250                        # 250 只照常交给扫描（分 3 批）
 
 
+def test_scan_drops_positions_with_monitor_off(cfg, nopause) -> None:
+    """持仓上关掉监控的票：竞价扫描照常取数，但**不推它**（它不再产生任何盘中提醒）。
+
+    为什么不禁掉取数：取数是按 100 只一批的整批请求（剔掉一两只不省一个请求），
+    而用户右键【关闭监控】真正要的是"别再提醒我" —— 所以过滤放在评分之前、
+    并把它计入 `skipped["已关闭监控"]`（过滤原因要看得见，不能凭空少几只）。
+    """
+    _seed(cfg, ["600001", "600002"])
+    with storage.connect(cfg.db_path) as conn:
+        storage.upsert_position(conn, "600002", name="样本600002", avg_cost=10.0,
+                                reopen=True)
+        assert storage.set_position_monitor(conn, "600002", False) is True
+
+    scan = it.auction_scan(
+        FakeClient(rows=[_row("600001", pct=4.0), _row("600002", pct=5.0)]),
+        db_path=cfg.db_path, cfg=cfg, now=MORNING, slot="09:20",
+    )
+    assert [hit["symbol"] for hit in scan["hits"]] == ["600001"]
+    assert scan["skipped"].get("已关闭监控") == 1
+    assert "600002" not in scan["title"] + "".join(scan["lines"])
+    # 打开监控 → 它回到结果里（开关双向）
+    with storage.connect(cfg.db_path) as conn:
+        storage.set_position_monitor(conn, "600002", True)
+    scan = it.auction_scan(
+        FakeClient(rows=[_row("600001", pct=4.0), _row("600002", pct=5.0)]),
+        db_path=cfg.db_path, cfg=cfg, now=MORNING, slot="09:20",
+    )
+    assert {hit["symbol"] for hit in scan["hits"]} == {"600001", "600002"}
+
+
 # ── 落库与展示 ──
 
 
@@ -433,10 +482,10 @@ def test_summary_message_format(cfg, nopause) -> None:
     ])
     scan = it.auction_scan(client, db_path=cfg.db_path, cfg=cfg, now=CLOSE_SLOT, slot="09:25")
     assert scan["title"] == "⚡ 竞价扫描（9:25）｜共命中 3 只，推送前 3："
-    assert scan["lines"][0].startswith("1. 创业板甲（300001） 创业板 +5.21% ")
+    assert scan["lines"][0].startswith("1. 创业板甲(300001) 创业板 +5.21% ")
     assert "（分6）" in scan["lines"][0]
     assert len(scan["lines"]) == 3
-    assert scan["lines"][2].startswith("3. 主板丙（600001） 主板 ")
+    assert scan["lines"][2].startswith("3. 主板丙(600001) 主板 ")
     assert "卖盘剩余900手" in scan["lines"][2]
     # 没有命中时标题仍然说得清（0 只），正文为空
     empty_title, empty_lines = it.auction_summary_message([], [], slot="09:20")
@@ -475,8 +524,8 @@ def test_scan_result_feeds_the_detail_dialog(cfg, nopause) -> None:
         text = "\n".join(lines)
         assert "竞价扫描（2026-09-15 09:25）共命中 3 只" in text
         assert "★ = 已推送前 2 只" in text
-        assert "创业板甲（300001） 创业板 +5.00%" in text
-        assert "主板甲（600001）" in text and "（池内）" in text
+        assert "创业板甲(300001) 创业板 +5.00%" in text
+        assert "主板甲(600001)" in text and "（池内）" in text
         stars = [line for line in lines[1:] if line.strip().startswith("★")]
         assert len(stars) == 2                          # 前 2 只标星
         assert "设置页" not in text                      # 有结果时不显示"去哪儿开"
@@ -486,6 +535,7 @@ def test_scan_result_feeds_the_detail_dialog(cfg, nopause) -> None:
         window._market_timer.stop()
         window._auction_timer.stop()
         window.scheduler.stop()
+        window.quotes.stop()          # 实时快照的工作线程也要收
         window.tray.hide()
         window.close()
         window.deleteLater()
@@ -509,6 +559,7 @@ def test_detail_dialog_explains_when_there_is_no_scan_yet(cfg) -> None:
         window._market_timer.stop()
         window._auction_timer.stop()
         window.scheduler.stop()
+        window.quotes.stop()          # 实时快照的工作线程也要收
         window.tray.hide()
         window.close()
         window.deleteLater()
@@ -545,6 +596,7 @@ def settings_window(cfg, tmp_path):
         window._market_timer.stop()
         window._auction_timer.stop()
         window.scheduler.stop()
+        window.quotes.stop()          # 实时快照的工作线程也要收
         window.tray.hide()
         window.close()
         window.deleteLater()

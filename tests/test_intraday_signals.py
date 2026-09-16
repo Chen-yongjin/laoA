@@ -384,7 +384,7 @@ def test_auction_scan_summary_line_format(cfg, monkeypatch) -> None:
     ])
     scan = it.auction_scan(client, db_path=cfg.db_path, cfg=cfg, now=AUCTION_NOW, slot="09:25")
     first = scan["lines"][0]
-    assert first.startswith("1. 创业板样本（300001） 创业板 +5.21% 量比3.20 ")
+    assert first.startswith("1. 创业板样本(300001) 创业板 +5.21% 量比3.20 ")
     assert "成交额2.1亿" in first and "买盘剩余3,400手" in first and "（分6）" in first
     assert "卖盘剩余800手" in scan["lines"][1]
     assert "科创板" in scan["lines"][1]
@@ -660,7 +660,8 @@ def test_new_intraday_config_defaults_and_fallback(cfg) -> None:
     assert fresh.intraday_auction is False
     assert fresh.auction_min_pct == 2.0
     assert fresh.auction_min_volume_ratio == 2.0
-    assert fresh.intraday_anomaly is True
+    # 当日异动**默认关**（用户拍板：减少无用消息）——能力都在，想要就打开
+    assert fresh.intraday_anomaly is False
     assert fresh.anomaly_alert_tags == []
 
     bad = Config(auction_min_pct=0, auction_min_volume_ratio=-1,
@@ -928,6 +929,7 @@ def test_run_once_pushes_t_hint_once_per_day(cfg, monkeypatch) -> None:
     换一天（次日）会重新发 —— 所以这里连"次日再发一次"一起钉住。
     """
     monkeypatch.setenv("INTRADAY_POOL_ONLY", "1")
+    cfg.intraday_t = True          # 做T**默认关**（用户拍板）；这条验的是它的整条链路
     _t_pos(cfg)
     _t_day(cfg, (T_DAY, "2026-09-17"))
     client = FakeClient(snapshots=[_t_snap(last=12.34, high=12.78, low=12.05, prev=12.0,
@@ -973,6 +975,7 @@ def test_run_once_watches_held_symbols_outside_the_pool(cfg, monkeypatch) -> Non
     from laoa_trader import pool as pool_mod
 
     monkeypatch.setenv("INTRADAY_POOL_ONLY", "1")
+    cfg.intraday_t = True          # 做T**默认关**（用户拍板）；这条验的是"持仓票也要盯"
     _t_pos(cfg, "600009", name="在手票")
     pool_mod.save_pool(cfg.db_path, [{"symbol": "600001", "name": "池内票", "score": 1.0,
                                       "strategy": "ReversalStrategy"}], T_DAY)

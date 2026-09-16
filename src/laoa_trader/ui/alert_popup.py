@@ -68,10 +68,11 @@ FOOT_TEXT = "点任意一条看详情；鼠标停在这里不会自动消失"
 
 
 def row_text(item: dict) -> str:
-    """浮窗里一行提醒的文本：`名称（代码）  类型  价格`。
+    """浮窗里一行提醒的文本：`名称(代码)  类型  价格`。
 
-    与推送文本、主窗口「盘中提醒」页**同一套写法**（`名称（代码）` 那种全角括号），
-    用户在三处看到的标的是同一个样子 —— 不需要在脑子里做格式映射。
+    与推送文本、主窗口两张表的「提醒」列**同一套写法**（**半角**括号 `名称(代码)`，
+    见 `docs/改版方案.md` 第四节）：用户在三处看到的标的是同一个样子 ——
+    不需要在脑子里做格式映射。
     """
     target = str(item.get("target") or item.get("symbol") or "").strip() or "—"
     kind = str(item.get("kind_label") or item.get("kind") or "").strip()
@@ -194,7 +195,7 @@ class AlertPopup(QFrame):
         outer.addLayout(buttons)
 
     def _rebuild_rows(self) -> None:
-        """按 `self._items` 重建行按钮（文本 = `名称（代码） 类型 价格`）。"""
+        """按 `self._items` 重建行按钮（文本 = `名称(代码) 类型 价格`）。"""
         while self._rows_layout.count():
             item = self._rows_layout.takeAt(0)
             widget = item.widget()
@@ -238,7 +239,7 @@ class AlertPopup(QFrame):
         """把新提醒并进浮窗并弹出来（已有内容则**合并**，不新开窗口）。
 
         Args:
-            items: 新的提醒（每条的 `target` 已由调用方拼好 `名称（代码）`）。
+            items: 新的提醒（每条的 `target` 已由调用方拼好 `名称(代码)`）。
 
         Returns:
             真的弹了 → True；`items` 是空的 → False（**不弹空浮窗**）。

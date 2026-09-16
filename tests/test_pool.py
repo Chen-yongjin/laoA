@@ -96,7 +96,7 @@ def test_format_pool_lines() -> None:
         {"name": "甲", "symbol": "600001", "strategies": "LowPriceStrategy,ReversalStrategy",
          "reason": "低价股"},
     ])
-    assert lines == ["1. 甲（600001）低价股、短期反转｜低价股"]
+    assert lines == ["1. 甲(600001)低价股、短期反转｜低价股"]
 
 
 def test_push_tag_translates_but_keeps_custom_names() -> None:
@@ -216,3 +216,87 @@ def test_save_pool_is_idempotent(db) -> None:
     pool.save_pool(db, rows, "2026-09-11")
     with storage.connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0] == 1
+
+
+# ── 「来源」列：**哪条策略**选出来的（不是组别）──
+#
+# 用户给定的口径（`docs/改版方案.md` 第八节第 5 条）：这一列要回答"是哪条策略"，
+# 而不是"哪一组"；组别/持有期 + 其余策略名 + 证据标记全进行 tooltip（列数被定死成 6 列）。
+
+
+def test_source_label_names_the_strategy_not_the_group() -> None:
+    """四种来源各是什么文本：`策略·X` / `公式·X` / `自选` / `策略·X+自选`。"""
+    builtin = {"strategy": "ReversalStrategy", "strategies": "ReversalStrategy"}
+    formula = {"strategy": "公式·放量上攻", "strategies": "公式·放量上攻"}
+    manual = {"strategy": "", "strategies": "", "watchlist": True}
+
+    assert pool.source_label(builtin, None) == "策略·短期反转"
+    # 第二个内置策略（另一组的）名字也要对：不能拿组名冒充
+    assert pool.source_label({"strategy": "LowPriceStrategy",
+                              "strategies": "LowPriceStrategy"}, None) == "策略·低价股"
+    # 公式保持现状：合成名本身就是"哪条公式"
+    assert pool.source_label(formula, None) == "公式·放量上攻"
+    assert pool.source_label(manual, None) == "自选"
+    # 两者都有 → 后面接 `+自选`（用户给定的写法，没有空格）
+    assert pool.source_label(builtin, {"enabled": 1}) == "策略·短期反转+自选"
+    # 组别**不再**出现在这一列里
+    assert "T+3" not in pool.source_label(builtin, None)
+    assert "短线" not in pool.source_label(builtin, None)
+
+
+def test_strategy_names_falls_back_to_the_primary_column() -> None:
+    """老库的行只有 `strategy`、`strategies` 是空的 → 来源与推送标签都不能退化成"自选"。
+
+    `strategies` 是后加的列；缺了它就写"自选"，会把策略标的说成手工加的票 ——
+    那是最难查的一类错（用户会以为策略没选到它）。
+    """
+    row = {"strategy": "ReversalStrategy", "strategies": ""}
+    assert pool.strategy_names(row) == ["短期反转"]
+    assert pool.push_tag(row) == "短期反转"
+    assert pool.source_label(row, None) == "策略·短期反转"
+    lines = pool.format_pool_lines([{**row, "name": "甲", "symbol": "600001",
+                                     "reason": "短期反转"}])
+    assert lines == ["1. 甲(600001)短期反转｜短期反转"]
+
+
+def test_source_detail_lines_list_group_and_other_strategies() -> None:
+    """tooltip 的来源明细：来源（含证据标记）/ 组别（含持有期）/ 同批选中的其它策略。"""
+    row = {
+        "strategy": "ReversalStrategy",
+        "strategies": "ReversalStrategy,DryUpExpansionStrategy",
+        "source_label": "策略·短期反转",
+        "group_label": "短线·T+3", "horizon": 3,
+        "evidence": "open_only", "evidence_text": "（依赖开盘）",
+    }
+    lines = pool.source_detail_lines(row)
+    assert lines[0] == "来源：策略·短期反转（依赖开盘）"
+    assert "组别：短线·T+3（T+3）" in lines
+    # 主策略之外的那条策略名进 tooltip（列里写不下，但不能丢）
+    assert "同批选中：地量后放量变盘" in lines
+    # 「依赖开盘」的解释在最后一行，前缀是**主策略**的中文名（不是整串来源文本）
+    assert lines[-1].startswith("策略·短期反转：正 α 只存在于")
+
+    # 单策略 + 没有组别的行：只出"来源"一行（不留空壳）
+    plain = {"strategy": "VolatilitySqueeze", "strategies": "VolatilitySqueeze",
+             "source_label": "策略·VolatilitySqueeze", "group_label": "—", "horizon": 0,
+             "evidence": "proven", "evidence_text": ""}
+    assert pool.source_detail_lines(plain) == ["来源：策略·VolatilitySqueeze"]
+
+
+def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> None:
+    """推送正文列**所有**命中的策略名，「来源」列只写**主策略** —— 两者不是"两套说法"。
+
+    推送是手机上一行、没有 tooltip，所以它保留更详细的那一份（用户明确允许：
+    "给推送链路单独保留一个更详细的文本"）；两处的中文名**同一个来源**
+    （`strategy_names()` → `rules.strategy_label()`），详细程度不同而已。
+    """
+    row = {"name": "半导体甲", "symbol": "600002", "strategy": "ReversalStrategy",
+           "strategies": "ReversalStrategy,DryUpExpansionStrategy", "reason": "缩量回踩",
+           "source_label": "策略·短期反转"}
+    assert pool.source_label(row, None) == "策略·短期反转"
+    line = pool.format_pool_lines([row])[0]
+    assert line == "1. 半导体甲(600002)短期反转、地量后放量变盘｜缩量回踩"
+    # 推送标签里的每个中文名，都能在「策略选股」列表里找到（同一份翻译表）
+    for name in pool.strategy_names(row):
+        assert name in (pool.rules.strategy_label("ReversalStrategy"),
+                        pool.rules.strategy_label("DryUpExpansionStrategy"))

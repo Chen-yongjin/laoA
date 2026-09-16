@@ -194,6 +194,7 @@ SCHEMA: tuple[str, ...] = (
         closed_at  TEXT,
         source     TEXT,
         note       TEXT,
+        monitor    INTEGER NOT NULL DEFAULT 1,
         updated_at TEXT
     );
     """,
@@ -303,9 +304,35 @@ def connect(db_path: str | Path, *, timeout: float = 60.0) -> sqlite3.Connection
             for ddl in SCHEMA:
                 conn.execute(ddl)
             conn.commit()
+        _migrate(conn)
     except sqlite3.Error as exc:  # pragma: no cover - 只读介质等极端情况
         logger.warning(f"初始化数据库结构失败：{exc}")
     return conn
+
+
+#: 给**老库**补的新列：`CREATE TABLE IF NOT EXISTS` 对已存在的表不生效，
+#: 所以新增列只能显式 `ALTER TABLE`（幂等写法：先查 `PRAGMA table_info`）。
+#: 每次 `connect()` 都会跑（一次 pragma + 最多几条 ALTER），
+#: 换来的是"老库直接能用新功能、不必删库重下几十年数据"。
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # (表, 列, 定义)
+    # `position.monitor`：持仓的"监控"开关（界面右键可开关；默认 1 = 与改动前完全一致，
+    # 关掉的持仓不再进做T提示，见 `intraday.held_positions`）
+    ("position", "monitor", "INTEGER NOT NULL DEFAULT 1"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """把老库缺的列补上（幂等；表都不存在时直接跳过）。"""
+    for table, column, definition in _ADDED_COLUMNS:
+        columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}  # noqa: S608
+        if not columns or column in columns:
+            continue                      # 表还不存在（下一步会建）/ 列已经有了
+        conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"  # noqa: S608 - 常量拼的
+        )
+        conn.commit()
+        logger.info(f"数据库迁移：{table} 补列 {column}")
 
 
 def init_db(db_path: str | Path) -> Path:
@@ -582,14 +609,51 @@ def pool_symbols(conn: sqlite3.Connection, day: str | None = None) -> list[str]:
     return [r["symbol"] for r in load_pool(conn, day)]
 
 
+def delete_pool_symbol(
+    conn: sqlite3.Connection, symbol: str, day: str | None = None
+) -> int:
+    """从**某一天的池子**里删掉一只标的（GUI 右键【删除】用；返回删掉的行数）。
+
+    为什么允许删池子行：用户在「自选股池」里右键删一只策略选出来的票时，
+    期望的是"这张表里别再出现它"（自选那张表里删不掉它 —— 它本来就不是自选）。
+    删的只是 `stock_pool` 里那一天的那一行，**不动** `signal` 台账；
+    下次【开始选股】会重新评估（策略又选中它的话它会回来，界面上把这句话写明了）。
+    """
+    if day is None:
+        row = conn.execute("SELECT MAX(date) FROM stock_pool").fetchone()
+        day = row[0] if row and row[0] else None
+    if not day:
+        return 0
+    cur = conn.execute(
+        "DELETE FROM stock_pool WHERE date = ? AND symbol = ?", (day, symbol)
+    )
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
 # ── 持仓 ──
 
 
 def load_positions(conn: sqlite3.Connection, open_only: bool = True) -> dict[str, dict]:
-    """读取持仓：{symbol: {...}}。"""
+    """读取持仓：{symbol: {...}}。
+
+    `open_only=True`（默认）取的是**还没平掉的持仓**，判据是
+    `quantity > 0 OR closed_at IS NULL`：
+
+    - 改版后界面上的「添加持仓」只收 **代码 + 成本价 + 备注**（用户给定的字段），
+      新写入的行 `quantity = 0` —— 老判据 `quantity > 0` 会让手工加的持仓**永远不出现**
+      （加了却不显示，是最难查的那类 bug）；
+    - 老库里的行（`quantity > 0`）**一条都不会少**：条件里留了 OR，
+      所以即使某行同时带着 `closed_at`（历史数据/手改过的库），也照旧读出来；
+    - 显式平仓的行（`quantity = 0` **且** `closed_at` 非空）不返回。
+
+    为什么用"两个条件的并集"而不是单看 `closed_at IS NULL`：后者要求"平仓一定会把
+    `closed_at` 写上"，而库里目前没有任何代码会写它；单看它会让 `quantity > 0` 但
+    `closed_at` 有值的行凭空消失 —— 对老库来说那是**改变了行为**。
+    """
     sql = "SELECT * FROM position"
     if open_only:
-        sql += " WHERE quantity > 0"
+        sql += " WHERE quantity > 0 OR closed_at IS NULL"
     return {r["symbol"]: dict(r) for r in conn.execute(sql).fetchall()}
 
 
@@ -601,17 +665,26 @@ def upsert_position(
     quantity: int = 0,
     avg_cost: float = 0.0,
     note: str = "",
+    reopen: bool = False,
 ) -> dict:
-    """新增/修改一条持仓（GUI 的"添加持仓"直接调它）。"""
+    """新增/修改一条持仓（GUI 的"添加持仓"直接调它）。
+
+    Args:
+        reopen: 是否把"已平仓"标记清掉（`closed_at = NULL`）。界面上手工添加一行
+            = "我现在持有它"，所以调用方传 True —— 否则用户先把一只票平掉（`closed_at`
+            被写上）、过几天又买回来重新添加时，新行会被"未平仓"这道门槛挡在界面外，
+            看起来就是"加了没反应"。默认 False 保持既有调用方的行为不变。
+    """
     now = _now()
     conn.execute(
         "INSERT INTO position (symbol, name, quantity, avg_cost, opened_at, source, note, "
         "updated_at) VALUES (?, ?, ?, ?, ?, 'manual', ?, ?) "
         "ON CONFLICT(symbol) DO UPDATE SET name = COALESCE(excluded.name, position.name), "
         "quantity = excluded.quantity, avg_cost = excluded.avg_cost, note = excluded.note, "
-        "closed_at = CASE WHEN excluded.quantity > 0 THEN NULL ELSE position.closed_at END, "
+        "closed_at = CASE WHEN ? THEN NULL "
+        "WHEN excluded.quantity > 0 THEN NULL ELSE position.closed_at END, "
         "updated_at = excluded.updated_at",
-        (symbol, name, int(quantity), float(avg_cost), now, note, now),
+        (symbol, name, int(quantity), float(avg_cost), now, note, now, int(bool(reopen))),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM position WHERE symbol = ?", (symbol,)).fetchone()
@@ -621,6 +694,24 @@ def upsert_position(
 def delete_position(conn: sqlite3.Connection, symbol: str) -> bool:
     """删除持仓（GUI 的"删除持仓"）。"""
     cur = conn.execute("DELETE FROM position WHERE symbol = ?", (symbol,))
+    conn.commit()
+    return bool(cur.rowcount)
+
+
+def set_position_monitor(conn: sqlite3.Connection, symbol: str, enabled: bool) -> bool:
+    """打开/关闭一条持仓的**监控**（`position.monitor`）：返回是否真的改到了行。
+
+    监控开着（默认 1）= 这只持仓参与盘中盯盘（做T提示会提它）；
+    关掉它**不会**删行、也不会影响盈亏显示 —— 用户想表达的是"别盯它了"，
+    而不是"我没有这只票"（后者用 `delete_position`）。
+
+    `monitor` 是后加的列（老库里没有），由 `connect()` 里的迁移补上，
+    默认 1 —— 所以**老库的行为与改动前完全一致**。
+    """
+    cur = conn.execute(
+        "UPDATE position SET monitor = ? WHERE symbol = ?",
+        (1 if enabled else 0, symbol),
+    )
     conn.commit()
     return bool(cur.rowcount)
 
@@ -997,6 +1088,51 @@ def dates_for_symbols(
             tuple(part),
         ):
             out.setdefault(symbol, set()).add(date)
+    return out
+
+
+def latest_raw_closes(
+    conn: sqlite3.Connection, symbols: Sequence[str]
+) -> dict[str, dict]:
+    """每只票最近两根**不复权**日线的收盘价：`{symbol: {date, close, prev_close}}`。
+
+    为什么是 `stock_daily_raw`（不复权）而不是 `stock_daily_hfq`（后复权视图）：
+    这张表的结果要摆在**现价**那一列（没有实时快照时的兜底），而现价必须能与
+    "用户手上的真实成本"直接比 —— `stock_daily_hfq.close` 是后复权价（10 送 10 之后
+    会显示成两倍），拿它算「盈亏比例」正是这次要修掉的那个 bug（见 `docs/改版方案.md` 第五节）。
+
+    取两根而不是一根：界面上的「涨幅」列要 `(今收 − 昨收) / 昨收`，
+    只取一根就没法在本地算涨跌幅（也就只能让那一列空着 —— 那不如不显示这一列）。
+
+    实现上按 `(symbol, date)` 主键做范围扫描、把每个 symbol 的所有行拉回来取最后两根。
+    池子 + 自选 + 持仓正常在几十只以内，6 个月的库每只约 120 行 —— 实测 50 只 × 121 行
+    （6050 行）耗时 **5.1 ms**，而界面只在"这只票没有实时快照"时才会问它
+    （交易时段里绝大多数票都有实时价，见 `ui/app.py:_local_closes`）。
+    """
+    wanted = [str(s) for s in dict.fromkeys(symbols) if s]
+    if not wanted:
+        return {}
+    out: dict[str, dict] = {}
+    chunk = 500  # 规避 SQLite 的变量数上限（默认 999）
+    for start in range(0, len(wanted), chunk):
+        part = wanted[start:start + chunk]
+        marks = ",".join("?" * len(part))
+        grouped: dict[str, list[tuple[str, float]]] = {}
+        for symbol, date, close in conn.execute(
+            f"SELECT symbol, date, close FROM stock_daily_raw "  # noqa: S608 - 只拼问号个数
+            f"WHERE symbol IN ({marks}) ORDER BY symbol, date",
+            tuple(part),
+        ):
+            if close is None:
+                continue
+            grouped.setdefault(str(symbol), []).append((str(date), float(close)))
+        for symbol, bars in grouped.items():
+            out[symbol] = {
+                "date": bars[-1][0],
+                "close": bars[-1][1],
+                # 只有一根日线时没有昨收 → None（涨幅那一列画 `—`，不瞎算）
+                "prev_close": bars[-2][1] if len(bars) > 1 else None,
+            }
     return out
 
 

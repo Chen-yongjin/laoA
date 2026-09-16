@@ -70,7 +70,7 @@ SILVER_COLORS: dict[str, str] = {
     "btn_press_top": "#dde2e9",
     "btn_press_bottom": "#c9d0d9",
     "btn_disabled_bg": "#f0f1f3",
-    # 主操作按钮（【选股建池】：略深的金属蓝灰 + 白字）
+    # 主操作按钮（【开始选股】：略深的金属蓝灰 + 白字）
     "primary_top": "#5b6b7d",
     "primary_bottom": "#46566a",
     "primary_hover_top": "#66788c",

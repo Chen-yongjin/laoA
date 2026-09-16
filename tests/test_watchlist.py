@@ -214,17 +214,31 @@ def test_same_symbol_in_both_sources_appears_once(engine, wl_db) -> None:
 
 
 def test_pool_table_rows_source_labels(engine, wl_db) -> None:
-    """界面/CLI 的「来源」列文本：组名（T+N）/ 自选 / 组名 + 自选。"""
+    """界面/CLI 的「来源」列文本：**哪条策略**（`策略·低价股`）/ 自选 / 两者都有。
+
+    组别与持有期从这一列挪进了 `group_label` / `horizon` 两个字段（行 tooltip 用）——
+    用户要求"来源"回答"是哪条策略选出来的"，而 `波段·T+10（T+10）` 只回答了"哪一组"。
+    """
     _add(wl_db, "600001", note="老朋友")     # 策略 + 自选
     _add(wl_db, "600100", note="龙头")       # 纯自选
     pool.build_pool(engine, wl_db, hot_only=False, save=True, day="2026-09-11")
     rows = {r["symbol"]: r for r in pool.pool_table_rows(wl_db.db_path)}
     assert rows["600001"]["source"] == "策略+自选"
-    assert rows["600001"]["source_label"] == "波段·T+10（T+10） + 自选"
+    # 600001 被 `低价股` 策略选中（类名 LowPriceStrategy → 中文名"低价股"）
+    assert rows["600001"]["strategy"] == "LowPriceStrategy"
+    assert rows["600001"]["source_label"] == "策略·低价股+自选"
+    assert rows["600001"]["group_label"] == "波段·T+10"      # 组别仍在，只是不在「来源」列里
+    assert rows["600001"]["horizon"] == 10
     assert rows["600001"]["note"] == "老朋友"
     assert rows["600100"]["source"] == "自选"
     assert rows["600100"]["source_label"] == "自选"
     assert rows["600100"]["note"] == "龙头"
+    # 一行 tooltip 的来源明细（界面用的就是这一份）：来源 / 组别 / 依赖开盘的解释
+    detail = pool.source_detail_lines(rows["600001"])
+    assert detail[0] == "来源：策略·低价股+自选"
+    assert "组别：波段·T+10（T+10）" in detail
+    # 纯自选的行没有组别那一行（不留一个空壳）
+    assert pool.source_detail_lines(rows["600100"]) == ["来源：自选"]
 
 
 def test_save_pool_persists_watchlist_rows(engine, wl_db) -> None:
@@ -256,6 +270,70 @@ def test_watch_targets_ignores_watchlist_when_config_off(wl_db) -> None:
     wl_db.watchlist_in_pool = False
     targets, pool_symbols = intraday.watch_targets(wl_db.db_path, cfg=wl_db)
     assert targets == {} and pool_symbols == set()
+
+
+# ── 右键【关闭监控】的语义：这只票**不再产生任何盘中提醒** ──
+
+
+def _hold(cfg, symbol: str, cost: float = 10.0, *, monitored: bool = True) -> None:
+    """记一笔持仓，并把监控开关设成指定状态（界面右键【关闭监控】做的就是这件事）。
+
+    显式把开关**设成**目标状态（而不是"只在关的时候设"）：重新打开监控时开关得回到 1，
+    否则第二次断言会读到上一轮留下的 0。
+    """
+    with storage.connect(cfg.db_path) as conn:
+        storage.upsert_position(conn, symbol, name=None, avg_cost=cost, reopen=True)
+        assert storage.set_position_monitor(conn, symbol, monitored) is True
+
+
+def test_monitor_off_position_leaves_the_whole_observation_set(wl_db) -> None:
+    """**重点**：持仓上关掉监控 → 它从观察面里整体消失，**哪怕它同时是自选**。
+
+    优先级由用户拍板：某只票同时是策略标的或自选时，**以持仓上的监控开关为准** ——
+    右键那一行菜单是对"这只票"最具体、最新的一次表态，而"它在池子里"是几天前跑策略
+    留下的结果（池子每天重建）。这条用例两边都造出来，然后逐条断言。
+    """
+    _add(wl_db, "600100", name="冷门样本", note="龙头")      # 既是自选……
+    _hold(wl_db, "600100", monitored=True)
+    targets, pool_symbols = intraday.watch_targets(wl_db.db_path, cfg=wl_db)
+    assert "600100" in targets and "600100" in pool_symbols   # 开着监控：照常盯
+
+    _hold(wl_db, "600100", monitored=False)                   # 现在关掉它
+    targets, pool_symbols = intraday.watch_targets(wl_db.db_path, cfg=wl_db)
+    assert "600100" not in targets, "关了监控的持仓不该再进观察面（自选身份也不例外）"
+    assert "600100" not in pool_symbols
+    # 做T那条路（持仓专属）也一起关掉
+    assert intraday.held_positions(wl_db.db_path) == {}
+    # 竞价与异动共用的"标的宇宙"同样剔掉它（这两路也属于"这只票的提醒"）
+    assert "600100" not in intraday.alert_universe(wl_db.db_path, wl_db)
+
+    # 打开监控 → 一切都回来（开关是双向的，不是一次性）
+    _hold(wl_db, "600100", monitored=True)
+    targets, _pool_symbols = intraday.watch_targets(wl_db.db_path, cfg=wl_db)
+    assert "600100" in targets
+    assert "600100" in intraday.alert_universe(wl_db.db_path, wl_db)
+
+
+def test_monitor_off_position_stays_in_pool_rows_but_not_targets(wl_db, engine) -> None:
+    """关监控**不删池子行**（表里照旧看得到它），只是不再盯它。
+
+    用户要的是"别盯它了"，不是"我没有这只票"（那是【删除】）—— 所以池子/表格不受影响，
+    受影响的只有"观察面"。
+    """
+    _add(wl_db, "600100", name="冷门样本")
+    pool.build_pool(engine, wl_db, hot_only=False, save=True, day="2026-09-11")
+    _hold(wl_db, "600100", monitored=False)
+    assert "600100" in {r["symbol"] for r in pool.load_pool(wl_db.db_path)}
+    assert "600100" not in intraday.watch_targets(wl_db.db_path, cfg=wl_db)[0]
+
+
+def test_monitor_off_read_failure_does_not_silence_everything(wl_db, monkeypatch) -> None:
+    """读持仓表失败时**不做排除**（宁可多提醒一次，也不能因为读库失败把提醒全关掉）。"""
+    def _boom(*_a, **_k):
+        raise RuntimeError("库坏了")
+
+    monkeypatch.setattr(intraday.storage, "connect", _boom)
+    assert intraday.monitor_off_symbols(wl_db.db_path) == set()
 
 
 def test_run_daily_with_strategies_off_still_pools_watchlist(wl_db, monkeypatch) -> None:
@@ -294,7 +372,7 @@ def test_run_daily_watchlist_only_mode_pushes_note(wl_db, monkeypatch) -> None:
     sched.run_daily(wl_db, DataEngine(wl_db.db_path), notify=True, with_data=False,
                     selection=groups.resolve(["none"], []))
     body = "\n".join(captured["lines"])
-    assert "冷门样本（600100）自选（龙头）" in body
+    assert "冷门样本(600100)自选（龙头）" in body
 
 
 # ── 5) 上限 ──
@@ -515,7 +593,7 @@ def test_cli_once_with_strategies_off(wl_db, tmp_path, capsys, monkeypatch) -> N
     assert cli(["--cli", "--once", "--no-notify", "--config", str(config)]) == 0
     out = capsys.readouterr().out
     assert "策略已关闭" in out
-    assert "冷门样本（600100）" in out
+    assert "冷门样本(600100)" in out
     assert "没有启用任何策略" not in out
 
 
@@ -541,17 +619,17 @@ def test_push_lines_mark_strategy_plus_watchlist(wl_db) -> None:
         "name": "低价样本", "symbol": "600001", "strategies": "LowPriceStrategy",
         "source": "策略+自选", "note": "老朋友", "reason": "低价股",
     }])
-    assert both == ["1. 低价样本（600001）低价股+自选（老朋友）｜低价股"]
+    assert both == ["1. 低价样本(600001)低价股+自选（老朋友）｜低价股"]
 
     only_watch = pool.format_pool_lines([{
         "name": "冷门样本", "symbol": "600100", "strategies": "",
         "source": "自选", "note": "龙头", "reason": "自选（龙头）",
     }])
-    assert only_watch == ["1. 冷门样本（600100）自选（龙头）｜自选（龙头）"]
+    assert only_watch == ["1. 冷门样本(600100)自选（龙头）｜自选（龙头）"]
 
     # 纯策略标的：格式与服务器版一致（不带任何自选字样）
     plain = pool.format_pool_lines([{
         "name": "半导体甲", "symbol": "600002", "strategies": "LowPriceStrategy",
         "source": "策略", "reason": "低价股",
     }])
-    assert plain == ["1. 半导体甲（600002）低价股｜低价股"]
+    assert plain == ["1. 半导体甲(600002)低价股｜低价股"]

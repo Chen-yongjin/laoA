@@ -593,3 +593,151 @@ def test_groups_place_formula_in_its_own_group() -> None:
     assert "formula" not in groups.GROUPS
     assert pool.weight_of("公式·x") == formula_group.FORMULA_WEIGHT
     assert pool.weight_of("LowPriceStrategy") == groups.STRATEGY_WEIGHTS["LowPriceStrategy"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 7) 备注（`# 说明:`）的读写 —— 界面「备注」框 ↔ 文件注释头
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 界面上的「备注」框与公式文件的 `# 说明:` 注释头是同一件事（`docs/改版方案.md`
+# TAB 4："自定义公式追加在后（备注来自公式文件的 `# 说明:`）"），这一节把这条缝钉死：
+# 写进去的是它、读回来也是它，中间不许有第二份真相。
+
+
+def test_save_formula_stores_note_in_description_header(tmp_path: Path) -> None:
+    """`save_formula(description=...)` → 文件里的 `# 说明:`；读回来还是同一句。"""
+    path = lib.save_formula("放量上攻", "C>MA(C,5)", description="站上5日线并且放量",
+                            directory=tmp_path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "# 名称: 放量上攻" in text
+    assert "# 说明: 站上5日线并且放量" in text
+    spec = lib.formula_files(tmp_path)[0]
+    assert spec.description == "站上5日线并且放量"
+    assert spec.ok and spec.source.strip() == "C>MA(C,5)"
+
+
+def test_save_formula_note_none_keeps_auto_describe(tmp_path: Path) -> None:
+    """备注留空（`description=None`）→ 仍然自动生成"用到的字段/函数"（小白不用手写）。"""
+    lib.save_formula("放量上攻", "M5:=MA(C,5)\nC>M5", directory=tmp_path)
+
+    text = (tmp_path / "放量上攻.txt").read_text(encoding="utf-8")
+    assert "# 说明: " in text and "字段：C" in text
+
+
+def test_multiline_description_breaks_the_header_so_ui_must_flatten(tmp_path: Path) -> None:
+    """**换行会打断注释头** —— 这正是界面必须把它拍平的原因。
+
+    `# 说明:` 是注释头的**一行**：写进去一个换行，后面那半行就不以 `#` 开头了，
+    引擎按格式把它当**公式正文**读走。这里把这个事实钉住（不是"期望的行为"，
+    而是文件格式的硬约束）：所以 `ui/formula_page.py` 的 `_note_text()` 会把换行
+    拍成空格，`tests/test_formula_page.py::test_note_with_newline_is_flattened`
+    反过来验界面确实拍了。
+    """
+    lib.save_formula("多行", "C>MA(C,5)", description="第一行\n第二行", directory=tmp_path)
+
+    spec = lib.formula_files(tmp_path)[0]
+    assert spec.ok is False                      # 正文里混进了"第二行" → 编译不过
+    assert "第二行" in spec.source
+    # 拍平之后（界面走的就是这条路）一切正常
+    lib.save_formula("多行", "C>MA(C,5)", description="第一行 第二行", directory=tmp_path)
+    spec = lib.formula_files(tmp_path)[0]
+    assert spec.ok and spec.description == "第一行 第二行"
+
+
+def test_scorecard_library_capability_survives_the_ui_removal(tmp_path: Path) -> None:
+    """界面拿掉了成绩单入口，但**库能力还在**（CLI `--scorecard` 与长样本回测要用）。"""
+    assert callable(lib.run_scorecard)
+    assert lib.DEFAULT_CONVENTION_KEY == "B"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 8) 统一策略列表的备注/行（纯函数，不需要 Qt）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 这一节测的是「策略列表」里那两列的**数据来源**：内置策略的备注只能搬现有字段
+# （`rules` 的 evidence/evidence_note、`groups` 的组结论与停用理由），
+# 公式的备注只能来自文件的 `# 说明:` —— 界面一个数字都不许编。
+
+
+def test_builtin_note_comes_from_evidence_fields_only() -> None:
+    """内置 5 条的备注：逐条对得上源字段（不是界面自己写的文案）。"""
+    from laoa_trader.ui import formula_page as fp
+
+    ultra = groups.GROUPS["ultra"]
+    swing = groups.GROUPS["swing"]
+    short = groups.GROUPS["short"]
+
+    assert fp.builtin_strategy_note("LadderPullbackStrategy") == (
+        "⛔ 默认关闭：" + ultra.disabled_reason
+    )
+    assert fp.builtin_strategy_note("LowPriceStrategy") == (
+        "⛔ 默认关闭：" + swing.disabled_reason
+    )
+    assert fp.builtin_strategy_note("DryUpExpansionStrategy") == (
+        "⚠️ " + rules.STRATEGIES["DryUpExpansionStrategy"].evidence_note
+    )
+    assert fp.builtin_strategy_note("FirstLimitUpStrategy") == (
+        "⚠️ " + rules.STRATEGIES["FirstLimitUpStrategy"].evidence_note
+    )
+    # evidence == proven 的那条：字段的语义（base.py）+ 组的实测区间，且标明是"组"的数字
+    assert fp.builtin_strategy_note("ReversalStrategy") == (
+        "两套口径都为正 · 组实测 " + short.note.split("：", 1)[1]
+    )
+    # 认不出来的策略名 → 空串（宁可什么都不说，也不猜）
+    assert fp.builtin_strategy_note("根本没有这条策略") == ""
+
+
+def test_builtin_order_matches_the_group_order_and_weights() -> None:
+    """列表顺序 = 组顺序（超短 → 短线 → 波段），与 `rules.run_all()` 的遍历口径一致。"""
+    from laoa_trader.ui import formula_page as fp
+
+    assert fp.builtin_order() == list(groups.all_strategies())
+    assert set(fp.builtin_order()) == set(rules.STRATEGIES)
+    for class_name in fp.builtin_order():
+        assert groups.STRATEGY_WEIGHTS[class_name] > 0
+
+
+def test_build_strategy_rows_marks_builtin_and_formula_rows(formulas_cfg: Config,
+                                                            tmp_path: Path) -> None:
+    """一次建表：内置 5 条在前（只读），公式追加在后（备注来自文件）。"""
+    from laoa_trader.ui import formula_page as fp
+
+    _write_formula(tmp_path, "放量上攻", "C>MA(C,5)", "站上5日线")
+    formulas_cfg.enabled_formulas = ["放量上攻"]
+    formulas_cfg.enabled_groups = ["short"]
+    formulas_cfg.enabled_strategies = []
+
+    rows = fp.build_strategy_rows(formulas_cfg, lib.formula_files(tmp_path), {})
+
+    assert [row.kind for row in rows] == [fp.ROW_BUILTIN] * 5 + [fp.ROW_FORMULA]
+    assert [row.key for row in rows][:5] == fp.builtin_order()
+    builtin = rows[0]
+    assert builtin.is_builtin and builtin.detail and "条件说明" in builtin.detail
+    assert builtin.name == rules.strategy_label(builtin.key)
+    formula = rows[-1]
+    assert formula.key == "放量上攻" and formula.note == "站上5日线"
+    assert formula.enabled is True                    # 勾了才为真（写回 enabled_formulas）
+    # 勾选状态来自 `groups.resolve_from_config()`（出厂只开 short 那三条）
+    assert {row.key for row in rows[:5] if row.enabled} == {
+        "ReversalStrategy", "DryUpExpansionStrategy", "FirstLimitUpStrategy",
+    }
+
+
+def test_build_strategy_rows_shows_broken_and_runtime_errors(formulas_cfg: Config,
+                                                             tmp_path: Path) -> None:
+    """坏公式的两类问题都要在列表里看得见：语法错（文件解析）与运行期出错（上一轮）。"""
+    from laoa_trader.ui import formula_page as fp
+
+    _write_formula(tmp_path, "坏公式", "C>MAA(C,5)")
+    _write_formula(tmp_path, "跑崩的", "C>MA(C,5)")
+
+    rows = fp.build_strategy_rows(formulas_cfg, lib.formula_files(tmp_path),
+                                  {"跑崩的": "3 只票算不出来：本地涨停池还没攒够"})
+    by_name = {row.name: row for row in rows}
+
+    assert "⛔ 语法错" in by_name["坏公式"].note
+    assert "未知函数" in by_name["坏公式"].note and "第 1 行" in by_name["坏公式"].note_tip
+    assert by_name["坏公式"].spec.ok is False
+    assert "⚠️ 运行时出错" in by_name["跑崩的"].note
+    assert "涨停池" in by_name["跑崩的"].note_tip

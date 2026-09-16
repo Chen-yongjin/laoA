@@ -131,7 +131,7 @@ def test_pool_prints_saved_pool(capsys, ready_config, ready_cfg) -> None:
     out = capsys.readouterr().out
     assert "数据自检：ready" in out
     assert "股票池（1 只，2026-09-11）" in out
-    assert "高价样本（600002）" in out
+    assert "高价样本(600002)" in out
 
 
 def test_pool_with_unwritable_dir_never_tracebacks(capsys, blocked_config) -> None:
@@ -312,10 +312,18 @@ def test_pool_output_shows_source_and_note(capsys, watch_db, tmp_path) -> None:
         storage.upsert_watchlist(conn, "601999", name="新股样本", note="龙头")
     assert cli(["--cli", "--pool", "--config", str(config)]) == 0
     out = capsys.readouterr().out
-    assert "来源 波段·T+10（T+10）" in out          # 策略标的：组名（T+N）
+    # 改版后「来源」回答的是**哪条策略**（`策略·低价股`），组别与持有期单独一栏 ——
+    # 界面「来源」列也是这个口径，两处说的是同一件事
+    assert "来源 策略·低价股" in out
+    assert "组别 波段·T+10（T+10）" in out
     assert "来源 自选" in out                        # 纯自选
+    assert "组别 —" in out                           # 自选没有组别（不留空、写 `—`）
     assert "备注 龙头" in out                        # 备注
     assert "只出现一行" in out                       # 来源说明
+    # 策略名**只在「来源」那一栏出现一次**：原来"名称后面紧跟策略名，来源栏再写组名"
+    # 的口径已经合并，不能再退回"同一件事说两遍"（`｜低价股` 那个是**理由**字段，不算）
+    assert "贵州样本(600519)｜来源 策略·低价股" in out
+    assert out.count("来源 策略·低价股") == 1
 
 
 # ── 运行时自检闸门 ──

@@ -151,7 +151,7 @@ def run_enabled_formulas(
                     first_error.setdefault(label, str(exc))
                     if count == 1:
                         logger.warning(
-                            f"公式 {label} 在 {series.name}（{series.symbol}）上算不出来：{exc}"
+                            f"公式 {label} 在 {series.name}({series.symbol}) 上算不出来：{exc}"
                         )
                     continue
                 if bool(mask[-1]):
