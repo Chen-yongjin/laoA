@@ -39,7 +39,7 @@ from laoa_trader.config import get_config
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
 from laoa_trader.log import get_logger
-from laoa_trader.strategy import groups, rules
+from laoa_trader.strategy import formula_group, groups, rules
 from laoa_trader.strategy.base import EVIDENCE_OPEN_ONLY, EVIDENCE_PROVEN
 
 logger = get_logger(__name__)
@@ -53,6 +53,17 @@ POOL_STRATEGIES: dict[str, int] = dict(groups.STRATEGY_WEIGHTS)
 MAX_PER_STRATEGY = 3
 
 DEFAULT_SIZE = 10
+
+
+def weight_of(strategy: str) -> int:
+    """池子权重：内置策略查 `POOL_STRATEGIES`；自定义公式用 `FORMULA_WEIGHT`。
+
+    为什么公式也要权重：候选合成是按"策略内排名 × 权重"打分的，权重为 0 的话
+    用户勾了公式也进不了池子（表现为"我勾了它，怎么一只都没有"）。
+    """
+    if groups.is_formula_strategy(strategy):
+        return formula_group.FORMULA_WEIGHT
+    return POOL_STRATEGIES.get(strategy, 1)
 
 
 def build_pool(
@@ -70,11 +81,17 @@ def build_pool(
 ) -> list[dict]:
     """跑入选策略并合成当日股票池。
 
+    除了内置策略，这里还会**自动并入 `enabled_formulas` 里勾选的自定义公式**
+    （作为与 short 等并列的「公式」组）—— 界面【选股建池】、定时日更、CLI 三条路
+    都走这个函数，所以放在这里就不可能有哪条路"忘了带公式"。默认（没勾公式时）
+    一次库都不读，行为与以前完全一致。
+
     Args:
         engine: DataEngine。
         settings: 配置对象（透传）。
         size: 池子大小。
         hot_only: 是否只保留热门行业（用户要求：池子只选热门行业，数量少、盯得过来）。
+            **自定义公式不参与这道收敛**（条件本身就是用户写明的，见下面的说明）。
         save: 是否落库 `stock_pool`。
         day: 池子日期，默认按库里最新行情日期。
         picks: 已算好的候选（`{策略类名: [...]}`）。**日更流程传它以避免重复跑策略** ——
@@ -83,7 +100,8 @@ def build_pool(
         watchlist: 自选股行（`{symbol,name,note,enabled}`）；None 时按配置从库里读
             （`watchlist_in_pool=false` 表示"只记录不监控"，此时会跳过）。
         report: 可选的可变字典，用来接收"自选股超上限被截掉几只"之类的提示
-            （返回类型保持 list，避免破坏现有调用方）。
+            （返回类型保持 list，避免破坏现有调用方）。**公式组的运行结果与错误
+            也写进它**（`report["formulas"]` / `report["errors"]`）。
 
     Returns:
         池子行列表（见 `build_pool_from_picks`）。
@@ -100,13 +118,48 @@ def build_pool(
     else:
         picks_by_strategy = picks
 
-    # 双保险：即使调用方传进来的候选里混了未启用的策略，也不让它进池子
+    # ── 「公式」组：用户自己在「公式选股」页勾的自定义公式 ──
+    #
+    # 为什么放在这里（而不是让调用方先合并好）：**建池是唯一必须并入公式的地方** ——
+    # 界面上的【选股建池】、定时任务、CLI 三条路都会走到 `build_pool`，
+    # 放在这里就不可能出现"某一条路忘了带公式"（那种 bug 极难发现：
+    # 用户勾了公式，手动建池有、定时建池没有）。
+    #
+    # `enabled_formulas` 为空时 `run_enabled_formulas` **一次库都不读**，
+    # 所以"没用公式的人"与以前完全一样（默认不参与）。
+    picks_by_strategy = dict(picks_by_strategy)
+    formula_run = formula_group.run_enabled_formulas(engine.db_path, settings)
+    for key, rows in formula_run.picks.items():
+        picks_by_strategy.setdefault(key, [])
+        picks_by_strategy[key] = list(rows)
+    if formula_run.errors:
+        # 失败隔离：公式出错只进 errors（状态栏/日志能看到原因），**不影响建池**
+        if report is not None:
+            report.setdefault("errors", []).extend(formula_run.errors)
+        for message in formula_run.errors:
+            logger.warning(message)
+    if report is not None:
+        report["formulas"] = {
+            "ran": list(formula_run.ran),
+            "picks": {k: len(v) for k, v in formula_run.picks.items()},
+            "status": dict(formula_run.status),
+        }
+
+    # 双保险：即使调用方传进来的候选里混了未启用的策略，也不让它进池子。
+    # **自定义公式例外**：它归 `enabled_formulas` 管（勾了就该跑），
+    # 不该被 `enabled_groups = ["short"]` 这种内置组的选择顺手剔掉。
     if selection is not None and not selection.empty:
         allowed = set(selection.strategies)
-        dropped_strategies = [k for k in picks_by_strategy if k not in allowed]
+        dropped_strategies = [
+            k for k in picks_by_strategy
+            if k not in allowed and not groups.is_formula_strategy(k)
+        ]
         if dropped_strategies:
             logger.info(f"按选择过滤候选：剔除未启用策略 {dropped_strategies}")
-        picks_by_strategy = {k: v for k, v in picks_by_strategy.items() if k in allowed}
+        picks_by_strategy = {
+            k: v for k, v in picks_by_strategy.items()
+            if k in allowed or groups.is_formula_strategy(k)
+        }
 
     # 只保留热门行业的候选
     if hot_only:
@@ -116,6 +169,12 @@ def build_pool(
             kept: dict[str, list[dict]] = {}
             dropped = 0
             for strategy, candidates in picks_by_strategy.items():
+                if groups.is_formula_strategy(strategy):
+                    # 公式**不参与热门行业收敛**：条件是这个用户自己写明的
+                    # （他要"低价+缩量"就只想要低价的那些），再被我们的"热门行业"
+                    # 删掉一半，表现就是他勾了公式却几乎看不到票，而且完全猜不到原因。
+                    kept[strategy] = list(candidates)
+                    continue
                 kept[strategy] = []
                 for pick in candidates:
                     industry = industry_of.get(pick["symbol"])
@@ -198,7 +257,9 @@ def merge_watchlist(
     known = {row["symbol"] for row in pool}
     merged: list[dict] = []
     for row in pool:
-        row.setdefault("source", "策略")
+        # 来源标成"策略"还是"公式"：自定义公式不能混进内置策略里（见 `source_kind`）
+        base = "公式" if groups.is_formula_strategy(row.get("strategy") or "") else "策略"
+        row.setdefault("source", base)
         merged.append(row)
     for entry in kept:
         symbol = entry["symbol"]
@@ -207,7 +268,9 @@ def merge_watchlist(
             # 去重：策略标的与自选是同一只 → 只留一行
             for row in merged:
                 if row["symbol"] == symbol:
-                    row["source"] = "策略+自选"
+                    base = ("公式" if groups.is_formula_strategy(row.get("strategy") or "")
+                            else "策略")
+                    row["source"] = f"{base}+自选"
                     row["note"] = note
                     row["watchlist"] = True
                     break
@@ -240,7 +303,7 @@ def build_pool_from_picks(
     """
     merged: dict[str, dict] = {}
     for strategy, picks in picks_by_strategy.items():
-        weight = POOL_STRATEGIES.get(strategy, 1)
+        weight = weight_of(strategy)
         for rank, pick in enumerate(picks[: MAX_PER_STRATEGY * 3], start=1):
             symbol = pick["symbol"]
             # 策略内排名越靠前分越高；再乘策略权重
@@ -490,47 +553,56 @@ def format_pool_lines(pool: list[dict]) -> list[str]:
         note = (row.get("note") or "").strip()
         if not tag:
             tag = "自选" + (f"（{note}）" if note else "")
-        elif row.get("source") == "策略+自选":
-            # 既是策略选中又是自选：标出来，免得用户以为"我加的自选没生效"
+        elif str(row.get("source") or "").endswith("+自选"):
+            # 既是策略/公式选中又是自选：标出来，免得用户以为"我加的自选没生效"
             tag += "+自选" + (f"（{note}）" if note else "")
         lines.append(f"{i}. {row['name']}（{row['symbol']}）{tag}｜{row.get('reason') or ''}")
     return lines
 
 
 def source_kind(row: dict, watch_entry: dict | None) -> str:
-    """池子行的来源类型：`策略` / `自选` / `策略+自选`。
+    """池子行的来源类型：`策略` / `公式` / `自选` / 组合。
 
     自选状态由 `watchlist` 表现查（而不是存进 `stock_pool`）：
     这样用户今天加/停用自选，池子表格的"来源"立刻就对了，不用重跑建池，
     也不用给老库加列做迁移。
+
+    自定义公式单独标成 `公式`（而不是混进"策略"）：用户勾的公式是他自己的东西，
+    与内置策略的边际证据无关，"这批票是哪来的"要一眼分得清。
     """
     has_strategy = bool(row.get("strategy"))
+    base = "公式" if groups.is_formula_strategy(row.get("strategy") or "") else "策略"
     in_watch = watch_entry is not None and int(watch_entry.get("enabled", 1)) == 1
-    if has_strategy and in_watch:
-        return "策略+自选"
     if has_strategy:
-        return "策略"
+        return f"{base}+自选" if in_watch else base
     if in_watch:
         return "自选"
     return "自选" if row.get("watchlist") else "策略"
 
 
 def source_label(row: dict, watch_entry: dict | None) -> str:
-    """界面「来源」列的文本：策略组名 / 自选 / 两者拼接。
+    """界面「来源」列的文本：策略组名 / 公式名 / 自选 / 两者拼接。
 
     需求要求"别搞出两列重复信息"：所以组别与来源合成**一列**：
         策略标的      → `波段·T+10（T+10）`
+        自定义公式    → `公式·放量上攻`
         纯自选        → `自选`
         策略 + 自选   → `波段·T+10（T+10） + 自选`
     备注单独一列（自选备注是用户自己写的，值得单独看）。
+
+    自定义公式**直接写合成名**（`公式·放量上攻`）而不是"公式（T+0）"：
+    用户勾了好几条公式时，"公式"两个字回答不了"是哪一条选出来的"。
     """
     strategy = row.get("strategy") or ""
     group_key = groups.group_of(strategy)
     parts: list[str] = []
     if strategy:
-        label = groups.group_label(group_key) if group_key else rules.strategy_label(strategy)
-        horizon = groups.group_horizon(group_key) if group_key else 0
-        parts.append(f"{label}（T+{horizon}）" if horizon else label)
+        if groups.is_formula_strategy(strategy):
+            parts.append(strategy)
+        else:
+            label = groups.group_label(group_key) if group_key else rules.strategy_label(strategy)
+            horizon = groups.group_horizon(group_key) if group_key else 0
+            parts.append(f"{label}（T+{horizon}）" if horizon else label)
     if watch_entry is not None or row.get("watchlist"):
         parts.append("自选")
     return " + ".join(parts) if parts else "—"
@@ -594,26 +666,34 @@ def pool_table_rows(db_path: str, day: str | None = None) -> list[dict]:
     for row in rows:
         strategy = row.get("strategy") or ""
         group_key = groups.group_of(strategy)
+        is_formula = groups.is_formula_strategy(strategy)
         entry = watch.get(row["symbol"])
         note = (entry or {}).get("note") or row.get("note") or ""
         out.append({
             **row,
             "industry": industries.get(row["symbol"], ""),
+            # 自定义公式的合成名（`公式·放量上攻`）本身就是"来源策略"该显示的东西
+            # （`strategy_label` 认不出它会原样返回，正好是我们要的）
             "label": rules.strategy_label(strategy),
-            # 组别（策略所属组）：推送文案与排序用它
+            # 组别（策略所属组）：推送文案与排序用它；公式归到 `formula` 组
             "group": group_key or "",
             "group_label": groups.group_label(group_key) if group_key else "—",
             "horizon": groups.group_horizon(group_key) if group_key else 0,
-            # 来源：策略组名 / 自选 / 策略+自选（与组别合成一列）
+            # 是不是自定义公式（界面/推送想单独标一句时用；**不打证据标记**）
+            "is_formula": is_formula,
+            # 来源：策略组名 / 公式名 / 自选 / 策略+自选（与组别合成一列）
             "source": source_kind(row, entry),
             "source_label": source_label(row, entry),
             "note": note,
             "watchlist_enabled": bool(entry and int(entry.get("enabled", 1)) == 1),
             # 证据：`open_only` 的策略标的带「（依赖开盘）」标记（**照常进池、照常推送**；
             # 只有用户打开 `push_only_proven` 时才不推，见 `split_push_rows`）。
-            # 界面上要能一眼看出来，不能只写在文档里
-            "evidence": strategy_evidence(strategy),
-            "evidence_text": evidence_text(strategy),
+            # 界面上要能一眼看出来，不能只写在文档里。
+            # **自定义公式不打这个标记**：那是"我们自己的策略的边际证据"，
+            # 用户自己写的公式既没跑过成绩单、也不该被贴上我们的结论 ——
+            # 但来源列/推送行里写着「公式·xxx」，来源一样摆在明面上。
+            "evidence": EVIDENCE_PROVEN if is_formula else strategy_evidence(strategy),
+            "evidence_text": "" if is_formula else evidence_text(strategy),
             # 今日涨停池里的信息（不在池里 → is_limit_up False，界面上整行不显示）
             "is_limit_up": row["symbol"] in limit_up,
             "continue_day_text": (limit_up.get(row["symbol"]) or {}).get("continue_day_text", ""),

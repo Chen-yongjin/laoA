@@ -414,6 +414,17 @@ def run_daily(
             return report
 
         title = f"📈 老A选股助手-选股池 | {report['data_date']}"
+        # 「公式」组：用户自己的公式选出来的票，**标题里点一下名** ——
+        # 收到推送的人一眼就知道"这批票里有我自己写的公式"，不用翻到正文才看出来
+        # （正文每一行的标签也写着 `公式·名字`）。名字多时只列前两条：
+        # 标题不该比正文还长。
+        picked_formulas = list((report.get("formulas") or {}).get("picks") or {})
+        if picked_formulas:
+            names = "、".join(
+                groups_mod.formula_name_of(key) for key in picked_formulas[:2]
+            )
+            more = f" 等 {len(picked_formulas)} 条" if len(picked_formulas) > 2 else ""
+            title += f"｜公式：{names}{more}"
         lines = pool.format_pool_lines(push_rows)
         lines.extend(_pool_plan_lines(push_rows, cfg))
         if skipped_rows:

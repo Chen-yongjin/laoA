@@ -350,6 +350,12 @@ class Config:
     #: 只跑列出的策略（类名或中文名都认）；**留空 = 该组全选**。
     #: 与 enabled_groups 同时非空时取交集；两者都空 = 全选（安全默认）。
     enabled_strategies: list[str] = field(default_factory=list)
+    #: 参与选股的**自定义公式**（`formulas/` 目录里的公式名，见 `formula_dir()`）。
+    #: 「公式」是一个与 ultra/short/swing 并列的组，但成员是用户自己在
+    #: 「公式选股」页勾的，所以**默认空 = 公式组不参与**（不会因为你用过一次
+    #: 示例公式就改变内置策略的结果）。界面上勾选「参与选股」时写回这个键。
+    #: 名字找不到文件 / 公式语法错 → 忽略并记日志（`formulas.enabled_names()`）。
+    enabled_formulas: list[str] = field(default_factory=list)
     #: 推送是否**只推"有边际"的策略标的**（**默认 false = 启用的策略都推送**）。
     #:
     #: 为什么默认关（用户拍板）：`short` 组里有两条策略（地量后放量变盘、首板缩量整理）
@@ -859,6 +865,7 @@ def _apply_env(cfg: Config) -> Config:
     env_list = (
         ("LAOA_ENABLED_GROUPS", "enabled_groups"),
         ("LAOA_ENABLED_STRATEGIES", "enabled_strategies"),
+        ("LAOA_ENABLED_FORMULAS", "enabled_formulas"),
         ("NOTIFY_CHANNELS", "notify_channels"),
         ("AUCTION_SCAN_AT", "auction_scan_at"),
         ("AUCTION_BOARDS", "auction_boards"),

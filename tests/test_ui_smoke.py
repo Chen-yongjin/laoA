@@ -204,11 +204,14 @@ def test_window_renders_all_panels(window, qapp) -> None:
     assert len(window.pool_cards) == 1
     assert window.position_table.rowCount() == 1
     assert window.alert_table.rowCount() == 1
-    # 六个页签：**大盘概览放第一个**（启动就停在它上面），股票池紧跟其后
-    assert window.tabs.count() == 6
-    assert [window.tabs.tabText(i) for i in range(6)] == [
-        "大盘概览", "股票池", "持仓", "自选股", "盘中提醒", "设置",
+    # 七个页签：**大盘概览放第一个**（启动就停在它上面），股票池紧跟其后；
+    # 「公式选股」在「盘中提醒」与「设置」之间（用户点名的顺序）
+    assert window.tabs.count() == 7
+    assert [window.tabs.tabText(i) for i in range(7)] == [
+        "大盘概览", "股票池", "持仓", "自选股", "盘中提醒", "公式选股", "设置",
     ]
+    assert window.tabs.widget(window.tabs.indexOf(window.formula_page)) is window.formula_page
+    assert window.tabs.tabText(window.tabs.indexOf(window.formula_page)) == "公式选股"
     assert window.tabs.widget(0) is window.market_page
     assert window.tabs.currentWidget() is window.market_page      # 启动默认页
     # 池子两款视图的可见性要**在池子页是当前页**时才谈得上（先切过去）
@@ -708,11 +711,46 @@ def test_worker_reports_progress_and_failure(window, qapp) -> None:
     assert window.progress.maximum() == 100
 
 
-def test_close_event_minimizes_to_tray(window, qapp) -> None:
-    """关闭窗口只最小化到托盘（盯盘工具应常驻后台）。"""
+def test_close_event_minimizes_to_tray(window, qapp, monkeypatch) -> None:
+    """关闭窗口只最小化到托盘（盯盘工具应常驻后台），**且不弹任何提示**。
+
+    用户明确说不要"关掉窗口后程序还在跑"这条气泡：他是故意关窗的，
+    当然知道程序还在跑。所以这里把托盘的气泡调用**记下来断言为空** ——
+    只断言 `isHidden()` 的话，谁把那条提示加回去都不会有人发现。
+    """
+    bubbles: list[tuple] = []
+    monkeypatch.setattr(window.tray, "showMessage",
+                        lambda *args, **kwargs: bubbles.append(args))
     window.close()
     qapp.processEvents()
-    assert window.isHidden() is True
+    assert window.isHidden() is True       # 行为保留：关窗 = 收进托盘
+    assert bubbles == []                   # 但一句提示都不弹
+
+
+def test_tray_menu_quit_still_exits(window, qapp, monkeypatch) -> None:
+    """托盘右键的【退出】照旧能退出（用户仍然需要一条"真的退出"的路）。
+
+    为什么值得单独盯着：关窗不再是退出（只隐藏），**托盘那一条就成了唯一的出口** ——
+    它要是坏了，用户只能去任务管理器杀进程。
+    """
+    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtWidgets import QApplication
+
+    quit_calls: list[str] = []
+    monkeypatch.setattr(QApplication, "quit", lambda *a, **k: quit_calls.append("quit"))
+    stop_calls: list[str] = []
+    monkeypatch.setattr(window.scheduler, "stop", lambda: stop_calls.append("stop"))
+
+    menu = window.tray.contextMenu()
+    assert menu is not None
+    actions = {action.text(): action for action in menu.actions()}
+    assert "退出" in actions
+    actions["退出"].trigger()
+    qapp.processEvents()
+
+    assert quit_calls == ["quit"]          # 事件循环收到退出请求
+    assert stop_calls == ["stop"]          # 调度线程先停（不留后台线程）
+    assert QCoreApplication.instance() is not None
 
 
 def test_test_notify_button_reports_results(window, qapp, monkeypatch) -> None:
@@ -1212,9 +1250,10 @@ def test_alert_table_shows_name_with_symbol(window, seeded, qapp) -> None:
             {"symbol": "600001", "kind": "break_high", "price": 3.2, "detail": "突破 20 日高点"},
             # 库里没有名字的那只：只显示代码（**不许出现 `（None）`**）
             {"symbol": "600009", "kind": "break_high", "price": 9.9, "detail": "突破"},
-            # symbol 为空的提醒（首板那类）：用说明里的名称
-            {"symbol": "", "kind": "first_board", "price": 12.0,
-             "detail": "半导体甲 首板，封单 0.90 亿"},
+            # symbol 为空的提醒（老库里的历史行 / 将来某类"全市场"提醒）：
+            # 用说明里的名称兜底。打板提醒虽已下线，这条退化路径**仍然必须好看**
+            {"symbol": "", "kind": "break_high", "price": 12.0,
+             "detail": "半导体甲 触发提醒"},
         ], "2026-09-15")
     window._refresh_alerts()
     qapp.processEvents()

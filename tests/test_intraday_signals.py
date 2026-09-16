@@ -505,6 +505,37 @@ def test_build_alerts_includes_anomaly_but_not_auction(cfg) -> None:
     assert [c for c in client.calls if c[0] == "auction"] == []     # 一次竞价请求都没发
 
 
+def test_build_alerts_no_longer_emits_first_board(cfg) -> None:
+    """**打板提醒已下线**：实时涨停池里就算有"首板 + 厚封单"，也不再产生任何提醒。
+
+    为什么留着这条用例（而不是把相关用例删干净）：删掉一个功能之后，
+    "它不会再回来"这件事必须由测试钉住 —— 否则哪天有人顺手把那段塞回
+    `build_alerts`，用户会重新收到他已经明确说"没有意义"的提醒，而且没人会发现。
+
+    顺带钉住两件事：① 标签表里也没有这个 kind（否则它会以"未知 kind = 原样显示
+    first_board"的形式漏到推送里）；② 这一轮**不再为了打板去拉涨停池**
+    （那条请求本身也是配额）。
+    """
+    _seed_targets(cfg)
+    client = FakeSignalClient(
+        limit_up=[{"thscode": "600519.SH", "name": "贵州茅台", "continue_day_cnt": 1,
+                   "seal_money": 9e7, "last_price": 1281.0,
+                   "limit_up_reason": "半导体设备+业绩预增"}],
+        anomalies=[_anomaly("600001", "RAPID_RALLY")],
+    )
+    engine = DataEngine(cfg.db_path)
+
+    alerts = it.build_alerts(engine, client, cfg=cfg)
+
+    kinds = {a["kind"] for a in alerts}
+    assert kinds, "其它提醒种类必须照常产出"
+    assert "first_board" not in kinds
+    assert kinds == {"anomaly_rapid_rally"}          # 这一轮该出的都出了
+    assert "first_board" not in it.KIND_LABELS       # 标签表也清掉了
+    assert not hasattr(it, "evaluate_first_board")   # 函数整个删掉，不是留着不用
+    assert [c for c in client.calls if c[0] == "limit_up"] == []   # 不为打板拉涨停池
+
+
 def test_run_once_scans_only_at_the_configured_slots(cfg, monkeypatch) -> None:
     """到点才扫：9:20 与 9:25 各一次；9:23（宽限窗口外）/9:40 一次请求都不发。"""
     _seed_market(cfg, count=120)
@@ -566,17 +597,6 @@ def test_auction_scan_records_alerts_and_results(cfg, monkeypatch) -> None:
 
 
 # ── 涨停原因 ──
-
-
-def test_first_board_alert_carries_the_reason() -> None:
-    """首板提醒的 detail 里要带涨停原因（用户要"为什么涨"的答案）。"""
-    client = FakeSignalClient(limit_up=[{
-        "thscode": "600519.SH", "name": "贵州茅台", "continue_day_cnt": 1,
-        "seal_money": 9e7, "last_price": 1281.0,
-        "limit_up_reason": "半导体设备+业绩预增",
-    }])
-    hits = it.evaluate_first_board(client)
-    assert hits and "半导体设备+业绩预增" in hits[0][2]
 
 
 def test_enrich_limit_up_reasons_appends_reason() -> None:

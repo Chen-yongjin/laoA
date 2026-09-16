@@ -181,6 +181,8 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
     )
     # 提醒浮窗：自己画的窗口（Windows 原生 Toast 的点击行为不受我们控制，见该模块说明）
     from laoa_trader.ui.alert_popup import AlertPopup
+    # 公式编辑器（「公式选股」页）：单独一个模块 —— 主窗口这边只负责把它挂成页签
+    from laoa_trader.ui.formula_page import FormulaPage
 
     QT_AVAILABLE = True
 except Exception as _exc:  # noqa: BLE001 - 任何导入问题都降级为 CLI
@@ -810,6 +812,13 @@ if QT_AVAILABLE:
             )
 
             self.tabs.addTab(self.alert_table, "盘中提醒")
+
+            # 公式选股页：右边点按钮就能写公式（小白友好），左边编辑/校验/试算/保存。
+            # 位置按用户点名的顺序：盘中提醒之后、设置之前。
+            # `status_cb` 把这一页的"已保存/已加入选股"之类的一句话送到状态栏 ——
+            # 这一页自己不弹提示框（不打断写公式），但用户在窗口任何位置都能看到结果
+            self.formula_page = FormulaPage(self.cfg, status_cb=self._toast)
+            self.tabs.addTab(self.formula_page, "公式选股")
 
             # 设置页：策略组自选 + 通知方式自选（都写回 config.toml，保留注释）
             self.tabs.addTab(self._build_settings_tab(), "设置")
@@ -1569,6 +1578,16 @@ if QT_AVAILABLE:
             self.save_groups_button = QPushButton("保存策略组设置")
             self.save_groups_button.clicked.connect(self.on_save_groups)
             layout.addWidget(self.save_groups_button)
+
+            # 自定义公式是**第四个组**（「公式」），成员由用户在「公式选股」页勾选，
+            # 所以它不在这张勾选表里 —— 不写一句的话，用户会以为"公式不算策略组"
+            formula_note = QLabel(
+                "　　另：你自己写的公式是「公式」组（与上面三组并列），"
+                "在【公式选股】页勾「参与选股」才生效，默认不参与。"
+            )
+            formula_note.setObjectName("statusTag")     # 小号灰字
+            formula_note.setWordWrap(True)
+            layout.addWidget(formula_note)
 
             layout.addWidget(QLabel("─" * 60))
 
@@ -2874,8 +2893,9 @@ if QT_AVAILABLE:
         def _alert_target_text(row: dict, names: dict[str, str]) -> str:
             """提醒里那一列：`名称（代码）`。
 
-            三种退化都要好看：没有名字 → 只显示代码；连代码都没有（首板那类提醒）
-            → 用说明里的名称，再不行才 `—`。**绝不显示 `（None）`**。
+            三种退化都要好看：没有名字 → 只显示代码；连代码都没有（老库里的历史
+            提醒行、将来某类"全市场"提醒）→ 用说明里的名称，再不行才 `—`。
+            **绝不显示 `（None）`**。
             """
             symbol = str(row.get("symbol") or "").strip()
             name = str(names.get(symbol) or "").strip()
@@ -3335,6 +3355,19 @@ if QT_AVAILABLE:
             data_date = report.get("data_date") or "无行情日"
             bits = [f"行情日 {data_date}", f"信号 {report.get('picks', 0)} 条",
                     f"池子 {pool_count} 只"]
+            formulas = report.get("formulas") or {}
+            if formulas.get("ran"):
+                # 「公式」组的运行结果也要说出来：不然用户勾了公式却"什么都看不到"
+                picked = sum((formulas.get("picks") or {}).values())
+                bits.append(f"公式 {len(formulas['ran'])} 条选出 {picked} 只")
+            # 公式的运行期错误（某只票算不出来之类）会显示在公式列表里（标红），
+            # 顺手刷一次那张表，用户切过去就能看到原因
+            page = getattr(self, "formula_page", None)
+            if page is not None:
+                try:
+                    page.reload()
+                except Exception:  # noqa: BLE001 - 刷新列表失败不该影响结论显示
+                    logger.debug("公式列表刷新失败", exc_info=True)
             if report.get("signals"):
                 bits.append(f"写入信号 {report['signals']} 行")
             if report.get("pushed"):
@@ -3855,16 +3888,19 @@ if QT_AVAILABLE:
             QApplication.quit()
 
         def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
-            """关闭窗口 = 最小化到托盘（盯盘工具应常驻后台）。"""
+            """关闭窗口 = **隐藏到托盘**（盯盘工具要常驻后台），关窗时**不弹任何提示**。
+
+            为什么 `event.ignore()` + `hide()` 而不是真的退出：盘中要一直盯，
+            误点关闭就把一整天的提醒都丢了。所以关窗只是把窗口收起来，
+            定时器、调度、托盘全都继续跑；想真正退出就用**托盘右键 →【退出】**。
+
+            为什么**不再**弹那条"程序还在托盘里跑"的提示气泡（用户明确说不需要）：
+            用户是**故意**关窗的，他当然知道程序还在跑 —— 再弹一次只是噪音，
+            而且每次关窗都弹（没有"只弹一次"的说法，那反而是另一种猜谜）。
+            顺带一个好处：关窗不再产生任何跨窗口的副作用，行为更好预测。
+            """
             event.ignore()
             self.hide()
-            try:
-                self.tray.showMessage(
-                    "老A选股助手仍在后台运行",
-                    "已最小化到托盘；右键托盘图标可退出。",
-                )
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def run_gui(cfg: Config | None = None) -> int:

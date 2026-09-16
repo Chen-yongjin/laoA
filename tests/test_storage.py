@@ -186,10 +186,16 @@ def test_record_alerts_dedupes_per_day_symbol_kind(cfg) -> None:
 
 
 def test_record_alerts_uses_name_when_symbol_missing(cfg) -> None:
-    """首板提醒没有本地代码（来自实时涨停池），用中文名兜底做去重键。"""
+    """提醒**没有本地代码**时用中文名兜底做去重键。
+
+    为什么这条不能跟着"打板提醒下线"一起删：`symbol` 为空的提醒最早来自打板提醒
+    （已下线），但去重键的兜底逻辑本身与具体功能无关 —— 老版本的库里就留着这种行，
+    少了兜底它们会去重失败、同一只票一天被推很多次。断言一点没放宽：
+    同一天第二次必须返回空。
+    """
     storage.init_db(cfg.db_path)
-    alert = {"symbol": "", "name": "某某股份", "kind": "first_board", "price": 12.0,
-             "detail": "首板，封单 1.00 亿"}
+    alert = {"symbol": "", "name": "某某股份", "kind": "break_high", "price": 12.0,
+             "detail": "触发提醒"}
     with storage.connect(cfg.db_path) as conn:
         assert len(storage.record_alerts(conn, [alert], "2026-09-11")) == 1
         assert storage.record_alerts(conn, [alert], "2026-09-11") == []

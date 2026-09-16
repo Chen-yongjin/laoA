@@ -204,32 +204,6 @@ def test_evaluate_pool_buy_rules_pullback(cfg) -> None:
     assert far == []
 
 
-def test_evaluate_first_board_filters_thin_seal(cfg) -> None:
-    """首板 + 封单 ≥5000 万才算（封单太薄的容易被砸开）。"""
-    client = FakeClient(limit_up=[
-        {"thscode": "600001.SH", "name": "厚封单", "continue_day_cnt": 1,
-         "seal_money": 8e7, "last_price": 10.0, "limit_up_reason": "芯片"},
-        {"thscode": "600002.SH", "name": "薄封单", "continue_day_cnt": 1,
-         "seal_money": 1e7, "last_price": 10.0},
-        {"thscode": "600003.SH", "name": "二连板", "continue_day_cnt": 2,
-         "seal_money": 9e7, "last_price": 10.0},
-    ])
-    hits = intraday.evaluate_first_board(client)
-    assert len(hits) == 1
-    assert hits[0][0] == "first_board"
-    assert "厚封单" in hits[0][2]
-    assert "封单 0.80 亿" in hits[0][2]
-    assert "芯片" in hits[0][2]
-
-
-def test_evaluate_first_board_swallows_api_error(cfg) -> None:
-    from laoa_trader.data import hithink as hx
-
-    assert intraday.evaluate_first_board(
-        FakeClient(fail_with=hx.HithinkError(5001, "模拟接口错误（测试假客户端）"))
-    ) == []
-
-
 # ── 历史上下文 ──
 
 

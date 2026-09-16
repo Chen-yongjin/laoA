@@ -100,6 +100,41 @@ GROUPS: dict[str, StrategyGroup] = {
 #: 组的展示顺序
 GROUP_ORDER: tuple[str, ...] = tuple(GROUPS)
 
+# ── 「公式」组：用户自定义公式 ────────────────────────────────────────────
+#
+# 为什么**不**把 formula 塞进上面的 `GROUPS`：那张表是"代码里写死的策略"，
+# `GROUP_ORDER`（= 界面上的组勾选框顺序）与 `STRATEGY_WEIGHTS`（= 池子权重）
+# 都由它派生，而且有测试钉住"五个策略、三个组"。自定义公式是**运行时**从
+# `formulas/` 目录读出来的，成员随时会变，两件事混在一张表里必然互相拖累。
+#
+# 但对用户而言它确实**是一个组**：与 short 等并列、默认不参与、勾了才进池。
+# 所以做法是"给合成策略名加组前缀"：池子里的策略名写成 `公式·放量上攻`，
+# `group_of()` 认出前缀就归到这一组，来源列/组别/排序全都能复用现有逻辑。
+FORMULA_GROUP_KEY = "formula"
+FORMULA_GROUP_LABEL = "公式"
+FORMULA_PREFIX = "公式·"
+
+
+def formula_strategy_name(formula_name: str) -> str:
+    """公式名 → 池子/推送里的**合成策略名**（`放量上攻` → `公式·放量上攻`）。
+
+    为什么不直接用公式名当策略名：`rules.strategy_label()` 对认不出的名字会
+    原样返回，于是池子表格的「来源策略」列会出现一个跟内置策略混在一起、
+    分不清来源的名字。带上 `公式·` 前缀，推送与卡片上就一眼能看出"这是我自己的公式"。
+    """
+    return f"{FORMULA_PREFIX}{str(formula_name or '').strip()}"
+
+
+def is_formula_strategy(class_name: str) -> bool:
+    """这个策略名是不是"自定义公式"（合成名以 `公式·` 开头）。"""
+    return str(class_name or "").startswith(FORMULA_PREFIX)
+
+
+def formula_name_of(class_name: str) -> str:
+    """合成策略名 → 公式名（不是公式时原样返回）。"""
+    name = str(class_name or "")
+    return name[len(FORMULA_PREFIX):] if name.startswith(FORMULA_PREFIX) else name
+
 #: 默认启用的组（**用户拍板**：只留 `short` 那三条 T+3 定位的策略）。
 #: `config.Config.enabled_groups` 的默认值必须与它一致（有测试钉住，防两处漂移）。
 DEFAULT_GROUPS: tuple[str, ...] = tuple(
@@ -134,12 +169,20 @@ def group_keys() -> list[str]:
 
 
 def group_of(class_name: str) -> str | None:
-    """策略类名 → 组 key（不在任何组里返回 None，例如将来新增但未归组）。"""
+    """策略类名 → 组 key（不在任何组里返回 None，例如将来新增但未归组）。
+
+    自定义公式的合成名（`公式·xxx`）归到 `formula` 组 —— 见上面 `FORMULA_PREFIX`
+    的说明：这样"来源列 / 组别 / 推送文案"都能复用同一套逻辑，不用到处特判。
+    """
+    if is_formula_strategy(class_name):
+        return FORMULA_GROUP_KEY
     return _STRATEGY_TO_GROUP.get(class_name)
 
 
 def group_label(key: str) -> str:
     """组 key → 中文展示名（未知 key 原样返回，便于报错时看清是哪个）。"""
+    if key == FORMULA_GROUP_KEY:
+        return FORMULA_GROUP_LABEL
     group = GROUPS.get(key)
     return group.label if group else key
 
@@ -357,6 +400,9 @@ def iter_selected(selection: Selection | None) -> Iterable[str]:
 
 
 __all__ = [
+    "FORMULA_GROUP_KEY",
+    "FORMULA_GROUP_LABEL",
+    "FORMULA_PREFIX",
     "GROUPS",
     "GROUP_ORDER",
     "STRATEGY_WEIGHTS",
@@ -364,10 +410,13 @@ __all__ = [
     "StrategyGroup",
     "all_strategies",
     "describe_groups",
+    "formula_name_of",
+    "formula_strategy_name",
     "group_horizon",
     "group_keys",
     "group_label",
     "group_of",
+    "is_formula_strategy",
     "iter_selected",
     "resolve",
     "resolve_from_config",

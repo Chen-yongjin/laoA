@@ -96,9 +96,14 @@ HIDDEN = [
     "laoa_trader.strategy",
     "laoa_trader.strategy.base",
     "laoa_trader.strategy.factors",
+    "laoa_trader.strategy.formula",
+    "laoa_trader.strategy.formula_group",
+    "laoa_trader.strategy.groups",
     "laoa_trader.strategy.rules",
+    "laoa_trader.formulas",
     "laoa_trader.ui",
     "laoa_trader.ui.app",
+    "laoa_trader.ui.formula_page",
     # PySide6 里被动态加载的插件模块
     "PySide6.QtCore",
     "PySide6.QtGui",
@@ -112,6 +117,11 @@ DATAS = [
     # 图标要打进包里：窗口 / 托盘 / 关于页都从 `laoa_trader/assets/` 取
     # （位置解析集中在 `laoa_trader/assets.py`，spec 这里只负责把文件放进去）
     (str(SRC / "laoa_trader" / "assets"), "laoa_trader/assets"),
+    # 示例公式（随包分发）：解到 `_MEIPASS/formulas`，第一次打开「公式选股」页时
+    # 由 `formulas.formula_dir()` 复制到 **exe 同级的 formulas/**（那才是用户自己的目录，
+    # 可写、看得见、能备份）。少这一步的话，新用户打开那一页是个空列表，
+    # 连【载入示例】都没得载。
+    (str(PROJECT_ROOT / "formulas"), "formulas"),
 ]
 
 #: exe 的图标：Windows 用它显示在任务栏 / 资源管理器 / 快捷方式上。

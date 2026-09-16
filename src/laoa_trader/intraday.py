@@ -20,7 +20,12 @@
 | 卖出/风控 | `limit_up_open` | 昨日涨停、今日触及涨停价后打开 |
 | 买入 | `break_high` | 放量突破 20 日高点（涨 2%~9%，成交额 ≥ 日均 ×0.5） |
 | 买入 | `pullback_ma5_buy` | 池内标的回踩 5 日线 ±1.5% 且盘中转强 |
-| 打板 | `first_board` | 实时涨停池里"首板 + 封单 ≥5000 万" |
+
+> **已下线**：原来的"打板提醒"（kind `first_board`：实时涨停池里"首板 + 封单 ≥5000 万"）
+> 已于本轮删除 —— 依赖**封单额**的打板信号没有可验证的边际（见策略成绩单那套口径），
+> 用户也明确说"没有意义"。`limit_up_pool` 的同步、连板数与封单额字段**都还在**
+> （池子要显示"涨停：2 连板 · 原因"，公式里的 `连板()` / `涨停天数()` 也依赖它），
+> 只是不再用它产生提醒。
 
 设计要点（继承服务器版）
 ------------------------
@@ -62,7 +67,6 @@ SESSIONS = ((9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60))
 BREAK_HIGH_WINDOW = int(os.environ.get("INTRADAY_BREAK_WINDOW", "20"))
 MIN_BREAK_GAIN = float(os.environ.get("INTRADAY_MIN_BREAK_GAIN", "0.02"))
 MAX_BREAK_GAIN = float(os.environ.get("INTRADAY_MAX_BREAK_GAIN", "0.09"))
-FIRST_BOARD_SEAL = float(os.environ.get("INTRADAY_FIRST_BOARD_SEAL", "5e7"))
 LOOKBACK_DAYS = int(os.environ.get("INTRADAY_LOOKBACK_DAYS", "10"))
 
 #: A 股一手
@@ -115,7 +119,6 @@ KIND_LABELS = {
     "break_ma5": "📉 跌破 5 日线",
     "limit_up_open": "🔓 涨停打开",
     "break_high": "🚀 放量突破20日高",
-    "first_board": "🔥 首板厚封单",
     "pullback_ma5_buy": "🎯 池内回踩买点",
     # 竞价强度：强/弱分开成两种 kind，去重键 (date, symbol, kind) 天然一天只推一次
     "auction_strong": "⚡ 竞价强度",
@@ -366,11 +369,19 @@ def watch_targets(
 
         为什么看全部而不是只看主策略：一只股票可能同时被"低价股"和"首板缩量整理"
         选中，主策略字段只存了第一个 —— 只看主策略会把启用组里的标的误判成不可用。
+
+        自定义公式（`公式·xxx`）**一律保留**：它归 `enabled_formulas` 管
+        （用户在「公式选股」页勾了才进池），不该被 `enabled_groups = ["short"]`
+        这种内置组的选择剔掉 —— 否则会出现"池子里有它、盘中却永远不提醒它"。
         """
         if allowed is None:
             return True
         names = [x for x in str(strategies_text or "").split(",") if x]
-        return any(name in allowed for name in names) if names else True
+        if not names:
+            return True
+        if any(groups_mod.is_formula_strategy(name) for name in names):
+            return True
+        return any(name in allowed for name in names)
 
     cfg = cfg or get_config()
     targets: dict[str, dict] = {}
@@ -532,33 +543,6 @@ def evaluate_pool_buy_rules(symbol: str, snap: dict, ctx: dict) -> list[tuple[st
     return []
 
 
-def evaluate_first_board(client: hx.HithinkClient) -> list[tuple[str, float, str]]:
-    """实时涨停池里的"首板 + 厚封单"（打板候选，含现价与封单额）。"""
-    try:
-        rows = client.limit_up_pool()
-    except hx.HithinkError as exc:
-        logger.warning(f"实时涨停池获取失败：{exc}")
-        return []
-    hits = []
-    for row in rows:
-        days = row.get("continue_day_cnt")
-        seal = row.get("seal_money") or row.get("order_amount") or 0
-        code = str(row.get("thscode") or row.get("ticker") or "")
-        if not code or days != 1 or float(seal) < FIRST_BOARD_SEAL:
-            continue
-        price = float(row.get("last_price") or 0)
-        reason = row.get("limit_up_reason") or ""
-        hits.append(
-            (
-                "first_board",
-                price,
-                f"{row.get('name', '')} 首板，封单 {float(seal) / 1e8:.2f} 亿"
-                + (f"，{reason}" if reason else ""),
-            )
-        )
-    return hits
-
-
 # ── 一轮执行 ──
 
 
@@ -619,10 +603,7 @@ def build_alerts(
     # 当日异动：全市场一条请求，本地只留自己的票
     alerts.extend(anomaly_alerts(client, db_path=engine.db_path, cfg=cfg))
 
-    for kind, price, detail in evaluate_first_board(client):
-        alerts.append({"symbol": "", "name": detail.split(" ")[0], "kind": kind,
-                       "price": price, "detail": detail})
-    # 涨停类提醒补"为什么涨停"（按需：只有真命中涨停打开/首板才去拉涨停池）
+    # 涨停类提醒补"为什么涨停"（按需：只有真命中"涨停打开"才去拉涨停池）
     enrich_limit_up_reasons(client, alerts)
     return alerts
 
@@ -1464,8 +1445,10 @@ def _clip_text(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-#: 需要补"涨停原因"的提醒类型（这几条本来只说"涨停打开/首板"，用户看不出为什么涨停）
-LIMIT_UP_KINDS = ("limit_up_open", "first_board")
+#: 需要补"涨停原因"的提醒类型（这条本来只说"涨停打开"，用户看不出为什么涨停）。
+#: 原来还有 `first_board`（打板提醒）—— 那条提醒已下线（见模块 docstring），
+#: 所以这里只剩一种；**保留成元组**是为了以后再加涨停类提醒时不用改调用处。
+LIMIT_UP_KINDS = ("limit_up_open",)
 
 
 def enrich_limit_up_reasons(client: hx.HithinkClient, alerts: list[dict]) -> None:
@@ -1478,7 +1461,7 @@ def enrich_limit_up_reasons(client: hx.HithinkClient, alerts: list[dict]) -> Non
     targets = {
         alert["symbol"] for alert in alerts
         if alert.get("kind") in LIMIT_UP_KINDS and alert.get("symbol")
-        # 只跳过"已经补过原因"的（详情里本来就有原因的首板提醒不用再补）；
+        # 只跳过"已经补过原因"的（detail 里已经有"，涨停原因：…"就不用再补）；
         # 注意不能拿"详情里有'涨停'两个字"当判据 —— "涨停打开"本来就有这两个字
         and "涨停原因" not in str(alert.get("detail") or "")
     }

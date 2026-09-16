@@ -1,0 +1,649 @@
+"""公式库：公式文件的**存/取**、**试算**、**成绩单**，以及目录定位。
+
+与 `strategy/formula.py` 的分工
+-------------------------------
+引擎那一份（`strategy/formula.py`，2300 行）只管"把文本变成能算的东西"：
+词法、语法、白名单求值、`FormulaError`。它**刻意不碰磁盘、不碰界面、不碰配置**。
+
+本模块是它的"产品外壳"：
+
+* **目录定位** —— `formula_dir()` 同时支持源码运行与打包后的 exe（见下）；
+* **保存/删除** —— 文件名安全化 + 引擎认的注释头（`# 名称:` / `# 说明:`）；
+* **参与选股名单** —— `enabled_names()`：把 `config.toml` 里的 `enabled_formulas`
+  收紧成"目录里真实存在且语法通过"的名字，**找不到/写错的忽略并记日志**；
+* **试算 / 成绩单** —— 供界面上的【试算】【看成绩单】用（只读本地库，不联网）。
+
+为什么"保存"要先做名称安全化
+-----------------------------
+公式名称是用户随手打的（"5日线上放量"），而它同时要当**文件名**。用户完全可能
+打出 `涨/跌`（Windows 上直接建不出这个文件）、`A:B`（时间戳风格的冒号）、
+结尾一个点（Windows 会把 `abc.` 悄悄变成 `abc`）—— 这些都不该表现成
+"点了保存但列表里没有"。所以统一在这里把非法字符换成下划线、去掉首尾空格与结尾点，
+**并且把安全化后的名字回显给用户**（界面填回名称框），用户看到的与磁盘上的一致。
+
+为什么注释头由本模块拼、而**不**让用户写进编辑框
+------------------------------------------------
+引擎的公式文件格式是"文件开头连续的 `#` 行 = 名称/说明注释头，其余是公式体"。
+如果让用户在编辑框里写 `# 名称: xxx`，他改一次名字就要记得改两处，改漏了就会出现
+"列表里显示旧名字、文件里写着新名字"。所以界面只让用户填名称与正文，
+注释头在这里拼；读取时引擎的 `_parse_formula_file()` 再把两者拆开。
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import sqlite3
+import sys
+from collections import OrderedDict
+from pathlib import Path
+from typing import Any, Callable, Sequence
+
+from laoa_trader.data.engine import HFQ_TABLE
+from laoa_trader.log import get_logger
+from laoa_trader.strategy import formula as fm
+
+logger = get_logger(__name__)
+
+#: 公式目录名（exe 同级 / 仓库根都是它）
+FORMULA_DIR_NAME = "formulas"
+
+#: 用户显式指定公式目录的环境变量（换机器、放共享盘、测试都靠它）
+FORMULA_DIR_ENV = "LAOA_TRADER_FORMULAS"
+
+#: Windows 文件名里**非法**的字符（换成下划线）。顺带把控制字符也挡掉：
+#: 从别处复制来的公式名里偶尔夹着不可见字符，那种文件名在资源管理器里看着是空的。
+_ILLEGAL_NAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+#: 文件名（= 公式名）的长度上限。Windows 全路径上限 260，公式名留 60 足够，
+#: 而且过长的名字在列表/推送里也读不下去。
+MAX_NAME_CHARS = 60
+
+#: 说明的长度上限（注释头一行太长会让文件很难看）
+MAX_DESC_CHARS = 200
+
+#: 依赖本地涨停池的两个函数 —— 它们的"历史坑"要在界面与成绩单里讲清楚
+LIMIT_UP_FUNCTIONS: tuple[str, ...] = ("连板", "涨停天数")
+
+#: 用到 `连板()` / `涨停天数()` 时必须一起显示的中文提醒（**一句话，别吓人**）。
+#:
+#: 为什么必须有：这两个函数读的是本地 `limit_up_pool` 表，而那张表是**逐日同步攒出来的**
+#: —— 用户第一次装好、只同步了最近几天时，历史日期一律读到 0，公式会"选不出票"或
+#: "回测全是 0 信号"。这看起来像公式写错了，实际是数据没攒够，必须当场说清楚。
+LIMIT_UP_HINT = (
+    "注意：连板() / 涨停天数() 读的是本地涨停池（逐日同步攒的），"
+    "早期日期会读到 0 —— 历史越早，信号越可能偏少。"
+)
+
+#: 默认的成交口径（成绩单用）。`B` = D+1 收盘买 → D+2 收盘卖：
+#: 与 `research/scorecard.py` 的默认并列口径一致，也是散户真能执行的那一档。
+DEFAULT_CONVENTION_KEY = "B"
+
+#: 【试算】最多列出多少只（名称（代码）格式太长，列满一屏就够了）
+PREVIEW_LIMIT = 20
+
+#: 成绩单的进度回调类型（与本项目其它进度回调同一个签名：阶段 + 已完成 + 总数）
+ProgressCb = Callable[[str, int, int], None]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 目录定位
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def repo_root() -> Path:
+    """仓库根（`laoA/`）：本文件在 `laoA/src/laoa_trader/formulas.py`。"""
+    return Path(__file__).resolve().parents[2]
+
+
+def bundled_formula_dir() -> Path | None:
+    """**随包分发**的示例公式目录（只读，找不到返回 None）。
+
+    两种形态：
+    * 打包后：PyInstaller 把 spec 里 `DATAS` 的 `formulas/` 解到 `_MEIPASS/formulas`；
+    * 源码运行：就是仓库根的 `formulas/`。
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        packed = Path(meipass) / FORMULA_DIR_NAME
+        if packed.is_dir():
+            return packed
+    root = repo_root() / FORMULA_DIR_NAME
+    return root if root.is_dir() else None
+
+
+def _seed_samples(target: Path) -> None:
+    """用户目录为空时，把随包的示例公式复制进去（**只在空目录做一次**）。
+
+    为什么需要：打包后示例公式在 `_internal/formulas`（解包目录，用户看不到、
+    也不该往里写），而用户的公式放在 exe 同级的 `formulas/`。第一版不带这一步时，
+    新用户打开界面看到的是一个**空列表**，连"载入示例"都没得载 —— 小白第一步就走不下去。
+    复制只在目标目录**一个公式文件都没有**时发生，绝不会覆盖用户自己存过的公式。
+    """
+    source = bundled_formula_dir()
+    if source is None or source == target:
+        return
+    if any(p.suffix.lower() in fm.FORMULA_SUFFIXES for p in target.iterdir()):
+        return
+    copied = 0
+    for path in sorted(source.iterdir()):
+        if path.is_file() and path.suffix.lower() in fm.FORMULA_SUFFIXES:
+            try:
+                shutil.copyfile(path, target / path.name)
+                copied += 1
+            except OSError as exc:      # 权限/只读盘：示例没到位不该影响启动
+                logger.warning(f"示例公式 {path.name} 复制失败：{exc}")
+    if copied:
+        logger.info(f"已把 {copied} 条示例公式放进 {target}")
+
+
+def formula_dir() -> Path:
+    """公式目录（**用户自己的公式存这里**），不存在就创建。
+
+    查找顺序（与 `config.config_search_paths()` 同一个思路：打包后优先"看得见的位置"）：
+
+    1. 环境变量 `LAOA_TRADER_FORMULAS`（换机器/放共享盘/测试用）；
+    2. **打包后**：exe 同级目录下的 `formulas/` —— 用户双击 exe 就放在旁边，
+       备份、发给别人、用记事本改都最直观；
+    3. **源码运行**：仓库根 `laoA/formulas/`（就是仓库里那份，随包分发的也是它）。
+
+    目录里没有公式文件时会把随包示例复制进来（见 `_seed_samples`）—— 只做一次。
+    """
+    override = (os.environ.get(FORMULA_DIR_ENV) or "").strip()
+    if override:
+        target = Path(override).expanduser()
+    elif getattr(sys, "frozen", False):
+        target = Path(sys.executable).resolve().parent / FORMULA_DIR_NAME
+    else:
+        target = repo_root() / FORMULA_DIR_NAME
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # 只读盘 / 权限不足：**不抛异常**（界面照开），保存时再给中文错误
+        logger.warning(f"公式目录建不出来：{target}（{exc}）")
+        return target
+    _seed_samples(target)
+    return target
+
+
+def formula_files(directory: str | Path | None = None) -> list[fm.FormulaSpec]:
+    """加载公式目录（默认 `formula_dir()`）里的全部公式，逐文件报错。"""
+    return fm.load_formula_files(directory if directory is not None else formula_dir())
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 名称安全化 / 保存 / 删除
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def safe_name(name: Any) -> str:
+    """公式名 → 安全的文件名（去非法字符、去首尾空格与结尾点、超长截断）。
+
+    **空名返回空串**（调用方据此拒绝保存，见 `name_error`）—— 这里不抛异常：
+    "名字不能用"是用户马上能自己改的问题，走提示而不是异常。
+
+    Example:
+        >>> safe_name(' 5日线上/放量 ')
+        '5日线上_放量'
+    """
+    text = "" if name is None else str(name)
+    text = _ILLEGAL_NAME_CHARS.sub("_", text).strip()
+    # Windows：结尾的点与空格会被**静默吃掉**（`abc.` → `abc`），先把它们去掉，
+    # 免得"我存的名字"和"列表里的名字"看着不一样
+    text = text.rstrip(". ")
+    if len(text) > MAX_NAME_CHARS:
+        text = text[:MAX_NAME_CHARS].rstrip(". ")
+    return text
+
+
+def name_error(name: Any) -> str:
+    """名称能不能用：可用返回空串，否则返回中文原因（界面直接显示）。"""
+    raw = "" if name is None else str(name)
+    if not raw.strip():
+        return "请先填公式名称（例如：5日线上放量）"
+    if not safe_name(raw):
+        return f"这个名字不能当文件名：{raw!r}（请换成中文或字母数字）"
+    return ""
+
+
+def formula_path(name: Any, directory: str | Path | None = None) -> Path:
+    """公式名 → 文件路径（`.txt`；名字会被安全化）。"""
+    folder = Path(directory) if directory is not None else formula_dir()
+    return folder / f"{safe_name(name)}{fm.FORMULA_SUFFIXES[0]}"
+
+
+def formula_text(name: str, body: str, description: str = "") -> str:
+    """拼出公式文件的全文（注释头 + 公式体）—— 引擎的 `load_formula_files` 认这个格式。"""
+    header = [f"# 名称: {name}"]
+    if description:
+        header.append(f"# 说明: {description}")
+    lines = [*header, "", (body or "").strip("\n")]
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def describe_for_save(body: str, name: str = "") -> str:
+    """给刚写完的公式自动生成一句说明（编译不过就给空串，不拦着用户存草稿）。
+
+    为什么自动生成：界面上只有"名称"一个输入框，用户不该为了填一行说明再多打一遍
+    字段与函数清单 —— 那正是 `Formula.describe()` 能算出来的东西。
+    """
+    try:
+        formula = fm.compile_formula(body, name=name)
+    except fm.FormulaError:
+        return ""
+    return formula.describe()[:MAX_DESC_CHARS]
+
+
+def save_formula(
+    name: str,
+    body: str,
+    *,
+    description: str | None = None,
+    directory: str | Path | None = None,
+) -> Path:
+    """把公式保存成文件（UTF-8，带引擎认的注释头）。
+
+    Args:
+        name: 公式名称（会做安全化；**空名拒绝**）。
+        body: 公式正文（多行，最后一行是选股条件）。
+        description: 说明；None = 用 `describe_for_save()` 自动生成。
+        directory: 公式目录；None = `formula_dir()`。
+
+    Returns:
+        写入的文件路径。
+
+    Raises:
+        ValueError: 名称为空 / 安全化后为空。
+        OSError: 写不进去（只读盘、权限），界面负责转成中文提示。
+    """
+    problem = name_error(name)
+    if problem:
+        raise ValueError(problem)
+    clean = safe_name(name)
+    if not clean:
+        raise ValueError(f"这个名字不能当文件名：{name!r}")
+    folder = Path(directory) if directory is not None else formula_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{clean}{fm.FORMULA_SUFFIXES[0]}"
+    if description is None:
+        description = describe_for_save(body, clean)
+    text = formula_text(clean, body, description)
+    # 先写临时文件再替换：中途失败不会把用户原来的公式截成半截
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    logger.info(f"公式已保存：{path.name}（{len(body)} 字符）")
+    return path
+
+
+def delete_formula(name: str, directory: str | Path | None = None) -> bool:
+    """删除公式文件；文件不存在返回 False（**不抛异常**）。"""
+    path = formula_path(name, directory)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    logger.info(f"公式已删除：{path.name}")
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 参与选股名单（config.toml 的 enabled_formulas）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def enabled_names(cfg: Any = None, directory: str | Path | None = None) -> list[str]:
+    """本次**真正参与选股**的公式名（按目录里的顺序）。
+
+    三道收紧，缺一不可：
+
+    1. 名字写在 `config.toml` 里、但 `formulas/` 里**没有这个文件** → 忽略 + 记日志
+       （用户删了文件、或改名了；静默失败会让他以为"公式选股坏了"）；
+    2. 文件有、但公式**语法错** → 忽略 + 记日志（坏公式不该拖垮其它公式）；
+    3. 名字里的首尾空格、重复项 → 去掉。
+
+    为什么"写成名字而不是文件路径"：用户眼里的公式就是它的名字，
+    在界面上勾选、在配置里手写都该写名字；文件名的安全化规则改了他也不用动配置。
+    """
+    from laoa_trader.config import get_config
+
+    cfg = cfg if cfg is not None else get_config()
+    wanted = [str(n).strip() for n in (getattr(cfg, "enabled_formulas", None) or [])]
+    wanted = [n for n in wanted if n]
+    if not wanted:
+        return []
+
+    specs = formula_files(directory)
+    by_name = {spec.name: spec for spec in specs}
+    picked: list[str] = []
+    for name in wanted:
+        spec = by_name.get(name)
+        if spec is None:
+            logger.warning(
+                f"公式选股：config.toml 里的 enabled_formulas 写着 {name!r}，"
+                f"但公式目录里没有这条公式，已忽略"
+            )
+            continue
+        if not spec.ok:
+            logger.warning(f"公式选股：{name} 语法有错（{spec.error_text}），本次不参与")
+            continue
+        if name not in picked:
+            picked.append(name)
+    return picked
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 连板/涨停天数的历史坑
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def limit_up_hint(formula: fm.Formula | None) -> str:
+    """公式用到 `连板()`/`涨停天数()` 时返回中文提醒，否则空串。
+
+    为什么按"函数名"判而不是按"结果对不对"判：数据攒没攒够是**环境**问题，
+    跟公式写得对不对无关；用户需要在**校验通过的那一刻**就被告知，
+    而不是等到试算结果偏少再回来怀疑公式。
+    """
+    if formula is None:
+        return ""
+    used = set(getattr(formula, "functions", ()) or ())
+    return LIMIT_UP_HINT if used & set(LIMIT_UP_FUNCTIONS) else ""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 试算：当前库能选出几只
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def latest_trading_day(db_path: str | Path) -> str | None:
+    """库里最新的行情日（空库返回 None）。"""
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(str(path), timeout=60)
+    try:
+        row = conn.execute(f"SELECT MAX(date) FROM {HFQ_TABLE}").fetchone()  # noqa: S608
+    finally:
+        conn.close()
+    return str(row[0]) if row and row[0] else None
+
+
+def preview_hits(
+    formula: fm.Formula,
+    db_path: str | Path,
+    *,
+    limit: int = PREVIEW_LIMIT,
+    start: str | None = None,
+    symbols: Sequence[str] | None = None,
+) -> dict:
+    """在**当前本地库**上跑一遍公式，返回最新行情日的命中清单（不联网、只读）。
+
+    口径与内置策略一致：只看**每只票最后一根 K 线**，命中即"当日收盘后选中"。
+    最后一根 K 线早于全市场最新行情日的票会被跳过（停牌/退市：它的"最后一根"
+    是旧的，拿它当"今天选中"是错的）。
+
+    Returns:
+        {"date": 行情日, "count": 命中数, "hits": [{"symbol","name"}...],
+         "shown": 展示数, "scanned": 扫过的票数, "skipped": 数据不足的票数,
+         "errors": [中文错误...]}
+    """
+    day = latest_trading_day(db_path)
+    hits: list[dict] = []
+    errors: list[str] = []
+    scanned = 0
+    skipped = 0
+    for series in fm.load_series(db_path, symbols=symbols, start=start):
+        # 数据不够长：公式的滚动窗口一定全是缺值 ⇒ 不可能出信号，直接跳过（省时间）
+        if len(series.date) < formula.min_history:
+            skipped += 1
+            continue
+        if day is not None and series.date[-1] != day:
+            skipped += 1
+            continue
+        scanned += 1
+        try:
+            mask = formula.eval(series)
+        except (fm.FormulaError, fm.FormulaDataError) as exc:
+            # 一只票算不出来不该让整次试算失败（与选股链路的隔离口径一致）
+            errors.append(f"{series.name}（{series.symbol}）：{exc}")
+            continue
+        if bool(mask[-1]):
+            hits.append({"symbol": series.symbol, "name": series.name})
+    hits.sort(key=lambda hit: hit["symbol"])
+    return {
+        "date": day,
+        "count": len(hits),
+        "hits": hits[:limit],
+        "shown": min(len(hits), limit),
+        "scanned": scanned,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 成绩单：这条公式历史上到底行不行
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _convention(key: str) -> Any:
+    """按短键取成交口径（`research/scorecard.py` 那份定义，**不另写一套**）。"""
+    from laoa_trader.research import scorecard as sc
+
+    for conv in sc.CONVENTIONS:
+        if conv.key == key:
+            return conv
+    return sc.CONVENTIONS[1] if len(sc.CONVENTIONS) > 1 else sc.CONVENTIONS[0]
+
+
+def run_scorecard(
+    formula: fm.Formula,
+    db_path: str | Path,
+    *,
+    progress_cb: ProgressCb | None = None,
+    conv_key: str = DEFAULT_CONVENTION_KEY,
+    start: str | None = None,
+    symbols: Sequence[str] | None = None,
+) -> dict:
+    """跑公式的历史成绩单（**逐只算，内存只占一只票**），返回结论 + 中文文本。
+
+    口径与 `research/scorecard.py` 的 `compute_outcomes()` **逐行对齐**（进场/出场
+    偏移、成交价、以及"一字板买不进就剔除"这条），默认 `B` 口径
+    （D+1 收盘买 → D+2 收盘卖）。为什么不去调那个函数：它是面向"全市场 panel"
+    的（一次把 10 年数据读进 pandas），而公式成绩单要能在**单机小库**上边跑边报进度 ——
+    所以这里按同样的规则逐只走，内存占用与 `load_series()` 一致。
+
+    与策略成绩单**故意不同**的一点：这里**不算 α**（超额收益需要全市场同期基准，
+    那正是 `research/scorecard.py` 的活）。所以文本里写的是**绝对收益**，
+    免得用户把两种数字混着比。
+
+    Returns:
+        {"formula","conv","conv_key","min_history","symbols","samples","days",
+         "avg","win_rate","t","best","worst","by_year","dropped","errors",
+         "hint","text"}
+    """
+    from laoa_trader.research import scorecard as sc
+
+    conv = _convention(conv_key)
+    per_day: dict[str, list[float]] = OrderedDict()
+    by_year: dict[str, list[float]] = OrderedDict()
+    samples = 0
+    worst: float | None = None
+    best: float | None = None
+    dropped = 0
+    errors: list[str] = []
+    scanned = 0
+
+    series_iter = fm.load_series(db_path, symbols=symbols, start=start)
+    # 进度需要"总数"，而 `load_series` 是生成器（不知道总数）—— 先按库里的代码数
+    # 报总步数：比"进度条永远停在 0%"好得多，且不额外读行情。
+    total = _symbol_count(db_path, symbols)
+    for series in series_iter:
+        scanned += 1
+        if progress_cb is not None and (scanned % 25 == 0 or scanned == total):
+            progress_cb("公式成绩单", min(scanned, total or scanned), total or scanned)
+        if len(series.date) < formula.min_history:
+            continue
+        try:
+            mask = formula.eval(series)
+        except (fm.FormulaError, fm.FormulaDataError) as exc:
+            # 单只票的缺失值/坏数据只记一笔，不影响其它票（也不让成绩单整体失败）
+            errors.append(f"{series.name}（{series.symbol}）：{exc}")
+            continue
+        dates = series.date
+        for index in range(len(dates)):
+            if not bool(mask[index]):
+                continue
+            trade = _forward_return(series, index, conv)
+            if trade is None:
+                dropped += 1
+                continue
+            ret, exit_date = trade
+            samples += 1
+            per_day.setdefault(dates[index], []).append(ret)
+            by_year.setdefault(exit_date[:4], []).append(ret)
+            best = ret if best is None or ret > best else best
+            worst = ret if worst is None or ret < worst else worst
+
+    t_stat, avg, days = sc.daily_t(per_day)
+    wins = sum(1 for values in per_day.values() for value in values if value > 0)
+    win_rate = (wins / samples) if samples else None
+    result = {
+        "formula": formula.label,
+        "conv": conv.description,
+        "conv_key": conv.key,
+        "min_history": formula.min_history,
+        "symbols": scanned,
+        "samples": samples,
+        "days": days,
+        "avg": avg,
+        "win_rate": win_rate,
+        "t": t_stat,
+        "best": best,
+        "worst": worst,
+        "dropped": dropped,
+        "errors": errors,
+        "by_year": [
+            {"year": year, "n": len(values),
+             "avg": sum(values) / len(values),
+             "win": sum(1 for v in values if v > 0) / len(values)}
+            for year, values in sorted(by_year.items())
+        ],
+        "hint": limit_up_hint(formula),
+    }
+    result["text"] = _scorecard_text(result)
+    return result
+
+
+def _symbol_count(db_path: str | Path, symbols: Sequence[str] | None) -> int:
+    if symbols is not None:
+        return len(list(symbols))
+    path = Path(db_path)
+    if not path.exists():
+        return 0
+    conn = sqlite3.connect(str(path), timeout=60)
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(DISTINCT symbol) FROM {HFQ_TABLE}"  # noqa: S608
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row[0]) if row and row[0] else 0
+
+
+def _forward_return(series: fm.Series, index: int, conv: Any) -> tuple[float, str] | None:
+    """信号日 `index` 在给定口径下的 (收益率, 出场日期)；不可成交返回 None。
+
+    规则与 `scorecard.compute_outcomes()` 一致：
+    - 进场行 = 该股票自身在信号日之后的第 `entry_offset` 根 K 线（停牌自然顺延）；
+    - **一字板买不进**（进场价相对信号日收盘涨幅 ≥ `LIMIT_UP_GAP`）→ 这一笔不计；
+    - 出场行越界（还没走到那天）→ 不计。
+    """
+    from laoa_trader.research import scorecard as sc
+
+    base = index + 1                       # D+1 = 信号日之后的第一根 K 线
+    entry_idx = base + (conv.entry_offset - 1)
+    exit_idx = base + (conv.exit_offset - 1)
+    if exit_idx >= len(series.date):
+        return None
+    signal_close = float(series.close[index]) if series.close[index] else None
+    if signal_close is None:
+        return None
+    opens = series.open
+    closes = series.close
+    entry_px = float(opens[entry_idx] if conv.entry_price == "open" else closes[entry_idx])
+    exit_px = float(opens[exit_idx] if conv.exit_price == "open" else closes[exit_idx])
+    if not entry_px or not exit_px:
+        return None
+    move = (
+        (entry_px / signal_close - 1.0)
+        if conv.entry_price == "open"
+        else (float(closes[entry_idx]) / signal_close - 1.0)
+    )
+    if move >= sc.LIMIT_UP_GAP:
+        return None
+    return (exit_px / entry_px - 1.0), series.date[exit_idx]
+
+
+def _scorecard_text(result: dict) -> str:
+    """把成绩单结果排版成**能直接读的中文多行文本**（界面提示区与复制都用它）。"""
+    def pct(value: Any) -> str:
+        return "—" if value is None else f"{value * 100:+.2f}%"
+
+    lines = [
+        f"📊 公式成绩单：{result['formula']}",
+        f"口径：{result['conv']}（与策略成绩单同一套规则；**绝对收益**，这里不算 α）",
+        f"样本：{result['samples']} 笔 / {result['days']} 个交易日"
+        f"（扫了 {result['symbols']} 只，买不进剔除 {result['dropped']} 笔）",
+        "平均收益：" + pct(result["avg"]) + "　胜率："
+        + ("—" if result["win_rate"] is None else f"{result['win_rate'] * 100:.1f}%")
+        + "　t 值：" + ("—" if result["t"] is None else f"{result['t']:.2f}"),
+        f"最好：{pct(result['best'])}　最差：{pct(result['worst'])}",
+    ]
+    if result["by_year"]:
+        lines.append("按年：")
+        for row in result["by_year"]:
+            lines.append(
+                f"  {row['year']}：{row['n']} 笔，平均 {row['avg'] * 100:+.2f}%，"
+                f"胜率 {row['win'] * 100:.0f}%"
+            )
+    if result["samples"] < 30:
+        lines.append("⚠️ 样本太少（不到 30 笔），结论只能当参考 —— 多攒些数据再跑一次。")
+    elif result["t"] is not None and abs(result["t"]) < 2:
+        lines.append("⚠️ t 值不到 2：这条公式的收益和「随机选」很难区分开，别急着上真金白银。")
+    if result["hint"]:
+        # 用到连板()/涨停天数()：历史越早数据越可能缺 —— 必须写在成绩单里
+        lines.append("⚠️ " + result["hint"])
+    if result["errors"]:
+        lines.append(f"（另有 {len(result['errors'])} 只票算不出来，已跳过："
+                     f"{result['errors'][0]}）")
+    return "\n".join(lines)
+
+
+__all__ = [
+    "DEFAULT_CONVENTION_KEY",
+    "FORMULA_DIR_ENV",
+    "FORMULA_DIR_NAME",
+    "LIMIT_UP_FUNCTIONS",
+    "LIMIT_UP_HINT",
+    "MAX_NAME_CHARS",
+    "PREVIEW_LIMIT",
+    "bundled_formula_dir",
+    "delete_formula",
+    "describe_for_save",
+    "enabled_names",
+    "formula_dir",
+    "formula_files",
+    "formula_path",
+    "formula_text",
+    "latest_trading_day",
+    "limit_up_hint",
+    "name_error",
+    "preview_hits",
+    "repo_root",
+    "run_scorecard",
+    "safe_name",
+    "save_formula",
+]
