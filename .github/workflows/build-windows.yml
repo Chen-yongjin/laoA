@@ -28,10 +28,16 @@ on:
 permissions:
   contents: write   # 失败时把 pytest.log 推回 ci-log 分支，便于本地直接 git fetch 查看
 
+# 同一分支只留最新一次构建：连续推几次时，旧的那次直接取消 ——
+# Windows 运行器很贵（额度按 2 倍算），排在后面的构建跑完也没人看。
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
     env:
       PYTHONUTF8: "1"                       # Windows 上避免中文路径/日志乱码
 
@@ -46,11 +52,13 @@ jobs:
           cache: pip
 
       - name: 安装依赖
+        timeout-minutes: 10
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
       - name: 跑测试（不通过就不出包）
+        timeout-minutes: 20          # 本机 3.5 分钟；卡住就该报错，别把整个 job 拖到总超时
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_tests != true }}
         shell: pwsh
         run: |
@@ -95,6 +103,7 @@ jobs:
           python -c "import PySide6,pyarrow,pandas;print('PySide6',PySide6.__version__,'| pyarrow',pyarrow.__version__,'| pandas',pandas.__version__)"
 
       - name: PyInstaller 打包
+        timeout-minutes: 15
         run: pyinstaller --noconfirm --clean build/laoa_trader.spec
 
       - name: 检查产物
