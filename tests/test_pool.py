@@ -86,11 +86,29 @@ def test_reason_is_truncated_to_200_chars() -> None:
 
 
 def test_format_pool_lines() -> None:
+    """推送正文的标签是**策略中文名**（不是 `LowPrice` 这样的类名片段）。
+
+    这条断言原来钉的是服务器版口径（`LowPrice,Reversal`）。改口径的理由：
+    推送是给手机上的人看的一行字，而界面同一只票写的是「低价股」
+    （`strategy_label()`）——一件事两个名字，用户没法拿它对照设置页。
+    """
     lines = pool.format_pool_lines([
         {"name": "甲", "symbol": "600001", "strategies": "LowPriceStrategy,ReversalStrategy",
          "reason": "低价股"},
     ])
-    assert lines == ["1. 甲（600001）LowPrice,Reversal｜低价股"]
+    assert lines == ["1. 甲（600001）低价股、短期反转｜低价股"]
+
+
+def test_push_tag_translates_but_keeps_custom_names() -> None:
+    """标签翻译的三条边界：类名 → 中文、中文 → 原样（幂等）、`公式·x` → 原样。"""
+    assert pool.push_tag({"strategies": "LowPriceStrategy"}) == "低价股"
+    # 已经是中文名的老行（`enabled_strategies = ["低价股"]` 那类写法存下来的）
+    assert pool.push_tag({"strategies": "低价股"}) == "低价股"
+    assert pool.push_tag({"strategies": "低价股,ReversalStrategy"}) == "低价股、短期反转"
+    # 用户自己起的公式名不能被翻译掉（认不出的名字原样返回）
+    assert pool.push_tag({"strategies": "公式·放量上攻"}) == "公式·放量上攻"
+    assert pool.push_tag({"strategies": ""}) == ""
+    assert pool.push_tag({}) == ""
 
 
 # ── 热门行业 ──

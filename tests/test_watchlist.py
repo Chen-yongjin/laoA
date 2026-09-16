@@ -541,7 +541,7 @@ def test_push_lines_mark_strategy_plus_watchlist(wl_db) -> None:
         "name": "低价样本", "symbol": "600001", "strategies": "LowPriceStrategy",
         "source": "策略+自选", "note": "老朋友", "reason": "低价股",
     }])
-    assert both == ["1. 低价样本（600001）LowPrice+自选（老朋友）｜低价股"]
+    assert both == ["1. 低价样本（600001）低价股+自选（老朋友）｜低价股"]
 
     only_watch = pool.format_pool_lines([{
         "name": "冷门样本", "symbol": "600100", "strategies": "",
@@ -554,4 +554,4 @@ def test_push_lines_mark_strategy_plus_watchlist(wl_db) -> None:
         "name": "半导体甲", "symbol": "600002", "strategies": "LowPriceStrategy",
         "source": "策略", "reason": "低价股",
     }])
-    assert plain == ["1. 半导体甲（600002）LowPrice｜低价股"]
+    assert plain == ["1. 半导体甲（600002）低价股｜低价股"]

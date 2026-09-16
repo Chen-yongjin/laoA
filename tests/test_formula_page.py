@@ -9,7 +9,12 @@
 * 函数骨架插完光标在不在括号里（不在的话用户得自己点回去，等于白做面板）；
 * `AND` 前后有没有空格（没有就变成 `A>1AND B` 这种"看不懂的语法错"）；
 * 名称必填、重名要二次确认（覆盖是**不可逆**的）；
-* 勾「参与选股」有没有真的写回 `config.toml`。
+* 勾「参与选股」有没有真的写回 `config.toml`；
+* 两个重活（【试算】【看成绩单】）**在不在后台线程里跑**（用户实报过"窗口未响应"）。
+
+最后一条尤其要在这里测：它是"看得见的行为"而不是"代码里的一行" ——
+`on_preview()` 返回时活儿必须还没干完（按钮还是灰的、进度条还在转），
+结果只能由工作线程的信号**稍后**写进提示区；提示文案必须与改造前**逐字一致**。
 
 这些只有把页面真的建出来、真的点一遍才测得到。用 Qt 的 `offscreen` 平台插件，
 无显示器也能跑；没装 PySide6 的机器整个文件跳过（与 `test_ui_smoke.py` 同一约定）。
@@ -18,6 +23,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -27,7 +33,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过公式编辑器界面测试")
 
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import Qt, QThread  # noqa: E402
 from PySide6.QtGui import QFont, QTextCursor  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
@@ -40,6 +46,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 from laoa_trader import formulas as lib  # noqa: E402
 from laoa_trader.config import Config  # noqa: E402
 from laoa_trader.data import storage  # noqa: E402
+from laoa_trader.strategy import formula as fm  # noqa: E402
 from laoa_trader.ui import formula_page as fp  # noqa: E402
 from tests.conftest import workdays_ending  # noqa: E402
 
@@ -102,9 +109,13 @@ def page(page_cfg: Config, tmp_path: Path, qapp):
     widget.show()
     qapp.processEvents()
     yield widget
-    worker = widget.scorecard_worker
-    if worker is not None and worker.isRunning():
-        worker.wait(5_000)
+    # ── 收尾必须把线程**等干净** ──
+    # 留一个还在跑的 QThread 给下一个用例：它的信号会打到已经删掉的控件上，
+    # 而且事件循环里一直有活儿 —— 整个文件的耗时会成倍劣化（界面用例踩过这个坑）。
+    for attr in ("scorecard_worker", "preview_worker"):
+        worker = getattr(widget, attr)
+        if worker is not None and worker.isRunning():
+            worker.wait(5_000)
     widget.close()
     widget.deleteLater()
     qapp.processEvents()
@@ -131,6 +142,22 @@ def _spin_until(qapp, predicate, timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.01)
     return predicate()
+
+
+#: 试算线程最多等多久（超时**大声失败**，而不是"睡一觉再赌它跑完了"）
+PREVIEW_TIMEOUT = 15.0
+
+
+def _wait_preview(page, qapp, timeout: float = PREVIEW_TIMEOUT) -> None:
+    """等【试算】的后台线程落地（`preview_worker` 被置回 None 就是"跑完了"）。
+
+    为什么要等而不用 `time.sleep`：线程什么时候结束取决于机器快慢，固定 sleep 要么
+    白等、要么偶发变红。这里转事件循环（信号得靠它回主线程）+ 超时断言，
+    失败时把当时的提示文本一起打出来，一眼能看出卡在哪一步。
+    """
+    assert _spin_until(qapp, lambda: page.preview_worker is None, timeout), (
+        f"试算线程 {timeout:.0f} 秒还没落地：hint={page.hint_text!r}"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -393,15 +420,71 @@ def test_validate_does_not_warn_for_plain_formula(page) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 6) 试算
+# 6) 试算：**后台线程**跑，文案与改造前逐字一致
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_preview_reports_known_hits_as_name_and_code(page, page_cfg) -> None:
+def test_preview_returns_immediately_and_shows_progress(page, qapp) -> None:
+    """【试算】点下去**马上返回**：按钮先灰掉、进度条先转起来、结果稍后才出现。
+
+    这就是"不卡界面"的证据。改造前是在按钮回调里同步扫全库（真实 3 年库实测 3.7 秒、
+    全市场 5000+ 只要 7~8 秒），窗口整个冻住、连"正在算"都看不见。
+    """
+    page.editor.setPlainText("C>MA(C,5)")
+
+    page.on_preview()
+
+    # on_preview() 已经返回了，但活儿还没干完 —— 这几条就是"异步"的直接证据
+    assert page.preview_worker is not None, "试算必须在后台线程里跑"
+    assert page.preview_worker.isRunning() is True
+    assert page.btn_preview.isEnabled() is False     # 跑完之前不给再点
+    assert page.progress.isVisible() is True         # 有看得见的"正在跑"
+    assert "正在试算" in page.hint_text
+
+    _wait_preview(page, qapp)
+    assert page.btn_preview.isEnabled() is True      # 跑完把按钮还回来
+    assert page.progress.isVisible() is False
+    assert "最近交易日" in page.hint_text            # 结果是在线程落地之后才写的
+
+
+def test_preview_runs_off_the_gui_thread(page, qapp, monkeypatch) -> None:
+    """**试算的计算发生在工作线程里**：干活的 `QThread.currentThread()` 不是界面线程。
+
+    这是"被人改回同步调用"就会立刻变红的那条：它不看时间、不看文案，
+    只看"干活的是哪个线程"—— 所以不会因为机器快慢偶发变红。
+
+    顺带钉住另一件事：这个替身**没有 `progress_cb` 参数**（`preview_hits` 本来就不收），
+    所以谁要是让 worker 无脑塞 `progress_cb`，这里会因为函数压根没被调用而变红。
+    """
+    seen: dict = {}
+
+    def fake_preview_hits(formula, db_path, *, limit):
+        seen["thread"] = QThread.currentThread()
+        seen["formula"] = formula
+        seen["db_path"] = db_path
+        seen["limit"] = limit
+        return {"date": "2026-09-11", "count": 0, "hits": [], "shown": 0,
+                "scanned": 0, "skipped": 0, "errors": []}
+
+    monkeypatch.setattr(lib, "preview_hits", fake_preview_hits)
+    page.editor.setPlainText("C>MA(C,5)")
+
+    page.on_preview()
+    _wait_preview(page, qapp)
+
+    assert seen["thread"] is not None, "试算工作函数根本没被调用"
+    assert seen["thread"] is not qapp.thread(), "试算又跑回界面线程了（窗口会冻住）"
+    assert seen["db_path"] == page.cfg.db_path
+    assert seen["limit"] == fp.PREVIEW_LIMIT
+    assert seen["formula"].min_history == 5          # 交给线程的是**编译好**的公式
+
+
+def test_preview_reports_known_hits_as_name_and_code(page, page_cfg, qapp) -> None:
     """试算：`名称（代码）` 格式 + 命中数就是小库里的那两只上涨票。"""
     page.editor.setPlainText("C>MA(C,5)")
 
     page.btn_preview.click()
+    _wait_preview(page, qapp)
 
     hint = page.hint_text
     assert "最近交易日 2026-09-11" in hint
@@ -410,20 +493,158 @@ def test_preview_reports_known_hits_as_name_and_code(page, page_cfg) -> None:
     assert "乙样本（600002）" not in hint
 
 
-def test_preview_with_no_hits_says_why(page) -> None:
+def test_preview_with_no_hits_says_why(page, qapp) -> None:
     page.editor.setPlainText("C>MA(C,5)*100")
 
     page.btn_preview.click()
+    _wait_preview(page, qapp)
 
     assert "没有命中" in page.hint_text
 
 
+def test_preview_no_hit_message_is_byte_for_byte_the_same(page, qapp,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    """没命中那句：**逐字**钉住（后台化只该换线程，不该换字）。"""
+    monkeypatch.setattr(lib, "preview_hits", lambda *a, **k: {
+        "date": "2026-09-11", "count": 0, "hits": [], "shown": 0,
+        "scanned": 7, "skipped": 3, "errors": []})
+    page.editor.setPlainText("C>MA(C,5)")
+
+    page.btn_preview.click()
+    _wait_preview(page, qapp)
+
+    assert page.hint_text == (
+        "最近交易日 2026-09-11：没有命中（扫了 7 只，3 只因数据不足跳过）"
+    )
+
+
+def test_preview_hit_message_keeps_truncation_hint_and_skipped_errors(
+        page, qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    """命中那一支的三种附加文案（只列前 N 只 / 涨停池提醒 / 算不出来的票）逐字钉住。"""
+    monkeypatch.setattr(lib, "preview_hits", lambda *a, **k: {
+        "date": "2026-09-11", "count": 5, "shown": 2,
+        "hits": [{"symbol": "600001", "name": "甲样本"},
+                 {"symbol": "600003", "name": "丙样本"}],
+        "scanned": 30, "skipped": 1,
+        "errors": ["乙样本（600002）：本地涨停池还没攒够"]})
+    page.editor.setPlainText("连板()>=2")
+
+    page.btn_preview.click()
+    _wait_preview(page, qapp)
+
+    assert page.hint_text == (
+        "最近交易日 2026-09-11 命中 5 只：甲样本（600001）、丙样本（600003）"
+        " …（只列前 2 只）"
+        "\n⚠️ " + lib.LIMIT_UP_HINT
+        + "\n（1 只票算不出来，已跳过：乙样本（600002）：本地涨停池还没攒够）"
+    )
+
+
 def test_preview_reports_broken_formula_instead_of_running(page) -> None:
+    """公式写错：**根本不起线程**（不用等后台；报错就是报错）。"""
     page.editor.setPlainText("C>MAA(C,5)")
 
     page.btn_preview.click()
 
     assert "未知函数" in page.hint_text
+    assert page.preview_worker is None
+    assert page.btn_preview.isEnabled() is True
+    assert page.progress.isVisible() is False
+
+
+def test_preview_result_belongs_to_the_clicked_formula(page, qapp,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """等待期间接着改编辑框，**不会**把结果显示成另一条公式的答案。
+
+    做法：把工作函数卡住（在工作线程里等一个 Event），期间把编辑框换成另一条公式，
+    再放行。文案里的"涨停池提醒"只可能来自按下按钮那一刻的那条公式
+    —— 这正是"先编译一次、把快照交给线程"要保住的东西。
+    """
+    started, release = threading.Event(), threading.Event()
+
+    def slow_preview_hits(formula, db_path, *, limit):
+        started.set()
+        assert release.wait(PREVIEW_TIMEOUT), "测试没有放行工作线程"
+        return {"date": "2026-09-11", "count": 0, "hits": [], "shown": 0,
+                "scanned": 1, "skipped": 0, "errors": []}
+
+    monkeypatch.setattr(lib, "preview_hits", slow_preview_hits)
+    page.editor.setPlainText("连板()>=2")
+    page.on_preview()
+    assert started.wait(PREVIEW_TIMEOUT), "试算线程没起来"
+    snapshot = page.preview_formula
+
+    page.editor.setPlainText("C>MA(C,5)")        # 用户在等待期间改了公式
+    release.set()
+    _wait_preview(page, qapp)
+
+    assert "涨停池" in page.hint_text             # 提醒来自"按下按钮时"的那条公式
+    assert lib.limit_up_hint(snapshot) == lib.LIMIT_UP_HINT
+    assert lib.limit_up_hint(page.compile_current()) == ""   # 编辑框里现在这条没有提醒
+
+
+def test_preview_double_click_only_starts_one_worker(page, qapp,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """连点两次：**只有一个**后台线程在跑（第二次只提示"还在跑"）。"""
+    started, release = threading.Event(), threading.Event()
+    calls: list = []
+
+    def slow_preview_hits(formula, db_path, *, limit):
+        calls.append(1)
+        started.set()
+        assert release.wait(PREVIEW_TIMEOUT), "测试没有放行工作线程"
+        return {"date": "2026-09-11", "count": 0, "hits": [], "shown": 0,
+                "scanned": 1, "skipped": 0, "errors": []}
+
+    monkeypatch.setattr(lib, "preview_hits", slow_preview_hits)
+    page.editor.setPlainText("C>MA(C,5)")
+    page.on_preview()
+    assert started.wait(PREVIEW_TIMEOUT), "试算线程没起来"
+    first = page.preview_worker
+
+    page.on_preview()        # 第二次（按钮已灰，但直接调 handler 也要拦住）
+
+    assert page.preview_worker is first
+    assert len(calls) == 1
+    assert "请稍候" in page.hint_text
+
+    release.set()
+    _wait_preview(page, qapp)
+    assert "最近交易日" in page.hint_text          # 跑完照样把结果写上
+
+
+def test_preview_data_error_is_reported_as_data_problem(page, qapp,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    """库不存在（`FormulaDataError`）：说**数据**的事，让用户去下载数据。"""
+    def boom(formula, db_path, *, limit):
+        raise fm.FormulaDataError("本地数据库不存在：/x/trader.db（请先在界面点【下载数据】）")
+
+    monkeypatch.setattr(lib, "preview_hits", boom)
+    page.editor.setPlainText("C>MA(C,5)")
+
+    page.on_preview()
+    _wait_preview(page, qapp)
+
+    assert page.hint_text == "❌ 本地数据库不存在：/x/trader.db（请先在界面点【下载数据】）"
+    assert page.btn_preview.isEnabled() is True     # 失败也要把按钮还回来
+    assert page.progress.isVisible() is False       # 进度条不能挂在界面上
+
+
+def test_preview_unexpected_error_is_reported_in_chinese(page, qapp,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """其它异常（程序问题）：带上类型名说清楚，界面不崩、按钮也还回来。"""
+    def boom(formula, db_path, *, limit):
+        raise RuntimeError("库文件被占用")
+
+    monkeypatch.setattr(lib, "preview_hits", boom)
+    page.editor.setPlainText("C>MA(C,5)")
+
+    page.on_preview()
+    _wait_preview(page, qapp)
+
+    assert page.hint_text == "❌ 试算失败：RuntimeError: 库文件被占用"
+    assert page.btn_preview.isEnabled() is True
+    assert page.progress.isVisible() is False
 
 
 # ══════════════════════════════════════════════════════════════════════════

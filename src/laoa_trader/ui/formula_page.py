@@ -86,6 +86,11 @@ PREVIEW_LIMIT = formulas_lib.PREVIEW_LIMIT
 #: 完整文本留在 `self.scorecard_text`，用【复制成绩单】拿走）
 HINT_MAX_LINES = 14
 
+#: 收尾时等后台线程真正退出的上限（毫秒）。见 `FormulaPage._finish_preview`：
+#: 信号是排队投递的，在 `run()` 返回**之前**就可能已经到主线程了，
+#: 这时候放掉最后一个引用会让 QThread 在"线程还在跑"时析构 —— Qt 直接崩进程。
+THREAD_JOIN_MS = 3_000
+
 #: 顶部那两行灰字说明（小白第一眼看的就是它）
 PAGE_HINT = (
     "点右边的按钮就能插入；最后一行是选股条件。"
@@ -165,29 +170,46 @@ _SPACED_OPERATORS = ("AND", "OR", "NOT")
 
 
 class ScorecardWorker(QThread):
-    """【看成绩单】的后台线程。
+    """这一页的后台线程：**【看成绩单】与【试算】都用它**。
 
     为什么必须后台跑：成绩单要扫全库（10 年数据下是几千只 × 上千根 K 线），
-    在主线程里跑就是"窗口未响应"——用户以为程序死了，其实是它正在算。
-    这里是 Qt 里唯一安全的做法：工作线程只算数，结果通过信号回主线程再碰控件。
+    试算要逐只票读 K 线并在最后一根上跑公式（真实 3 年库实测 3.7 秒，全市场
+    5000+ 只要 7~8 秒）。在主线程里跑就是"窗口未响应"——用户以为程序死了，
+    其实是它正在算。这里是 Qt 里唯一安全的做法：工作线程只算数，
+    结果通过信号回主线程再碰控件。
+
+    `with_progress`：**不是每个被后台化的函数都收 `progress_cb`**
+    （`preview_hits` 就只有 `limit`/`start`/`symbols`）。与其为了让 worker 统一
+    而给库函数加一个假参数，不如让调用方声明"这次要不要进度回调"
+    （与 `ui/app.py` 的 `Worker` 同一个约定）。
+
+    `failed` 递的是**异常对象**而不是一句话：两种失败在界面上的说法不同
+    （`FormulaDataError` = 数据问题，该去下载数据；其它 = 程序问题），
+    工作线程不该替界面决定措辞 —— 主线程拿到类型才分得清
+    （见 `FormulaPage._on_preview_failed`）。
     """
 
     progress = Signal(str, int, int)
     finished_ok = Signal(object)
-    failed = Signal(str)
+    failed = Signal(object)
 
-    def __init__(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    def __init__(self, fn: Callable[..., Any], *args: Any,
+                 with_progress: bool = False, **kwargs: Any) -> None:
         super().__init__()
         self._fn = fn
         self._args = args
         self._kwargs = kwargs
+        self._with_progress = with_progress
 
     def run(self) -> None:  # noqa: D102 - QThread 约定
         try:
-            result = self._fn(*self._args, progress_cb=self.progress.emit, **self._kwargs)
+            kwargs = dict(self._kwargs)
+            if self._with_progress:
+                kwargs["progress_cb"] = self.progress.emit
+            result = self._fn(*self._args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - 后台异常必须回主线程说人话
-            logger.exception("公式成绩单失败")
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            logger.exception("公式后台任务失败")
+            self.failed.emit(exc)
         else:
             self.finished_ok.emit(result)
 
@@ -196,8 +218,8 @@ class FormulaPage(QWidget):
     """「公式选股」页。
 
     属性里刻意留着测试与外部要用的引用（`name_edit` / `editor` / `hint_label` /
-    `table` / `palette_buttons` / `scorecard_worker`），不要去爬控件层级 ——
-    这一页的控件多，按层级取值的测试一改布局就集体失效。
+    `table` / `palette_buttons` / `scorecard_worker` / `preview_worker`），
+    不要去爬控件层级 —— 这一页的控件多，按层级取值的测试一改布局就集体失效。
     """
 
     def __init__(
@@ -228,6 +250,10 @@ class FormulaPage(QWidget):
         self.scorecard_worker: ScorecardWorker | None = None
         self.scorecard_result: dict | None = None
         self.scorecard_text: str = ""
+        #: 【试算】的后台线程；跑完置回 None（测试就等这一条来判断"落地了"）
+        self.preview_worker: ScorecardWorker | None = None
+        #: 【试算】按下按钮那一刻的公式快照（结果属于它，不属于编辑框里现在的内容）
+        self.preview_formula: Any = None
         self.hint_text: str = ""
         self._loading = False          # 载入行时别把"选中变化"当成用户点击
 
@@ -528,23 +554,49 @@ class FormulaPage(QWidget):
         self._set_hint("\n".join(lines))
 
     def on_preview(self) -> None:
-        """【试算】：当前库的最近一个交易日能选出几只（名称（代码）格式）。"""
+        """【试算】：当前库的最近一个交易日能选出几只（名称（代码）格式）。
+
+        **后台线程 + 公式快照**（这一页第二处必须后台化的地方，第一处是成绩单）：
+        试算要逐只票读 K 线并在最后一根上跑公式，真实 3 年库实测 3.7 秒、
+        全市场 5000+ 只要 7~8 秒 —— 在主线程里跑就是"窗口未响应"
+        （用户已经为这件事抱怨过一次，那次是下载路径）。
+
+        为什么先编译一次、再把**同一个公式对象**交给线程：线程跑的是用户按下按钮
+        那一刻看到的公式。他在等待期间接着改编辑框（很常见：边等边琢磨条件），
+        编辑框里的新内容不会把结果污染成"另一条公式的答案"。
+        """
         formula = self.compile_current()
         if formula is None:
             return
-        try:
-            result = formulas_lib.preview_hits(
-                formula, self.cfg.db_path, limit=PREVIEW_LIMIT
-            )
-        except fm.FormulaDataError as exc:
-            # 数据侧问题（库不存在/读不出来）：这不是公式写错了，说清楚下一步
-            self._set_hint("❌ " + str(exc))
+        if self.preview_worker is not None and self.preview_worker.isRunning():
+            # 双击 / 上一次还没跑完又点一次：不动正在跑的那次
+            # （两个线程抢同一个库没有意义，只是白扫一遍）
+            self._set_hint("试算还在跑，请稍候…（跑完会写在这里）")
             return
-        except Exception as exc:  # noqa: BLE001 - 界面层不该看到异常
-            logger.exception("公式试算失败")
-            self._set_hint(f"❌ 试算失败：{type(exc).__name__}: {exc}")
-            return
+        self.preview_formula = formula
+        self.btn_preview.setEnabled(False)
+        # 先设成"不确定进度"：总共有多少只票要扫，得先走一遍库才知道。
+        # 让进度条先动起来，比"停在 0% 七八秒"让人安心（与成绩单同一立场）。
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("正在试算…")
+        self.progress.setVisible(True)
+        self._set_hint("正在试算…（在后台跑，界面可以继续用）")
+        worker = ScorecardWorker(
+            formulas_lib.preview_hits, formula, self.cfg.db_path, limit=PREVIEW_LIMIT
+        )
+        self.preview_worker = worker
+        worker.finished_ok.connect(self._on_preview_done)
+        worker.failed.connect(self._on_preview_failed)
+        worker.start()
 
+    @staticmethod
+    def _preview_text(formula: Any, result: dict) -> str:
+        """把 `preview_hits` 的返回值拼成提示区那段中文。
+
+        单独一个**纯函数**，是为了让"结果长什么样"与"它在哪个线程跑"解耦：
+        这次改造只是把计算挪到后台，文案一个字都不该变（用户已经见过这几句话），
+        所以格式化逻辑只此一份，谁调都是同一段文本。
+        """
         if result["count"]:
             names = "、".join(
                 f"{hit['name']}（{hit['symbol']}）" for hit in result["hits"]
@@ -560,7 +612,47 @@ class FormulaPage(QWidget):
             text += "\n⚠️ " + hint
         if result["errors"]:
             text += f"\n（{len(result['errors'])} 只票算不出来，已跳过：{result['errors'][0]}）"
-        self._set_hint(text)
+        return text
+
+    def _on_preview_done(self, result: Any) -> None:
+        """试算回来了（回主线程执行）：先收起"正在跑"的样子，再写结果。"""
+        formula = self.preview_formula
+        self._finish_preview()
+        if not isinstance(result, dict):
+            self._set_hint("试算没有返回结果（请重试）")
+            return
+        self._set_hint(self._preview_text(formula, result))
+
+    def _on_preview_failed(self, exc: Any) -> None:
+        """试算失败：**数据问题**与**程序问题**分开说（下一步动作完全不同）。
+
+        注：这里的两句话与改造前的同步版本**逐字一致**。`failed` 递过来的是异常
+        对象（不是一句话），正是为了在这里用 `isinstance` 分清这两种情况 ——
+        工作线程不该替界面决定措辞。
+        """
+        self._finish_preview()
+        if isinstance(exc, fm.FormulaDataError):
+            # 库不存在/读不出来：这不是公式写错了，说清楚下一步
+            self._set_hint("❌ " + str(exc))
+        else:
+            self._set_hint(f"❌ 试算失败：{type(exc).__name__}: {exc}")
+
+    def _finish_preview(self) -> None:
+        """【试算】收尾：把按钮还回来、收掉进度条、放掉线程引用。
+
+        为什么"等它真的退出"再放引用：`finished_ok`/`failed` 是**跨线程排队**投递的，
+        在工作线程 `run()` 返回之前就可能已经排到主线程执行了；这时丢掉最后一个引用，
+        QThread 对象会在"线程还没真正结束"时就析构 —— Qt 会
+        `QThread: Destroyed while thread is still running` 直接把进程干掉。
+        线程此刻已经在收尾，`wait()` 只等几毫秒，比留一堆线程对象在 `self` 上干净。
+        """
+        worker = self.preview_worker
+        self.btn_preview.setEnabled(True)
+        self.progress.setVisible(False)
+        if worker is not None:
+            if worker.isRunning():
+                worker.wait(THREAD_JOIN_MS)
+            self.preview_worker = None
 
     def on_scorecard(self) -> None:
         """【看成绩单】：后台线程跑历史成绩单（**不卡界面**）。"""
@@ -582,6 +674,7 @@ class FormulaPage(QWidget):
             formulas_lib.run_scorecard,
             formula,
             self.cfg.db_path,
+            with_progress=True,          # `run_scorecard` 收 `progress_cb`，试算不收
             conv_key=formulas_lib.DEFAULT_CONVENTION_KEY,
         )
         self.scorecard_worker = worker
@@ -605,10 +698,11 @@ class FormulaPage(QWidget):
         self.scorecard_text = str(result.get("text") or "")
         self._set_hint(self.scorecard_text)
 
-    def _on_scorecard_failed(self, message: str) -> None:
+    def _on_scorecard_failed(self, exc: Any) -> None:
+        """成绩单失败：把线程递过来的异常写成人话（这句与改造前逐字一致）。"""
         self.btn_scorecard.setEnabled(True)
         self.progress.setVisible(False)
-        self._set_hint("❌ 成绩单算不出来：" + message)
+        self._set_hint("❌ 成绩单算不出来：" + f"{type(exc).__name__}: {exc}")
 
     def on_copy_scorecard(self) -> None:
         """【复制成绩单】：把完整文本放进剪贴板（提示区只显示前几行）。"""

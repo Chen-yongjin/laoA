@@ -541,15 +541,35 @@ def skipped_push_note(skipped: list[dict]) -> str:
             "完整清单见股票池页，想看推送就把该开关关掉。")
 
 
-def format_pool_lines(pool: list[dict]) -> list[str]:
-    """把池子整理成推送正文行。
+def push_tag(row: dict) -> str:
+    """推送正文里的标签：**策略中文名**（多条用「、」连接）。
 
-    策略标的保持与服务器版同款格式（`1. 名称（代码）LowPrice｜理由`）——
+    这里**必须翻译**成中文，不能像服务器版那样把类名截断直接用
+    （`.replace("Strategy", "")`）——那是服务器版的内部叫法，而推送是给**手机上的
+    人**看的：用户收到的会是 `1. 平安银行（000001）LowPrice｜…`，
+    而界面同一只票写的是「低价股」（`strategy_label()`）。同一件事两个名字，
+    用户根本分不清是"哪条策略选的"，也没法拿它去对照设置页的勾选框。
+
+    自定义公式的合成名（`公式·放量上攻`）`strategy_label()` 认不出来会**原样返回**，
+    正是我们要的：用户自己起的名字不能被翻译掉。
+
+    兼容已有的库/配置：老行里的 `strategies` 可能已经是中文名（用户用
+    `enabled_strategies = ["低价股"]` 这种写法存进去的），翻译函数对中文名
+    原样返回，所以**重复调用是幂等的**。
+    """
+    names = [n for n in str(row.get("strategies") or "").split(",") if n.strip()]
+    return "、".join(rules.strategy_label(name) for name in names)
+
+
+def format_pool_lines(pool: list[dict]) -> list[str]:
+    """把池子整理成推送正文行（`1. 名称（代码）策略中文名｜理由`）。
+
     自选标的没有策略名，改用「自选」+ 备注，避免出现空标签。
+    标签的中文名来自 `push_tag()`（理由见那里：推送是给手机看的一行字）。
     """
     lines = []
     for i, row in enumerate(pool, start=1):
-        tag = str(row.get("strategies") or "").replace("Strategy", "")
+        tag = push_tag(row)
         note = (row.get("note") or "").strip()
         if not tag:
             tag = "自选" + (f"（{note}）" if note else "")
