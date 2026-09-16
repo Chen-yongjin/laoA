@@ -634,6 +634,13 @@ def kpi_values(overview: dict | None) -> dict[str, str]:
         "涨停": _count_text(limits.get("up")),
         "跌停": _count_text(limits.get("down")),
         "炸板": _count_text(limits.get("break")),
+        # 成交额**分成三个键**：界面上是"一条一个数"（`沪成交额 / 7793亿`），
+        # 合成成一句话在 Windows 字体下会被列宽截掉（CI 实测过，见 `ui/app.py` 里
+        # `MARKET_STAT_TITLES` 的注释）。下面那个 `成交额` 合成长串是给
+        # `lines()`（`--cli --market`）用的，命令行一行一句话更省地方。
+        "沪成交额": _amount_text(turnover.get("sh")),
+        "深成交额": _amount_text(turnover.get("sz")),
+        "北成交额": _amount_text(turnover.get("bj")),
         "成交额": (
             f"沪 {_amount_text(turnover.get('sh'))} · "
             f"深 {_amount_text(turnover.get('sz'))} · "

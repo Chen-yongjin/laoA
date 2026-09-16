@@ -146,15 +146,31 @@ MARKET_SECTION_HOT = "热门板块"
 MARKET_SECTION_TITLES: tuple[str, ...] = (
     MARKET_SECTION_WIDE, MARKET_SECTION_SENTIMENT, MARKET_SECTION_HOT,
 )
-#: 原来的 KPI 卡片整排（7 张）折进「情绪指数」块里的 **3 个小条目**：
-#: 成交额 / 涨停家数 / 涨跌家数。为什么折成 3 条而不是 7 条：它们本来就是三句话
-#: （钱有多少、涨跌停几个、涨跌几家），单开一排卡片既占地方又和"情绪"这件事分家。
-MARKET_STAT_AMOUNT = "成交额"
-MARKET_STAT_LIMIT_UP = "涨停家数"
-MARKET_STAT_BREADTH = "涨跌家数"
+#: 原来的 KPI 卡片整排（7 张）折进「情绪指数」块里的**小条目**。
+#:
+#: 为什么是**一条一个数**（9 条）而不是 3 条合成长文本：
+#: 最初做成 3 条（`沪 7793亿 · 深 8499亿 · 北 140亿` 这种），在 Linux 字体下刚好，
+#: 到 Windows 上就出事了 —— **同一段中文在 Windows 上更宽**（CI 实测：那一格需要
+#: 338px、实际只分到 231px），合成文本被自己的列宽截掉半个数字，而且它撑大了整页的
+#: 最小宽度（实测 714 > 视口 706，横向差 8px）。拆成"一个数一条"之后，每条只有
+#: `沪成交额 / 7793亿` 这么短，任何字体下都塞得下，也不再撑大最小宽度。
+#: 代价是多两行 —— 换来的是**任何一台机器上都不被截**。
+MARKET_STAT_SH = "沪成交额"
+MARKET_STAT_SZ = "深成交额"
+MARKET_STAT_BJ = "北交所"
+MARKET_STAT_LIMIT_UP = "涨停"
+MARKET_STAT_LIMIT_DOWN = "跌停"
+MARKET_STAT_BREAK = "炸板"
+MARKET_STAT_UP = "上涨"
+MARKET_STAT_DOWN = "下跌"
+MARKET_STAT_FLAT = "平盘"
 MARKET_STAT_TITLES: tuple[str, ...] = (
-    MARKET_STAT_AMOUNT, MARKET_STAT_LIMIT_UP, MARKET_STAT_BREADTH,
+    MARKET_STAT_SH, MARKET_STAT_SZ, MARKET_STAT_BJ,
+    MARKET_STAT_LIMIT_UP, MARKET_STAT_LIMIT_DOWN, MARKET_STAT_BREAK,
+    MARKET_STAT_UP, MARKET_STAT_DOWN, MARKET_STAT_FLAT,
 )
+#: 小条目最多铺几列（9 条正好 3×3）
+MARKET_STAT_MAX_COLUMNS = 3
 #: 「热门板块」摆前几名。12 = 用户给定的口径（与 `pool.hot_industries` 的默认 top 一致），
 #: 也正好是"两列 × 6 行"或"三列 × 4 行"都能摆满的数量。
 MARKET_HOT_TOP = 12
@@ -930,13 +946,14 @@ if QT_AVAILABLE:
                 return
             self._stats_columns = columns
             # 小条目最多 3 个：列数比 3 多的时候按 3 排（三个条目摊在 5 列上会松得看不出关系）
-            stats_columns = min(columns, len(MARKET_STAT_TITLES))
+            # 小条目最多 3 列（9 条正好 3×3）：列数再多也不摊开，否则一条一列看不出关系
+            stats_columns = min(columns, MARKET_STAT_MAX_COLUMNS)
             for index, name in enumerate(MARKET_STAT_TITLES):
                 item = self.stats[name]
                 self.stats_grid.removeWidget(item)
                 self.stats_grid.addWidget(item, index // stats_columns,
                                           index % stats_columns)
-            for column in range(len(MARKET_STAT_TITLES)):
+            for column in range(MARKET_STAT_MAX_COLUMNS):
                 self.stats_grid.setColumnStretch(
                     column, 1 if column < stats_columns else 0
                 )
@@ -1966,32 +1983,34 @@ if QT_AVAILABLE:
         def _market_stat_rows(
             self, values: dict, overview: Any
         ) -> list[tuple[str, str, str]]:
-            """3 个小条目的 `(名字, 数值, tooltip)`。
+            """9 个小条目的 `(名字, 数值, tooltip)` —— **一条一个数**。
 
-            为什么 7 张卡折成 3 条之后**一个数字都没少**：
-            「涨停家数」那条后面跟着跌停与炸板（同属涨跌停家数），
-            「涨跌家数」那条后面跟着平盘 —— 折的是版式，不是信息。
+            为什么不做成"三句话"（原来那样）：合成文本在 Windows 字体下会被自己的列宽
+            截掉半个数字（CI 实测 338px 的需要 vs 231px 的实际），见上面
+            `MARKET_STAT_TITLES` 的注释。拆开之后每条都短，任何字体都塞得下。
+            `values` 来自 `market.kpi_values()`（与 `--cli --market` 同一份口径），
+            所以这里不自己算数、只排版。
             """
             breadth_on = bool((overview or {}).get("breadth_enabled"))
+            amount_tip = ("沪/深成交额取自上证指数与深证成指的成交额；"
+                          "北交所靠全市场快照汇总（每 5 分钟更新一次，见页脚）")
+            limits_tip = "当日涨停 / 跌停 / 炸板家数（同花顺涨停池、跌停池、炸板池）"
+            breadth_tip = ("全市场上涨 / 下跌 / 平盘家数"
+                           "（翻 6 页全市场快照算出来的，每 5 分钟更新一次）")
+            if not breadth_on:
+                breadth_tip = ("现在是 `—`：market_breadth 关着，程序不去翻全市场快照"
+                               "（省配额）。想看到它就在 config.toml 里把 "
+                               "market_breadth 设成 true")
             return [
-                (
-                    MARKET_STAT_AMOUNT, values["成交额"],
-                    "沪/深成交额取自上证指数与深证成指的成交额；北交所靠全市场快照汇总"
-                    "（每 5 分钟更新一次，见页脚）",
-                ),
-                (
-                    MARKET_STAT_LIMIT_UP,
-                    f"{values['涨停']} · 跌停 {values['跌停']} · 炸板 {values['炸板']}",
-                    "当日涨停 / 跌停 / 炸板家数（同花顺涨停池、跌停池、炸板池）",
-                ),
-                (
-                    MARKET_STAT_BREADTH,
-                    f"涨 {values['上涨']} · 跌 {values['下跌']} · 平 {values['平盘']}",
-                    "全市场上涨 / 下跌 / 平盘家数（翻 6 页全市场快照算出来的，每 5 分钟更新）"
-                    if breadth_on else
-                    "现在是 `—`：market_breadth 关着，程序不去翻全市场快照（省配额）。"
-                    "想看到它就在 config.toml 里把 market_breadth 设成 true",
-                ),
+                (MARKET_STAT_SH, values["沪成交额"], amount_tip),
+                (MARKET_STAT_SZ, values["深成交额"], amount_tip),
+                (MARKET_STAT_BJ, values["北成交额"], amount_tip),
+                (MARKET_STAT_LIMIT_UP, values["涨停"], limits_tip),
+                (MARKET_STAT_LIMIT_DOWN, values["跌停"], limits_tip),
+                (MARKET_STAT_BREAK, values["炸板"], limits_tip),
+                (MARKET_STAT_UP, values["上涨"], breadth_tip),
+                (MARKET_STAT_DOWN, values["下跌"], breadth_tip),
+                (MARKET_STAT_FLAT, values["平盘"], breadth_tip),
             ]
 
         def _market_hint_notes(self, overview: Any) -> list[str]:
@@ -2012,8 +2031,9 @@ if QT_AVAILABLE:
             fetched = bool(data.get("as_of"))
             if fetched and bool(getattr(self.cfg, "market_overview", True)):
                 if not data.get("breadth_enabled"):
-                    notes.append(f"{MARKET_STAT_BREADTH}显示 {market.DASH}："
-                                 "market_breadth 关着，不取全市场快照（打开就能看到）")
+                    notes.append(f"{MARKET_STAT_UP} / {MARKET_STAT_DOWN} / "
+                                 f"{MARKET_STAT_FLAT} 显示 {market.DASH}：market_breadth "
+                                 "关着，不取全市场快照（打开就能看到）")
                 if not (self.market_industries or {}):
                     notes.append("热门板块暂无数据：本地还没有涨停池数据，"
                                  f"在【{TAB_SETTINGS}】里点【{BTN_REFRESH_TEXT}】补齐")

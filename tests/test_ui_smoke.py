@@ -453,8 +453,12 @@ def test_long_transient_message_is_elided_not_wrapped(window, qapp) -> None:
     # 一行的高度：状态区与整窗的最小高度都不变（底部不会被顶出屏幕）
     assert win.status_area.height() <= area_height + 2
     assert win.minimumSizeHint().height() <= min_height
-    assert win.status_label.height() \
-        <= win.status_label.fontMetrics().height() * 2
+    # 「只占一行」的判据必须与字体无关：Windows 上同一个控件实测高 30px，
+    # 而 `fontMetrics().height()` 只有 13px（*2=26）——用像素比会把平台的
+    # 字体/样式差异当成缺陷。这里改成两条结构判据：
+    # ① 控件本身不换行；② 它没有把自己的行撑得比标题区还高。
+    assert win.status_label.wordWrap() is False
+    assert win.status_label.height() <= win.status_area.height()
 
 
 def test_status_details_dialog_opens_and_copies(window, qapp) -> None:
@@ -541,9 +545,9 @@ def test_status_line_is_fully_visible_at_960_logical_width(screen_window, qapp) 
     assert shown == win.status_label.fullText()          # 没被省略
     assert shown.startswith("✅ 数据就绪 · ")
     assert "…" not in shown
-    # 一行的高度（没有折成两三行把标题区顶高）
-    assert win.status_label.height() \
-        <= win.status_label.fontMetrics().height() * 2
+    # 一行的高度（没有折成两三行把标题区顶高）：判据与字体无关（见上一条用例的说明）
+    assert win.status_label.wordWrap() is False
+    assert win.status_label.height() <= win.status_area.height()
     assert "\n" not in shown
     # 软件名与两个按钮都在（没有被状态文本挤掉/换行）
     assert win.app_title_label.text() == ui_app.APP_NAME
@@ -2936,9 +2940,13 @@ def test_market_page_is_a_tab_of_its_own(window) -> None:
 
     # 3 个小条目**在「情绪指数」块里**（不是另开一排）
     sentiment = window.market_sections[ui_app.MARKET_SECTION_SENTIMENT]
+    # 9 个小条目：**一条一个数**（合成文本在 Windows 字体下会被自己的列宽截掉，
+    # 见 `ui/app.py` 里 `MARKET_STAT_TITLES` 的注释与 CI 实测数字）
     assert list(sentiment.stats) == list(ui_app.MARKET_STAT_TITLES) == [
-        ui_app.MARKET_STAT_AMOUNT, ui_app.MARKET_STAT_LIMIT_UP,
-        ui_app.MARKET_STAT_BREADTH,
+        ui_app.MARKET_STAT_SH, ui_app.MARKET_STAT_SZ, ui_app.MARKET_STAT_BJ,
+        ui_app.MARKET_STAT_LIMIT_UP, ui_app.MARKET_STAT_LIMIT_DOWN,
+        ui_app.MARKET_STAT_BREAK, ui_app.MARKET_STAT_UP,
+        ui_app.MARKET_STAT_DOWN, ui_app.MARKET_STAT_FLAT,
     ]
     for name, item in sentiment.stats.items():
         assert item.title_label.text() == name
@@ -3153,9 +3161,12 @@ def test_market_page_refreshes_right_after_startup(seeded, qapp, monkeypatch) ->
         assert client.calls                                  # 启动那一次确实去取了
         assert win.market_overview is not None
         stats = win.market_sections[ui_app.MARKET_SECTION_SENTIMENT].stats
-        assert stats[ui_app.MARKET_STAT_LIMIT_UP].value_label.text() == "55 · 跌停 16 · 炸板 30"
-        assert stats[ui_app.MARKET_STAT_AMOUNT].value_label.text() \
-            == "沪 7792亿 · 深 8499亿 · 北 140亿"
+        assert stats[ui_app.MARKET_STAT_LIMIT_UP].value_label.text() == "55"
+        assert stats[ui_app.MARKET_STAT_LIMIT_DOWN].value_label.text() == "16"
+        assert stats[ui_app.MARKET_STAT_BREAK].value_label.text() == "30"
+        assert stats[ui_app.MARKET_STAT_SH].value_label.text() == "7792亿"
+        assert stats[ui_app.MARKET_STAT_SZ].value_label.text() == "8499亿"
+        assert stats[ui_app.MARKET_STAT_BJ].value_label.text() == "140亿"
         wide = win.market_sections[ui_app.MARKET_SECTION_WIDE]
         assert wide.entries[0].name_label.text() == "上证"
         # 「热门板块」跟着同一趟取回来了（seeded 库里有半导体涨停）
@@ -3238,13 +3249,13 @@ def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp
         # 折成 3 条之后**一个数字都没少**：涨停家数那条带着跌停与炸板，涨跌家数那条带着平盘
         values = market.kpi_values(market_window.market_overview)
         assert (values["涨停"], values["跌停"], values["炸板"]) == ("55", "16", "30")
-        assert values["成交额"] == "沪 7792亿 · 深 8499亿 · 北 140亿"
+        assert values["成交额"] == "沪 7792亿 · 深 8499亿 · 北 140亿"   # 命令行那一行仍是一句话
         assert (values["上涨"], values["下跌"], values["平盘"]) == ("1", "1", "1")
         stats = _stat_texts(market_window)
         assert stats == {
-            "成交额": "沪 7792亿 · 深 8499亿 · 北 140亿",
-            "涨停家数": "55 · 跌停 16 · 炸板 30",
-            "涨跌家数": "涨 1 · 跌 1 · 平 1",
+            "沪成交额": "7792亿", "深成交额": "8499亿", "北交所": "140亿",
+            "涨停": "55", "跌停": "16", "炸板": "30",
+            "上涨": "1", "下跌": "1", "平盘": "1",
         }
 
         # 两块指数的每一项：一个指数一个控件，四项文本逐项对齐
@@ -3403,8 +3414,9 @@ def test_market_page_hides_whole_block_when_config_is_empty(market_window, qapp)
         # 沪/深成交额是**从宽基条目里**取的（`market.py` 的口径：那两只指数的 turnover
         # 就是两市成交额）—— 宽基没配时它必然是 `—`，而北交所那份来自全市场快照，
         # 不受影响。这条断言把这个依赖关系钉住（不是缺陷，是取数口径的必然结果）
-        assert sentiment.stats[ui_app.MARKET_STAT_AMOUNT].value_label.text() \
-            == f"沪 {market.DASH} · 深 {market.DASH} · 北 140亿"
+        assert sentiment.stats[ui_app.MARKET_STAT_SH].value_label.text() == market.DASH
+        assert sentiment.stats[ui_app.MARKET_STAT_SZ].value_label.text() == market.DASH
+        assert sentiment.stats[ui_app.MARKET_STAT_BJ].value_label.text() == "140亿"
         hot = market_window.market_sections[ui_app.MARKET_SECTION_HOT]
         assert hot.isVisible() is True                   # 热门板块不受指数配置影响
         assert "上证" not in "".join(e.name_label.text() for e in market_window.market_entries)
@@ -3458,9 +3470,9 @@ def test_market_page_shows_dash_and_reason_without_data(market_window, qapp) -> 
         assert market_window.market_overview is not None    # 拿不到 ≠ 抛异常，而是"有结构没数据"
         assert market.has_data(market_window.market_overview) is False
         assert _stat_texts(market_window) == {
-            "成交额": f"沪 {market.DASH} · 深 {market.DASH} · 北 {market.DASH}",
-            "涨停家数": f"{market.DASH} · 跌停 {market.DASH} · 炸板 {market.DASH}",
-            "涨跌家数": f"涨 {market.DASH} · 跌 {market.DASH} · 平 {market.DASH}",
+            "沪成交额": market.DASH, "深成交额": market.DASH, "北交所": market.DASH,
+            "涨停": market.DASH, "跌停": market.DASH, "炸板": market.DASH,
+            "上涨": market.DASH, "下跌": market.DASH, "平盘": market.DASH,
         }
         # 配了的两块指数还在（用户才知道自己配的东西在哪一行），只是没数据 → 一个 `—` 占位
         for title in (ui_app.MARKET_SECTION_WIDE, ui_app.MARKET_SECTION_SENTIMENT):
@@ -3503,16 +3515,19 @@ def test_market_breadth_off_shows_dash_and_says_why(market_window, qapp) -> None
         qapp.processEvents()
 
         assert client.count("request") == 0
-        assert _stat_texts(market_window)[ui_app.MARKET_STAT_BREADTH] \
-            == f"涨 {market.DASH} · 跌 {market.DASH} · 平 {market.DASH}"
-        assert _stat_texts(market_window)[ui_app.MARKET_STAT_AMOUNT].endswith("北 —")
+        assert _stat_texts(market_window)[ui_app.MARKET_STAT_UP] == market.DASH
+        assert _stat_texts(market_window)[ui_app.MARKET_STAT_DOWN] == market.DASH
+        assert _stat_texts(market_window)[ui_app.MARKET_STAT_FLAT] == market.DASH
+        assert _stat_texts(market_window)[ui_app.MARKET_STAT_BJ] == market.DASH
         # 光看一个 `—` 用户猜不出为什么 —— 必须在页面上说清是"这个开关关着"
         assert market_window.market_hint.isVisible() is True
         assert "market_breadth" in market_window.market_hint.text()
-        assert "涨跌家数" in market_window.market_hint.text()
+        # 说的是具体哪几条（改版后是三个独立小条目：上涨/下跌/平盘）
+        for title in ("上涨", "下跌", "平盘"):
+            assert title in market_window.market_hint.text()
         assert "market_breadth" in market_window.market_sections[
             ui_app.MARKET_SECTION_SENTIMENT
-        ].stats[ui_app.MARKET_STAT_BREADTH].value_label.toolTip()
+        ].stats[ui_app.MARKET_STAT_UP].value_label.toolTip()
         # 关掉时页脚就不该再提"每 5 分钟更新"
         assert "每 5 分钟" not in market_window.market_as_of_label.fullText()
     finally:
@@ -3547,7 +3562,7 @@ def _assert_market_fonts_and_alignment(win) -> None:
     assert title_font.pointSize() > group_font.pointSize()          # 页面标题最大
     from laoa_trader import market
 
-    item = sections[ui_app.MARKET_SECTION_SENTIMENT].stats[ui_app.MARKET_STAT_AMOUNT]
+    item = sections[ui_app.MARKET_SECTION_SENTIMENT].stats[ui_app.MARKET_STAT_SH]
     assert item.value_label.text() != market.DASH                   # 有数才谈得上对齐
     assert item.value_label.font().bold() is True                   # 数值加粗
     # "大一号"：数值比它自己的标签大一号（标签保持正文号，只是变灰）
@@ -3690,6 +3705,66 @@ def test_market_overview_off_shows_hint_and_makes_no_request(market_window, qapp
         assert "market_overview" in market_window.market_hint.text()
     finally:
         market.clear_cache()
+
+def test_market_layout_survives_wider_fonts(seeded, qapp, monkeypatch) -> None:
+    """**换一台机器（字体更宽）也不能把数字挤掉** —— 这条是给 CI 那次红补的回归。
+
+    为什么要有它：`test_overview_uses_three_columns_on_a_150pct_scaled_screen` 在 Linux
+    全绿、到 Windows CI 上红了 5 条 —— 同一段中文在 Windows 字体下更宽（实测"沪 7793亿 ·
+    深 8499亿 · 北 140亿"那一格需要 338px，只分到 231px），于是合成文本被自己的列宽截掉、
+    还把整页最小宽度顶到 714 > 视口 706。根因是**布局对字体宽度敏感**，而 Linux 上测不出来。
+
+    这里把应用字体放大（模拟更宽的字形）后重新检查三条硬要求：
+    ① 小条目的数值不被自己的宽度截掉；② 页面最小宽度不超过视口（不出现横向滚动条）；
+    ③ 三块的结构不变。字体是最容易被忽略的变量，所以用测试钉住它，而不是等 CI 再红一次。
+    """
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QFont
+
+    from laoa_trader import market
+    from laoa_trader.ui import app as ui_app
+
+    market.clear_cache()
+    original = qapp.font()
+    wider = QFont(original.family(), original.pointSize() + 3)
+    opened: list = []
+    try:
+        monkeypatch.setattr(ui_app, "_available_geometry", lambda: QRect(0, 0, 960, 900))
+        qapp.setFont(wider)
+        win = ui_app.MainWindow(seeded)
+        win.show()
+        qapp.processEvents()
+        _wait_market(win, qapp)
+        opened.append(win)
+        win.refresh_market_overview(force=True, client=_market_fake())
+        qapp.processEvents()
+
+        for section in win.market_sections.values():
+            # 所有条目与小条目的三段文本都得放得下（截断会让 width < sizeHint）
+            for entry in section.entries:
+                # 指数条目是 名称/点位/涨跌幅 三段；热门板块行是 行业名/涨停数/密度/涨幅 四段
+                labels = [entry.name_label]
+                labels += [getattr(entry, attr) for attr in
+                           ("value_label", "pct_label", "limit_up_label",
+                            "density_label", "mom_label")
+                           if hasattr(entry, attr)]
+                for label in labels:
+                    # 容 2px：Qt 的网格分配会四舍五入，1~2px 的差看不出区别；
+                    # 真正要拦的是"差一截"（CI 那次是差 107px）。
+                    assert label.width() >= label.sizeHint().width() - 2, \
+                        (entry.name_label.text(), label.text())
+            for name, item in section.stats.items():
+                assert item.value_label.width() >= item.value_label.sizeHint().width(), name
+        assert win.market_content.minimumSizeHint().width() \
+            <= win.market_scroll.viewport().width()
+        assert win.market_scroll.horizontalScrollBar().isVisible() is False
+        assert win._market_columns >= 1
+        assert list(win.market_sections) == list(ui_app.MARKET_SECTION_TITLES)
+        assert all(section.isVisible() for section in win.market_sections.values())
+    finally:
+        qapp.setFont(original)
+        market.clear_cache()
+
 
 @pytest.fixture()
 def screen_window(seeded, qapp, monkeypatch):
@@ -4069,12 +4144,13 @@ def test_market_entry_columns_shrink_with_the_window(screen_window, qapp) -> Non
         assert _grid_rows(wide) == [codes]
         assert win.market_content.minimumSizeHint().width() \
             <= win.market_scroll.viewport().width()
-        # 小条目最多 3 个：列数 5 时它们仍然是 3 列（摊在 5 列上会松得看不出关系）
+        # 小条目最多 3 列：列数 5 时它们仍然按 3 列排（摊在 5 列上会松得看不出关系），
+        # 9 条正好 3×3
         stats = win.market_sections[ui_app.MARKET_SECTION_SENTIMENT].stats
         grid = win.market_sections[ui_app.MARKET_SECTION_SENTIMENT].stats_grid
         positions = [grid.getItemPosition(grid.indexOf(item))[:2]
                      for item in stats.values()]
-        assert positions == [(0, 0), (0, 1), (0, 2)]
+        assert positions == [(row, col) for row in range(3) for col in range(3)]
     finally:
         market.clear_cache()
 

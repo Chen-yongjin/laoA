@@ -487,9 +487,14 @@ def test_kpi_values_and_entry_fields_are_the_single_source() -> None:
         "sentiment": [], "sector": [],
     }
     values = market.kpi_values(overview)
-    # 键的顺序 = 界面上卡片的显示顺序（涨停/跌停/炸板 → 成交额 → 涨跌家数）
-    assert list(values) == ["涨停", "跌停", "炸板", "成交额", "上涨", "下跌", "平盘"]
+    # 键的顺序 = 界面上的显示顺序：沪/深/北三个独立成交额 → 涨停/跌停/炸板 → 上涨/下跌/平盘。
+    # **成交额是三个键**（界面"一条一个数"），另有一个合成串 `成交额` 给命令行那一行用 ——
+    # 合成串在 Windows 字体下会被界面列宽截掉，所以界面不再用它（见 ui/app.py 的注释）。
+    assert list(values) == ["涨停", "跌停", "炸板", "沪成交额", "深成交额", "北成交额",
+                            "成交额", "上涨", "下跌", "平盘"]
     assert values["涨停"] == "55" and values["平盘"] == "221"
+    assert (values["沪成交额"], values["深成交额"], values["北成交额"]) \
+        == ("7792亿", "8499亿", "140亿")
     assert values["成交额"] == "沪 7792亿 · 深 8499亿 · 北 140亿"
 
     name, value, pct = market.entry_fields(overview["indices"][0])
