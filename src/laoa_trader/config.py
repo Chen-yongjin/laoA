@@ -348,7 +348,7 @@ class Config:
     #: **不给每个来源加 `xxx_enabled` 布尔键**：一个键只表达一件事，
     #: 免得出现"列表里有、开关却是关"这种自相矛盾的状态。
     #: 环境变量 `DATA_SOURCES`（逗号分隔，写法与 notify_channels 一致）。
-    data_sources: list[str] = field(default_factory=lambda: ["hithink"])
+    data_sources: list[str] = field(default_factory=lambda: ["public", "hithink"])
     data_dir: Path = field(default_factory=default_data_dir)
 
     # ── 策略组（跑哪几组 / 哪几条策略）──
@@ -937,7 +937,7 @@ def _apply_env(cfg: Config) -> Config:
         ("LAOA_ENABLED_STRATEGIES", "enabled_strategies"),
         ("LAOA_ENABLED_FORMULAS", "enabled_formulas"),
         ("NOTIFY_CHANNELS", "notify_channels"),
-        ("DATA_SOURCES", "data_sources"),       # 数据来源（主来源=同花顺；为辅助来源留结构）
+        ("DATA_SOURCES", "data_sources"),       # 数据来源（默认主源=公开源，免 Key；同花顺为备用/增强）
         ("AUCTION_SCAN_AT", "auction_scan_at"),
         ("AUCTION_BOARDS", "auction_boards"),
         ("MARKET_INDICES", "market_indices"),

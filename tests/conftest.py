@@ -472,3 +472,34 @@ def sqlite_conn(db: str):
     conn.row_factory = sqlite3.Row
     yield conn
     conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_desktop_export(tmp_path, monkeypatch):
+    """测试期间**绝不往真桌面写文件**（选股结果导出会落在桌面）。
+
+    为什么必须有：`scheduler.run_daily()` 建池成功后会往**桌面**导出一份结果文本
+    （用户要求）。测试里大量调用 `run_daily`（pipeline / cli / scheduler_gate …），
+    它们多数不传 `export_dir` —— 在开发者本机（尤其 Windows CI 的 runner，那里
+    `~/Desktop` 是真实存在的目录）就会真的在桌面上落一个文件，而且**同名同日互相覆盖**。
+    这种副作用不会让测试变红，所以最容易被忽略：直到有一天发现"桌面上怎么多了个文件"。
+
+    这里把桌面目录固定到临时目录：显式传 `export_dir` 的用例不受影响（它们本来就注入），
+    没有显式注入的那些则写进 `tmp_path/desktop-export`，跑完即随 tmp_path 消失。
+    """
+    try:
+        from laoa_trader import pool
+    except Exception:      # noqa: BLE001 - 极小依赖环境下没有这个模块就跳过
+        return
+    target = tmp_path / "desktop-export"
+    real_export = getattr(pool, "export_pick_file", None)
+    if real_export is None:      # 老版本没有这个函数（或将来改名了）
+        return
+
+    def _guarded(*args, **kwargs):
+        # 只拦"调用方没指定目录"的那种：显式传了 dest_dir 的用例保持真实行为，
+        # 也就不影响 `desktop_dir()` 自己的解析用例（它们直接调那个函数，没被替换）。
+        kwargs.setdefault("dest_dir", target)
+        return real_export(*args, **kwargs)
+
+    monkeypatch.setattr(pool, "export_pick_file", _guarded, raising=False)

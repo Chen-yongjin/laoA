@@ -1,24 +1,32 @@
 """来源注册表：能力矩阵、启停与顺序、未知 id、没 Key 的回退、统一口径的归一化。
 
 外加一小节"接线测试"（`ui/quotes.py` 那四条门槛里最要紧的一条）：
-**没填同花顺 Key、但启用了东方财富时，两张表的现价/涨幅照样要能取到**。
+**一个 Key 都没配时，两张表的现价/涨幅照样要能取到** ——
+2026-09-17 起出厂顺序是 `["public", "hithink"]`（**免 Key 的公开源当主源**），
+所以那条用例现在盯的是 `public`（同花顺降为"有 Key 时的备用/增强"）。
 
-全部用例都不联网：来源取数函数被换成假函数，socket 层还有 conftest 的
-`_block_network` 兜底（真外呼会直接失败，而不是悄悄打接口）。
+全部用例都不联网：来源取数函数被换成假函数、公开源的 HTTP 层被换成假 opener，
+socket 层还有 conftest 的 `_block_network` 兜底（真外呼会直接失败，而不是悄悄打接口）。
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 import pytest
 
 from laoa_trader.config import Config
 from laoa_trader.data import eastmoney as em
 from laoa_trader.data import hithink as hx
+from laoa_trader.data import public_quotes as pq
 from laoa_trader.data import sources
 
+#: `tests/fixtures/public/` 里是 2026-09-17 真实抓下来的公开源响应（GBK 原文）。
+#: 为什么用真实响应而不是手写样本：公开源最容易错的就是**单位归一**
+#: （腾讯是"手/万元"、新浪是"股/元"）—— 手写的样本会跟着实现一起写错。
+PUBLIC_FIXTURES = Path(__file__).parent / "fixtures" / "public"
 
 @pytest.fixture(autouse=True)
 def _clear_warning_memo():
@@ -46,6 +54,30 @@ def cfg_sources(*ids: str, **kwargs) -> Config:
     return Config(data_sources=list(ids), **kwargs)
 
 
+def fake_public_opener(calls: list[str] | None = None):
+    """公开源的假 HTTP 层：腾讯/新浪的 URL 各返回真实抓下来的响应（**绝不联网**）。
+
+    契约与 `public_quotes.Opener` 一致（`opener(url, headers, timeout) -> bytes`）。
+    没准备好的 URL 直接抛 `AssertionError` —— 让"测试打算用哪个接口"写清楚，
+    而不是悄悄返回空串（那会变成"来源没数"而不是"测试写错了"）。
+    """
+    payloads = {
+        "qt.gtimg.cn": (PUBLIC_FIXTURES / "tencent_three.txt").read_bytes(),
+        "hq.sinajs.cn": (PUBLIC_FIXTURES / "sina_two.txt").read_bytes(),
+    }
+    seen: list[str] = [] if calls is None else calls
+
+    def _get(url: str, headers: dict, timeout: float) -> bytes:
+        seen.append(url)
+        for key, payload in payloads.items():
+            if key in url:
+                return payload
+        raise AssertionError(f"测试没准备这个 URL 的响应：{url}")
+
+    _get.calls = seen          # type: ignore[attr-defined]
+    return _get
+
+
 def unified(symbol: str, **overrides) -> dict:
     """一条统一口径的行（东方财富那一路的形状）。"""
     row = {
@@ -60,14 +92,44 @@ def unified(symbol: str, **overrides) -> dict:
 # ── REGISTRY：能力矩阵与凭据 ──
 
 
-def test_registry_has_both_builtin_sources() -> None:
-    assert set(sources.REGISTRY) == {"hithink", "eastmoney"}
+def test_registry_has_all_builtin_sources() -> None:
+    """内置来源一共三个（原名叫 `..._both_builtin_sources`，现在不止两个）。
+
+    改名与新断言的理由：2026-09-17 起 `public`（免 Key 公开源）是**分发版主源**
+    ——"装上就能看行情"这条产品承诺在注册表这一层就要成立，所以它的关键属性
+    单独钉死（免 Key、名字写明"免 Key"、能力含快照）。
+    """
+    assert set(sources.REGISTRY) == {"public", "hithink", "eastmoney"}
+    pub_info = sources.REGISTRY["public"]
     hx_info = sources.REGISTRY["hithink"]
     em_info = sources.REGISTRY["eastmoney"]
     assert hx_info.needs_key is True and hx_info.key_config == "hithink_api_key"
+    assert pub_info.needs_key is False and pub_info.key_config is None
     assert em_info.needs_key is False and em_info.key_config is None
     assert hx_info.name == "同花顺金融数据服务（内置）"
-    assert "免 Key" in em_info.name
+    assert "免 Key" in pub_info.name and "免 Key" in em_info.name
+    # 主源：能出实时快照（否则"免 Key 也能看行情"根本没有来源支撑）
+    assert sources.CAP_SNAPSHOT in pub_info.capabilities
+    # ⚠️ 只许声明**已经接进链路**的能力。`public_quotes.daily()` 确实能取单只历史日K，
+    # 但它没接进下载/日更链路，所以这里**必须**只有 snapshot：谁要是顺手把
+    # CAP_DAILY_HISTORY 加回来，界面就会写着"历史日K"而实际取不到，
+    # 用户只会认为"这个源坏了"—— 能力声明是给用户看的承诺，不是实现清单。
+    assert pub_info.capabilities == frozenset({sources.CAP_SNAPSHOT})
+    # 没接通的链路必须在界面能看到的 note 里点名，否则用户会归因错误
+    assert "大盘概览" in pub_info.note and "历史数据下载" in pub_info.note
+    assert pub_info.note            # 风险与口径如实写在这一行里（界面直接显示它）
+
+
+def test_every_snapshot_source_has_a_fetcher() -> None:
+    """声明了快照能力的来源**必须**有取数实现（注册表与分派表不许漂移）。
+
+    漂移的后果特别隐蔽：列表里能看到这个来源、能启用、界面一切正常，
+    但取数时它被 `_SNAPSHOT_FETCHERS.get()` 静默跳过 —— 表现成"表格永远是空的"。
+    """
+    for info in sources.REGISTRY.values():
+        if sources.CAP_SNAPSHOT in info.capabilities:
+            assert info.id in sources._SNAPSHOT_FETCHERS, info.id
+    assert set(sources._SNAPSHOT_FETCHERS) == set(sources.REGISTRY)
 
 
 def test_capabilities_only_use_known_values() -> None:
@@ -171,10 +233,14 @@ def test_hithink_key_from_config_or_env(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_source_states_lists_all_sources_with_enabled_first() -> None:
-    """界面要能**添加来源**，所以没启用的也要列出来（这是与 active_sources 的关键差别）。"""
+    """界面要能**添加来源**，所以没启用的也要列出来（这是与 active_sources 的关键差别）。
+
+    期望值随注册表走：启用的是 `eastmoney` 排第一，其余按 `REGISTRY` 的定义顺序
+    跟在后面 —— 现在是 `public`（第二个内置来源）与 `hithink`。
+    """
     states = sources.source_states(cfg_sources("eastmoney"))
-    assert [row["id"] for row in states] == ["eastmoney", "hithink"]
-    assert states[0]["enabled"] is True and states[1]["enabled"] is False
+    assert [row["id"] for row in states] == ["eastmoney", "public", "hithink"]
+    assert [row["enabled"] for row in states] == [True, False, False]
     assert set(states[0]) == {
         "id", "name", "enabled", "needs_key", "has_key",
         "capabilities_text", "note", "key_config", "capabilities",
@@ -193,6 +259,14 @@ def test_source_states_default_order_and_texts() -> None:
     assert states["eastmoney"]["capabilities"] == (
         "daily_history", "snapshot", "stock_list",
     )
+    # 免 Key 的公开源同理：没启用、但"可用"，能力文案**只列已接通的那一项**，
+    # 与它声明的 capabilities 严格一致（多一个字都算过度承诺）
+    assert states["public"]["enabled"] is False
+    assert states["public"]["has_key"] is True
+    assert states["public"]["key_config"] is None
+    assert states["public"]["capabilities_text"] == "实时快照"
+    assert states["public"]["capabilities"] == ("snapshot",)
+    assert "免 Key" in states["public"]["name"]
     assert states["hithink"]["note"]
 
 
@@ -274,9 +348,143 @@ def test_snapshot_map_without_any_usable_source_returns_empty(monkeypatch: pytes
     monkeypatch.setattr(em, "snapshot_all", lambda *a, **k: calls.append("em-all") or [])
     monkeypatch.setattr(hx, "HithinkClient",
                         lambda *a, **k: calls.append("hx-client") or object())
+    monkeypatch.setattr(pq, "_urllib_get",
+                        lambda url, headers, timeout: calls.append("public") or b"")
     assert sources.snapshot_map(cfg_sources("hithink"), ["600519"]) == {}       # 没 Key
     assert sources.snapshot_map(cfg_sources(), ["600519"]) == {}                # 一个都没启用
     assert calls == []                                                          # 谁都没被叫
+
+
+def test_snapshot_map_with_no_enabled_source_sends_no_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`data_sources = []`（用户把来源全删了）→ 没有可用来源、**一个字节都不发**。
+
+    为什么要单独一条：`public` 是免 Key 的，**永远"可用"** ——
+    "一个可用来源都没有"这个前提从 2026-09-17 起只能**显式构造**（把列表清空，
+    或只留一个没配 Key 的同花顺）。这里同时盯住"注册层面为空"与"HTTP 层没被打"：
+    只看其中一层的话，另一层悄悄绕过去是看不出来的。
+    """
+    monkeypatch.setattr(hx, "available", lambda: False)
+    calls: list[str] = []
+    opener = fake_public_opener(calls)
+    monkeypatch.setattr(pq, "_urllib_get", opener)
+    monkeypatch.setattr(em, "snapshot", lambda *a, **k: calls.append("em-snapshot") or [])
+    monkeypatch.setattr(em, "snapshot_all", lambda *a, **k: calls.append("em-all") or [])
+    monkeypatch.setattr(hx, "HithinkClient",
+                        lambda *a, **k: calls.append("hx-client") or object())
+    cfg = cfg_sources()                                       # data_sources = []
+    assert sources.active_sources(cfg) == []
+    assert sources.usable_sources(cfg) == []                  # 一个能用的都没有
+    assert sources.snapshot_map(cfg, ["600519"]) == {}
+    assert sources.snapshot_map(cfg, None) == {}              # 全市场那条路同样不发
+    assert calls == []                                        # 公开源/东财/同花顺都没被叫
+    assert opener.calls == []
+
+
+def test_snapshot_map_uses_the_public_source_without_any_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """只启用 `public`、**一个 Key 都没配** → 照样拿到统一口径的行情（免 Key 主源）。
+
+    用真实响应做假 HTTP 层：这条用例真正要保护的是"**没 Key 也有数**"，
+    以及"公开源那一路的单位也已经归一成股/元"（两张表的口径不随来源变化）。
+    """
+    monkeypatch.setattr(hx, "available", lambda: False)
+    opener = fake_public_opener()
+    monkeypatch.setattr(pq, "_urllib_get", opener)
+    out = sources.snapshot_map(cfg_sources("public"), ["600519", "000001"])
+
+    assert set(out) == {"600519", "000001"}
+    maotai = out["600519"]
+    assert maotai["source"] == "public"
+    assert maotai["name"] == "贵州茅台"
+    assert maotai["last_price"] == pytest.approx(1266.98)
+    assert maotai["prev_close"] == pytest.approx(1258.0)
+    assert maotai["pct"] == pytest.approx(0.71)
+    assert maotai["volume"] == pytest.approx(1_755_400)        # 股（腾讯的"手"已换算）
+    assert maotai["turnover"] == pytest.approx(2_217_338_283, rel=1e-6)
+    assert set(sources.QUOTE_FIELDS) <= set(maotai)
+    assert abs(maotai["as_of"] - time.time()) < 5
+    # 两只票一次批量请求（分批是来源自己的事，这里只确认没被拆成两次）
+    assert len(opener.calls) == 1 and "qt.gtimg.cn" in opener.calls[0]
+
+
+def test_snapshot_map_public_needs_a_symbol_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`symbols=None`（要全市场）时公开源**不出数**：腾讯没有"给我全部"的开关。
+
+    这是公开源已知的边界（全市场得由调用方给代码表），如实钉住 ——
+    否则以后有人把 `None` 当成"随便给点"就有了想象空间。
+    """
+    monkeypatch.setattr(hx, "available", lambda: False)
+    opener = fake_public_opener()
+    monkeypatch.setattr(pq, "_urllib_get", opener)
+    assert sources.snapshot_map(cfg_sources("public"), None) == {}
+    assert opener.calls == []                                 # 连请求都没发
+
+
+def test_snapshot_map_prefers_hithink_over_public_when_a_key_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`["hithink", "public"]` 且配了 Key → **同花顺接管**，公开源一次都不打。
+
+    这是"有 Key 的用户自动用同花顺"这条产品承诺的最小验证：
+    顺序即优先级，第一个能出数的来源胜出，后面的来源连请求都不该发。
+    """
+    calls: list[str] = []
+    public_calls: list[str] = []
+
+    class FakeHx:
+        def __init__(self, *args, **kwargs) -> None:
+            calls.append("hx")
+
+        def snapshot(self, thscodes=None, **kwargs):
+            calls.append("hx-snapshot")
+            return [{"thscode": "600519.SH", "last_price": 1258.0,
+                     "price_change_ratio_pct": -1.16, "volume": 2623500,
+                     "turnover": 3307926407.0}]
+
+    monkeypatch.setattr(hx, "HithinkClient", FakeHx)
+    monkeypatch.setattr(pq, "_urllib_get",
+                        lambda url, headers, timeout: public_calls.append(url) or b"")
+    out = sources.snapshot_map(
+        cfg_sources("hithink", "public", hithink_api_key="k"), ["600519"]
+    )
+    assert out["600519"]["source"] == "hithink"
+    assert out["600519"]["last_price"] == 1258.0
+    assert calls == ["hx", "hx-snapshot"]
+    assert public_calls == []                                 # 公开源没被打
+
+
+def test_snapshot_map_falls_through_when_the_public_source_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """免 Key 主源（公开源）挂了 → 只记日志，落到下一个来源，**绝不抛异常**。
+
+    公开接口随时可能限流/改字段，所以"主源失败"是常态而不是意外：
+    用户配的备用来源必须能接管（这条就是那份承诺的用例）。
+    """
+    monkeypatch.setattr(hx, "available", lambda: False)
+    monkeypatch.setattr(em, "snapshot",
+                        lambda symbols, **k: [unified("600519", last_price=11.0)])
+
+    def _boom(url: str, headers: dict, timeout: float) -> bytes:
+        raise OSError("腾讯接口连不上")
+
+    # ① 网络层失败：`public_quotes` 自己吞掉 → 公开源返回空 → 换下一个来源
+    monkeypatch.setattr(pq, "_urllib_get", _boom)
+    out = sources.snapshot_map(cfg_sources("public", "eastmoney"), ["600519"])
+    assert out["600519"]["source"] == "eastmoney"
+    assert out["600519"]["last_price"] == 11.0
+
+    # ② 公开源整路抛异常（不是"没数据"）：`snapshot_map` 也只记日志、继续换下一个
+    monkeypatch.setattr(pq, "snapshot",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("公开源炸了")))
+    out2 = sources.snapshot_map(cfg_sources("public", "eastmoney"), ["600519"])
+    assert out2["600519"]["source"] == "eastmoney"
+
+    # ③ 后面没有来源了 → 返回 `{}`（界面退回本地收盘价），不是抛出去
+    assert sources.snapshot_map(cfg_sources("public"), ["600519"]) == {}
 
 
 def test_snapshot_map_falls_back_to_eastmoney_without_hithink_key(
@@ -467,47 +675,89 @@ def test_probe_source_tolerates_bad_symbol_input(monkeypatch: pytest.MonkeyPatch
     assert seen == [["600519"]]                 # 空代码回落到默认的 600519
 
 
+def test_probe_source_public_says_ok_without_any_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**【测试】按钮对免 Key 主源也要给"通"**（用户没配任何 Key 时的第一行）。
+
+    设置页那一行的意义就是"点一下看它到底通不通"；公开源不需要 Key，
+    所以这里 `has_key` 必须为真、`ok` 必须为真 —— 否则用户会去找一个不存在的 Key。
+    走到的是真解析（假 HTTP 层喂真实响应），单位也一并验了。
+    """
+    monkeypatch.setattr(hx, "available", lambda: False)
+    monkeypatch.setattr(pq, "_urllib_get", fake_public_opener())
+    out = sources.probe_source(cfg_sources("public"), "public")
+    assert out["ok"] is True and out["source"] == "public"
+    assert out["symbol"] == "600519" and out["price"] == pytest.approx(1266.98)
+    assert "免 Key" in out["text"] and "1266.98" in out["text"]
+    # 免 Key 的来源**不许**报"还没配 Key"
+    assert "还没配 Key" not in out["text"]
+
+
 # ── 接线：`ui/quotes.py`（用户拍板的那条行为变化）──
 
 
-def test_quotes_uses_eastmoney_when_hithink_key_is_missing(
+def test_quotes_uses_the_public_source_when_no_key_is_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**主目标**：没填同花顺 Key、启用了东方财富 → 两张表照样有现价/涨幅。"""
+    """**主目标**：一个 Key 都不配 → 两张表照样有现价/涨幅（落到免 Key 的公开源）。
+
+    原名 `test_quotes_uses_eastmoney_when_hithink_key_is_missing`：**意图一字未改**
+    （"绝不因为没 Key 就什么都不返回"），变的是"第一个免 Key 的来源"—— 出厂顺序
+    2026-09-17 起是 `["public", "hithink"]`，所以现在落到 `public`。
+    东方财富那条路仍在，只是排到了公开源后面（下方第二个场景）。
+    """
     from laoa_trader.ui import quotes as q
 
     monkeypatch.setattr(hx, "available", lambda: False)
+    monkeypatch.setattr(pq, "_urllib_get", fake_public_opener())   # 离线：真实响应做假 HTTP 层
+
+    # ① 出厂默认顺序（`Config()` 就是 `["public", "hithink"]`）
+    out = q.fetch_snapshot_prices(Config(), ["600519"])
+    assert set(out) == {"600519"}                    # 没 Key 也**不是空**
+    quote = out["600519"]
+    # 界面（`app._price_cells`）读的就是这三个键
+    assert quote["price"] == pytest.approx(1266.98)
+    assert quote["pct"] == pytest.approx(0.71)
+    assert isinstance(quote["at"], float) and quote["at"] > 0
+    # 统一口径的字段一并带上（来源与取数时刻要能显示出来）
+    assert quote["last_price"] == pytest.approx(1266.98)
+    assert quote["source"] == "public"
+    assert quote["volume"] == pytest.approx(1_755_400)          # 股（来源层已归一）
+
+    # ② 东财排在公开源后面时的兜底也还在（同一条意图的另一种排法）
     monkeypatch.setattr(em, "snapshot", lambda symbols, **k: [
         unified("600519", last_price=1258.0, pct=-1.16, volume=2623500,
                 turnover=3307926407.0),
     ])
-    cfg = cfg_sources("hithink", "eastmoney")
-    out = q.fetch_snapshot_prices(cfg, ["600519"])
-    assert set(out) == {"600519"}
-    quote = out["600519"]
-    # 界面（`app._price_cells`）读的就是这三个键
-    assert quote["price"] == 1258.0 and quote["pct"] == -1.16
-    assert isinstance(quote["at"], float) and quote["at"] > 0
-    # 统一口径的字段一并带上（来源与取数时刻要能显示出来）
-    assert quote["last_price"] == 1258.0 and quote["source"] == "eastmoney"
-    assert quote["volume"] == 2623500
+    fallback = q.fetch_snapshot_prices(cfg_sources("hithink", "eastmoney"), ["600519"])
+    assert fallback["600519"]["source"] == "eastmoney"
+    assert fallback["600519"]["price"] == 1258.0
+    assert fallback["600519"]["volume"] == 2623500
 
 
 def test_quotes_sends_nothing_without_a_usable_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    """没有可用来源 → 一次请求都不发、返回空（表格退回本地收盘价并标注）。"""
+    """没有可用来源 → 一次请求都不发、返回空（表格退回本地收盘价并标注）。
+
+    `public` 是免 Key 的、**永远可用**，所以"一个可用来源都没有"这个前提现在
+    只能**显式构造**：来源列表为空（用户全删了），或只留一个没配 Key 的同花顺。
+    """
     from laoa_trader.ui import quotes as q
 
     monkeypatch.setattr(hx, "available", lambda: False)
     entered: list[str] = []
-    # 盯**两层**：`quotes` 自己的门槛（连 `sources.snapshot_map` 都不进）
-    # 与来源层的取数函数（`em.snapshot` 一次都不被叫）——
-    # 只看其中一层的话，另一层被删掉是看不出来的
+    # 盯**三层**：`quotes` 自己的门槛（连 `sources.snapshot_map` 都不进）、
+    # 来源层的取数函数、以及免 Key 主源自己的 HTTP 层 ——
+    # 只看其中一层的话，另一层被删掉（或绕过）是看不出来的
     monkeypatch.setattr(sources, "snapshot_map",
                         lambda *a, **k: entered.append("snapshot_map") or {})
     monkeypatch.setattr(em, "snapshot", lambda *a, **k: entered.append("em") or [])
     monkeypatch.setattr(em, "snapshot_all", lambda *a, **k: entered.append("em-all") or [])
+    monkeypatch.setattr(pq, "_urllib_get",
+                        lambda url, headers, timeout: entered.append("public") or b"")
+    none_enabled = cfg_sources()                                # 用户把来源全删了
+    assert sources.usable_sources(none_enabled) == []
+    assert q.fetch_snapshot_prices(none_enabled, ["600519"]) == {}
+    # 只留一个没配 Key 的同花顺：同样一次请求都不发
     assert q.fetch_snapshot_prices(cfg_sources("hithink"), ["600519"]) == {}
-    assert q.fetch_snapshot_prices(cfg_sources(), ["600519"]) == {}
     assert entered == []
 
 
@@ -515,7 +765,7 @@ def test_quotes_service_gate_follows_usable_sources(
     monkeypatch: pytest.MonkeyPatch, qapp
 ) -> None:
     """那四条门槛里"没有可用来源就不取"：没 Key 的 `["hithink"]` 不发，
-    加了东方财富就发（交易时段内）。"""
+    免 Key 的来源（`public` / `eastmoney`）只要在列表里就发（交易时段内）。"""
     from laoa_trader import intraday, state
     from laoa_trader.ui import quotes as q
 
@@ -524,12 +774,17 @@ def test_quotes_service_gate_follows_usable_sources(
     monkeypatch.setattr(intraday, "in_session", lambda now=None: True)
     provider = lambda: ["600519"]        # noqa: E731 - 一行的小闭包
     only_hx = q.QuoteService(cfg_sources("hithink"), provider)
-    both = q.QuoteService(cfg_sources("hithink", "eastmoney"), provider)
-    no_source = q.QuoteService(cfg_sources("eastmoney"), provider)
+    only_public = q.QuoteService(cfg_sources("public"), provider)
+    both = q.QuoteService(cfg_sources("hithink", "public"), provider)
+    em_only = q.QuoteService(cfg_sources("eastmoney"), provider)
+    none = q.QuoteService(cfg_sources(), provider)
+    empty_symbols = q.QuoteService(cfg_sources("public"), lambda: [])
     try:
         assert only_hx.should_request() is False          # 没 Key 且没有别的来源
-        assert both.should_request() is True              # 东方财富兜底
-        assert no_source.should_request() is True         # 只要东方财富也行
+        assert only_public.should_request() is True       # 免 Key 主源：不用配任何 Key
+        assert both.should_request() is True              # 同花顺没 Key，公开源接管
+        assert em_only.should_request() is True           # 只要东方财富也行
+        assert none.should_request() is False             # 一个来源都没启用
         # 非交易时段 / 下载中 / 没有标的，三条门槛照旧
         monkeypatch.setattr(intraday, "in_session", lambda now=None: False)
         assert both.should_request() is False
@@ -537,15 +792,18 @@ def test_quotes_service_gate_follows_usable_sources(
         monkeypatch.setattr(state, "is_downloading", lambda: True)
         assert both.should_request() is False
         monkeypatch.setattr(state, "is_downloading", lambda: False)
-        empty = q.QuoteService(cfg_sources("eastmoney"), lambda: [])
-        assert empty.should_request() is False
+        assert empty_symbols.should_request() is False
     finally:
-        for service in (only_hx, both, no_source):
+        for service in (only_hx, only_public, both, em_only, none, empty_symbols):
             service.stop()
 
 
 def test_quotes_injected_client_path_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
-    """注入假客户端的测试通路保留（离线、确定）：形状与生产一致。"""
+    """注入假客户端的测试通路保留（离线、确定）：形状与生产一致。
+
+    这里**故意一个来源都不启用**（`cfg_sources()` = `[]`）：注入客户端这条路
+    是完全离线、绕开来源注册表的，界面测试靠它拿确定的结果。
+    """
     from tests.conftest import FakeClient
     from laoa_trader.ui import quotes as q
 
@@ -553,8 +811,10 @@ def test_quotes_injected_client_path_still_works(monkeypatch: pytest.MonkeyPatch
         {"ticker": "600001", "thscode": "600001.SH", "last_price": 4.0,
          "price_change_ratio_pct": 3.5, "volume": 1000, "turnover": 4000.0},
     ])
-    out = q.fetch_snapshot_prices(cfg_sources(), ["600001"], client=client)
-    assert out["600001"]["price"] == 4.0
+    cfg = cfg_sources()
+    assert sources.usable_sources(cfg) == []        # 没有可用来源……
+    out = q.fetch_snapshot_prices(cfg, ["600001"], client=client)
+    assert out["600001"]["price"] == 4.0            # ……注入客户端照样出数
     assert out["600001"]["pct"] == 3.5
     assert out["600001"]["volume"] == 1000          # 股（同花顺口径不换算）
     assert out["600001"]["source"] == ""

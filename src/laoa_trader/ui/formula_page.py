@@ -26,8 +26,26 @@
    `# 说明:` 注释头）。
 3. **【开始选股】**（右上角）：本页**只 emit `start_pick_requested()`** ——
    增量数据 → 跑策略与公式 → 建池 → 推送这一整套在主窗口（`ui/app.py`）里，
-   这一页不碰它（也不联网）。选完之后主窗口调 `reload()`，本页把结果摆进
-   「本次选股结果」区，并给一个【全部加为自选】按钮让这些票长期留在自选股池里。
+   这一页不碰它（也不联网）。
+
+选股结果去哪了（用户 2026-09-17 的明确要求）
+--------------------------------------------
+用户原话：「策略选股只要显示策略，不显示选股结果，选股结果直接进自选股池，
+可以在股池再添加删除。（也可以同时 output 一个文件到桌面）」
+
+所以这一页**只有策略列表**（`名称 | 备注 | 状态` + 【策略编辑】【开始选股】）：
+旧版那块「本次选股结果」表 + 一句话结论 + 【全部加为自选】按钮**已经删掉**。
+结果有**两个**去处在界面上看得见，一个都不会丢：
+
+* **自选股池页**（主入口）：选出来的票就是 `stock_pool` 里的行，
+  右键能【删除】、上面能【添加自选】—— 增删都在那一页做（用户原话"可以在股池再添加删除"）；
+  这也是为什么这一页**不需要**再摆一张"结果表"：同一批票在一张表里看就够了。
+* **桌面文件**：`scheduler.run_daily()` 在建池成功后调 `pool.export_pick_file()`，
+  往桌面写一份 `老A选股助手-选股结果-<日期>.txt`（导出失败只记日志、不影响选股）。
+
+`show_pick_result()` 这个方法**保留**（主窗口还在调它）：它现在是空实现，
+只写日志、不画任何东西 —— 删掉它会让 `ui/app.py` 那边 `AttributeError`
+（`app.py` 属于另一个改动方，这一页不替它做决定）。
 
 为什么这里**没有**「成绩单」
 ----------------------------
@@ -119,18 +137,12 @@ HINT_MAX_LINES = 14
 #: 这时候放掉最后一个引用会让 QThread 在"线程还在跑"时析构 —— Qt 直接崩进程。
 THREAD_JOIN_MS = 3_000
 
-#: 「本次选股结果」表最多占多高（它是"看一眼就走"的东西，不该把策略列表挤没）
-RESULT_MAX_HEIGHT = 190
-
 # ── 统一策略列表的两类行 ──
 ROW_BUILTIN = "builtin"      # 内置策略（写在 `strategy/rules.py` 里，只读、不可删）
 ROW_FORMULA = "formula"      # 自定义公式（`formulas/` 目录里的文件，可改可删）
 
 #: 列表列头（用户给定，**一个字都不加**）
 LIST_COLUMNS: tuple[str, ...] = ("名称", "备注", "状态")
-
-#: 「本次选股结果」两列
-RESULT_COLUMNS: tuple[str, ...] = ("名称(代码)", "来源策略")
 
 #: 右键菜单项文案
 MENU_ENABLE = "启用"
@@ -150,10 +162,13 @@ OFF_GROUP_KEY = "none"
 #: 得先翻过大段文字才看得见公式本身（同一个上限库里有 `MAX_DESC_CHARS`）。
 MAX_NOTE_CHARS = formulas_lib.MAX_DESC_CHARS
 
-#: 顶部那行灰字说明（用户打开这一页先看到的东西）
+#: 顶部那行灰字说明（用户打开这一页先看到的东西）。
+#: **必须写明结果去哪了**：这一页不再显示选股结果（用户要求），
+#: 不写的话用户点完【开始选股】会以为"什么都没发生"。
 PAGE_HINT = (
     "勾「状态」列 = 这条策略/公式参与选股；单击一行看详情（公式会载入编辑器）；"
-    "右键 = 启用 / 关闭 / 删除；点【开始选股】跑一轮。"
+    "右键 = 启用 / 关闭 / 删除；点【开始选股】跑一轮 —— "
+    "选出的票直接进「自选股池」（在那里增删），并同时导出一份到桌面的文本文件。"
 )
 
 #: 策略列表上方那句灰字
@@ -608,15 +623,6 @@ if QT_AVAILABLE:
             self._loading = False
             #: 当前展开的内置策略详情（刷列表后要跟着更新）
             self._detail_key = ""
-            #: 主窗口交过来的本次结果 `(行情日, [行])`；None = 还没人交过
-            self._pick_result: tuple[Any, list[dict]] | None = None
-            #: 本地库里最近一次建池的结果 `(行情日, [行])`（`_load_result_from_db` 填）
-            self._db_result: tuple[Any, list[dict]] | None = None
-            #: 最终选定的那一份（`_refresh_result` 按"谁更新"决定，见那里的说明）
-            self._chosen_result: tuple[Any, list[dict]] | None = None
-            #: 结果区的渲染数据（`名称(代码)` / 来源 / 代码 / 名称）
-            self.result_rows: list[dict] = []
-            self.result_date: Any = None
 
             self._build_ui()
             self.reload()
@@ -646,8 +652,9 @@ if QT_AVAILABLE:
             self.btn_start_pick = QPushButton("开始选股")
             self.btn_start_pick.setObjectName("primaryAction")   # 主操作按钮（主题精确命中）
             self.btn_start_pick.setToolTip(
-                "按上面勾选的策略与公式跑一轮：结果直接进「自选股池」，"
-                "并按「系统设置」里的通知方式发一条消息"
+                "按上面勾选的策略与公式跑一轮：结果直接进「自选股池」"
+                "（在那一页右键删除、或手工再添加），并同时往桌面导出一个结果文本文件，"
+                "最后按「系统设置」里的通知方式发一条消息"
             )
             self.btn_start_pick.clicked.connect(self.on_start_pick)
             top.addWidget(self.btn_start_pick)
@@ -686,7 +693,13 @@ if QT_AVAILABLE:
             self.bottom_stack.setVisible(False)
 
         def _build_list_side(self) -> Any:
-            """上半：策略列表（名称 | 备注 | 状态） + 「本次选股结果」区。"""
+            """上半：**只有策略列表**（名称 | 备注 | 状态）。
+
+            为什么这里只剩一张表（用户原话："策略选股只要显示策略，不显示选股结果"）：
+            旧版下半还挂着一块「本次选股结果」表 + 一句话结论 + 【全部加为自选】，
+            而同一批票本来就有一张更该看的表 —— 「自选股池」页（结果就在那里，
+            还能右键删、手工加）。摆两块显示同一批票只会让用户不确定"哪一块说了算"。
+            """
             side = QWidget()
             layout = QVBoxLayout(side)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -717,7 +730,6 @@ if QT_AVAILABLE:
             self.table.itemSelectionChanged.connect(self.on_row_selected)
             layout.addWidget(self.table, 1)
 
-            layout.addWidget(self._build_result_box())
             return side
 
         def _set_header_tooltip(self, column: int, text: str) -> None:
@@ -725,51 +737,6 @@ if QT_AVAILABLE:
             item = self.table.horizontalHeaderItem(column)
             if item is not None:
                 item.setToolTip(text)
-
-        def _build_result_box(self) -> Any:
-            """「本次选股结果」区：一句话结论 + 命中的票 + 【全部加为自选】。
-
-            为什么放在这一页：用户点完【开始选股】最想知道的两件事是
-            "选出来没有"和"选出来的票在哪" —— 前者是一句话，后者是清单。
-            这些票**已经在自选股池里**（建池那一步做的），这里的清单是"这一轮是哪几条
-            策略/公式选出来的"，而【全部加为自选】是把它们**长期**留在自选股池表里
-            （池子按行情日重算，自选是用户自己的，不会跟着没了）。
-            """
-            box = QGroupBox("本次选股结果（选出来的票已经在「自选股池」里）")
-            box.setVisible(False)
-            layout = QVBoxLayout(box)
-            layout.setSpacing(6)
-
-            self.result_summary = QLabel("")
-            self.result_summary.setWordWrap(True)
-            layout.addWidget(self.result_summary)
-
-            self.result_table = QTableWidget(0, len(RESULT_COLUMNS))
-            self.result_table.setHorizontalHeaderLabels(list(RESULT_COLUMNS))
-            self.result_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-            self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            self.result_table.setMaximumHeight(RESULT_MAX_HEIGHT)
-            header = self.result_table.horizontalHeader()
-            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-            layout.addWidget(self.result_table)
-
-            row = QHBoxLayout()
-            self.btn_add_all = QPushButton("全部加为自选")
-            self.btn_add_all.setToolTip(
-                "把这些票写进「自选股池」（只写本地库，不联网）：它们以后即使不进池，"
-                "也留在自选股池表里；已经在自选里的不会重复添加"
-            )
-            self.btn_add_all.clicked.connect(self.on_add_all_to_watchlist)
-            row.addWidget(self.btn_add_all)
-            self.result_hint = QLabel("")
-            self.result_hint.setObjectName("statusTag")
-            self.result_hint.setWordWrap(True)
-            row.addWidget(self.result_hint, 1)
-            layout.addLayout(row)
-
-            self.result_box = box
-            return box
 
         def _build_bottom_stack(self) -> Any:
             """下半：一叠两张 —— 公式编辑器 / 内置策略只读详情（同时只显示一张）。"""
@@ -1046,12 +1013,15 @@ if QT_AVAILABLE:
         # ── 策略列表：重建 / 单击 / 右键菜单 ──────────────────────────
 
         def reload(self) -> None:
-            """重建统一策略列表（内置 + 公式）与「本次结果」区。
+            """重建统一策略列表（内置 + 公式）。
 
             主窗口在选股完成后会调它（`_on_pipeline_done`），所以这里**绝不碰编辑区**：
             用户可能正开着编辑器改公式，刷一次列表就把他的草稿换掉是不可接受的
             （旧版 `reload()` 会顺手选中第一行并载入编辑框 —— 在"列表在上、编辑器按需展开"
             的布局里那会变成"每次选完股，编辑器自己弹出来并顶掉我在写的东西"）。
+
+            这里**也不再刷"本次结果"区**（那块界面已经按用户要求删掉，见模块 docstring
+            「选股结果去哪了」）：结果在「自选股池」页与桌面文件里，不在这一页。
             """
             self.specs = formulas_lib.formula_files(self.directory)
             runtime = formula_group.last_status()
@@ -1068,7 +1038,6 @@ if QT_AVAILABLE:
 
             self._restore_selection(keep)
             self._update_list_hint()
-            self._refresh_result()
 
         def _fill_table(self) -> None:
             """按 `self.rows` 铺表格（勾选框**先 setChecked 再接信号**）。"""
@@ -1810,215 +1779,53 @@ if QT_AVAILABLE:
                 )
             self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
 
-        # ── 本次选股结果 / 加自选 ────────────────────────────────────
+        # ── 选股结果（**这一页不再显示**）─────────────────────────────
+        #
+        # 用户 2026-09-17：「策略选股只要显示策略，不显示选股结果，选股结果直接进
+        # 自选股池，可以在股池再添加删除。（也可以同时 output 一个文件到桌面）」
+        #
+        # 所以旧的「本次选股结果」表、一句话结论、[全部加为自选] 按钮与它们的
+        # 渲染/写库方法（`_refresh_result` / `_render_result` / `_load_result_from_db` /
+        # `_result_row` / `on_add_all_to_watchlist`）**整体删掉**。结果的两个去处见模块
+        # docstring 的「选股结果去哪了」：自选股池页（可右键删、可手工加）+ 桌面文件
+        # （`pool.export_pick_file()`，由 `scheduler.run_daily` 在建池成功后调用）。
 
         def show_pick_result(self, rows: Any = None, *, data_date: str | None = None) -> None:
-            """主窗口在选股完成后调用：把本轮结果摆进「本次选股结果」区。
+            """界面不再显示结果（用户要求），这个方法保留为**空实现**以免调用方崩；
+            结果通过【自选股池】与桌面导出文件呈现。
 
-            参数**两种都认**（主窗口手上有什么就给什么）：
+            为什么留着一个什么都不做的方法（而不是删掉）：
 
-            * `run_daily()` 的 report（dict）→ 取 `report["pool"]` 与 `report["data_date"]`；
-            * 行列表：每行要有 `symbol`，以及 `strategy`/`strategies`（「来源策略」列靠它，
-              没有来源的行会被当成"纯自选"过滤掉）。
+            * `ui/app.py` 的 `_on_pipeline_done()` 还在调它
+              （`getattr(page, "show_pick_result", None)` → 有就调）。删掉方法本身
+              不会炸（那边用的是 `getattr`），但一旦哪天接线改成直接调用，
+              这里就会变成 `AttributeError` **把结论显示那段带崩** ——
+              一个空的兼容方法比"指望调用方老记得容错"可靠得多；
+            * 参数原样收下（report 或行列表都行），签名不缩水：
+              调用方不用为了这一页改代码（`app.py` 属于另一个改动方）。
 
-            不传（`None`）时退回"读本地库最近一次建池的结果"（见 `_load_result_from_db`）——
-            这样即使主窗口没接线，用户跑完选股切回这一页也能看到结果，而不是空白。
+            它现在做的事**只有写日志**：把"这一轮到底选出了几只"记进日志文件，
+            方便事后对账（对完账就知道桌面文件里应该有哪几只）。
+
+            Args:
+                rows: `run_daily()` 的 report（dict，取 `pool`/`data_date`）或行列表；
+                    两者都收下只是为了兼容，内容不会被展示。
+                data_date: 行情日（report 里没有时用这个）。
             """
-            if rows is None:
-                self._pick_result = None
-                self._refresh_result()
-                return
+            picked: list[dict] = []
             if isinstance(rows, dict):
-                report = rows
-                data_date = data_date or report.get("data_date")
-                rows = report.get("pool") or []
-            # 只留**选出来的票**（带 strategy/strategies 的行）：池子里还有"纯自选"
-            # 的行（那是用户自己加的，没有来源策略可写），把它们混进"本次选股结果"
-            # 会让用户以为"这些也是选出来的"。与本地库兜底（`_load_result_from_db`）
-            # 用同一条规则，两条路的结果才可能一致。
-            picked = [
-                self._result_row(r) for r in (rows or [])
-                if r.get("symbol") and str(r.get("strategy") or r.get("strategies") or "")
-            ]
-            self._pick_result = (data_date, picked)
-            # 走 `_refresh_result()` 而不是直接 `_render_result()`：本地库里可能已经
-            # 有**更新**的一次建池（另一个入口刚跑过），选择规则只此一处
-            self._refresh_result()
-
-        def _refresh_result(self) -> None:
-            """决定结果区显示哪一份数据，然后画出来。
-
-            **两份候选**：主窗口交过来的（`show_pick_result`，含它刚跑完那一轮的行情日）
-            与本地库里最近一次建池（`stock_pool`）。选择规则：
-
-            1. 本地库里有**更新**的行情日 → 以本地库为准（可能是别的入口又跑了一轮：
-               CLI、定时任务；界面不能一直显示上一轮的旧名单）；
-            2. 否则用主窗口交过来的那一份（它更"新鲜"，还带着推送/过滤的上下文）；
-            3. 主窗口没交过（没接线 / 用户刚打开这一页）→ 本地库。
-
-            为什么要读本地库这一步：`stock_pool` 是"这一轮选出来的票"唯一落库的地方
-            （建池那一步写进去的），而自选股池页展示的就是它 —— 让这一页读同一个来源，
-            用户在这两处看到的名单就不可能不一致。
-            """
-            self._load_result_from_db()
-            pinned = self._pick_result
-            fresh = self._db_result or (None, [])
-            if pinned is None:
-                chosen = fresh
-            elif pinned[0] and fresh[0] and str(fresh[0]) > str(pinned[0]):
-                chosen = fresh
-            else:
-                chosen = pinned
-            self._chosen_result = chosen
-            self._render_result()
-
-        def _load_result_from_db(self) -> None:
-            try:
-                # 延迟导入：`pool` 会拉起策略/因子那一串（这一页只在需要时才碰它）
-                from laoa_trader import pool as pool_mod
-
-                rows = pool_mod.pool_table_rows(self.cfg.db_path)
-            except Exception as exc:  # noqa: BLE001 - 读不到就当"还没有结果"，不该拦住界面
-                logger.debug(f"读取最近一次选股结果失败：{exc}")
-                self._db_result = (None, [])
-                return
-            picked = [self._result_row(r) for r in rows if str(r.get("strategy") or "")]
-            day = rows[0].get("date") if rows else None
-            self._db_result = (day, picked)
-
-        @staticmethod
-        def _result_row(row: dict) -> dict:
-            """池子行 → 结果区的一行。
-
-            `strategies` 在库里是逗号拼的类名（`ReversalStrategy,DryUpExpansionStrategy`），
-            这里翻成中文名显示（`短期反转、地量后放量变盘`）；`公式·xxx` 的合成名原样显示
-            （`rules.strategy_label()` 会把它当类名去掉 `Strategy` 后缀，
-            用户给公式起名 `我的Strategy` 时会被吃掉两个字 —— 所以公式名单独走一条路）。
-            """
-            symbol = str(row.get("symbol") or "")
-            name = str(row.get("name") or "") or symbol
-            raw = str(row.get("strategies") or row.get("strategy") or "")
-            keys = [part for part in raw.split(",") if part]
-            labels = [
-                key if groups.is_formula_strategy(key) else rules_mod.strategy_label(key)
-                for key in keys
-            ]
-            return {
-                "symbol": symbol,
-                "name": name,
-                # 半角 `名称(代码)`：与「自选股池」表格、推送正文同一套写法（改版方案第四节）
-                "text": f"{name}({symbol})",
-                "label": "、".join(labels) or "—",
-                "is_formula": any(groups.is_formula_strategy(key) for key in keys),
-            }
-
-        def _render_result(self) -> None:
-            """把当前选定的那份结果画到结果区（没有结果就整块收起来）。"""
-            date, picked = self._chosen_result or (None, [])
-            self.result_rows = [dict(row) for row in picked]
-            self.result_date = date
-            if not self.result_rows:
-                self.result_box.setVisible(False)
-                self.btn_add_all.setEnabled(False)
-                return
-
-            total = len(self.result_rows)
-            formula_rows = sum(1 for row in self.result_rows if row["is_formula"])
-            strategies = total - formula_rows
-            where = f"行情日 {date}" if date else "最近一次选股"
-            self.result_summary.setText(
-                f"✅ {where}：共选出 {total} 只（内置策略 {strategies} · 公式 {formula_rows}）"
-                "，它们已经在「自选股池」里。\n"
-                "想让它们**长期**留着（池子按行情日重算，自选不会）：点【全部加为自选】。"
+                data_date = data_date or rows.get("data_date")
+                picked = [r for r in (rows.get("pool") or []) if isinstance(r, dict)]
+            elif rows is not None:
+                picked = [r for r in rows if isinstance(r, dict)]
+            # 只数**选出来的**票（带来源策略的行），与建池那份清单同一口径
+            selected = [r for r in picked if r.get("symbol")
+                        and str(r.get("strategy") or r.get("strategies") or "")]
+            logger.debug(
+                "选股结果不在这张页面显示（用户要求）：本轮 %d 只（行情日 %s）——"
+                "结果在「自选股池」页与桌面导出文件里",
+                len(selected), data_date or "未知",
             )
-            self.result_table.setRowCount(total)
-            for index, row in enumerate(self.result_rows):
-                name_item = QTableWidgetItem(row["text"])
-                name_item.setToolTip(f"{row['name']}（{row['symbol']}）")
-                self.result_table.setItem(index, 0, name_item)
-                source_item = QTableWidgetItem(row["label"])
-                source_item.setToolTip("这条票是哪条策略/公式选出来的：" + row["label"])
-                self.result_table.setItem(index, 1, source_item)
-            self.result_box.setVisible(True)
-            self.btn_add_all.setEnabled(True)
-
-        def on_add_all_to_watchlist(self) -> None:
-            """【全部加为自选】：把本次结果的票写进 `watchlist`（**只写本地库，不联网**）。
-
-            三条口径，与 `pool.merge_watchlist()` 保持一致：
-
-            1. **不重复添加**：已经在自选表里的代码直接跳过（`upsert_watchlist` 本身幂等，
-               但我们也不去动用户的备注 —— 他给自己那只票写过什么，不该被这一下改掉）；
-            2. **尊重 `watchlist_max`**：上限只数**启用**的自选（与池子那边同一口径），
-               满了就**明确说**"还有哪几只没加进去、怎么解决"，绝不静默丢；
-            3. **保留来源**：新加的票在备注里写上"选股来源：<策略/公式>"——
-               池子重算后它们会离开池子，备注是这几只票"当初为什么在这"的唯一线索。
-            """
-            if not self.result_rows:
-                self._set_hint("❌ 「本次选股结果」还是空的：先点【开始选股】跑一轮")
-                return
-            from laoa_trader.data import storage
-
-            limit = max(int(getattr(self.cfg, "watchlist_max", 0) or 0), 0)
-            try:
-                with storage.connect(self.cfg.db_path) as conn:
-                    existing = storage.load_watchlist(conn, enabled_only=False)
-                    enabled_count = sum(1 for row in existing if int(row.get("enabled", 1)) == 1)
-                    known = {str(row["symbol"]) for row in existing}
-                    fresh = [row for row in self.result_rows if row["symbol"] not in known]
-                    room = max(limit - enabled_count, 0)
-                    added: list[dict] = []
-                    skipped: list[dict] = []
-                    for row in fresh:
-                        if len(added) >= room:
-                            skipped.append(row)
-                            continue
-                        storage.upsert_watchlist(
-                            conn, row["symbol"], name=row["name"],
-                            note=f"选股来源：{row['label']}",
-                        )
-                        added.append(row)
-            except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，不让按钮把界面带走
-                self._set_hint(f"❌ 加自选失败：{type(exc).__name__}: {exc}")
-                return
-
-            already = len(self.result_rows) - len(fresh)
-            if added:
-                lines = [
-                    f"✅ 已加 {len(added)} 只进「自选股池」"
-                    f"（现在共 {enabled_count + len(added)} 只自选，上限 {limit}）。"
-                ]
-            else:
-                # 一只都没加（全都已经在自选里、或上限已经满了）：**别写"已加 0 只"**
-                # 那种像是没生效的话，直接把真实情况说出来
-                lines = [
-                    f"ℹ️ 这次没有新增自选（现在共 {enabled_count} 只自选，上限 {limit}）："
-                    + ("都已经在自选里了。" if already else "自选已到上限。")
-                ]
-            if already:
-                lines.append(f"（其中有 {already} 只本来就在自选里，没有重复添加）")
-            if skipped:
-                names = "、".join(row["text"] for row in skipped[:5])
-                more = f" 等 {len(skipped)} 只" if len(skipped) > 5 else ""
-                lines.append(
-                    f"⚠️ 还有 {len(skipped)} 只因自选股上限（watchlist_max={limit}）**没有加入**："
-                    f"{names}{more}。\n"
-                    "  可以把上限调大（「系统设置」的自选股上限，或 config.toml 的 watchlist_max），"
-                    "或先在「自选股池」里删掉几只，再点一次这个按钮。"
-                )
-            self._set_hint("\n".join(lines))
-            self.result_hint.setText(
-                f"本轮 {len(self.result_rows)} 只：已加 {len(added)} 只"
-                + (f"、超额未加 {len(skipped)} 只" if skipped else "")
-                + (f"、本来就有 {already} 只" if already else "")
-            )
-            if added:
-                self._toast(
-                    f"已把 {len(added)} 只加进自选股池"
-                    + (f"（{len(skipped)} 只超过上限未加）" if skipped else "")
-                )
-            else:
-                self._toast("这批票都已经在自选股池里了（没有重复添加）")
 
         # ── 小工具 ────────────────────────────────────────────────────
 
@@ -2055,8 +1862,12 @@ if QT_AVAILABLE:
             这一页要是自己调一遍，就会出现两套流程、两套状态、两套错误处理
             （而且"这一页没跑数据闸门"会安静地跑出一个错的池子）。
             主窗口把这个信号接到 `on_run_pipeline`，跑完再调 `reload()` 刷列表。
+            跑完之后**结果不在这一页**：进「自选股池」（在那一页增删）+ 导出一份到桌面
+            （`scheduler.run_daily` 里建池成功后做的）—— 这句提示里得说出来，
+            否则用户点完看不到任何结果会以为程序没反应。
             """
-            self._toast("开始选股：正在按勾选的策略与公式跑一轮…")
+            self._toast("开始选股：正在按勾选的策略与公式跑一轮…"
+                        "（结果直接进「自选股池」，并同时导出到桌面一个文本文件）")
             self.start_pick_requested.emit()
 
         def on_copy_detail(self) -> None:
@@ -2105,7 +1916,6 @@ __all__ = [
     "PAGE_HINT",
     "PANEL_WIDTH",
     "PREVIEW_LIMIT",
-    "RESULT_COLUMNS",
     "ROW_BUILTIN",
     "ROW_FORMULA",
     "RowMenu",

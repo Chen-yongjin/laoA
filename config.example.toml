@@ -15,7 +15,17 @@ hithink_api_key = ""
 
 # 行情数据来源：**列表本身就是启停，顺序就是优先级**（前一个取不到才轮到后一个）。
 # 可填的 id（认不出的会被忽略并在日志里说明，不会让程序起不来）：
-#   "hithink"    同花顺金融数据服务（内置主来源）。要 Key（就是上面的 hithink_api_key）；
+#   "public"     **公开行情源（腾讯为主 + 新浪兜底）—— 免 Key，分发版默认主源**。
+#                装上就能看现价/涨幅，不用去申请任何 Key。
+#                实测（2026-09-17）：腾讯批量接口一次 100 只、全市场 5562 只约 0.7 分钟；
+#                字段含 现价/涨跌幅/成交量额/换手率/流通市值/总市值/市盈率/市净率/
+#                量比/均价/涨跌停价/五档。缺的票自动用新浪兜底（新浪单位是股与元，
+#                腾讯是手与万元，程序内部已统一）。
+#                ⚠️ 它们是**公开但未授权**的行情接口：可能改字段或限流，所以它只当主路，
+#                后面还挂着同花顺（有 Key 时）与本地库兜底。数据为准实时快照，非交易所授权行情。
+#   "hithink"    同花顺金融数据服务（要 Key，就是上面的 hithink_api_key）。
+#                **有 Key 的用户建议把它排在 public 前面**：一次请求能拿全市场 10 年
+#                历史 dump + 竞价 + 估值 + 涨停池，是最稳的一路；
 #                能力：全市场日线（dump）、实时快照、涨停/跌停/炸板池、复权因子、
 #                交易日历、板块与成分股。
 #   "eastmoney"  东方财富公开接口。**免 Key**，不用申请就能用；没填同花顺 Key 时
@@ -25,13 +35,14 @@ hithink_api_key = ""
 #                官方可能改字段或限流；它**没有**实时涨停池/复权因子/交易日历，
 #                代码表也**拿不到行业**。实测（2026-09-16）：全市场快照 5559 只、
 #                日K 与批量快照都能取到，成交量单位是「手」（程序内部已换算成股）。
-# 只要同花顺（默认，出厂设置）：data_sources = ["hithink"]
-# 没填 Key 也想看现价：        data_sources = ["eastmoney"]
-# 两个都开（同花顺优先）：      data_sources = ["hithink", "eastmoney"]
+# 出厂设置（**免 Key 优先**；填了同花顺 Key 时把它放前面就自动接管）：
+#   data_sources = ["hithink", "public"]     # 有 Key：同花顺优先
+#   data_sources = ["public"]                # 完全不要同花顺（纯免 Key）
+#   data_sources = ["public", "eastmoney"]   # 公开源 + 东财兜底
 # 说明：**没有** `xxx_enabled` 这类开关 —— 一个键只表达一件事，
 # 不会出现"列表里有、开关却是关"这种自相矛盾的状态；界面上勾选/取消就是在改这一行。
-# 环境变量：DATA_SOURCES="hithink,eastmoney"（逗号分隔，与 notify_channels 写法一致）。
-data_sources = ["hithink"]
+# 环境变量：DATA_SOURCES="public,hithink"（逗号分隔，与 notify_channels 写法一致）。
+data_sources = ["public", "hithink"]
 
 # 本地数据目录。默认 %LOCALAPPDATA%\LaoATrader\data（Windows）。
 # 数据库 trader.db、dump 缓存都在这里；数据约 1~2 GB，建议放在 SSD 上。

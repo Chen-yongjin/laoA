@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from laoa_trader.config import get_config
@@ -584,6 +585,337 @@ def format_pool_lines(pool: list[dict]) -> list[str]:
             tag += "+自选" + (f"（{note}）" if note else "")
         lines.append(f"{i}. {row['name']}({row['symbol']}){tag}｜{row.get('reason') or ''}")
     return lines
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 桌面导出：选股结果除了进「自选股池」，也 output 一个文件到桌面
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 用户原话：「选股结果直接进自选股池……（也可以同时 output 一个文件到桌面）」
+#
+# 为什么放在 `pool.py`（而不是 `ui/` 或 `scheduler.py`）：
+#   1. 这里的每一行都是**池子行 → 给人看的文本**，与 `format_pool_lines()`
+#      （推送正文）是同一件事的两种排版；放一处才不会出现"两套写法"，
+#      而且两份文本用的是同一批中文名（`strategy_label` / `source_label`）。
+#   2. 界面【开始选股】、定时日更、CLI `--once` **三条路都经过 `run_daily` → 建池**，
+#      导出挂在这个位置三条路就都有桌面文件；挂在界面上则只有点按钮那条路有。
+#   3. 这一层不依赖 Qt、不联网、不读配置，可以单独测（`tests/test_desk_export.py`）。
+
+#: 导出文件名（用户给定：`老A选股助手-选股结果-2026-09-18.txt`）。
+#: 同一天再跑一次会**覆盖同一个文件**：桌面不是归档目录，堆一串同名文件只会让人分不清。
+EXPORT_NAME_PREFIX = "老A选股助手-选股结果-"
+EXPORT_NAME_SUFFIX = ".txt"
+
+#: 文件名与正文里的日期写法（用户给定：`2026-09-18`）
+EXPORT_DAY_FORMAT = "%Y-%m-%d"
+
+#: 正文第一行（`老A选股助手 · 选股结果 · 2026-09-18（行情日 2026-09-17）`）
+EXPORT_TITLE = "老A选股助手 · 选股结果"
+
+#: 正文最后一行。**必须留着**：这份文件常被用户转发到群里，而里面的价格只是
+#: 公开来源的快照 —— 不写清楚，看到的人会当它是交易所行情。
+EXPORT_FOOTER = (
+    "（本文件由程序自动生成；数据为公开来源的准实时快照，"
+    "非交易所授权行情，不构成投资建议。）"
+)
+
+#: 桌面目录的候选写法：Windows 英文系统叫 `Desktop`、中文系统叫 `桌面`；
+#: 后两条覆盖"桌面被 OneDrive 接管"那类机器。自己拼路径一定会猜错几台机器，
+#: 所以 `_standard_desktop()` 还会**先**问 Qt/系统要一次答案（见那里的说明）。
+DESKTOP_SUBDIRS: tuple[tuple[str, ...], ...] = (
+    ("Desktop",),
+    ("桌面",),
+    ("OneDrive", "Desktop"),
+    ("OneDrive", "桌面"),
+)
+
+
+def _is_dir(path: Path) -> bool:
+    """是不是一个**能进去的**目录（没权限/路径怪 → 当成没有，绝不抛异常）。
+
+    为什么单独包一层：桌面目录是"猜"出来的，猜错的那台机器上可能是
+    `C:\\Users\\别人\\Desktop` 这种读不动的路径 —— 个别 Windows 路径上
+    `is_dir()` 会抛 `OSError`，而"导出到桌面"这件事**不该**把选股流程带走。
+    """
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _standard_desktop() -> Path | None:
+    """问系统要"真正的桌面目录"（Windows 上认 OneDrive 重定向与中文名）。
+
+    为什么要问系统：桌面被改成中文名、或被 OneDrive 搬到 `OneDrive\\桌面` 之后，
+    `~/Desktop` 就不存在了 —— 自己拼路径会在**那台机器上**静默失败（用户的
+    桌面就在眼前，程序却说"写不出去"）。`QStandardPaths` 走的是系统 API。
+
+    `pool.py` 是后端模块（CLI、定时任务都会 import 它），所以这里**懒加载 + 全程兜底**：
+    没装 PySide6 的机器不该因为"导出到桌面"这一件事而 import 就炸。
+    """
+    try:
+        from PySide6.QtCore import QStandardPaths
+    except Exception:  # noqa: BLE001 - 没有 Qt 就退回自己拼路径
+        return None
+    try:
+        location = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DesktopLocation
+        )
+    except Exception:  # noqa: BLE001 - Qt 的枚举/版本差异不该影响导出
+        return None
+    return Path(location) if location else None
+
+
+def desktop_dir(*, home: Any = None, fallback_dir: Any = None) -> Path | None:
+    """找桌面目录：候选里**第一个存在的**；一个都没有就退回 `fallback_dir`。
+
+    Args:
+        home: 家目录（默认 `Path.home()`；测试注入 tmp_path，**不碰真桌面**）。
+            注入了 home 就不再问系统要桌面目录 —— 那一路必须完全可控。
+        fallback_dir: 桌面一个都找不到时的落点（调用方给**数据目录**）——
+            "这台机器没有桌面"不该让结果凭空消失，至少留在用户找得到的数据目录里，
+            日志里也会写明落在哪。
+
+    Returns:
+        目录 Path；连回退目录都没有时返回 None（调用方记日志、不导出）。
+    """
+    base = Path(home).expanduser() if home is not None else Path.home()
+    candidates: list[Path] = []
+    if home is None:
+        # 系统给的答案排第一：它可能是 OneDrive 里的那一个，也可能是中文名那一个。
+        # **注入 home 时（测试/特殊部署）不问系统** —— 那一路必须完全由调用方决定，
+        # 否则"把家目录指到 tmp_path 免得写真人桌面"这件事会被系统答案绕过。
+        standard = _standard_desktop()
+        if standard is not None:
+            candidates.append(standard)
+    candidates.extend(base.joinpath(*parts) for parts in DESKTOP_SUBDIRS)
+    for candidate in candidates:
+        if _is_dir(candidate):
+            return candidate
+    # 回退目录**不要求存在**：由写文件那一步创建（数据目录可能还没建出来，
+    # 但那是"至少能写"的地方，比"谁都不要"好）
+    return Path(fallback_dir) if fallback_dir is not None else None
+
+
+def latest_quotes(db_path: Any) -> dict[str, tuple[float, float | None]]:
+    """`{代码: (最新价, 涨跌幅%)}` —— 给桌面文件那行"现价 +x.xx%"用。
+
+    **读 `stock_daily_raw`（不复权）而不是 `stock_daily_hfq`（后复权视图）**：
+    后复权价是给策略算因子用的口径，10 送 10 之后它能变成真实价的两倍 ——
+    写进给人看的文件里就是"茅台 2600 元"这种假数字。用户手上的成交价是不复权价。
+
+    涨跌幅按**库里最近两个交易日**的收盘价算；只有一天数据（或那天停牌没有前收）
+    时返回 `None` —— 那时正文只写现价、不编一个百分比。
+    """
+    with storage.connect(db_path) as conn:
+        days = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT date FROM stock_daily_raw ORDER BY date DESC LIMIT 2"
+            )
+        ]
+        if not days:
+            return {}
+        rows = conn.execute(
+            "SELECT symbol, date, close FROM stock_daily_raw WHERE date IN (?, ?)",
+            (days[0], days[1] if len(days) > 1 else days[0]),
+        ).fetchall()
+
+    latest: dict[str, float] = {}
+    previous: dict[str, float] = {}
+    for symbol, day, close in rows:
+        if close is None or not symbol:
+            continue
+        target = latest if day == days[0] else previous
+        target[str(symbol)] = float(close)
+
+    out: dict[str, tuple[float, float | None]] = {}
+    for symbol, price in latest.items():
+        before = previous.get(symbol)
+        # 昨收为 0/缺失 → 不算涨跌幅（除零会把整份导出变成"没有文件"）
+        pct = (price - before) / before * 100.0 if before else None
+        out[symbol] = (price, pct)
+    return out
+
+
+def _quote_text(price: float, pct: float | None) -> str:
+    """`现价 1266.98 +0.71%`（没有涨跌幅时只写现价 —— 宁可少一个数字，也不编一个）。"""
+    text = f"现价 {price:.2f}"
+    if pct is not None:
+        text += f" {pct:+.2f}%"
+    return text
+
+
+def _export_source(row: dict) -> str:
+    """桌面文件里的「来源」：与「自选股池」表格那一列**同一个词**。
+
+    三条退路（越靠前越权威）：
+
+    1. 行里已经算好的 `source_label`（`pool_table_rows()` 填的，带 `+自选` 组合标记）；
+    2. 现算一次 `source_label(row, None)` —— `run_daily` 传进来的池子行只有
+       `strategy/strategies/source/watchlist`，没有 `source_label`；
+    3. 退回 `source`（`策略` / `公式` / `自选` / `公式+自选`）。
+
+    为什么留第 3 条：第 2 条在"纯自选行没有 `watchlist` 标记"时会给一个 `—`
+    （`source_label` 的兜底值）—— 给人看的文件里写"来源：—"等于什么都没说。
+    """
+    label = str(row.get("source_label") or "").strip()
+    if not label:
+        label = source_label(row, None)
+    if not label or label == "—":
+        label = str(row.get("source") or "").strip() or "—"
+    return label
+
+
+def pick_export_text(
+    pool_rows: list[dict],
+    *,
+    data_date: str | None = None,
+    day: str | None = None,
+    quotes: dict[str, tuple[float, float | None]] | None = None,
+) -> str:
+    """本次选股结果 → 桌面文件的**正文**（纯函数：不碰磁盘、不联网、不读配置）。
+
+    版式（用户给定）：
+
+        老A选股助手 · 选股结果 · 2026-09-18（行情日 2026-09-17）
+        共 N 只（策略 M · 自选 K）
+        1. 贵州茅台(600519)  现价 1266.98 +0.71%  来源：策略·短期反转
+        2. …
+        （本文件由程序自动生成；……不构成投资建议。）
+
+    三条口径：
+
+    * **数量**用 `pool_counts()`（与「自选股池」表头同一个函数），所以"M 只策略 /
+      K 只自选"与界面上那两个数是同一份算法，不会对不上；
+    * **来源**优先用行里已经算好的 `source_label`（`pool_table_rows()` 填的，
+      带「策略·X+自选」那种组合标记），没有才算一次 —— 界面、推送、桌面文件同源；
+    * **现价**来自 `quotes`（`latest_quotes()` 的结果或调用方注入），没有就不写这一段。
+
+    隐私：正文里**只有选股结果本身**（代码、名称、价格、来源）—— 没有 Key、
+    没有本地路径、没有系统信息。这份文件是要被用户转发出去的。
+    """
+    rows = [row for row in (pool_rows or []) if row.get("symbol")]
+    if day is None:
+        # 懒加载：`intraday` 自己会（在函数里）import `pool`，模块级互相 import
+        # 会在别的入口顺序不同的情况下变成循环 —— 这里只需要"今天是哪天"。
+        from laoa_trader import intraday as intraday_mod
+
+        day = intraday_mod.now_shanghai().strftime(EXPORT_DAY_FORMAT)
+
+    total, strategy, watch = pool_counts(rows)
+    lines = [
+        f"{EXPORT_TITLE} · {day}（行情日 {data_date or '未知'}）",
+        f"共 {total} 只（策略 {strategy} · 自选 {watch}）",
+    ]
+    for index, row in enumerate(rows, start=1):
+        symbol = str(row.get("symbol") or "")
+        name = str(row.get("name") or "") or symbol
+        source = _export_source(row)
+        parts = [f"{index}. {name}({symbol})"]
+        entry = (quotes or {}).get(symbol)
+        if entry:
+            try:
+                price = float(entry[0])
+                raw_pct = entry[1] if len(entry) > 1 else None
+                pct = float(raw_pct) if raw_pct is not None else None
+            except (TypeError, ValueError, IndexError):
+                price, pct = 0.0, None      # 价格字段坏掉 → 这一行不写价格段
+            if price > 0:
+                parts.append(_quote_text(price, pct))
+        parts.append(f"来源：{source}")
+        # 两空格分隔：数字与中文之间留白，用户看一行就知道哪段是价格、哪段是来源
+        lines.append("  ".join(parts))
+    lines.append(EXPORT_FOOTER)
+    return "\n".join(lines) + "\n"
+
+
+def export_file_name(day: str) -> str:
+    """文件名（`老A选股助手-选股结果-2026-09-18.txt`，用户给定）。"""
+    return f"{EXPORT_NAME_PREFIX}{day}{EXPORT_NAME_SUFFIX}"
+
+
+def _write_export(path: Path, text: str) -> None:
+    """真正落盘（单独一层：测试要能确定性地模拟"写盘失败"）。
+
+    `utf-8-sig`（带 BOM）：这份文件是给 Windows 用户**双击打开**的，
+    中文记事本/Excel 靠 BOM 认编码；没有它，老版本记事本会把中文显示成乱码。
+    `newline="\\r\\n"`：Windows 桌面上双击就用记事本看，CRLF 在任何编辑器里都正常，
+    而且**跨平台写出的字节是确定的**（测试才能逐字节钉住内容）。
+    """
+    path.write_text(text, encoding="utf-8-sig", newline="\r\n")
+
+
+def export_pick_file(
+    pool_rows: list[dict],
+    *,
+    data_date: str | None = None,
+    day: str | None = None,
+    dest_dir: Any = None,
+    quotes: dict[str, tuple[float, float | None]] | None = None,
+    db_path: Any = None,
+    home: Any = None,
+    fallback_dir: Any = None,
+) -> Path | None:
+    """把**本次选股结果**写成一个桌面上的纯文本文件；失败只记日志、返回 None。
+
+    用户要求："结果直接进自选股池……也可以同时 output 一个文件到桌面"。
+    所以这是**附赠**产物：它绝不能影响选股/建池/推送（调用方 `run_daily` 另有兜底
+    try，这里自己也不再往外抛）。
+
+    Args:
+        pool_rows: 池子行（`build_pool()` 的返回值）。
+        data_date: 行情日（写进标题括号里；来自 `run_daily` 的 `report["data_date"]`）。
+        day: 文件名/标题里的日期（默认按**北京时间今天**）。
+        dest_dir: 目标目录。**测试与特殊部署注入它**（不传就自己找桌面，见
+            `desktop_dir()`）—— 测试绝不能往真桌面上写文件。
+        quotes: `{代码: (现价, 涨跌幅%)}`；None 且给了 `db_path` 时按库算
+            （`latest_quotes()`）。
+        db_path: 行情库路径（只用来取现价）。
+        home: 家目录（默认 `Path.home()`；测试注入，避免摸到真桌面）。
+        fallback_dir: 找不到桌面时的落点（调用方给数据目录）。
+
+    Returns:
+        写出去的文件路径；**没有结果 / 找不到可写目录 / 写盘失败**都返回 None
+        （原因全部写进日志，绝不静默）。
+    """
+    rows = [row for row in (pool_rows or []) if row.get("symbol")]
+    if not rows:
+        logger.info("本次没有选股结果，不导出桌面文件")
+        return None
+    try:
+        if day is None:
+            from laoa_trader import intraday as intraday_mod
+
+            day = intraday_mod.now_shanghai().strftime(EXPORT_DAY_FORMAT)
+        target = (
+            Path(dest_dir).expanduser()
+            if dest_dir is not None
+            else desktop_dir(home=home, fallback_dir=fallback_dir)
+        )
+        if target is None:
+            logger.warning(
+                "找不到桌面目录、也没有可用的回退目录：本次选股结果没有导出"
+                "（不影响选股与推送）"
+            )
+            return None
+        target.mkdir(parents=True, exist_ok=True)      # 目录不在就建（回退目录常常还没建）
+        if quotes is None and db_path is not None:
+            try:
+                quotes = latest_quotes(db_path)
+            except Exception as exc:  # noqa: BLE001 - 取不到价格照样导出（只是少一列）
+                logger.warning(f"读取最新价失败，桌面文件里不写现价：{exc}")
+                quotes = {}
+        path = target / export_file_name(day)
+        _write_export(path, pick_export_text(rows, data_date=data_date,
+                                            day=day, quotes=quotes))
+        logger.info(f"选股结果已导出到 {path}")
+        return path
+    except Exception as exc:  # noqa: BLE001 - 导出失败绝不能把选股流程带走
+        logger.warning(
+            f"导出选股结果到桌面失败（不影响选股与推送）：{type(exc).__name__}: {exc}"
+        )
+        return None
 
 
 #: 界面「来源」列里内置策略的前缀（用户给定的写法：`策略·短期反转`）。

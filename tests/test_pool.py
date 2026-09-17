@@ -300,3 +300,66 @@ def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> 
     for name in pool.strategy_names(row):
         assert name in (pool.rules.strategy_label("ReversalStrategy"),
                         pool.rules.strategy_label("DryUpExpansionStrategy"))
+
+
+# ── 选出来的票在「自选股池」里能删、能手工再加（用户要求）──
+#
+# 用户原话：「策略选股只要显示策略，不显示选股结果，选股结果直接进自选股池，
+# **可以在股池再添加删除**」。
+#
+# 结果现在不再显示在「策略选股」页，入口收敛到「自选股池」那一张表：
+# 右键【删除】走 `storage.delete_pool_symbol()`，手工再加走
+# `storage.upsert_watchlist()`（界面上是【添加自选】/回车）。
+# 界面那两步的接线在 `ui/app.py`（属于另一个改动方），这里钉住**后端这两个入口**
+# 对"策略选中的票"真的有效 —— 界面怎么改都不至于连后端语义都变了。
+
+
+def _saved_pool_with_one_pick(engine, cfg, monkeypatch) -> None:
+    """建一个只有一只策略标的的池子并落库（600002 半导体甲）。"""
+    def fake_run_all(engine_, settings=None, *, top_n=None, names=None):
+        return {"ReversalStrategy": _picks("600002", name="半导体甲")}, []
+
+    monkeypatch.setattr(pool.rules, "run_all", fake_run_all)
+    built = pool.build_pool(engine, cfg, hot_only=False, save=True, day="2026-09-11")
+    assert [row["symbol"] for row in built] == ["600002"]
+
+
+def test_a_picked_symbol_can_be_deleted_from_the_pool_page(engine, cfg, monkeypatch) -> None:
+    """右键【删除】的后端：`delete_pool_symbol` 之后「自选股池」不再显示这只票。"""
+    _saved_pool_with_one_pick(engine, cfg, monkeypatch)
+    assert [row["symbol"] for row in pool.pool_page_rows(cfg.db_path)] == ["600002"]
+
+    with storage.connect(cfg.db_path) as conn:
+        removed = storage.delete_pool_symbol(conn, "600002")
+
+    assert removed == 1                                   # 真的删掉了一行
+    assert pool.pool_page_rows(cfg.db_path) == []         # 池子页也随之空了
+    assert pool.pool_symbols(cfg.db_path) == []
+
+
+def test_a_manually_added_symbol_comes_back_into_the_pool_page(engine, cfg,
+                                                               monkeypatch) -> None:
+    """手工再加：`upsert_watchlist` 之后那只票**立刻**能在这张表里看见。
+
+    为什么这条重要：池子按行情日重算，删掉一只策略标的之后用户想自己把它加回来
+    （或加一只完全手工挑的票），界面上必须马上就有一行 —— 而不是"等今晚重新建池"。
+    """
+    _saved_pool_with_one_pick(engine, cfg, monkeypatch)
+    with storage.connect(cfg.db_path) as conn:
+        storage.delete_pool_symbol(conn, "600002")        # 先删掉（上一个用例的动作）
+        storage.upsert_watchlist(conn, "600002", name="半导体甲", note="手工加的")
+
+    rows = pool.pool_page_rows(cfg.db_path)
+
+    assert [row["symbol"] for row in rows] == ["600002"]
+    assert rows[0]["source_label"] == "自选"               # 来源标成自选（不是策略）
+    assert rows[0]["note"] == "手工加的"                   # 用户写的备注留着
+    assert rows[0]["strategy"] == ""                      # 不再是"策略选出来的"
+
+
+def test_deleting_a_symbol_that_is_not_in_the_pool_is_a_no_op(cfg) -> None:
+    """删一只不在池子里的票（界面点错、或另一处刚删过）→ 返回 0，不报错。"""
+    storage.init_db(cfg.db_path)
+    with storage.connect(cfg.db_path) as conn:
+        assert storage.delete_pool_symbol(conn, "600002") == 0
+    assert pool.pool_page_rows(cfg.db_path) == []

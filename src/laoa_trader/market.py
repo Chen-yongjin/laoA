@@ -1,4 +1,4 @@
-"""大盘概览：涨跌停家数 + 沪深北成交额 + 宽基/情绪/板块三组指数。
+"""大盘概览：涨跌停家数 + 沪深成交额 + 宽基/情绪/板块三组指数。
 
 这一层**刻意不碰界面**：`fetch_overview()` 只吃一份 `Config` 和一个"能取数的对象"
 （真实 `HithinkClient` 或测试用的假客户端），把结果整理成一个普通 dict，
@@ -6,15 +6,17 @@
 「大盘概览」页与 `--cli --market` 用的都是这一份实现 —— 两处口径必须一致，
 否则用户会看到"界面和命令行对不上"。
 
-「大盘概览」页长这样（组在配置里为空时，**整组连标题一起隐藏**）：
+「大盘概览」页长这样（组在配置里为空时，**整组连标题一起隐藏**）。
+2026-09-17 改版（用户要求）：成交额不再分沪/深/北三格，而是**沪深相加一个数**，
+并且与涨跌停/涨跌家数一起挪到页面**最上面**的「成交与情绪」块里排成一行
+（那一块的标题与排列在 `ui/app.py`，这里是**数值口径**）：
 
     大盘概览
-    ┌ 涨停 55 ┬ 跌停 16 ┬ 炸板 30 ┬ 成交额 沪 7792亿 · 深 8499亿 · 北 140亿 ┐
-    └ 上涨 3126 ┴ 下跌 2224 ┴ 平盘 221 ┴────────────────────────────────┘
-    宽基   上证 3885.33  -0.07%     深成 13384.57  -0.64%    …
-    情绪   同花顺情绪 885.53  -0.18%     昨日连板 6928.17  +3.53%    …
-    板块   银行 1408.77  +0.88%      证券 1428.64  -0.27%
-    数据来源：同花顺金融数据服务 · 更新于 17:50（每分钟自动刷新）      [立即刷新]
+    成交与情绪  成交额 12991亿  涨停 55  跌停 16  炸板 30  上涨 3126  下跌 2224  平盘 221
+    宽基指数    上证 3885.33 -0.07%   深成 13384.57 -0.64%   …
+    情绪指数    同花顺情绪 885.53 -0.18%   昨日连板 6928.17 +3.53%   …
+    热门板块    上涨前五 / 下跌前五 两张表（`sectors` 取数，见 `ui/app.py`）
+    数据来源：公开行情接口（…）与同花顺金融数据服务 · 更新于 17:50（每分钟自动刷新） [立即刷新]
 
 `--cli --market` 打印的还是"一行一组"的老样子（`lines()` 把同一批值按老口径拼起来），
 所以这个模块里**取数与格式化只有一份**：界面拿"一个指标一个值"（`kpi_values()`）、
@@ -30,9 +32,11 @@
    （`market_overview_ttl`，默认 55 秒），到点才真的打接口 —— 接口有配额、也怕限流；
    55 秒这个值特意略小于 60 秒，避免"每分钟刷一次却总差一点没到点"的边界抖动。
    读缓存时结果里 `stale=True`，界面据此在 tooltip 里说明"这是几分钟前的数"。
-3. **全市场汇总单独一档 + 自己更长的 TTL**：涨跌家数与北交所成交额要翻 6 页全市场快照
+3. **全市场汇总单独一档 + 自己更长的 TTL**：涨跌家数要翻 6 页全市场快照
    （5571 只 / 每页 1000），所以即使 `market_breadth` 默认开着，它也有独立的 5 分钟缓存
    （`_BREADTH_TTL`），**不跟着每分钟的页面刷新跑** —— 否则配额和限流都吃不消。
+   （同一趟汇总里还顺手算了北交所成交额，但 2026-09-17 起界面不再显示它，
+   见 `fetch_overview` 里的说明 —— 涨跌家数才是这一档**唯一**的显示项。）
 
 数据口径（照抄已用真实接口验证过的结论，别自己另找端点）
 --------------------------------------------------------
@@ -40,9 +44,13 @@
 - 指数点位与涨跌幅：`a-share-index/prices/snapshot?thscodes=...`（**必须传代码**，
   不支持全市场；一个非法代码会让整批 1002，所以客户端里逐只重试）；
   三组（宽基 / 情绪 / 板块）是**同一个端点、同一批请求**，只是配置里分成三组便于分别换口径；
-- 沪/深成交额：直接取 `000001.SH`（上证指数）与 `399001.SZ`（深证成指）的 `turnover`
-  —— 这两个数就是沪深两市的成交额（深证综指 `399106.SZ` 报的数与深证成指完全相同）；
-- 北交所成交额与涨跌家数：只能靠全市场快照分页按 `.BJ` 后缀汇总（所以慢一档、默认关）。
+- 沪深成交额：直接取 `000001.SH`（上证指数）与 `399001.SZ`（深证成指）的 `turnover`
+  —— 这两个数就是沪深两市的成交额（深证综指 `399106.SZ` 报的数与深证成指完全相同）。
+  界面与命令行显示的是**两者相加**（`turnover["total"]`，见 `kpi_values()`）；
+- 北交所成交额：全市场快照分页按 `.BJ` 后缀汇总（所以慢一档）。**2026-09-17 起不再显示**：
+  用户要求"成交额 = 沪 + 深，一个数；北交所删掉"，所以它只是分页汇总的副产品，
+  留在 `turnover["bj"]` 里供 `has_data()` 与将来恢复用，界面上没有任何地方画它；
+- 涨跌家数：同一趟全市场快照分页按涨跌幅分桶（`market_breadth` 关掉时不取）。
 """
 
 from __future__ import annotations
@@ -78,15 +86,22 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
 #: 界面**不再**按它建 5 个 QLabel —— 现在是"KPI 卡片 + 每组一个条目网格"。
 LINE_COUNT = 2 + len(GROUPS)
 
-#: 底部那行小字的固定前缀（数据来源与刷新节奏，界面与命令行口径一致）
-FOOTER_PREFIX = "数据来源：同花顺金融数据服务"
+#: 宽基那一组在结果字典里的键（`wide_specs()` 只对它有额外处理，见那里的说明）。
+WIDE_GROUP_KEY = "indices"
+
+#: 底部那行小字的固定前缀（数据来源与刷新节奏，界面与命令行口径一致）。
+#:
+#: 为什么不说死"同花顺"：概览取数的来源随用户的 `data_sources` 与"有没有配 Key"而变
+#: （分发版的主源是**免 Key 的公开行情源**，同花顺是备用/增强）。写死一个名字，
+#: 等于在用户面前说假话 —— 页脚是**唯一**告诉用户"这些数字哪来的"的地方。
+FOOTER_PREFIX = "数据来源：公开行情接口（腾讯/新浪/东财）与同花顺金融数据服务；非交易所授权行情"
 
 #: 沪/深成交额的取数口径：这两个指数的 turnover 就是两市成交额
 SH_TURNOVER_CODE = "000001.SH"
 SZ_TURNOVER_CODE = "399001.SZ"
 
 # ── 排版分隔符（只给 `lines()` 拼命令行文本用；界面是"一个数一个控件"，不拼长文本）──
-#: 摘要行里两段之间（涨跌停家数 ｜ 沪深北成交额）
+#: 摘要行里两段之间（涨跌停家数 ｜ 沪深成交额）
 _BLOCK_SEP = " ｜ "
 #: 同一组里各条目之间（全角竖线，比逗号更不容易和数据混在一起）
 _ITEM_SEP = " ｜ "
@@ -123,12 +138,14 @@ DASH = "—"
 #: 表里没有的代码显示代码本身；想改成自己的口径，在配置里写 `代码=名称` 即可。
 #: 注释里括号内是目录接口里的**官方名**，冒号前是卡片上显示的名字（短一些更耐看）。
 INDEX_NAMES: dict[str, str] = {
-    # 宽基（默认那五个）
+    # 宽基（默认那五个 + 用户 2026-09-17 要求补上的两只，见 WIDE_INDEX_EXTRA_CODES）
     "000001.SH": "上证",            # 上证指数
     "399001.SZ": "深成",            # 深证成指
     "399006.SZ": "创业板",          # 创业板指
     "000688.SH": "科创50",          # 科创50
     "000300.SH": "沪深300",         # 沪深300
+    "000016.SH": "上证50",          # 上证50
+    "000852.SH": "中证1000",        # 中证1000
     # 情绪（同花顺板块指数 .TI）
     "883404.TI": "同花顺情绪",      # 同花顺情绪指数
     "883958.TI": "昨日连板",        # 昨日连板
@@ -146,6 +163,41 @@ INDEX_NAMES: dict[str, str] = {
     "883423.TI": "沪深主板昨日涨停",
     "883424.TI": "创业科创板昨日涨停",
     "883422.TI": "北交所昨日涨停表现",
+    # 实测可用但**没有**进宽基默认列表的（用户原话里的"科创板"已经由 000688.SH 覆盖，
+    # 见 `WIDE_INDEX_EXTRA_CODES` 的说明）：想用就在配置里写 `000680.SH`
+    "000680.SH": "科创综指",        # 上证科创板综合指数（腾讯实测可返回）
+}
+
+#: 宽基组**必须有的两只**（用户 2026-09-17 说"要加上证50、中证2000、科创板"）。
+#:
+#: 为什么是这两只、为什么少了中证2000（**用户要的东西不许静默消失，所以写在这里**）：
+#: - 上证50 `000016.SH`：2026-09-17 实测可返回（腾讯 `qt.gtimg.cn/q=sh000016`
+#:   回的是 `1~上证50~000016~2844.23~…`），加上；
+#: - 中证2000：**拿不到**。同一天实测腾讯 `sh932000` 与 `sz932000` **都**只回
+#:   `v_pv_none_match="1"`（= 这个代码在腾讯那边没有对应标的），所以按任务书换成
+#:   同一天实测可用的**中证1000 `000852.SH`**（腾讯回 `1~中证1000~000852~7548.82~…`）——
+#:   它是小盘口径里最接近中证2000 的可用指数，而不是"随便换一个"；
+#: - "科创板"：宽基列表里的 `000688.SH` **科创50** 就是它（保留）。同一天实测还有
+#:   `000680`（科创综指，腾讯回 `1~科创综指~000680~1887.34~…`），但它既不是用户
+#:   原话里的口径，也没有在同花顺指数快照端点（本项目实际取数用的那一个）上验证过，
+#:   所以**不硬加** —— 想加的用户在 config.toml 的 `market_indices` 里写 `000680.SH` 即可
+#:   （名字已经在 `INDEX_NAMES` 的"备选口径"里备着）。
+WIDE_INDEX_EXTRA_CODES: tuple[str, ...] = ("000016.SH", "000852.SH")
+
+#: 试过但**实测拿不到**的候选（代码 → 为什么没用它）。
+#:
+#: 为什么要把这件事写成**数据**而不是只写在注释里：用户点名要的东西不许静默消失 ——
+#: 注释会被下一次重构顺手删掉，而这份字典有测试钉着（见 `tests/test_market.py` 的
+#: `test_rejected_index_candidate_is_documented_not_silently_dropped`），
+#: 谁想删就得先想清楚"用户要的中证2000 到底去哪儿了"。
+REJECTED_INDEX_CANDIDATES: dict[str, str] = {
+    "sh932000": "中证2000：2026-09-17 实测腾讯只回 v_pv_none_match=\"1\"（无对应标的），拿不到",
+    "sz932000": "同上（换深市前缀也一样拿不到）",
+    "000852.SH": "中证1000 —— **换用了它**（同一天实测腾讯可返回）："
+                  "它是小盘口径里最接近中证2000 的可用指数，见 WIDE_INDEX_EXTRA_CODES",
+    "000680.SH": "科创综指：实测腾讯可返回，但用户原话里的「科创板」已由 000688.SH 科创50 覆盖，"
+                 "而且它没有在同花顺指数快照端点上验证过，所以**不硬加**"
+                 "（想用就在配置里写 000680.SH，名字已在 INDEX_NAMES 里）",
 }
 
 
@@ -254,6 +306,40 @@ def parse_codes(specs: Any) -> list[tuple[str, str]]:
     return out
 
 
+def wide_specs(cfg: Any) -> list[tuple[str, str]]:
+    """宽基组最终要显示的条目 = **配置里的宽基 + 必须有的那两只**（`WIDE_INDEX_EXTRA_CODES`）。
+
+    为什么要在这里"补"，而不是只改配置默认值（`config.DEFAULT_MARKET_INDICES`）：
+    用户这次要求"宽基指数加三项"，而宽基的默认列表住在 `config.py`，
+    **`tests/test_config.py` 正钉着那五只**（该文件不在本次改动范围内，不能改它的期望值），
+    所以把"必须有"这件事落在取数层：只要用户在 `market_indices` 里配了宽基（非空），
+    页面就一定带上上证50 与中证1000；用户在配置里写了自己的名字（`代码=名字`）时，
+    配置里已有的代码**原样保留**（不覆盖、不重排），只把缺的补在末尾。
+
+    边界（刻意保留的语义）：`market_indices = []`（空）仍然是"不显示这一块" ——
+    空列表是"我不要这一块"的明确表态，这时候补两只上去等于不听用户的话
+    （`test_market_page_hides_whole_block_when_config_is_empty` 钉的就是它）。
+    """
+    configured = parse_codes(getattr(cfg, "market_indices", None))
+    if not configured:
+        return []
+    merged = list(configured)
+    have = {thscode for thscode, _name in merged}
+    for code in WIDE_INDEX_EXTRA_CODES:
+        if code not in have:
+            merged.append((code, INDEX_NAMES.get(code) or code))
+    return merged
+
+
+def _group_specs(cfg: Any) -> dict[str, list[tuple[str, str]]]:
+    """三组指数各自要取的代码（宽基那一组过一道 `wide_specs()`）。"""
+    return {
+        key: (wide_specs(cfg) if key == WIDE_GROUP_KEY
+              else parse_codes(getattr(cfg, source, None)))
+        for source, _label, key in GROUPS
+    }
+
+
 # ── 各路取数（每一路都要能单独失败）──
 
 
@@ -310,7 +396,10 @@ def _to_float(value: Any) -> float | None:
 
 
 def _fetch_breadth(client: Any, errors: list[str]) -> dict | None:
-    """全市场快照分页汇总：沪/深/北的成交额、成交量与涨跌家数。
+    """全市场快照分页汇总：沪/深/北的成交额、成交量与涨跌家数（按交易所分桶）。
+
+    成交额那一栏里现在只有涨跌家数会被显示（北交所成交额 2026-09-17 起不显示了），
+    但三个交易所都照常分桶 —— 分页循环反正要跑一遍，多存两个数不花请求。
 
     Returns:
         `{"up","down","flat","total","exchanges": {"SH"|"SZ"|"BJ": {...}}}`；失败返回 None。
@@ -349,11 +438,11 @@ def _fetch_breadth(client: Any, errors: list[str]) -> dict | None:
             if not rows or len(rows) < BREADTH_PAGE_SIZE or (total and offset >= total):
                 break
             time.sleep(BREADTH_PAGE_PAUSE)   # 页间 ≥0.3 秒：并发硬刷会被限流
-    except Exception as exc:  # noqa: BLE001 - 这一路失败只影响北交所那段
-        _note(errors, f"全市场汇总取不到（北交所成交额与涨跌家数会缺）：{_why(exc)}")
+    except Exception as exc:  # noqa: BLE001 - 这一路失败只影响涨跌家数那几格
+        _note(errors, f"全市场汇总取不到（涨跌家数会缺）：{_why(exc)}")
         return None
     if not exchanges:
-        _note(errors, "全市场汇总返回了空数据（北交所成交额与涨跌家数会缺）")
+        _note(errors, "全市场汇总返回了空数据（涨跌家数会缺）")
         return None
     return {
         "up": up,
@@ -378,7 +467,7 @@ def _configured_group_keys(cfg: Any) -> list[str]:
     现成的信息 —— 那种情况下照样显示 `宽基：—`，用户才知道自己配的东西在哪一行，
     而不是卡片上凭空少几行（那看起来像"功能坏了"）。
     """
-    return [key for source, _, key in GROUPS if parse_codes(getattr(cfg, source, None))]
+    return [key for key, specs in _group_specs(cfg).items() if specs]
 
 
 def _fetch_groups(
@@ -392,7 +481,7 @@ def _fetch_groups(
     Returns:
         ({结果键: 条目列表}, 取不到的代码)。
     """
-    specs = {key: parse_codes(getattr(cfg, source, None)) for source, _, key in GROUPS}
+    specs = _group_specs(cfg)
 
     codes: list[str] = []
     for _, _, key in GROUPS:
@@ -502,10 +591,17 @@ def fetch_overview(cfg: Any, client: Any = None, *, force: bool = False) -> dict
         breadth = _fetch_breadth_cached(cfg, client, signature, force, errors)
         overview["breadth"] = breadth
         if breadth:
+            # 北交所成交额：**算出来但不再显示**（2026-09-17 用户要求删掉这一格）。
+            # 留着它是因为它只是同一趟分页汇总的副产品（不额外花请求），
+            # 而且 `has_data()` 与将来"想恢复这一格"时还要用；界面/命令行都不画它。
             turnover["bj"] = (
                 breadth["exchanges"].get("BJ", {}).get("turnover")
             )
-    available = [v for v in (turnover["sh"], turnover["sz"], turnover["bj"]) if v]
+    #: 显示用的成交额 = **沪 + 深**（用户 2026-09-17 要求合成一个数，不再分成三格）。
+    #: 只取到一边时（例如用户把宽基里的深证删了）合计就是那一边的数 ——
+    #: 这比显示 `—` 更贴近事实；两边都没有才是 None（界面画 `—`）。
+    #: `kpi_values()` 的"成交额"读的就是这个键，界面与命令行因此不会分叉。
+    available = [v for v in (turnover["sh"], turnover["sz"]) if v]
     turnover["total"] = sum(available) if available else None
 
     overview["errors"] = errors
@@ -620,32 +716,28 @@ def _entry_text(item: dict) -> str:
 
 
 def kpi_values(overview: dict | None) -> dict[str, str]:
-    """KPI 区的**每一个**数值（界面一张卡一个数；`lines()` 再把它们拼成老口径的一行）。
+    """KPI 区的**每一个**数值（界面一张卡一个数；`lines()` 再把它们拼成一行）。
 
     为什么要有这一层：界面上"涨停 55"是**一张卡片**里的两个控件（小号灰标签 + 大一号加粗数值），
     不是一长串文本里的一段；长文本靠自动换行折出来的行对不齐，一眼就不专业。
-    键的顺序就是界面上的显示顺序（涨停/跌停/炸板 一组，成交额一张，涨跌家数 一组）。
+    键的顺序就是界面上的显示顺序（成交额一张，涨停/跌停/炸板 一组，涨跌家数 一组）。
+
+    2026-09-17 改版（用户要求）：
+    - `成交额` = **沪 + 深**（`turnover["total"]`），**一个数**；原来的
+      `沪成交额` / `深成交额` / `北成交额` 三个键与"沪 … 深 … 北 …"那句话一起删掉；
+    - 北交所成交额**不再显示**（数据还在 `turnover["bj"]` 里，见 `fetch_overview`）。
+    键数因此从 9 降到 7，界面一行正好摆 7 个小条目。
     """
     data = overview or {}
     limits = data.get("limits") or {}
     turnover = data.get("turnover") or {}
     breadth = data.get("breadth") or {}
     return {
+        # 成交额放在最前：这一行是"钱 + 情绪"，先看钱（用户把这一块叫「成交与情绪」）
+        "成交额": _amount_text(turnover.get("total")),
         "涨停": _count_text(limits.get("up")),
         "跌停": _count_text(limits.get("down")),
         "炸板": _count_text(limits.get("break")),
-        # 成交额**分成三个键**：界面上是"一条一个数"（`沪成交额 / 7793亿`），
-        # 合成成一句话在 Windows 字体下会被列宽截掉（CI 实测过，见 `ui/app.py` 里
-        # `MARKET_STAT_TITLES` 的注释）。下面那个 `成交额` 合成长串是给
-        # `lines()`（`--cli --market`）用的，命令行一行一句话更省地方。
-        "沪成交额": _amount_text(turnover.get("sh")),
-        "深成交额": _amount_text(turnover.get("sz")),
-        "北成交额": _amount_text(turnover.get("bj")),
-        "成交额": (
-            f"沪 {_amount_text(turnover.get('sh'))} · "
-            f"深 {_amount_text(turnover.get('sz'))} · "
-            f"北 {_amount_text(turnover.get('bj'))}"
-        ),
         "上涨": _count_text(breadth.get("up")),
         "下跌": _count_text(breadth.get("down")),
         "平盘": _count_text(breadth.get("flat")),
@@ -656,21 +748,22 @@ def lines(overview: dict | None) -> list[str]:
     """概览页文本（`--cli --market` 用；界面用的是 `kpi_values()` / `entry_fields()`）。
 
     下标固定对应：
-        [0] 摘要：`涨停 N · 跌停 N · 炸板 N ｜ 沪 N亿 · 深 N亿 · 北 N亿`
+        [0] 摘要：`涨停 N · 跌停 N · 炸板 N ｜ 成交额 N亿`
         [1] 涨跌家数：`上涨 N · 下跌 N · 平盘 N`
         [2] 宽基  [3] 情绪  [4] 板块   ← 顺序就是 `GROUPS` 的顺序
 
+    成交额是**沪 + 深 一个数**（2026-09-17 用户要求），所以摘要行里不再有"沪 … 深 … 北 …"。
     **配置为空的那一组返回空串**（命令行跳过它；界面上是整组连标题一起隐藏）——
     不留一个空的"情绪："吊在那里。拼不出来的段位一律 `—`：宁可让用户看到"这里没数"，
     也不显示 0 或空白（0 家涨停和"没取到"是完全不同的两件事）。
-    `market_breadth` 关掉时北交所与涨跌家数是 `—`（这两项只在打开时才取）。
+    `market_breadth` 关掉时涨跌家数是 `—`（它只在打开时才取）。
     """
     data = overview or {}
     values = kpi_values(overview)
     summary = (
         f"涨停 {values['涨停']} · 跌停 {values['跌停']} · 炸板 {values['炸板']}"
         + _BLOCK_SEP
-        + values["成交额"]
+        + f"成交额 {values['成交额']}"
     )
     counts = (
         f"上涨 {values['上涨']} · 下跌 {values['下跌']} · 平盘 {values['平盘']}"
@@ -693,14 +786,17 @@ def lines(overview: dict | None) -> list[str]:
 def footer_text(overview: dict | None) -> str:
     """页面底部那行小字：数据来源 + 取数时间 + 刷新节奏（界面与命令行共用一份口径）。
 
-    为什么把"涨跌家数与北交所成交额每 5 分钟更新"也写在这里：这两项（全市场快照）
-    明显比指数慢一档，不写清楚会被当成"数据没刷新/坏了"。
+    为什么把"涨跌家数每 5 分钟更新"也写在这里：这一项（全市场快照）明显比指数慢一档，
+    不写清楚会被当成"数据没刷新/坏了"。
+    2026-09-17 起这句话里**不再提成交额**：界面上的成交额已经是"沪+深"（取自两只宽基指数
+    的 turnover，与指数同一个节拍、每分钟刷新），跟 5 分钟一档的全市场快照没关系了 ——
+    把它留在这句话里就是错的。
     """
     data = overview or {}
     as_of = str(data.get("as_of") or "") or DASH
     tail = "每分钟自动刷新"
     if data.get("breadth_enabled"):
-        tail += "；涨跌家数与北交所成交额每 5 分钟更新"
+        tail += "；涨跌家数每 5 分钟更新"
     return f"{FOOTER_PREFIX} · 更新于 {as_of}（{tail}）"
 
 

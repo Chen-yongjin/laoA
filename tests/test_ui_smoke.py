@@ -219,8 +219,11 @@ def test_window_renders_all_panels(window, qapp) -> None:
     # **五个页签**，顺序就是用户给定的顺序（见 `docs/改版方案.md` 第二节）
     assert window.tabs.count() == 5
     assert [window.tabs.tabText(i) for i in range(5)] == list(ui_app.TAB_TITLES)
-    assert list(ui_app.TAB_TITLES) == ["全市概览", "自选股池", "持仓监控", "策略选股",
+    # 2026-09-17：第一个页签从「全市概览」改回「大盘概览」（用户要求）——
+    # 凡是按标题找页面的地方（截图脚本、`tabs.indexOf`、这条断言）都跟着改
+    assert list(ui_app.TAB_TITLES) == ["大盘概览", "自选股池", "持仓监控", "策略选股",
                                        "系统设置"]
+    assert ui_app.TAB_MARKET == "大盘概览"
     # 概览页是第一个页签（启动就停在它上面）：看盘第一眼要扫到
     assert window.tabs.widget(0) is window.market_page
     assert window.tabs.currentWidget() is window.market_page
@@ -236,8 +239,10 @@ def test_window_renders_all_panels(window, qapp) -> None:
     assert _header_texts(window.position_table) == list(ui_app.POSITION_HEADERS)
     # 池子表格第一行：`名称(代码)` + 来源（seeded 里是 `低价股` 策略选的 → `策略·低价股`）
     assert window.pool_table.item(0, 0).text() == "半导体甲(600002)"
-    assert window.pool_table.item(0, 3).text() == "半导体"
-    assert window.pool_table.item(0, 4).text() == "策略·低价股"
+    # 列下标按新表头取（板块/来源两列因为新加的市值/换手往后挪了两格）
+    assert window.pool_table.item(0, ui_app.WATCH_HEADERS.index("板块")).text() == "半导体"
+    assert window.pool_table.item(
+        0, ui_app.WATCH_HEADERS.index("来源")).text() == "策略·低价股"
     # 表头右边那行小字：`共 N 只（策略 M · 自选 K）`
     assert window.pool_count_label.text() == "共 1 只（策略 1 · 自选 0）"
     assert window.tabs.currentWidget() is window.market_page      # 启动默认页
@@ -859,28 +864,42 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     assert not hasattr(window, "group_boxes")
     assert not hasattr(window, "strategy_boxes")
 
-    # 数据来源：**来源列表**，第一行是内置同花顺（照 cfg.data_sources 如实画）
-    assert window.cfg.data_sources == ["hithink"]
+    # 数据来源：**来源列表**。2026-09-17 起默认是 `["public", "hithink"]`
+    # （公开源是主源、同花顺是备用源），所以列表里是两行、同花顺排最后
+    assert window.cfg.data_sources == ["public", "hithink"]
     assert "同花顺金融数据服务（内置）" in window.data_source_label.text()
     assert "hithink" in window.data_source_label.text()        # 把配置里的原值也写出来
-    # 列表只画**已启用**的来源（默认只有内置同花顺）；能力文案来自注册表
-    assert list(window.source_rows) == [ui_app.BUILTIN_SOURCE]
+    assert window.data_source_label.text().startswith("取数顺序")   # 顺序 = 优先级
+    # 列表只画**已启用**的来源（这一份配置里的两个）；能力文案来自注册表
+    assert list(window.source_rows) == ["public", ui_app.BUILTIN_SOURCE]
     from laoa_trader.data import sources as sources_mod
 
     state = {s["id"]: s for s in sources_mod.source_states(window.cfg)}
+    public = window.source_rows["public"]
+    assert public.tag_label.text() == "主来源"                  # 排第一的那个 = 主源
     builtin = window.source_rows[ui_app.BUILTIN_SOURCE]
     assert builtin.name_label.text() == state["hithink"]["name"]
-    assert builtin.tag_label.text() == "主来源"
+    # 同花顺 = **备用源**（用户明确要求"同花顺改成备用源"）
+    assert builtin.tag_label.text() == ui_app.BUILTIN_BACKUP_TAG == "备用源"
     # 能力说明写在界面上（换来源会丢掉什么，用户必须看得见）——**文案来自真相源**
     assert builtin.capability_label.text() == \
         "提供：" + state["hithink"]["capabilities_text"]
     assert "实时快照" in builtin.capability_label.text()
     assert builtin.enabled_box.isChecked() is True
-    assert builtin.enabled_box.isEnabled() is False            # 内置主来源不能关
+    assert builtin.enabled_box.isEnabled() is False            # 内置来源不能在界面上关
     # 非当前页签里的控件 `isVisible()` 恒为 False，所以这里看的是「有没有被显式藏起来」
     assert builtin.btn_delete.isHidden() is True               # 也不能删
-    assert builtin.key_edit is window.key_edit                  # 老属性名仍指向同一个输入框
-    assert builtin.btn_test is window.btn_test_connection
+    # **界面上没有 Key 输入框、也没有【测试连接】**（2026-09-17 用户要求）；
+    # 那一行改成"备用源 + 可点开的申请地址"
+    assert builtin.key_edit is None
+    assert builtin.btn_test is None
+    assert not hasattr(window, "key_edit")
+    assert not hasattr(window, "btn_test_connection")
+    assert builtin.key_notice_text == (
+        "备用源：同花顺金融数据服务（需要 Key，申请地址 https://fuyao.aicubes.cn）")
+    assert "备用源：同花顺金融数据服务（需要 Key，申请地址" in builtin.key_label.text()
+    assert f'href="{ui_app.BUILTIN_KEY_URL}"' in builtin.key_label.text()   # 地址可点开
+    assert builtin.key_label.openExternalLinks() is True
     # 注册表里还有**没启用**的来源（东方财富）→ 进【添加来源】候选，不画进列表
     assert [s["id"] for s in window._addable_sources()] == ["eastmoney"]
     assert "东方财富" in window.source_add_hint.text()
@@ -955,15 +974,21 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
         type(window.save_settings_button)) if b.text() == "保存设置"]) == 0  # 只在页脚
 
 def test_watch_table_headers_and_source_column(window) -> None:
-    """「自选股池」的列**就是用户给定的那 6 列**（顺序也一致），「来源」列区分策略与自选。"""
-    assert window.pool_table.columnCount() == 6
+    """「自选股池」的列**就是用户给定的那 8 列**（顺序也一致），「来源」列区分策略与自选。
+
+    2026-09-17 改版（用户要求）：在「涨幅」后面加「市值」「换手」两列，
+    「提醒」列改成「监控开关」—— 所以列数从 6 变 8，`板块/来源` 的下标从 3/4 挪到 5/6。
+    """
+    assert window.pool_table.columnCount() == 8
     assert _header_texts(window.pool_table) == [
-        "名称(代码)", "现价", "涨幅", "板块", "来源", "提醒",
+        "名称(代码)", "现价", "涨幅", "市值", "换手", "板块", "来源", "监控开关",
     ]
+    assert window.pool_table.columnCount() == len(ui_app.WATCH_HEADERS)
     # seeded 里 600002 是 `低价股` 策略选中的（不是自选）：来源 = **哪条策略**
     # （用户要求这一列回答"是哪条策略选出来的"，而不是只写组别）
     assert window.pool_table.item(0, 0).text() == "半导体甲(600002)"
-    assert window.pool_table.item(0, 4).text() == "策略·低价股"
+    assert window.pool_table.item(0, ui_app.WATCH_HEADERS.index("来源")).text() \
+        == "策略·低价股"
     # 组别与持有期挪进了行 tooltip（列数被用户定死，不能加列）
     tip = window.pool_table.item(0, 0).toolTip()
     assert "来源：策略·低价股" in tip
@@ -989,8 +1014,10 @@ def test_pool_table_shows_watchlist_rows_not_in_pool(window, seeded, qapp) -> No
     assert _symbols_of(window.pool_table) == ["600002", "600001"]   # 池内在前，自选在后
     row = window.pool_table.rowCount() - 1
     assert window.pool_table.item(row, 0).text() == "低价样本(600001)"
-    assert window.pool_table.item(row, 4).text() == "自选"
-    assert window.pool_table.item(row, 3).text() == "银行"          # 板块来自 stock_basic
+    assert window.pool_table.item(row, ui_app.WATCH_HEADERS.index("来源")).text() == "自选"
+    # 板块来自 stock_basic（这一列的位置跟着新列往后挪了两格）
+    assert window.pool_table.item(
+        row, ui_app.WATCH_HEADERS.index("板块")).text() == "银行"
     # 表头那行小字：`共 2 只（策略 1 · 自选 1）`
     assert window.pool_count_label.text() == "共 2 只（策略 1 · 自选 1）"
     # 备注在整行的 tooltip 里（悬浮任何一格都能看到）
@@ -1017,7 +1044,11 @@ def test_pool_row_hover_shows_note_and_monitor_state(window, seeded, qapp) -> No
     window._refresh_pool_table()
     qapp.processEvents()
     assert "已停用" in window.pool_table.item(row, 0).toolTip()
-    assert window.pool_table.item(row, 4).text() == "自选（已停用）"
+    assert window.pool_table.item(
+        row, ui_app.WATCH_HEADERS.index("来源")).text() == "自选（已停用）"
+    # 「监控开关」那一格跟着变成"关闭"（与来源列的"已停用"说的是同一件事）
+    assert window.pool_table.item(
+        row, ui_app.WATCH_MONITOR_COLUMN).text() == ui_app.MONITOR_OFF_TEXT
 
     # 策略标的（不是自选）：说明它也在被盯，但**没有**"停用"这一说
     assert "策略选中的标的" in window.pool_table.item(0, 0).toolTip()
@@ -1141,8 +1172,13 @@ def test_pool_empty_label_visible_only_when_pool_empty(window, qapp, monkeypatch
     assert window.pool_count_label.text() == "共 0 只（策略 0 · 自选 0）"
 
 
-def test_pool_table_has_exact_headers_and_alert_column(window, seeded, qapp) -> None:
-    """「提醒」列：今天的提醒画短标签 + tooltip 给整句话；没有就是 `—`。"""
+def test_pool_table_has_exact_headers_and_monitor_column(window, seeded, qapp) -> None:
+    """「监控开关」列：格子里是 `开启`/`关闭`，**今天的提醒完整内容在 tooltip 里**。
+
+    2026-09-17（用户要求）：原来那一列画的是提醒的短标签（`放量突破`），
+    现在这一列画的是监控开关（可点切换）；提醒**一点没丢** ——
+    短标签 + 整句话（含日期）都进了这一格的 tooltip。
+    """
     from laoa_trader.intraday import now_shanghai
 
     today = now_shanghai().strftime("%Y-%m-%d")
@@ -1155,29 +1191,40 @@ def test_pool_table_has_exact_headers_and_alert_column(window, seeded, qapp) -> 
     window._refresh_pool_table()
     qapp.processEvents()
 
-    item = window.pool_table.item(0, 5)
-    assert item.text() == "放量突破"
+    item = window.pool_table.item(0, ui_app.WATCH_MONITOR_COLUMN)
+    assert item.text() == ui_app.MONITOR_ON_TEXT          # 策略标的默认在监控中
+    assert "放量突破" in item.toolTip()                    # 短标签（原「提醒」列的文字）
     assert "现价 12.85 突破 20 日高点 12.60" in item.toolTip()
     assert today in item.toolTip()
+    # 表头文字写清这一列是什么（用户要求"改成监控开关"）
+    assert _header_texts(window.pool_table)[ui_app.WATCH_MONITOR_COLUMN] == "监控开关"
 
 
 # ── 「持仓监控」表 ──
 
 
 def test_position_table_headers(window) -> None:
-    """「持仓监控」的列**就是用户给定的那 8 列**：没有"数量"这一列。"""
-    assert window.position_table.columnCount() == 8
+    """「持仓监控」的列**就是用户给定的那 10 列**：没有"数量"这一列。
+
+    2026-09-17（用户要求）：加「市值」「换手」，「提醒」列改成「监控开关」。
+    """
+    assert window.position_table.columnCount() == 10
     assert _header_texts(window.position_table) == [
-        "名称(代码)", "成本价", "现价", "涨幅", "盈亏比例", "止损位", "止盈位", "提醒",
+        "名称(代码)", "成本价", "现价", "涨幅", "市值", "换手",
+        "盈亏比例", "止损位", "止盈位", "监控开关",
     ]
+    assert window.position_table.columnCount() == len(ui_app.POSITION_HEADERS)
     assert "数量" not in "".join(_header_texts(window.position_table))
 
 
 def test_position_row_shows_pnl_stop_and_target(window, seeded, qapp) -> None:
-    """一行的全部单元格：成本 / 现价（本地收盘，标 `*`）/ 涨幅 / 盈亏比例 / 止损止盈。
+    """一行的全部单元格：成本 / 现价（本地收盘，**不带任何符号**）/ 涨幅 /
+    市值 / 换手 / 盈亏比例 / 止损止盈 / 监控开关。
 
     seeded：600001 成本 3.0；本地最新**不复权**收盘 3.174、前收 3.1675…
     （库里的 post-adjust 视图会把它放大，所以这条用例同时钉住"不许用后复权价"）。
+    2026-09-17（用户要求）：现价/涨幅**不再加 `*`**（用户把它误读成监控状态标记），
+    区别改由 tooltip 说清。
     """
     from laoa_trader import market
     from laoa_trader.data import storage as st
@@ -1189,15 +1236,21 @@ def test_position_row_shows_pnl_stop_and_target(window, seeded, qapp) -> None:
     cells = _row_cells(window.position_table, 0)
     assert cells[0] == "低价样本(600001)"
     assert cells[1] == f"{3.0:.2f}"
-    assert cells[2] == f"{close:.2f}*"                      # 标 `*` = 本地收盘价、不是实时价
-    assert cells[3] == f"{(close - prev) / prev * 100:+.2f}%*"
-    assert cells[4] == f"{(close - 3.0) / 3.0 * 100:+.2f}%"  # 与「现价」同一个价
-    assert cells[5] == f"{3.0 * (1 - seeded.stop_loss):.2f}"
-    assert cells[6] == f"{3.0 * (1 + seeded.take_profit):.2f}"
-    assert cells[7] == market.DASH                          # 今天没有提醒
-    # 「现价」的 tooltip 必须点明"不是实时价"（标了 `*` 也要说清 `*` 是什么意思）
-    assert "不是实时价" in window.position_table.item(0, 2).toolTip()
-    assert "不复权" in window.position_table.item(0, 2).toolTip()
+    assert cells[2] == f"{close:.2f}"                       # **不带 `*`**（用户要求去掉）
+    assert cells[3] == f"{(close - prev) / prev * 100:+.2f}%"
+    assert "*" not in "".join(cells)                        # 整行都不许出现星号
+    # 市值/换手：没有实时快照 → `—`（**不是 0**）
+    assert cells[4] == market.DASH
+    assert cells[5] == market.DASH
+    assert cells[6] == f"{(close - 3.0) / 3.0 * 100:+.2f}%"  # 与「现价」同一个价
+    assert cells[7] == f"{3.0 * (1 - seeded.stop_loss):.2f}"
+    assert cells[8] == f"{3.0 * (1 + seeded.take_profit):.2f}"
+    assert cells[9] == ui_app.MONITOR_ON_TEXT               # 默认在监控中
+    # 「现价」的 tooltip 必须点明"这是本地最新收盘价（MM-DD），不是实时价"
+    tip = window.position_table.item(0, 2).toolTip()
+    assert "不是实时价" in tip
+    assert "不复权" in tip
+    assert f"（{bar['date'][5:]}）" in tip                  # MM-DD 口径
 
 
 def test_position_pnl_uses_the_same_price_as_the_price_column(window, seeded, qapp) -> None:
@@ -1216,8 +1269,9 @@ def test_position_pnl_uses_the_same_price_as_the_price_column(window, seeded, qa
     cells = _row_cells(window.position_table, 0)
     assert cells[2] == "4.00"                               # 实时价：**不带** `*`
     assert cells[3] == "+3.50%"
-    assert cells[4] == f"{(4.0 - 3.0) / 3.0 * 100:+.2f}%"    # 用同一个 4.00 算出来的
-    assert cells[4] == "+33.33%"
+    pnl = ui_app.POSITION_HEADERS.index("盈亏比例")
+    assert cells[pnl] == f"{(4.0 - 3.0) / 3.0 * 100:+.2f}%"  # 用同一个 4.00 算出来的
+    assert cells[pnl] == "+33.33%"
     assert "实时快照" in window.position_table.item(0, 2).toolTip()
 
 
@@ -1233,7 +1287,7 @@ def test_position_pnl_is_dash_when_there_is_no_price(window, seeded, qapp) -> No
     row = _symbols_of(window.position_table).index("000002")
     cells = _row_cells(window.position_table, row)
     assert cells[2] == "—"
-    assert cells[4] == "—"
+    assert cells[ui_app.POSITION_HEADERS.index("盈亏比例")] == "—"
     assert "0.00%" not in "".join(cells)
 
 
@@ -1305,8 +1359,9 @@ def test_t_group_single_save_writes_ratios(window, seeded, qapp) -> None:
     assert "take_profit = 0.15" in text
     # 表格里的止损位/止盈位立刻跟上（3.0 × (1∓比例)）
     cells = _row_cells(window.position_table, 0)
-    assert cells[5] == f"{3.0 * (1 - 0.075):.2f}"
-    assert cells[6] == f"{3.0 * (1 + 0.15):.2f}"
+    # 止损位/止盈位这两列的下标跟着新加的「市值」「换手」往后挪了两格
+    assert cells[ui_app.POSITION_HEADERS.index("止损位")] == f"{3.0 * (1 - 0.075):.2f}"
+    assert cells[ui_app.POSITION_HEADERS.index("止盈位")] == f"{3.0 * (1 + 0.15):.2f}"
     # 老名字 `on_save_risk` 是它的别名（老调用点不该炸），做的是同一件事
     window.stop_loss_box.setValue(6.0)
     window.on_save_risk()
@@ -1514,7 +1569,7 @@ def test_pool_source_column_shows_primary_strategy_and_tooltip_the_rest(
 ) -> None:
     """「来源」列只写得下**主策略**，其余策略 + 组别 + 证据标记全在行 tooltip 里。
 
-    列数被用户定死成 6 列（不能加列），所以"这一行到底被哪几条策略选中"只能进 tooltip ——
+    「来源」列只有一格的宽度，所以"这一行到底被哪几条策略选中"只能进 tooltip ——
     工具提示里少一条，用户就少一个"要不要照这个信号动手"的依据。
     """
     from laoa_trader import pool as pool_mod
@@ -1537,16 +1592,16 @@ def test_pool_source_column_shows_primary_strategy_and_tooltip_the_rest(
     window._refresh_pool_table()
     qapp.processEvents()
 
-    # 列还是 6 列（没有为了信息来源而加列），来源 = 主策略
-    assert window.pool_table.columnCount() == 6
-    assert window.pool_table.item(0, 4).text() == "策略·短期反转"
+    # 来源 = 主策略（这一列的宽度只放得下它 + 组别等明细进 tooltip）
+    source_column = ui_app.WATCH_HEADERS.index("来源")
+    assert window.pool_table.item(0, source_column).text() == "策略·短期反转"
     tip = window.pool_table.item(0, 0).toolTip()
     assert "来源：策略·短期反转（依赖开盘）" in tip
     assert "组别：短线·T+3（T+3）" in tip
     assert "同批选中：地量后放量变盘" in tip        # 第二条策略没有从界面上消失
     assert "策略照常推送" in tip                    # 证据解释也在
     # 组别那一份不再塞进「来源」列（列里只有"哪条策略"）
-    assert "T+3" not in window.pool_table.item(0, 4).text()
+    assert "T+3" not in window.pool_table.item(0, source_column).text()
 
 
 def test_pool_row_tooltip_shows_limit_up_and_auction(pool_window, qapp,
@@ -1637,13 +1692,14 @@ def test_position_table_pnl_colors_and_dash(window, seeded, qapp) -> None:
     from laoa_trader import market
 
     table = window.position_table
-    assert table.columnCount() == 8
+    assert table.columnCount() == 10
+    pnl = ui_app.POSITION_HEADERS.index("盈亏比例")
 
     # seeded 里 600001：成本 3.0、本地最新收盘 3.174 → +5.80%（两位小数，精确断言）
     window._position_signature = None
     window._refresh_positions()
     qapp.processEvents()
-    cell = table.item(0, 4)
+    cell = table.item(0, pnl)
     assert cell.text() == "+5.80%"
     assert cell.foreground().color().name() == market.COLOR_UP      # 赚 → 红
 
@@ -1658,18 +1714,20 @@ def test_position_table_pnl_colors_and_dash(window, seeded, qapp) -> None:
     qapp.processEvents()
 
     by_symbol = {_symbols_of(table)[i]: i for i in range(table.rowCount())}
-    losing = table.item(by_symbol["600002"], 4)
+    losing = table.item(by_symbol["600002"], pnl)
     assert losing.text() == "-36.52%"
     assert losing.foreground().color().name() == market.COLOR_DOWN  # 亏 → 绿
 
-    missing = table.item(by_symbol["600009"], 4)
+    missing = table.item(by_symbol["600009"], pnl)
     assert missing.text() == market.DASH                            # 不是 0.00%
     assert missing.data(Qt.ItemDataRole.ForegroundRole) is None     # 不上色（默认前景）
     # 止损位/止盈位按**成本**算
     cost = float(table.item(by_symbol["600001"], 1).text())
-    assert float(table.item(by_symbol["600001"], 5).text()) \
+    stop = ui_app.POSITION_HEADERS.index("止损位")
+    target = ui_app.POSITION_HEADERS.index("止盈位")
+    assert float(table.item(by_symbol["600001"], stop).text()) \
         == pytest.approx(cost * (1 - seeded.stop_loss), abs=0.01)
-    assert float(table.item(by_symbol["600001"], 6).text()) \
+    assert float(table.item(by_symbol["600001"], target).text()) \
         == pytest.approx(cost * (1 + seeded.take_profit), abs=0.01)
 
 
@@ -1712,10 +1770,11 @@ def test_position_pnl_ratio_is_weighted_by_cost(window, seeded, qapp) -> None:
 
 
 def test_position_table_columns_fit_at_960_logical_width(screen_window, qapp) -> None:
-    """≈用户那台（逻辑 960×900 → 窗口 920×760）：8 列持仓表铺满、不挤、也不顶大最小宽度。
+    """≈用户那台（逻辑 960×900 → 窗口 920×760）：**10 列**持仓表铺满、不挤、也不顶大最小宽度。
 
     这一条是给"窗口能缩到 760 宽"的成果上保险：多一列如果让表格的最小宽度变大，
     窗口就又被顶出屏幕了（那正是用户最初抱怨的"最下边看不见"）。
+    2026-09-17 加了两列（市值/换手）之后这条更要紧 —— 所以列数跟着断言成 10。
     """
     win = screen_window(960, 900)
     win.tabs.setCurrentWidget(_tab_page(win, ui_app.TAB_POSITION))
@@ -1724,8 +1783,8 @@ def test_position_table_columns_fit_at_960_logical_width(screen_window, qapp) ->
     qapp.processEvents()
 
     table = win.position_table
-    assert table.columnCount() == 8
-    widths = [table.columnWidth(i) for i in range(8)]
+    assert table.columnCount() == 10
+    widths = [table.columnWidth(i) for i in range(10)]
     assert all(width > 20 for width in widths), widths          # 每列都还看得清
     assert sum(widths) <= table.viewport().width() + 8          # Stretch：正好铺满
     assert table.horizontalScrollBar().isVisible() is False     # 不需要横向滚动
@@ -1737,10 +1796,11 @@ def test_position_table_columns_fit_at_960_logical_width(screen_window, qapp) ->
 
 
 def test_position_alert_column_shows_t_hint_with_full_tooltip(window, seeded, qapp) -> None:
-    """「提醒」列：短标签 + **整句话**的 tooltip；今天没有提醒就画 `—`。
+    """「监控开关」列：`开启`/`关闭` + **今天最新一条提醒的整句话**在 tooltip 里。
 
-    做T提示原来单独占一列（「今日T提示」），现在并进「提醒」列 —— 它本来就是
-    "今天这只票出过的一件事"，与其他提醒同一口径（列数由用户定死成 8 列）。
+    做T提示原来单独占一列（「今日T提示」），上一版并进「提醒」列；
+    2026-09-17 用户要求把这一列改成监控开关，做T 那句话**照样一点没丢** ——
+    它的短标签（`T高抛`）与整句话都在这一格的 tooltip 里。
     """
     today = now_shanghai().strftime("%Y-%m-%d")
     with storage.connect(seeded.db_path) as conn:
@@ -1758,13 +1818,14 @@ def test_position_alert_column_shows_t_hint_with_full_tooltip(window, seeded, qa
 
     table = window.position_table
     rows = {_symbols_of(table)[i]: i for i in range(table.rowCount())}
-    cell = table.item(rows["600001"], 7)
-    assert cell.text() == "T高抛"
-    assert "反T：先卖后买" in cell.toolTip()            # 整句话在 tooltip 里
+    cell = table.item(rows["600001"], ui_app.POSITION_MONITOR_COLUMN)
+    assert cell.text() == ui_app.MONITOR_ON_TEXT        # 这一格现在是监控开关
+    assert "T高抛" in cell.toolTip()                     # 原来的短标签（提醒列的文字）
+    assert "反T：先卖后买" in cell.toolTip()              # 整句话在 tooltip 里
     assert "可卖数量以券商为准" in cell.toolTip()
 
-    empty = table.item(rows["600002"], 7)
-    assert empty.text() == "—"                          # 不是空白（空白看不出是哪种情况）
+    empty = table.item(rows["600002"], ui_app.POSITION_MONITOR_COLUMN)
+    assert empty.text() == ui_app.MONITOR_ON_TEXT        # 没有提醒不代表没在监控
     assert "今天还没有这只票的盘中提醒" in empty.toolTip()
 
 
@@ -1811,7 +1872,11 @@ def test_about_dialog_shows_version_and_copyright(window, qapp) -> None:
     assert f"版本：{laoa_trader.__version__}（测试版）" in blob
     assert "作者 / 版权所有人：async-chen" in blob
     assert "版权所有 © 2026 async-chen，保留所有权利。" in blob
-    assert "同花顺（fuyao.aicubes.cn）" in blob
+    # 数据来源那一行现在把**公开源写在前面**（2026-09-17：公开源是主源、同花顺是备用），
+    # 并点明"非交易所授权行情" —— 这句是用户判断"这数据能不能当真"的依据
+    assert "公开行情接口（腾讯/新浪/东财）" in blob
+    assert "非交易所授权行情" in blob
+    assert "不构成任何投资建议" in blob
     assert "不构成任何投资建议" in blob
     assert all("<a href" not in t for t in texts)          # 版本号不是富文本链接
 
@@ -2027,7 +2092,11 @@ def test_save_notify_feishu_without_credentials_hints(window, seeded, qapp) -> N
 #: 少一个键 = "改了没生效"（最难查的那类抱怨）；多一个键 = 把不属于本页的东西悄悄改了。
 SETTINGS_KEYS: frozenset[str] = frozenset({
     # 1) 数据来源
-    "hithink_api_key", "history_years",
+    #
+    # **没有 `hithink_api_key`**（2026-09-17 用户要求）：同花顺改成备用源之后，界面上
+    # 不再提供填 Key 的入口（那一行只剩"备用源 + 申请地址"的说明），所以一键保存
+    # 也不该再写这个键。读取路径一个字没改（config.toml / 环境变量照旧生效）。
+    "history_years",
     # 2) 通知方式
     "notify_popup", "notify_channels", "notify_sound", "notify_flash_seconds",
     "notify_popup_seconds", "notify_popup_max_items", "notify_windows_sound",
@@ -2048,11 +2117,14 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
 def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None:
     """收集函数的键集合 = 五组控件的**全部**键（一键保存的"写哪些"就是它决定的）。
 
-    **36 还是 35**：`SETTINGS_KEYS` 是那 35 个固定键（同花顺的 Key 是内置的、固定收）；
-    在此之上，每个**已启用、需要 Key** 的来源会按注册表给的 `key_config` 多收一个键 ——
-    默认只有同花顺，而它的键已经在 `SETTINGS_KEYS` 里，所以**当前恰好是 35 个**。
-    东方财富是**免 Key** 的（它那行连输入框都没有），所以加不加它都不改变这个数字；
-    将来再加"要 token 的来源"时，这里会自动多一个键（`test_source_list_key_field_enters_the_one_click_save`
+    **34 是现在的个数**（2026-09-17：`hithink_api_key` 从这份键集合里去掉了 ——
+    同花顺改成备用源，界面上没有填 Key 的入口，所以一键保存也不该再写它；
+    读取路径没变，config.toml / 环境变量照旧生效）。
+    在此之上，每个**已启用、需要 Key 且界面上真有输入框**的来源会按注册表给的
+    `key_config` 多收一个键 —— 内置同花顺没有输入框（`row.key_edit is None`）所以被跳过，
+    公开行情源是**免 Key** 的（它那行连输入框都没有），所以当前一个都不多收；
+    将来再加"要 token 的来源"时，这里会自动多一个键
+    （`test_source_list_key_field_enters_the_one_click_save`
     用一个注册表测试替身把那条分支钉住了）。
     """
     from laoa_trader.data import sources as sources_mod
@@ -2060,17 +2132,24 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     extra_key_fields = {
         state["key_config"] for state in sources_mod.source_states(window.cfg)
         if state["enabled"] and state["needs_key"] and state["key_config"]
+        # 内置同花顺**不算**：它那一行没有 Key 输入框（用户要求改成"备用源 + 申请地址"），
+        # 而"界面上有没有这个框"正是"要不要收这个键"的判据
+        and state["id"] != ui_app.BUILTIN_SOURCE
     } - SETTINGS_KEYS
     updates = window._collect_settings_updates()
     assert set(updates) == SETTINGS_KEYS | extra_key_fields
-    assert len(updates) == 35                      # 当前：35 个固定键，没有额外要 Key 的来源
+    assert len(updates) == 34                      # 当前：34 个固定键，没有额外要 Key 的来源
+    assert "hithink_api_key" not in updates        # 界面上没有的入口，一键保存不许写
     assert "_bad_scan_at" not in updates           # 内部提示字段不许进配置文件
 
 
 def _change_every_settings_control(window) -> None:
-    """把设置页**每一个**控件都改一遍（一键保存的验收要用；不留一个"没被覆盖"的键）。"""
+    """把设置页**每一个**控件都改一遍（一键保存的验收要用；不留一个"没被覆盖"的键）。
+
+    2026-09-17：这一组里**没有** Key 输入框了（同花顺改备用源），所以这里也不改它 ——
+    `_collect_settings_updates()` 的键集合里同样没有 `hithink_api_key`。
+    """
     # 1) 数据来源
-    window.key_edit.setText("key-abc")
     window.history_years_box.setValue(1.5)
     # 2) 通知方式（四个勾选框 + 参数）
     window.popup_box.setChecked(False)
@@ -2122,13 +2201,14 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
     _change_every_settings_control(window)
     qapp.processEvents()
     config_file = seeded.data_dir / "config.toml"
+    before_key = window.cfg.hithink_api_key       # 测试配置里是 "test-key"
 
     window.save_settings_button.click()          # ← **一次点击**
     qapp.processEvents()
     text = config_file.read_text(encoding="utf-8")
 
     for line in (
-        'hithink_api_key = "key-abc"',
+        # `hithink_api_key` **不在**这一批里（界面上没有它的入口了，见 SETTINGS_KEYS 的说明）
         "history_years = 1.5",
         "notify_popup = false",
         'notify_channels = ["feishu"]',
@@ -2172,8 +2252,11 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
     hint = window.save_settings_hint.text()
     assert hint.startswith(f"✅ 已保存 {len(SETTINGS_KEYS)} 项（已写入 config.toml）")
     assert "生效：主题 系统默认；" in hint and "T策略 开" in hint
+    # 配置里的 Key **一个字都没被这个动作碰过**：内存里那份还是原值，
+    # 文件里那一行也还是 seeded 写进去的那个空串（界面没有它的输入框 → 一键保存不收它）
+    assert 'hithink_api_key = ""' in text
+    assert window.cfg.hithink_api_key == before_key
     # 内存里的配置同步跟上（不用重启）
-    assert window.cfg.hithink_api_key == "key-abc"
     assert window.cfg.history_years == 1.5
     assert window.cfg.notify_popup is False
     assert window.cfg.t_low_rebound_pct == 1.5
@@ -2280,11 +2363,16 @@ def test_formula_page_button_runs_the_pipeline_through_its_signal(
 
 
 def test_test_connection_probe_reports_every_outcome(window) -> None:
-    """【测试连接】：用输入框里的 Key 真打一次**最小请求**，把结果说成人话。
+    """`probe_data_source()`：真打一次**最小请求**，把结果说成人话。
 
-    为什么这条必须有：这个按钮的价值全在"它真的去打了接口、而且每种失败都给出
+    为什么这条必须有：这段逻辑的价值全在"它真的去打了接口、而且每种失败都给出
     可执行的说法"。如果它只是弹一句"连接正常"，那就成了假能力 —— 所以这里把
     成功 / 没填 Key / Key 无效 / 服务端未就绪 / 网络异常五种结果逐一钉住。
+
+    2026-09-17：界面上那个【测试连接】**按钮**被删掉了（用户要求把同花顺那一行改成
+    "备用源 + 申请地址"，输入框没了按钮就没有被测对象），但**函数保留**：
+    它是独立能力，测试直接调它（将来要恢复"测一下配置里的 Key 能不能用"，
+    接一个按钮上来就行）。
     """
     from laoa_trader.data import hithink as hx
 
@@ -2318,35 +2406,39 @@ def test_test_connection_probe_reports_every_outcome(window) -> None:
                                                   client=BoomClient())
 
 
-def test_test_connection_button_uses_the_key_in_the_input_box(window, qapp,
-                                                             monkeypatch) -> None:
-    """点【测试连接】走的是**输入框里当前那个 Key**（测通了再保存），并丢后台线程。
+def test_no_dead_test_connection_button_is_left_on_the_page(window) -> None:
+    """**不许留一颗点了没反应的按钮**：同花顺那一行现在既没有 Key 输入框，
+    也没有【测试连接】（它测的就是输入框里那个 Key）。
 
-    界面线程不许被网络请求按住（与下载/刷新同一条规矩）：所以它必须走 `_run_worker`。
+    这条是防"按钮还在、但点了什么都不发生"那种最糟的中间态：
+    只要页面上还能找到那个按钮，或者 `key_edit` 还挂在窗口上，就说明删得不干净。
     """
-    seen: dict = {}
+    from PySide6.QtWidgets import QPushButton
 
-    def fake_run(fn, label, **kwargs):
-        seen["label"] = label
-        seen["text"] = fn()                      # 在测试里同步跑一次，取回结论
+    builtin = window.source_rows[ui_app.BUILTIN_SOURCE]
+    assert builtin.key_edit is None
+    assert builtin.btn_test is None
+    assert not hasattr(window, "key_edit")
+    assert not hasattr(window, "btn_test_connection")
+    # 整页（含来源列表）里没有任何"测试连接"按钮
+    page = _tab_page(window, ui_app.TAB_SETTINGS)
+    assert [b.text() for b in page.findChildren(QPushButton) if "测试连接" in b.text()] == []
+    # 那一行的说明就是用户给定的那句话，且地址**可点开**
+    assert builtin.key_label.openExternalLinks() is True
+    assert ui_app.BUILTIN_KEY_URL in builtin.key_label.text()
+    assert builtin.key_label.textInteractionFlags() & \
+        ui_app.Qt.TextInteractionFlag.TextBrowserInteraction
 
-    monkeypatch.setattr(window, "_run_worker", fake_run)
-    monkeypatch.setattr(ui_app, "probe_data_source",
-                        lambda cfg, api_key="": f"✅ 用的是 {api_key}")
-    window.key_edit.setText("key-in-box")
-    window.btn_test_connection.click()
-    qapp.processEvents()
-    assert seen["label"] == "测试连接"
-    assert seen["text"] == "✅ 用的是 key-in-box"
 
+def test_pick_result_is_no_longer_shown_on_the_formula_page(window, qapp) -> None:
+    """选股跑完 → **不再把结果喂进「策略选股」页**（用户 2026-09-17 拍板：那一页只显示策略，
+    结果直接进自选股池，另外导出一份桌面文件）。
 
-def test_pick_result_is_fed_to_the_formula_page(window, qapp) -> None:
-    """选股跑完 → 把**这一轮**的 report 喂进「策略选股」页的「本次选股结果」区。
-
-    不喂也能用（页面会从本地库 `stock_pool` 兜底读最近一次建池），但直接给 report 更准：
-    兜底读的是"库里那一份"，遇到"同一天跑了两次 / 这次没建成池"就会显示上一批。
-    这里还钉住两条口径：**纯自选不算选出来的**（那是用户自己加的票）与
-    结果行用**半角 `名称(代码)`**（与两张表、推送正文同一套写法）。
+    为什么这条留着（而不是删掉）：它盯的正是"别把那张结果表加回来"。
+    旧版这一页下半挂着「本次选股结果」表 + 一句话结论 +【全部加为自选】，
+    用户明确要求删掉；`FormulaPage.show_pick_result()` 保留成**空实现**
+    （`app.py` 的 `_on_pipeline_done()` 还在调它），所以这条同时钉住两件事：
+    ① 页面上确实没有结果表；② 调那个空方法不炸、也不改变页面。
     """
     report = {
         "data_date": "2026-09-11",
@@ -2354,23 +2446,29 @@ def test_pick_result_is_fed_to_the_formula_page(window, qapp) -> None:
         "pool": [
             {"symbol": "600002", "name": "半导体甲", "strategy": "ReversalStrategy",
              "strategies": "ReversalStrategy,DryUpExpansionStrategy"},
-            # 纯自选行（没有来源策略）→ 不算"本次选股结果"
+            # 纯自选行（没有来源策略）→ 本来也不算"本次选股结果"
             {"symbol": "300750", "name": "电池龙头", "strategy": "", "strategies": ""},
         ],
     }
-    window._on_pipeline_done("开始选股", report)
+    window._on_pipeline_done("开始选股", report)      # 主窗口仍然调它：不许抛
     qapp.processEvents()
 
     page = window.formula_page
-    assert [row["symbol"] for row in page.result_rows] == ["600002"]
-    assert page.result_rows[0]["text"] == "半导体甲(600002)"      # 半角 `名称(代码)`
-    assert "短期反转" in page.result_rows[0]["label"]             # 来源策略
-    assert "地量后放量变盘" in page.result_rows[0]["label"]       # 同批选中的另一条也写出来
-    assert page.result_date == "2026-09-11"
-    assert "共选出 1 只" in page.result_summary.text()
-    assert page.result_box.isHidden() is False                    # 结果区真的显示出来了
-    assert page.result_table.item(0, 0).text() == "半导体甲(600002)"
-    assert page.result_table.item(0, 1).text() == page.result_rows[0]["label"]
+    # ① 结果表连骨头都不剩（属性查一遍；旧版是 result_box / result_table / result_rows）
+    for stale in ("result_rows", "result_table", "result_box", "result_summary",
+                  "result_date", "on_add_all_to_watchlist"):
+        assert not hasattr(page, stale), stale
+    # ② 空实现：收下参数、什么都不做、也不改变页面上的控件数
+    from PySide6.QtWidgets import QLabel
+
+    before = len(page.findChildren(QLabel))
+    assert page.show_pick_result(report, data_date="2026-09-11") is None
+    assert page.show_pick_result([{"symbol": "600002"}]) is None
+    qapp.processEvents()
+    assert len(page.findChildren(QLabel)) == before
+    # 结论照旧进运行状态（用户照样知道"跑完了、选出了几只"）
+    text = window.status_label.fullText()
+    assert "开始选股完成" in text and "池子 2 只" in text
 
     # 主窗口是**容错调用**的：另一个模块没提供这个方法时不该让流程报错
     class NoResultPage:
@@ -2550,7 +2648,10 @@ def test_watch_panel_add_autofills_name_and_notes(window, seeded, qapp) -> None:
     row = _symbols_of(window.pool_table).index("600001")
     assert window.pool_table.item(row, 0).text() == "低价样本(600001)"
     assert "备注：龙头" in window.pool_table.item(row, 0).toolTip()
-    assert window.pool_table.item(row, 4).text() == "自选"
+    assert window.pool_table.item(row, ui_app.WATCH_HEADERS.index("来源")).text() == "自选"
+    # 加进来的自选默认在监控中 → 「监控开关」列是 `开启`
+    assert window.pool_table.item(row, ui_app.WATCH_MONITOR_COLUMN).text() \
+        == ui_app.MONITOR_ON_TEXT
     assert "已加自选：600001 低价样本" in window.status_label.fullText()
 
 
@@ -2583,7 +2684,10 @@ def test_watch_panel_toggle_and_remove(window, seeded, qapp) -> None:
         assert storage.watchlist_symbols(conn) == []           # 停了就不启用
         assert len(storage.load_watchlist(conn)) == 1           # 但还在列表里
     row = _symbols_of(window.pool_table).index("600001")
-    assert window.pool_table.item(row, 4).text() == "自选（已停用）"
+    assert window.pool_table.item(
+        row, ui_app.WATCH_HEADERS.index("来源")).text() == "自选（已停用）"
+    assert window.pool_table.item(
+        row, ui_app.WATCH_MONITOR_COLUMN).text() == ui_app.MONITOR_OFF_TEXT
     assert "不进池、不监控" in window.status_label.fullText()
 
     window.on_watch_toggle(True)
@@ -2611,7 +2715,8 @@ def test_pool_table_shows_watchlist_source_and_note(window, seeded, qapp) -> Non
     window._refresh_pool_table()
     qapp.processEvents()
 
-    assert window.pool_table.item(0, 4).text() == "策略·低价股+自选"
+    assert window.pool_table.item(0, ui_app.WATCH_HEADERS.index("来源")).text() \
+        == "策略·低价股+自选"
     assert "备注：龙头" in window.pool_table.item(0, 0).toolTip()
 
     # 纯自选（不在策略候选里）→ 来源「自选」，而且**不用等建池**就能进这张表
@@ -2623,7 +2728,8 @@ def test_pool_table_shows_watchlist_source_and_note(window, seeded, qapp) -> Non
     rows = {_symbols_of(window.pool_table)[i]: i
             for i in range(window.pool_table.rowCount())}
     assert "600100" in rows
-    assert window.pool_table.item(rows["600100"], 4).text() == "自选"
+    assert window.pool_table.item(
+        rows["600100"], ui_app.WATCH_HEADERS.index("来源")).text() == "自选"
     assert "备注：消息面" in window.pool_table.item(rows["600100"], 0).toolTip()
 
     # 建池之后它仍然只出现一次（不重复）
@@ -2774,13 +2880,15 @@ def test_download_without_api_key_shows_inline_hint_not_dialog(window, qapp,
     """没配 Key 就点【下载数据】：**不弹窗**，在「系统设置」里点亮提示 + 指路。
 
     为什么不做成弹窗：缺 Key 不是"要用户拍板"的事，而是"下一步该做什么" ——
-    弹一个框只会拦住他，然后他还是得回同一个地方填 Key。
+    弹一个框只会拦住他，然后他还是得回同一个地方改配置。
+
+    2026-09-17：界面上**没有填 Key 的入口**了（同花顺改备用源），所以这句指路改成
+    **config.toml / 环境变量**；读数路径没变，只是写的地方从界面回到配置文件。
     """
     from PySide6.QtWidgets import QMessageBox
 
     win = window
     win.cfg.hithink_api_key = ""
-    win.key_edit.setText("")
     popped: list[str] = []
     # 万一还有谁把它弹出来，这条用例要**红**（不是静默通过）
     monkeypatch.setattr(QMessageBox, "warning",
@@ -2795,19 +2903,27 @@ def test_download_without_api_key_shows_inline_hint_not_dialog(window, qapp,
     assert win._worker is None                                  # 没起下载任务
     assert win.key_hint.isVisible() is True
     assert "API Key" in win.key_hint.text()
-    assert "保存 Key" in win.key_hint.text()                     # 指到那一页的那个按钮
+    # 指路指的是**配置文件**（界面上没有输入框了）
+    assert "config.toml" in win.key_hint.text()
+    assert "hithink_api_key" in win.key_hint.text()
+    assert "HITHINK_FINANCE_API_KEY" in win.key_hint.text()      # 环境变量那条路也写出来
     assert "系统设置" in win.status_label.fullText()
-    # 填好 Key 并保存 → 提示收掉，再点就能下载
-    win.key_edit.setText("real-key")
-    win.on_save_api_key()
+    # 在 config.toml 里写好 Key（老用户的做法）→ 提示收掉，再点就能下载
+    config_file = win.cfg.source_path
+    config_file.write_text(
+        config_file.read_text(encoding="utf-8").replace(
+            'hithink_api_key = ""', 'hithink_api_key = "real-key"'),
+        encoding="utf-8",
+    )
+    win.cfg.hithink_api_key = "real-key"
+    win._run_worker = lambda *a, **k: None          # 只验"放行"，不真起下载线程
+    win.on_download()
     qapp.processEvents()
     assert win.key_hint.isVisible() is False
-    assert win.cfg.hithink_api_key == "real-key"
-    assert "hithink_api_key = \"real-key\"" in (
-        win.cfg.source_path.read_text(encoding="utf-8"))
+    assert 'hithink_api_key = "real-key"' in config_file.read_text(encoding="utf-8")
 
 
-# ── 「全市概览」页（第一个页签）──
+# ── 「大盘概览」页（第一个页签）──
 
 
 def _market_fake(**kwargs):
@@ -2874,7 +2990,7 @@ def _wait_market(window, qapp, timeout_ms: int = 10_000) -> None:
 
 @pytest.fixture()
 def market_window(window, qapp):
-    """把窗口切到「全市概览」页（并等切页触发的那一轮后台取数落地）。
+    """把窗口切到「大盘概览」页（并等切页触发的那一轮后台取数落地）。
 
     为什么需要：Qt 里非当前页签里的子控件 `isVisible()` 恒为 False，
     不切过去就断言不了"整行隐藏"这类行为（虽然概览是第一个页签、启动就在它上面，
@@ -2899,11 +3015,13 @@ def pool_window(window, qapp):
 
 
 def test_market_page_is_a_tab_of_its_own(window) -> None:
-    """概览是**独立一页、第一个页签**，页面是"三块 + 单行页脚"，**没有 KPI 卡片排**。
+    """概览是**独立一页、第一个页签**，页面是"四块 + 单行页脚"，**没有 KPI 卡片排**。
 
-    用户给定的新版布局（`docs/改版方案.md` 第二节 TAB 1）只有三块：
-    宽基指数 / 情绪指数 / 热门板块；原来占一整排的 7 张 KPI 卡片折进「情绪指数」块里的
-    3 个小条目。这条用例同时是"别把卡片排加回来"的看门狗。
+    用户 2026-09-17 给定的布局（顺序也是用户给的）：
+    **成交与情绪 → 宽基指数 → 情绪指数 → 热门板块**。
+    第一块装的是原来那排 KPI 折成的小条目（成交额/涨跌停/涨跌家数），
+    挪到了「宽基指数」**上面**（用户原话："把'成交额等元素'模块挪到「宽基指数」上面"）。
+    这条用例同时是"别把卡片排加回来"的看门狗。
     """
     from PySide6.QtWidgets import QScrollArea, QWidget
 
@@ -2915,21 +3033,25 @@ def test_market_page_is_a_tab_of_its_own(window) -> None:
     assert pool_page.isAncestorOf(window.market_page) is False
 
     page = window.market_page
-    # **三块**，顺序也钉住（顺序 = 用户给定："先看大盘、再看情绪、最后看钱在打谁"）
+    # **四块**，顺序也钉住（用户给定：成交额与情绪在最上面，然后宽基、情绪、热门板块）
     assert list(window.market_sections) == list(ui_app.MARKET_SECTION_TITLES) == [
-        ui_app.MARKET_SECTION_WIDE, ui_app.MARKET_SECTION_SENTIMENT,
-        ui_app.MARKET_SECTION_HOT,
+        ui_app.MARKET_SECTION_FLOW, ui_app.MARKET_SECTION_WIDE,
+        ui_app.MARKET_SECTION_SENTIMENT, ui_app.MARKET_SECTION_HOT,
     ]
+    # 用户原话"把'成交额等元素'模块挪到「宽基指数」上面"：第一条就是它
+    assert ui_app.MARKET_SECTION_FLOW == "成交与情绪"
+    assert ui_app.MARKET_SECTION_TITLES.index(ui_app.MARKET_SECTION_FLOW) \
+        < ui_app.MARKET_SECTION_TITLES.index(ui_app.MARKET_SECTION_WIDE)
     for title, section in window.market_sections.items():
         assert section.title_label.text() == title
         assert page.isAncestorOf(section) is True
         assert page.isAncestorOf(section.title_label) is True
-    # 内容区顶层**就是这三块**（多一块"KPI 区"会被这条抓出来）
+    # 内容区顶层**就是这四块**（多一块"KPI 区"会被这条抓出来）
     content = window.market_content.layout()
-    assert [content.itemAt(i).widget() for i in range(3)] == [
+    assert [content.itemAt(i).widget() for i in range(4)] == [
         window.market_sections[t] for t in ui_app.MARKET_SECTION_TITLES
     ]
-    assert content.itemAt(3).spacerItem() is not None      # 第 4 项是收尾的 stretch
+    assert content.itemAt(4).spacerItem() is not None      # 第 5 项是收尾的 stretch
     # 那排卡片连骨头都不该剩下（属性、objectName 都查一遍）
     assert not hasattr(window, "market_kpis")
     assert not hasattr(window, "market_kpi_cards")
@@ -2938,23 +3060,29 @@ def test_market_page_is_a_tab_of_its_own(window) -> None:
     assert "marketKpiCard" not in names
     assert "marketKpiArea" not in names
 
-    # 3 个小条目**在「情绪指数」块里**（不是另开一排）
-    sentiment = window.market_sections[ui_app.MARKET_SECTION_SENTIMENT]
-    # 9 个小条目：**一条一个数**（合成文本在 Windows 字体下会被自己的列宽截掉，
+    # 7 个小条目**在「成交与情绪」块里**（最上面那一块；既不在情绪块里、也不另开一排）
+    flow = window.market_sections[ui_app.MARKET_SECTION_FLOW]
+    # 一条一个数（合成文本在 Windows 字体下会被自己的列宽截掉，
     # 见 `ui/app.py` 里 `MARKET_STAT_TITLES` 的注释与 CI 实测数字）
-    assert list(sentiment.stats) == list(ui_app.MARKET_STAT_TITLES) == [
-        ui_app.MARKET_STAT_SH, ui_app.MARKET_STAT_SZ, ui_app.MARKET_STAT_BJ,
+    assert list(flow.stats) == list(ui_app.MARKET_STAT_TITLES) == [
+        ui_app.MARKET_STAT_AMOUNT,                       # 成交额 = 沪 + 深（一个数）
         ui_app.MARKET_STAT_LIMIT_UP, ui_app.MARKET_STAT_LIMIT_DOWN,
         ui_app.MARKET_STAT_BREAK, ui_app.MARKET_STAT_UP,
         ui_app.MARKET_STAT_DOWN, ui_app.MARKET_STAT_FLAT,
     ]
-    for name, item in sentiment.stats.items():
+    assert len(ui_app.MARKET_STAT_TITLES) == 7     # 9 条 → 7 条（北交所删掉、沪+深合并）
+    assert ui_app.MARKET_STAT_MAX_COLUMNS == 7     # 宽屏一行正好 7 个（用户要求）
+    for name, item in flow.stats.items():
         assert item.title_label.text() == name
-        assert sentiment.isAncestorOf(item) is True
+        assert flow.isAncestorOf(item) is True
         assert page.isAncestorOf(item) is True
+        # 名称加粗（用户："所有名称显示不清楚，都加黑显示"）
+        assert item.title_label.font().bold() is True, name
     for title, section in window.market_sections.items():
-        if title != ui_app.MARKET_SECTION_SENTIMENT:
-            assert section.stats == {}, title              # 小条目只在情绪块里
+        if title != ui_app.MARKET_SECTION_FLOW:
+            assert section.stats == {}, title              # 小条目只在成交与情绪块里
+    # 情绪块**只剩指数条目**（用户要求：情绪指数块不再有小条目）
+    assert window.market_sections[ui_app.MARKET_SECTION_SENTIMENT].stats == {}
 
     # 页脚 / 提示 / 【立即刷新】都在这一页里
     assert page.isAncestorOf(window.market_footer) is True
@@ -2991,7 +3119,7 @@ def test_source_list_adds_eastmoney_without_a_fake_key_box(
     from laoa_trader.data import sources as sources_mod
 
     config_file = seeded.data_dir / "config.toml"
-    assert window.cfg.data_sources == ["hithink"]
+    assert window.cfg.data_sources == ["public", "hithink"]
     assert "eastmoney" in sources_mod.REGISTRY           # 后端已实现第二个来源
 
     # 【添加来源】的菜单里就是它（抽成方法之后测试不用去点会阻塞的 `exec`）
@@ -3001,10 +3129,11 @@ def test_source_list_adds_eastmoney_without_a_fake_key_box(
 
     window.on_add_source("eastmoney")
     qapp.processEvents()
-    assert window.cfg.data_sources == ["hithink", "eastmoney"]
-    assert 'data_sources = ["hithink", "eastmoney"]' in config_file.read_text(
+    assert window.cfg.data_sources == ["public", "hithink", "eastmoney"]
+    assert 'data_sources = ["public", "hithink", "eastmoney"]' in config_file.read_text(
         encoding="utf-8")
-    assert list(window.source_rows) == ["hithink", "eastmoney"]
+    # 列表顺序 = 优先级：公开源（主）→ 同花顺（备用，永远排在最后）→ 用户新加的
+    assert list(window.source_rows) == ["public", "hithink", "eastmoney"]
     row = window.source_rows["eastmoney"]
     assert row.name_label.text() == "东方财富（公开接口，免 Key）"
     assert row.tag_label.text() == "免 Key"
@@ -3027,13 +3156,14 @@ def test_source_list_adds_eastmoney_without_a_fake_key_box(
     assert window._source_add_menu() is None              # 没有别的可加了
     assert window.source_add_hint.text().startswith("没有可添加的来源了")
 
-    # 删除 → 回到只有一个来源
+    # 删除 → 回到原来的两个来源
     row.btn_delete.click()
     qapp.processEvents()
-    assert window.cfg.data_sources == ["hithink"]
-    assert list(window.source_rows) == ["hithink"]
-    assert 'data_sources = ["hithink"]' in config_file.read_text(encoding="utf-8")
-    # 内置那一条**删不掉**（实时快照只有它提供）
+    assert window.cfg.data_sources == ["public", "hithink"]
+    assert list(window.source_rows) == ["public", "hithink"]
+    assert 'data_sources = ["public", "hithink"]' in config_file.read_text(
+        encoding="utf-8")
+    # 内置那一条**删不掉**（历史日K 的 dump 只有它提供）
     window.on_remove_source("hithink")
     assert "hithink" in window.source_rows
     assert "不能删除" in window.status_label.fullText()
@@ -3043,9 +3173,11 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
                                                          monkeypatch) -> None:
     """**将来再加"需要 Key 的来源"时，它的 Key 自动进一键保存的键集合**。
 
-    用一条**注册表里的测试替身**验证契约（东方财富是免 Key 的，走不到这条分支）：
+    用一条**注册表里的测试替身**验证契约（公开源与东方财富都是免 Key 的，走不到这条分支）：
     `key_config` 指到哪个配置键，一键保存就写哪个键 —— 界面上的输入框与写回
     config.toml 的键一一对应，不存在"填了没保存"。
+    这也顺带证明：同花顺不再被收进这份键集合，是**因为界面上没有它的输入框**，
+    而不是因为代码里写死了一个"同花顺除外"的例外。
     """
     from laoa_trader.data import sources as sources_mod
 
@@ -3056,12 +3188,14 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
         note="测试替身：只用来验证「要 Key 的来源」这条分支。",
         key_config=fake_key,
     ))
-    seeded.data_sources = ["hithink", "fakesrc"]
+    seeded.data_sources = ["public", "hithink", "fakesrc"]
     window._rebuild_source_rows()
     qapp.processEvents()
     row = window.source_rows["fakesrc"]
     assert row.key_edit is not None                       # 要 Key → 有输入框
     assert row.tag_label.text() == "未配 Key"
+    # 同花顺仍然没有输入框（内置那一行的特例：用户要求改成"备用源 + 申请地址"）
+    assert window.source_rows["hithink"].key_edit is None
     row.key_edit.setText("token-abc")
     updates = window._collect_settings_updates()
     assert updates[fake_key] == "token-abc"               # 它的 Key 进了一键保存的键集合
@@ -3070,7 +3204,10 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     qapp.processEvents()
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
     assert f'{fake_key} = "token-abc"' in text
-    assert window.save_settings_hint.text().startswith("✅ 已保存 36 项")
+    # 34 个固定键 + 这个测试替身来源的 Key = 35 项
+    # （2026-09-17 起少了 `hithink_api_key` 那一项：界面上没有它的输入框了）
+    assert window.save_settings_hint.text().startswith("✅ 已保存 35 项")
+    assert "hithink_api_key" not in window._collect_settings_updates()
 
 
 def test_source_list_falls_back_when_the_registry_is_unreadable(
@@ -3093,11 +3230,15 @@ def test_source_list_falls_back_when_the_registry_is_unreadable(
     assert list(window.source_rows) == [ui_app.BUILTIN_SOURCE]
     row = window.source_rows[ui_app.BUILTIN_SOURCE]
     assert "注册表暂时读不出来" in row.note_label.text()      # 如实说明，不是空白
-    assert row.key_edit is window.key_edit                     # Key 输入框照旧可用
+    # 这一行照旧是"备用源 + 申请地址"（它不依赖注册表，是内置的）
+    assert row.tag_label.text() == ui_app.BUILTIN_BACKUP_TAG
+    assert row.key_edit is None
+    assert row.key_label.openExternalLinks() is True
     assert window._addable_sources() == []                     # 没有候选 → 不会画假条目
     assert window._source_add_menu() is None
-    # 一键保存的键集合不受影响（同花顺那一栏是固定收的）
-    assert window._collect_settings_updates()["hithink_api_key"] == window.cfg.hithink_api_key
+    # 一键保存的键集合不受影响：**本来就没有** `hithink_api_key`
+    #（界面不提供填 Key 的入口 —— 读数路径照旧在 config.toml / 环境变量里）
+    assert "hithink_api_key" not in window._collect_settings_updates()
 
 
 def test_source_list_shows_unknown_names_truthfully(window, seeded, qapp) -> None:
@@ -3108,6 +3249,8 @@ def test_source_list_shows_unknown_names_truthfully(window, seeded, qapp) -> Non
     seeded.data_sources = ["hithink", "mystery"]
     window._rebuild_source_rows()
     qapp.processEvents()
+    # **列表顺序 = 配置里写的顺序**（那是真实的取数优先级）：配置里同花顺写在前面，
+    # 界面就照实画在前面 —— 界面只在"配置里漏写了它"时把它补在**最后**（备用位置）
     assert list(window.source_rows) == ["hithink", "mystery"]
     unknown = window.source_rows["mystery"]
     assert unknown.name_label.text() == "mystery"          # 键本身就当名字显示
@@ -3160,17 +3303,19 @@ def test_market_page_refreshes_right_after_startup(seeded, qapp, monkeypatch) ->
         assert win.tabs.currentWidget() is win.market_page   # 第一屏就是概览
         assert client.calls                                  # 启动那一次确实去取了
         assert win.market_overview is not None
-        stats = win.market_sections[ui_app.MARKET_SECTION_SENTIMENT].stats
+        stats = win.market_sections[ui_app.MARKET_SECTION_FLOW].stats
         assert stats[ui_app.MARKET_STAT_LIMIT_UP].value_label.text() == "55"
         assert stats[ui_app.MARKET_STAT_LIMIT_DOWN].value_label.text() == "16"
         assert stats[ui_app.MARKET_STAT_BREAK].value_label.text() == "30"
-        assert stats[ui_app.MARKET_STAT_SH].value_label.text() == "7792亿"
-        assert stats[ui_app.MARKET_STAT_SZ].value_label.text() == "8499亿"
-        assert stats[ui_app.MARKET_STAT_BJ].value_label.text() == "140亿"
+        # 成交额 = 沪 7792 + 深 8499 = **16291 亿**，一个数（北交所那 140 亿不再显示）
+        assert stats[ui_app.MARKET_STAT_AMOUNT].value_label.text() == "16291亿"
         wide = win.market_sections[ui_app.MARKET_SECTION_WIDE]
         assert wide.entries[0].name_label.text() == "上证"
         # 「热门板块」跟着同一趟取回来了（seeded 库里有半导体涨停）
-        assert [row.industry for row in win.market_industry_rows] == ["半导体", "银行"]
+        hot = win.market_sections[ui_app.MARKET_SECTION_HOT]
+        rows = hot.tables[ui_app.SECTOR_UP_TITLE].table
+        assert rows.rowCount() >= 1
+        assert rows.item(0, 0).text() == "半导体"        # 本地口径下涨幅最高的行业
         assert "更新于 —" not in win.market_as_of_label.fullText()   # 页脚已是真实取数时间
     finally:
         win._timer.stop()
@@ -3187,12 +3332,16 @@ def test_market_page_refreshes_right_after_startup(seeded, qapp, monkeypatch) ->
 #: 与 `tests/test_market.py` 的 `SAMPLE_LINES` 是同一批数字：界面与命令行口径必须一致。
 #: 「热门板块」块摆的不是指数（它由 `pool.hot_industries` 算出来，断言在别处）。
 MARKET_EXPECTED_ENTRIES: dict[str, list[tuple[str, str, str, str]]] = {
+    # 宽基 = 配置里的五只 + **必有的两只**（上证50 / 中证1000，2026-09-17 用户要求；
+    # 中证2000 腾讯实测拿不到，换成中证1000，见 `market.WIDE_INDEX_EXTRA_CODES`）
     "宽基指数": [
         ("000001.SH", "上证", "3885.33", "-0.07%"),
         ("399001.SZ", "深成", "13384.57", "-0.64%"),
         ("399006.SZ", "创业板", "3285.58", "-1.10%"),
         ("000688.SH", "科创50", "1528.27", "-1.62%"),
         ("000300.SH", "沪深300", "4480.08", "-0.67%"),
+        ("000016.SH", "上证50", "2844.23", "+0.42%"),
+        ("000852.SH", "中证1000", "7548.82", "-1.21%"),
     ],
     # 「情绪指数」块装的是**两组**同花顺板块指数：`market_sentiment_indices` 在前、
     # `market_sector_indices` 在后（沿用现有取数；用户给定的三块里只有这一块装它们）
@@ -3223,19 +3372,29 @@ def _entry_colors(entry) -> tuple[str, str]:
 
 
 def _stat_texts(window) -> dict[str, str]:
-    """3 个小条目的 `{名字: 数值}`（原来那一排 KPI 卡片折进来的）。"""
-    stats = window.market_sections[ui_app.MARKET_SECTION_SENTIMENT].stats
+    """7 个小条目的 `{名字: 数值}`（那一排 KPI 折进「成交与情绪」块之后的）。"""
+    stats = window.market_sections[ui_app.MARKET_SECTION_FLOW].stats
     return {name: item.value_label.text() for name, item in stats.items()}
 
 
-def _industry_fields(row) -> tuple[str, str, str, str]:
-    """一个热门行业行的四段文本：行业名 / 涨停家数 / 密度 / 近 5 日等权涨幅。"""
-    return (row.industry, row.limit_up_label.text(), row.density_label.text(),
-            row.mom_label.text())
+def _sector_table_rows(window, title: str) -> list[list[str]]:
+    """「上涨前五 / 下跌前五」某一张表的全部单元格文字（含表头那一行不在此列）。"""
+    table = window.market_sections[ui_app.MARKET_SECTION_HOT].tables[title].table
+    return [
+        [table.item(row, column).text() if table.item(row, column) is not None else ""
+         for column in range(table.columnCount())]
+        for row in range(table.rowCount())
+    ]
+
+
+def _sector_headers(window, title: str) -> list[str]:
+    """某一张板块表的表头文字（用户要求"标上名称"的那四列）。"""
+    table = window.market_sections[ui_app.MARKET_SECTION_HOT].tables[title].table
+    return [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
 
 
 def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp) -> None:
-    """3 个小条目 + 两块指数的每一项 + 逐值颜色 + 热门板块 + 页脚来源，一次全钉住。"""
+    """7 个小条目 + 两块指数的每一项 + 逐值颜色 + 热门板块两张表 + 页脚，一次全钉住。"""
     from laoa_trader import market
     from laoa_trader.ui import app as ui_app
 
@@ -3245,18 +3404,20 @@ def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp
         qapp.processEvents()
 
         assert market_window.market_overview is not None
-        # 3 个小条目：与 `market.kpi_values()` 同源（取数口径与命令行共用一份）。
-        # 折成 3 条之后**一个数字都没少**：涨停家数那条带着跌停与炸板，涨跌家数那条带着平盘
+        # 7 个小条目：与 `market.kpi_values()` 同源（取数口径与命令行共用一份）
         values = market.kpi_values(market_window.market_overview)
         assert (values["涨停"], values["跌停"], values["炸板"]) == ("55", "16", "30")
-        assert values["成交额"] == "沪 7792亿 · 深 8499亿 · 北 140亿"   # 命令行那一行仍是一句话
+        # 成交额 = 沪 7792 + 深 8499 = 16291 亿（**一个数**，用户要求）
+        assert values["成交额"] == "16291亿"
         assert (values["上涨"], values["下跌"], values["平盘"]) == ("1", "1", "1")
         stats = _stat_texts(market_window)
         assert stats == {
-            "沪成交额": "7792亿", "深成交额": "8499亿", "北交所": "140亿",
+            "成交额": "16291亿",
             "涨停": "55", "跌停": "16", "炸板": "30",
             "上涨": "1", "下跌": "1", "平盘": "1",
         }
+        assert list(stats) == list(ui_app.MARKET_STAT_TITLES)   # 显示顺序 = 常量顺序
+        assert "北交所" not in stats and "140亿" not in "".join(stats.values())
 
         # 两块指数的每一项：一个指数一个控件，四项文本逐项对齐
         for title, expected in MARKET_EXPECTED_ENTRIES.items():
@@ -3267,37 +3428,49 @@ def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp
         assert [entry.thscode for entry in market_window.market_entries] == [
             code for rows in MARKET_EXPECTED_ENTRIES.values() for code, *_ in rows
         ]
+        # 名称一律**加粗**（用户："所有名称显示不清楚，都加黑显示"），数值不加粗
+        for entry in market_window.market_entries:
+            assert entry.name_label.font().bold() is True, entry.thscode
+            assert entry.value_label.font().bold() is False, entry.thscode
+            assert entry.pct_label.font().bold() is False, entry.thscode
 
-        # 逐值上色：宽基全跌（绿）、情绪块里 4 情绪 + 2 板块各自按自己的涨跌
+        # 逐值上色：宽基里 5 只跌（绿）+ 上证50 涨（红）+ 中证1000 跌（绿），
+        # 情绪块里 4 情绪 + 2 板块各自按自己的涨跌
         up, down = f"color:{market.COLOR_UP}", f"color:{market.COLOR_DOWN}"
         wide = market_window.market_sections[ui_app.MARKET_SECTION_WIDE].entries
-        assert [_entry_colors(e) for e in wide] == [(down, down)] * 5
+        assert [_entry_colors(e) for e in wide] == [
+            (down, down)] * 5 + [(up, up), (down, down)]
         sentiment = market_window.market_sections[ui_app.MARKET_SECTION_SENTIMENT].entries
         assert [_entry_colors(e) for e in sentiment] == (
             [(down, down)] + [(up, up)] * 3 + [(up, up), (down, down)]
         )
         assert market_window.market_hint.isVisible() is False       # 一切正常不留提示
 
-        # 「热门板块」：行业名 + 涨停家数 + 密度 + 近 5 日等权涨幅，按密度降序
-        rows = market_window.market_industry_rows
-        assert [row.industry for row in rows] == ["半导体", "银行"]      # seeded 库的真实内容
-        assert [row.limit_up_label.text() for row in rows] == ["1只", "0只"]
-        assert [row.density_label.text() for row in rows] == ["100.00%", "0.00%"]
-        densities = [
-            float(row.density_label.text().rstrip("%")) for row in rows
-        ]
-        assert densities == sorted(densities, reverse=True)
-        for row in rows:
-            # 只有"近 5 日涨幅"上色：涨停家数与密度是数量，没有涨跌方向
-            assert row.mom_label.text().endswith("%")
-            assert row.limit_up_label.styleSheet() == ""
-            assert row.density_label.styleSheet() == ""
+        # 「热门板块」：**两张表**（上涨前五 / 下跌前五），表头就是用户给定的那四列
+        for title in (ui_app.SECTOR_UP_TITLE, ui_app.SECTOR_DOWN_TITLE):
+            assert _sector_headers(market_window, title) == list(ui_app.SECTOR_TABLE_HEADERS)
+        assert list(market_window.market_sections[
+            ui_app.MARKET_SECTION_HOT].tables) == [ui_app.SECTOR_UP_TITLE,
+                                                   ui_app.SECTOR_DOWN_TITLE]
+        # 测试环境里 `data/sectors.py` 的取数被 socket 层封死 → 退回**本地口径**：
+        # 涨幅 = 近 5 日行业等权涨幅，主力净额 `—`（不是 0），页面上写清了口径
+        hot_note = market_window.market_sections[ui_app.MARKET_SECTION_HOT].note_label
+        assert hot_note.isVisible() is True
+        assert "本地口径" in hot_note.fullText()
+        assert "主力净额取不到" in hot_note.fullText()
+        up_rows_local = _sector_table_rows(market_window, ui_app.SECTOR_UP_TITLE)
+        assert [row[0] for row in up_rows_local] == ["半导体", "银行"]   # seeded 库的真实行业
+        assert up_rows_local[0][1] == "1"            # 涨停家数口径来自 pool.hot_industries
+        assert up_rows_local[1][1] == "0"
+        assert all(row[3] == market.DASH for row in up_rows_local)      # 主力净额取不到 → —
 
         # 页脚：数据来源 + 取数时间 + 刷新节奏（breadth 开着要注明它慢一档）
         footer = market_window.market_as_of_label.fullText()
-        assert footer.startswith("数据来源：同花顺金融数据服务 · 更新于 ")
+        assert footer.startswith(market.FOOTER_PREFIX + " · 更新于 ")
         assert "每分钟自动刷新" in footer
-        assert "涨跌家数与北交所成交额每 5 分钟更新" in footer
+        # 成交额已改成"沪深合计"（与指数同节拍），所以这句只提涨跌家数
+        assert "涨跌家数每 5 分钟更新" in footer
+        assert "北交所" not in footer
         assert market_window.market_overview["as_of"] in footer
 
         # 全线上涨 → 点位与涨跌幅都变红（颜色跟着新数据走，不是建页面时定死的）
@@ -3393,8 +3566,10 @@ def test_market_footer_is_exactly_one_row(market_window, qapp) -> None:
 def test_market_page_hides_whole_block_when_config_is_empty(market_window, qapp) -> None:
     """`market_indices` 没配 → 「宽基指数」块**连标题一起隐藏**（不留空的"宽基指数："）。
 
-    「情绪指数」块**始终显示**：它还装着 3 个小条目（成交额/涨停家数/涨跌家数），
+    「成交与情绪」块**始终显示**：它装的是 7 个小条目（成交额/涨跌停/涨跌家数），
     与"配没配指数"无关 —— 这也是它与旧版最大的区别（旧版整组隐藏后那一排就空了）。
+    另外：`market_indices = []` 是"我不要这一块"的明确表态，所以这时候**不补**
+    "必有的两只"（`market.WIDE_INDEX_EXTRA_CODES`）—— 见 `wide_specs()` 的说明。
     """
     from laoa_trader import market
     from laoa_trader.ui import app as ui_app
@@ -3409,14 +3584,14 @@ def test_market_page_hides_whole_block_when_config_is_empty(market_window, qapp)
         assert wide.isVisible() is False
         assert wide.title_label.isVisible() is False     # 标题也跟着收掉，不留空标题
         assert wide.entries == []
+        flow = market_window.market_sections[ui_app.MARKET_SECTION_FLOW]
+        assert flow.isVisible() is True                  # 成交与情绪块照常（它装着 7 个小条目）
         sentiment = market_window.market_sections[ui_app.MARKET_SECTION_SENTIMENT]
-        assert sentiment.isVisible() is True             # 情绪块照常（它还有 3 个小条目）
-        # 沪/深成交额是**从宽基条目里**取的（`market.py` 的口径：那两只指数的 turnover
-        # 就是两市成交额）—— 宽基没配时它必然是 `—`，而北交所那份来自全市场快照，
-        # 不受影响。这条断言把这个依赖关系钉住（不是缺陷，是取数口径的必然结果）
-        assert sentiment.stats[ui_app.MARKET_STAT_SH].value_label.text() == market.DASH
-        assert sentiment.stats[ui_app.MARKET_STAT_SZ].value_label.text() == market.DASH
-        assert sentiment.stats[ui_app.MARKET_STAT_BJ].value_label.text() == "140亿"
+        assert sentiment.isVisible() is True             # 情绪块照常（指数取到就显示）
+        # 成交额是**从宽基条目里**取的（`market.py` 的口径：上证/深证两只指数的 turnover
+        # 相加）—— 宽基没配时它必然是 `—`。这条断言把这个依赖关系钉住
+        #（不是缺陷，是取数口径的必然结果；北交所那一格已经删掉了，不再受影响）
+        assert flow.stats[ui_app.MARKET_STAT_AMOUNT].value_label.text() == market.DASH
         hot = market_window.market_sections[ui_app.MARKET_SECTION_HOT]
         assert hot.isVisible() is True                   # 热门板块不受指数配置影响
         assert "上证" not in "".join(e.name_label.text() for e in market_window.market_entries)
@@ -3469,8 +3644,9 @@ def test_market_page_shows_dash_and_reason_without_data(market_window, qapp) -> 
 
         assert market_window.market_overview is not None    # 拿不到 ≠ 抛异常，而是"有结构没数据"
         assert market.has_data(market_window.market_overview) is False
+        # 7 个小条目全是 `—`：成交额（沪+深）与涨跌停、涨跌家数一起降级
         assert _stat_texts(market_window) == {
-            "沪成交额": market.DASH, "深成交额": market.DASH, "北交所": market.DASH,
+            "成交额": market.DASH,
             "涨停": market.DASH, "跌停": market.DASH, "炸板": market.DASH,
             "上涨": market.DASH, "下跌": market.DASH, "平盘": market.DASH,
         }
@@ -3483,11 +3659,12 @@ def test_market_page_shows_dash_and_reason_without_data(market_window, qapp) -> 
             assert section.placeholder_label.text() == market.DASH
             assert section.placeholder_label.isVisible() is True
         assert market_window.market_entries == []
-        # 「热门板块」是**本地库**算的（当日涨停密度 + 近 5 日行业等权涨幅），
-        # 与有没有 Key / 服务端通不通**无关** —— 概览全灭时它照样有内容，这正是它的价值
+        # 「热门板块」的**本地兜底**（涨停家数 + 近 5 日行业等权涨幅）与有没有 Key /
+        # 服务端通不通**无关** —— 概览全灭时它照样有内容，这正是它的价值
         hot = market_window.market_sections[ui_app.MARKET_SECTION_HOT]
         assert hot.isVisible() is True
-        assert [row.industry for row in hot.entries] == ["半导体", "银行"]
+        up_rows = _sector_table_rows(market_window, ui_app.SECTOR_UP_TITLE)
+        assert [row[0] for row in up_rows] == ["半导体", "银行"]
         assert hot.placeholder_label.isVisible() is False
         assert market_window.market_hint.isVisible() is True
         assert "同花顺 Key" in market_window.market_hint.text()
@@ -3518,7 +3695,8 @@ def test_market_breadth_off_shows_dash_and_says_why(market_window, qapp) -> None
         assert _stat_texts(market_window)[ui_app.MARKET_STAT_UP] == market.DASH
         assert _stat_texts(market_window)[ui_app.MARKET_STAT_DOWN] == market.DASH
         assert _stat_texts(market_window)[ui_app.MARKET_STAT_FLAT] == market.DASH
-        assert _stat_texts(market_window)[ui_app.MARKET_STAT_BJ] == market.DASH
+        # 成交额与全市场快照无关（沪深两市来自两只宽基指数）→ 这一格照样有数
+        assert _stat_texts(market_window)[ui_app.MARKET_STAT_AMOUNT] == "16291亿"
         # 光看一个 `—` 用户猜不出为什么 —— 必须在页面上说清是"这个开关关着"
         assert market_window.market_hint.isVisible() is True
         assert "market_breadth" in market_window.market_hint.text()
@@ -3526,7 +3704,7 @@ def test_market_breadth_off_shows_dash_and_says_why(market_window, qapp) -> None
         for title in ("上涨", "下跌", "平盘"):
             assert title in market_window.market_hint.text()
         assert "market_breadth" in market_window.market_sections[
-            ui_app.MARKET_SECTION_SENTIMENT
+            ui_app.MARKET_SECTION_FLOW
         ].stats[ui_app.MARKET_STAT_UP].value_label.toolTip()
         # 关掉时页脚就不该再提"每 5 分钟更新"
         assert "每 5 分钟" not in market_window.market_as_of_label.fullText()
@@ -3562,11 +3740,13 @@ def _assert_market_fonts_and_alignment(win) -> None:
     assert title_font.pointSize() > group_font.pointSize()          # 页面标题最大
     from laoa_trader import market
 
-    item = sections[ui_app.MARKET_SECTION_SENTIMENT].stats[ui_app.MARKET_STAT_SH]
+    item = sections[ui_app.MARKET_SECTION_FLOW].stats[ui_app.MARKET_STAT_AMOUNT]
     assert item.value_label.text() != market.DASH                   # 有数才谈得上对齐
-    assert item.value_label.font().bold() is True                   # 数值加粗
-    # "大一号"：数值比它自己的标签大一号（标签保持正文号，只是变灰）
+    assert item.value_label.font().bold() is True                   # 数值加粗（既有层级，没动）
+    # "大一号"：数值比它自己的标签大一号（标签保持正文号，只是加粗）
     assert item.value_label.font().pointSize() == item.title_label.font().pointSize() + 1
+    # **名称加粗**（用户："所有名称显示不清楚，都加黑显示"）：小条目的名字也得加粗
+    assert item.title_label.font().bold() is True
     assert item.value_label.alignment() & Qt.AlignmentFlag.AlignRight
     # 条目里点位与涨跌幅都右对齐；两列的列宽对所有条目都一样 → 数字落在同一条竖线上
     entries = sections[ui_app.MARKET_SECTION_WIDE].entries
@@ -3579,14 +3759,20 @@ def _assert_market_fonts_and_alignment(win) -> None:
     }
     assert len(tracks) == 1
     assert tracks.pop()[0] > 0
-    # 热门板块那一块：三列数字同样右对齐 + 同一条列宽轨道
-    hot = win.market_industry_rows
-    assert hot, "需要有数据才谈得上对齐"
-    for row in hot:
-        for label in (row.limit_up_label, row.density_label, row.mom_label):
-            assert label.alignment() & Qt.AlignmentFlag.AlignRight
-    assert len({(r.limit_up_label.minimumWidth(), r.density_label.minimumWidth(),
-                 r.mom_label.minimumWidth()) for r in hot}) == 1
+    # 「热门板块」两张表：数值列右对齐、板块名称加粗
+    hot = win.market_sections[ui_app.MARKET_SECTION_HOT]
+    assert hot.tables, "两块表是固定的"
+    for title, block in hot.tables.items():
+        assert block.table.rowCount() >= 1, title          # 有数据才谈得上对齐
+        for column in (1, 2, 3):                           # 涨停数量 / 涨幅 / 主力净额
+            for row in range(block.table.rowCount()):
+                item = block.table.item(row, column)
+                assert item.textAlignment() & Qt.AlignmentFlag.AlignRight
+        # 名称那一列**加粗**，数值列不加粗（用户明确要求别把数值也加粗）
+        for row in range(block.table.rowCount()):
+            assert block.table.item(row, 0).font().bold() is True
+            for column in (1, 2, 3):
+                assert block.table.item(row, column).font().bold() is False
 
 def test_market_refresh_button_forces_refetch(market_window, qapp, monkeypatch) -> None:
     """【立即刷新】忽略 TTL 缓存，一定重打接口（与 `force=True` 同义）。"""
@@ -3702,6 +3888,7 @@ def test_market_overview_off_shows_hint_and_makes_no_request(market_window, qapp
         assert wide.placeholder_label.isVisible() is True
         assert _stat_texts(market_window)[ui_app.MARKET_STAT_LIMIT_UP] \
             .startswith(market.DASH)
+        assert _stat_texts(market_window)[ui_app.MARKET_STAT_AMOUNT] == market.DASH
         assert "market_overview" in market_window.market_hint.text()
     finally:
         market.clear_cache()
@@ -3710,13 +3897,14 @@ def test_market_layout_survives_wider_fonts(seeded, qapp, monkeypatch) -> None:
     """**换一台机器（字体更宽）也不能把数字挤掉** —— 这条是给 CI 那次红补的回归。
 
     为什么要有它：`test_overview_uses_three_columns_on_a_150pct_scaled_screen` 在 Linux
-    全绿、到 Windows CI 上红了 5 条 —— 同一段中文在 Windows 字体下更宽（实测"沪 7793亿 ·
-    深 8499亿 · 北 140亿"那一格需要 338px，只分到 231px），于是合成文本被自己的列宽截掉、
-    还把整页最小宽度顶到 714 > 视口 706。根因是**布局对字体宽度敏感**，而 Linux 上测不出来。
+    全绿、到 Windows CI 上红了 5 条 —— 同一段中文在 Windows 字体下更宽（实测那一格需要
+    338px，只分到 231px），于是合成文本被自己的列宽截掉、还把整页最小宽度顶到 714 > 视口 706。
+    根因是**布局对字体宽度敏感**，而 Linux 上测不出来。2026-09-17 起名称还都**加粗**了
+    （比原来更宽一点），这条回归更要紧。
 
     这里把应用字体放大（模拟更宽的字形）后重新检查三条硬要求：
     ① 小条目的数值不被自己的宽度截掉；② 页面最小宽度不超过视口（不出现横向滚动条）；
-    ③ 三块的结构不变。字体是最容易被忽略的变量，所以用测试钉住它，而不是等 CI 再红一次。
+    ③ 四块的结构不变。字体是最容易被忽略的变量，所以用测试钉住它，而不是等 CI 再红一次。
     """
     from PySide6.QtCore import QRect
     from PySide6.QtGui import QFont
@@ -3755,6 +3943,8 @@ def test_market_layout_survives_wider_fonts(seeded, qapp, monkeypatch) -> None:
                         (entry.name_label.text(), label.text())
             for name, item in section.stats.items():
                 assert item.value_label.width() >= item.value_label.sizeHint().width(), name
+                # 名称加粗之后更容易被挤 —— 它也得完整显示
+                assert item.title_label.width() >= item.title_label.sizeHint().width() - 2, name
         assert win.market_content.minimumSizeHint().width() \
             <= win.market_scroll.viewport().width()
         assert win.market_scroll.horizontalScrollBar().isVisible() is False
@@ -3967,40 +4157,153 @@ def test_window_stays_usable_when_dragged_down_to_the_minimum(
         market.clear_cache()
 
 
-def test_hot_industry_rows_are_ranked_by_density_with_ties_and_top_limit() -> None:
-    """`ui_app.hot_industry_rows()`：**按当日涨停密度降序**、同密度按涨停家数、
-    再同名定序（每次刷新顺序都一样），并只留前 12 —— 页面顺序就是它算出来的。
+def test_sector_rank_tables_are_sorted_by_change_pct_with_local_limit_ups() -> None:
+    """`ui_app.sector_rank_tables()`：**按涨幅**排上涨前五 / 下跌前五，
+    涨停数量用**本地那一套口径**（`pool.hot_industries` 的 `limit_up`），主力净额单位是元。
+
+    2026-09-17（用户要求）：热门板块改成两张表 —— 上涨前五按涨幅降序、下跌前五按涨幅升序，
+    各 5 行；涨停数量与选股用的是同一套口径（不另起一套）。
     """
     from laoa_trader.ui import app as ui_app
 
+    rank = [
+        {"name": "半导体", "pct": 3.21, "main_net": 1.23e9},
+        {"name": "银行", "pct": 0.55, "main_net": -4.5e8},
+        {"name": "白酒", "pct": -2.40, "main_net": -9.9e8},
+        {"name": "煤炭", "pct": -1.05, "main_net": -3.3e8},
+        {"name": "地产", "pct": -3.60, "main_net": -1.4e9},
+        {"name": "医药", "pct": 0.20, "main_net": 5.0e7},
+        {"name": "证券", "pct": 1.10, "main_net": 2.0e8},
+    ]
     industries = {
         "半导体": {"limit_up": 5, "density": 0.10, "mom": 0.03},
-        "银行": {"limit_up": 3, "density": 0.10, "mom": -0.01},   # 同密度、家数少 → 排后面
-        "白酒": {"limit_up": 9, "density": 0.30, "mom": 0.01},    # 密度最高 → 第一
-        "煤炭": {"limit_up": 0, "density": 0.0, "mom": 0.02},
-        "医药": {"limit_up": 1, "density": None, "mom": None},    # 缺密度 → 当 0 处理，排最后
+        "银行": {"limit_up": 0, "density": 0.0, "mom": -0.01},
+        "白酒": {"limit_up": 2, "density": 0.2, "mom": 0.01},
     }
-    rows = ui_app.hot_industry_rows(industries)
-    # 密度为 None 按 0 处理；同为 0 密度时按涨停家数降序（医药 1 只 > 煤炭 0 只）
-    assert [r["industry"] for r in rows] == ["白酒", "半导体", "银行", "医药", "煤炭"]
-    assert rows[0]["limit_up"] == 9 and rows[0]["density"] == 0.30
+    up, down = ui_app.sector_rank_tables(rank, industries)
+    # 上涨前五 = 涨幅降序前 5（各 5 行）
+    assert [row["name"] for row in up] == ["半导体", "证券", "银行", "医药", "煤炭"]
+    assert [row["pct"] for row in up] == [3.21, 1.10, 0.55, 0.20, -1.05]
+    # 下跌前五 = 涨幅升序前 5
+    assert [row["name"] for row in down] == ["地产", "白酒", "煤炭", "医药", "银行"]
+    assert [row["pct"] for row in down] == [-3.60, -2.40, -1.05, 0.20, 0.55]
+    assert len(up) == len(down) == ui_app.SECTOR_TOP == 5
+    # 涨停数量 = 本地口径（不在本地行业表里的板块 → None，界面画 `—`，**不是 0**）
+    assert [row["limit_up"] for row in up] == [5, None, 0, None, None]
+    # 主力净额是**元**（界面 ÷1e8 显示成"亿"），原样带着符号
+    assert up[0]["main_net"] == 1.23e9
+    assert up[0]["main_net"] / ui_app.SECTOR_NET_UNIT == pytest.approx(12.30)
 
-    # 前 12：多了就截断（行业一共 90 多个，不截会把页面拉成一条长表）
-    many = {f"行业{i:02d}": {"limit_up": i, "density": i / 100.0, "mom": 0.0}
-            for i in range(30)}
-    picked = ui_app.hot_industry_rows(many)
-    assert len(picked) == ui_app.MARKET_HOT_TOP == 12
-    assert [r["industry"] for r in picked] == [f"行业{i:02d}" for i in range(29, 17, -1)]
-    # 空输入不炸（库还没建好时就是这个入参）
-    assert ui_app.hot_industry_rows(None) == []
-    assert ui_app.hot_industry_rows({}) == []
+    # 没有涨幅的行排不进前五（不拿 0 顶替）；同涨幅按名字定序 → 顺序稳定
+    rank2 = [{"name": "乙", "pct": None}, {"name": "甲", "pct": 1.0},
+             {"name": "丙", "pct": 1.0}]
+    up2, _ = ui_app.sector_rank_tables(rank2, {})
+    assert [row["name"] for row in up2] == ["丙", "甲"]      # 稳定序：同名次按名字排
+    # 空输入不炸（取不到板块榜 / 本地库还没建好时就是这个入参）
+    assert ui_app.sector_rank_tables(None, None) == ([], [])
+    assert ui_app.sector_rank_tables([], {}) == ([], [])
 
 
-def test_market_hot_block_is_a_real_table_of_industries(market_window, qapp) -> None:
-    """「热门板块」块：**行业名 + 涨停家数 + 密度 + 近 5 日等权涨幅**四列，数值都在行里。
+def test_local_sector_tables_fall_back_and_say_so() -> None:
+    """取不到板块榜时的**本地兜底**：涨幅 = 近 5 日等权涨幅（**比例 → 百分数**），
+    主力净额一律 None（界面 `—`）。用户要的东西不许静默消失 —— 缺哪一项都要看得见。"""
+    from laoa_trader.ui import app as ui_app
 
-    这三个数就是选股时"热门行业"那套口径（`pool.hot_industries`）—— 摆出来用户才能
-    自己核对"凭什么这个板块算热"。四列各自可断言、且涨幅是唯一上色的那一列。
+    industries = {
+        "半导体": {"limit_up": 5, "density": 0.10, "mom": 0.0321},
+        "银行": {"limit_up": 0, "density": 0.0, "mom": -0.0105},
+        "煤炭": {"limit_up": 1, "density": 0.05, "mom": None},     # 缺动量 → 排不进前五
+    }
+    up, down = ui_app.local_sector_tables(industries)
+    assert [row["name"] for row in up] == ["半导体", "银行"]
+    # `mom` 是比例（0.0321 = 3.21%），这一列统一成**百分数**：×100 只做一次
+    assert up[0]["pct"] == pytest.approx(3.21)
+    assert [row["name"] for row in down] == ["银行", "半导体"]
+    assert all(row["main_net"] is None for row in up + down)
+    assert all(row["mom"] is not None for row in up + down)
+    assert ui_app.local_sector_tables({}) == ([], [])
+    # 页内说明由 `sector_payload()` 拼（下一节那条用例逐句钉住）
+
+
+def test_sector_payload_uses_the_sector_module_when_available(monkeypatch) -> None:
+    """有 `data/sectors.py` 时走板块榜；取数失败/模块缺失时退回本地口径**并在页面上说明**。
+
+    这里用一个**假的 sectors 模块**（真实契约：`fetch_sector_rank()` → list[dict]）：
+    另一条路径（模块缺失 / 它抛异常 / 返回空）也都走一遍。
+    """
+    from laoa_trader.ui import app as ui_app
+
+    class FakeSectors:
+        def __init__(self, rows=None, boom=False):
+            self.rows = rows if rows is not None else [
+                {"name": "半导体", "pct": 3.21, "main_net": 1.23e9},
+                {"name": "银行", "pct": -0.55, "main_net": -4.5e8},
+            ]
+            self.boom = boom
+
+        def fetch_sector_rank(self, *args, **kwargs):
+            if self.boom:
+                raise RuntimeError("板块榜炸了")
+            return self.rows
+
+    industries = {"半导体": {"limit_up": 5, "mom": 0.03}}
+
+    monkeypatch.setattr(ui_app, "sectors_module", lambda: FakeSectors())
+    payload = ui_app.sector_payload(object(), industries)
+    assert payload["source"] == "sectors"
+    # 表里只有两行数据 → 两张表都装着这两行（上涨前五按涨幅降序、下跌前五升序）
+    assert [row["name"] for row in payload["up"]] == ["半导体", "银行"]
+    assert [row["name"] for row in payload["down"]] == ["银行", "半导体"]
+    assert "当天" in payload["note"] and "亿" in payload["note"]
+    assert payload["up"][0]["limit_up"] == 5            # 涨停数量来自本地口径
+
+    # 模块缺失 → 本地兜底 + 写明原因
+    monkeypatch.setattr(ui_app, "sectors_module", lambda: None)
+    payload = ui_app.sector_payload(object(), industries)
+    assert payload["source"] == "local"
+    assert "未就绪" in payload["note"]
+    assert "近 5 日" in payload["note"] and "主力净额取不到" in payload["note"]
+    assert payload["up"][0]["main_net"] is None
+
+    # 取数抛异常 → 也是本地兜底（原因写清是"取不到"）
+    monkeypatch.setattr(ui_app, "sectors_module", lambda: FakeSectors(boom=True))
+    payload = ui_app.sector_payload(object(), industries)
+    assert payload["source"] == "local"
+    assert "取不到" in payload["note"]
+
+    # 返回空数据 → 同样兜底
+    monkeypatch.setattr(ui_app, "sectors_module", lambda: FakeSectors(rows=[]))
+    payload = ui_app.sector_payload(object(), industries)
+    assert payload["source"] == "local"
+    assert "没返回数据" in payload["note"]
+
+
+def test_sectors_module_import_is_defensive(monkeypatch) -> None:
+    """`sectors_module()`：拿不到板块榜模块时返回 None（**不抛**）—— 概览页是第一屏，
+    一个 import 失败不能让整个窗口打不开。
+
+    怎么模拟"模块拿不到"：把 `laoa_trader.data.sectors` 从父包里摘掉、并往 `sys.modules`
+    里塞一个 `None`（Python 对"`sys.modules` 里是 None"的子模块会抛 `ImportError`）——
+    与"模块文件还不存在 / 写坏了"是同一条代码路径（`except Exception` → 返回 None）。
+    """
+    import sys
+
+    import laoa_trader.data as data_pkg
+
+    from laoa_trader.ui import app as ui_app
+
+    assert ui_app.sectors_module() is not None          # 正常情况下当然拿得到
+    monkeypatch.delattr(data_pkg, "sectors", raising=False)
+    monkeypatch.setitem(sys.modules, "laoa_trader.data.sectors", None)
+    assert ui_app.sectors_module() is None
+
+
+def test_market_hot_block_is_two_real_tables_with_clear_headers(market_window, qapp) -> None:
+    """「热门板块」块 = **上涨前五 / 下跌前五两张表**，每张表的表头就是用户给定的四列。
+
+    用户原话："把上涨前 5 和下跌前 5 都标出来。现在的数据都没写什么意思，
+    改成以下表格标上名称。" —— 所以这条重点钉**表头文字**与**两张表都在**。
+    口径：涨停数量来自"选股用的那一套"（`pool.hot_industries`）。
     """
     from laoa_trader import market, pool
     from laoa_trader.ui import app as ui_app
@@ -4013,21 +4316,26 @@ def test_market_hot_block_is_a_real_table_of_industries(market_window, qapp) -> 
         section = win.market_sections[ui_app.MARKET_SECTION_HOT]
         assert section.isVisible() is True
         assert section.title_label.text() == ui_app.MARKET_SECTION_HOT
-        # 行数据与"选股用的那套实现"**同一个函数**（不是界面自己另算一套）
+        assert list(section.tables) == [ui_app.SECTOR_UP_TITLE, ui_app.SECTOR_DOWN_TITLE]
+        assert (ui_app.SECTOR_UP_TITLE, ui_app.SECTOR_DOWN_TITLE) == ("上涨前五", "下跌前五")
+        for title, block in section.tables.items():
+            # 表头就是用户给的那四个字（"现在的数据都没写什么意思" → 现在写清了）
+            assert _sector_headers(win, title) == ["板块名称", "涨停数量", "涨幅", "主力净额"]
+            assert block.title_label.text() == title
+            # 每张表各 5 行（本次数据只有 2 个行业 → 就 2 行；上限是 5）
+            assert 0 < block.table.rowCount() <= ui_app.SECTOR_TOP == 5
+            # 四列的表头 tooltip 都写清了口径（列头只有四个字，放不下解释）
+            for column in range(4):
+                tip = block.table.horizontalHeaderItem(column).toolTip()
+                assert len(tip) >= 10, (title, column)
+        # 涨停数量用的是**本地那一套**（`pool.hot_industries`），不是另起一套
         expected = pool.hot_industries(win.cfg.db_path, top=ui_app.MARKET_HOT_TOP)
-        assert set(expected) == {row.industry for row in win.market_industry_rows}
-        for row in win.market_industry_rows:
-            industry, limit_up, density, mom = _industry_fields(row)
-            assert industry in expected
-            assert limit_up == f"{expected[industry]['limit_up']}只"
-            assert density == f"{expected[industry]['density'] * 100:.2f}%"
-            assert mom == f"{expected[industry]['mom'] * 100:+.2f}%"
-            # 涨停家数与密度不上色（"数量"没有涨跌方向），只有近 5 日涨幅按涨跌上色
-            assert row.limit_up_label.styleSheet() == ""
-            assert row.density_label.styleSheet() == ""
-            expect_color = market.value_color(expected[industry]["mom"] * 100)
-            assert row.mom_label.styleSheet() == (
-                f"color:{expect_color}" if expect_color else "")
+        up_rows = _sector_table_rows(win, ui_app.SECTOR_UP_TITLE)
+        for row in up_rows:
+            assert row[0] in expected
+            assert row[1] == str(expected[row[0]]["limit_up"])
+        # 本地口径下涨幅 = 近 5 日等权涨幅（比例 → 百分数），页内说明写清了这一点
+        assert up_rows[0][2] == f"{expected[up_rows[0][0]]['mom'] * 100:+.2f}%"
     finally:
         market.clear_cache()
 
@@ -4035,7 +4343,7 @@ def test_market_hot_block_is_a_real_table_of_industries(market_window, qapp) -> 
 def test_market_hot_block_explains_itself_when_local_data_is_missing(
     market_window, qapp, monkeypatch
 ) -> None:
-    """本地还没有涨停池数据 → 「热门板块」一个 `—` 占位 + 页面上写出**怎么补**。
+    """本地没有涨停池数据 + 板块榜也取不到 → 两张表空着 + **页面上写出怎么补**。
 
     不能只留一个空块：用户会以为"这一块本来就不显示东西"，而实际是数据还没下。
     """
@@ -4045,17 +4353,22 @@ def test_market_hot_block_explains_itself_when_local_data_is_missing(
     market.clear_cache()
     try:
         monkeypatch.setattr(pool, "hot_industries", lambda *a, **k: {})
+        monkeypatch.setattr(ui_app, "sectors_module", lambda: None)
         market_window.refresh_market_overview(force=True, client=_market_fake())
         qapp.processEvents()
         section = market_window.market_sections[ui_app.MARKET_SECTION_HOT]
-        assert section.entries == []
+        assert all(block.table.rowCount() == 0 for block in section.tables.values())
         assert section.placeholder_label.isVisible() is True
         assert section.placeholder_label.text() == market.DASH
+        # 表头仍然在（空表也要看得出这四列是什么）
+        assert _sector_headers(market_window, ui_app.SECTOR_UP_TITLE) \
+            == list(ui_app.SECTOR_TABLE_HEADERS)
         assert market_window.market_hint.isVisible() is True
         assert "热门板块" in market_window.market_hint.text()
         assert "刷新数据" in market_window.market_hint.text()
     finally:
         market.clear_cache()
+
 
 def test_overview_columns_fit_the_screen_without_clipping(
     screen_window, qapp
@@ -4091,6 +4404,8 @@ def test_overview_columns_fit_the_screen_without_clipping(
         assert len(rows) == -(-len(codes) // columns)             # 行数正好排满
         sentiment_rows = _grid_rows(win.market_sections[ui_app.MARKET_SECTION_SENTIMENT])
         assert all(len(row) <= columns for row in sentiment_rows)
+        # 7 个小条目最多 7 列（宽屏一行 7 个），窄屏按算出来的列数往下排
+        assert 1 <= win._market_stat_columns <= ui_app.MARKET_STAT_MAX_COLUMNS == 7
         # 内容不比视口宽 → 不会出现横向滚动条
         assert win.market_content.minimumSizeHint().width() \
             <= win.market_scroll.viewport().width()
@@ -4103,14 +4418,18 @@ def test_overview_columns_fit_the_screen_without_clipping(
                 entry.thscode
             for label in (entry.value_label, entry.pct_label):
                 assert label.width() >= label.sizeHint().width(), entry.thscode
-        # 小条目的数值也不许被自己的宽度截掉
+        # 小条目的名称与数值都不许被自己的宽度截掉
         for name, item in win.market_sections[
-                ui_app.MARKET_SECTION_SENTIMENT].stats.items():
+                ui_app.MARKET_SECTION_FLOW].stats.items():
             assert item.value_label.width() >= item.value_label.sizeHint().width(), name
-        # 热门板块的三列数字同理
-        for row in win.market_industry_rows:
-            for label in (row.limit_up_label, row.density_label, row.mom_label):
-                assert label.width() >= label.sizeHint().width(), row.industry
+            assert item.title_label.width() >= item.title_label.sizeHint().width(), name
+        # 热门板块两张表的每一格文字都不许被自己的列宽截掉
+        for title, block in win.market_sections[ui_app.MARKET_SECTION_HOT].tables.items():
+            for row in range(block.table.rowCount()):
+                for column in range(block.table.columnCount()):
+                    item = block.table.item(row, column)
+                    need = block.table.fontMetrics().horizontalAdvance(item.text())
+                    assert block.table.columnWidth(column) >= need, (title, row, column)
         # 一行页脚照样成立
         assert win.market_footer.height() \
             <= max(win.market_as_of_label.height(), win.btn_market_refresh.height()) + 8
@@ -4155,13 +4474,16 @@ def test_market_entry_columns_shrink_with_the_window(screen_window, qapp) -> Non
         assert win._market_columns >= wide_columns
         assert win.market_content.minimumSizeHint().width() \
             <= win.market_scroll.viewport().width()
-        # 小条目最多 3 列：列数 5 时它们仍然按 3 列排（摊在 5 列上会松得看不出关系），
-        # 9 条正好 3×3
-        stats = win.market_sections[ui_app.MARKET_SECTION_SENTIMENT].stats
-        grid = win.market_sections[ui_app.MARKET_SECTION_SENTIMENT].stats_grid
+        # 小条目按**自己的列数**排（与指数条目那套分开算）：宽屏一行 7 个，
+        # 窗口一窄就往下排 —— 位置得与算出来的列数一致，且 7 条一个都不少
+        stats = win.market_sections[ui_app.MARKET_SECTION_FLOW].stats
+        grid = win.market_sections[ui_app.MARKET_SECTION_FLOW].stats_grid
+        stat_columns = win._market_stat_columns
         positions = [grid.getItemPosition(grid.indexOf(item))[:2]
                      for item in stats.values()]
-        assert positions == [(row, col) for row in range(3) for col in range(3)]
+        assert positions == [(index // stat_columns, index % stat_columns)
+                            for index in range(len(stats))]
+        assert len(stats) == 7
     finally:
         market.clear_cache()
 
@@ -4210,6 +4532,220 @@ def test_pool_row_tooltip_marks_open_only_strategy(pool_window, qapp, monkeypatc
 #
 # 为什么放在界面测试文件里：它是这两列的**唯一数据源**（`KIND_LABELS` 的短标签、
 # tooltip 的整句话都从它出来），换掉它 = 两列的语义就变了。
+
+
+# ── 两张表新增的「市值」「换手」列 / 「监控开关」列 / 去掉 `*` ──
+#
+# 为什么这几条放在界面测试里：这三个改动都是**用户直接提的界面问题**
+# （2026-09-17）："两张表加市值换手"、"提醒列改成监控开关、点一下就能切换"、
+# "把 `*` 号去掉"（用户把它误当成监控状态标记）。断言的就是他在界面上看到的东西。
+
+
+def _inject_snapshot(window, symbol: str, **extra) -> None:
+    """给某只票塞一份**实时快照**（含市值/换手两项），绕开网络。"""
+    quote = {"symbol": symbol, "price": 3.20, "pct": 0.63, "at": time.time(),
+             "source": "public"}
+    quote.update(extra)
+    window.quotes.apply({symbol: quote})
+
+
+def test_tables_show_circ_mktcap_and_turnover_rate(window, seeded, qapp) -> None:
+    """两张表的「市值」「换手」：取快照里的**流通市值（亿）**与**实时换手率（%）**；
+    没有快照时是 `—`（**绝不显示 0** —— 0 亿市值/0% 换手是真实存在的值）。"""
+    from laoa_trader import market
+
+    # 600001 只是持仓；把它也加成自选，池子表里才有它这一行
+    with storage.connect(seeded.db_path) as conn:
+        storage.upsert_watchlist(conn, "600001", name="低价样本", note="")
+    window._pool_signature = None
+    cap_col = ui_app.WATCH_HEADERS.index("市值")
+    turn_col = ui_app.WATCH_HEADERS.index("换手")
+    # 持仓表的两列同名，但下标不同（前面多了成本价那一列）
+    p_cap = ui_app.POSITION_HEADERS.index("市值")
+    p_turn = ui_app.POSITION_HEADERS.index("换手")
+    assert (cap_col, turn_col) == (3, 4)
+    assert (p_cap, p_turn) == (4, 5)
+
+    # ① 没有实时快照 → 两列都是 `—`（不是 0），tooltip 说清"为什么是 —"
+    window._pool_signature = None
+    window._position_signature = None
+    window._refresh_pool_table()
+    window._refresh_positions()
+    qapp.processEvents()
+    row = _symbols_of(window.pool_table).index("600001")
+    cells = _row_cells(window.pool_table, row)
+    assert cells[cap_col] == market.DASH and cells[turn_col] == market.DASH
+    assert "不是 0" in window.pool_table.item(row, cap_col).toolTip()
+    pcells = _row_cells(window.position_table, 0)
+    assert pcells[p_cap] == market.DASH and pcells[p_turn] == market.DASH
+
+    # ② 有快照（含这两项）→ 照实显示：市值单位亿、换手带 %
+    _inject_snapshot(window, "600001", circ_mktcap=456.78, turnover_rate=1.23)
+    window._pool_signature = None
+    window._position_signature = None
+    window._refresh_pool_table()
+    window._refresh_positions()
+    qapp.processEvents()
+    assert window.pool_table.item(row, cap_col).text() == "456.78亿"
+    assert window.pool_table.item(row, turn_col).text() == "1.23%"
+    assert window.position_table.item(0, p_cap).text() == "456.78亿"
+    assert window.position_table.item(0, p_turn).text() == "1.23%"
+    # 表头写了口径（"亿"/"%"），tooltip 还点明"是流通市值，不是总市值"
+    assert "流通市值" in window.pool_table.horizontalHeaderItem(cap_col).toolTip()
+    assert "换手率" in window.pool_table.horizontalHeaderItem(turn_col).toolTip()
+    assert "不是总市值" in window.position_table.item(0, p_cap).toolTip()
+
+
+def test_tables_snapshot_columns_are_dash_not_zero_when_only_one_is_missing(
+    window, seeded, qapp
+) -> None:
+    """快照在、但**没给这两项**（来源不提供 / 契约还没接上）→ 还是 `—`，不是 0。
+
+    这是最容易被写错的一处：`float(None)` 会炸，`float(0)` 会显示成 0.00亿/0.00%，
+    而"0 亿市值"会被用户读成"这只票没人要"。
+    """
+    from laoa_trader import market
+
+    with storage.connect(seeded.db_path) as conn:
+        storage.upsert_watchlist(conn, "600001", name="低价样本", note="")
+    cap_col = ui_app.WATCH_HEADERS.index("市值")
+    _inject_snapshot(window, "600001")          # 只有价与涨幅，没有市值/换手
+    window._pool_signature = None
+    window._refresh_pool_table()
+    qapp.processEvents()
+    row = _symbols_of(window.pool_table).index("600001")
+    assert window.pool_table.item(row, cap_col).text() == market.DASH
+    assert window.pool_table.item(
+        row, ui_app.WATCH_HEADERS.index("换手")).text() == market.DASH
+    assert "0.00亿" not in "".join(_row_cells(window.pool_table, row))
+
+
+def test_monitor_column_click_toggles_position_monitor(window, seeded, qapp) -> None:
+    """「监控开关」列：**点一下就能切换**（与右键菜单调的是同一个方法）。"""
+    from laoa_trader import intraday
+    from laoa_trader.data import storage as st
+
+    column = ui_app.POSITION_MONITOR_COLUMN
+    table = window.position_table
+    window.tabs.setCurrentWidget(_tab_page(window, ui_app.TAB_POSITION))
+    qapp.processEvents()
+    assert table.item(0, column).text() == ui_app.MONITOR_ON_TEXT
+
+    window._on_table_cell_clicked(table, 0, column)          # ← 单击那一格
+    qapp.processEvents()
+    assert table.item(0, column).text() == ui_app.MONITOR_OFF_TEXT
+    with st.connect(seeded.db_path) as conn:
+        assert int(st.load_positions(conn, open_only=False)["600001"]["monitor"]) == 0
+    # 真实作用：不再进做T/盘中提醒的观察面（与右键【关闭监控】完全一致）
+    assert list(intraday.held_positions(seeded.db_path)) == []
+    assert "关闭监控" in window.status_label.fullText()
+
+    window._on_table_cell_clicked(table, 0, column)          # 再点一次 → 打开
+    qapp.processEvents()
+    assert table.item(0, column).text() == ui_app.MONITOR_ON_TEXT
+    assert list(intraday.held_positions(seeded.db_path)) == ["600001"]
+    # 关掉的那一格会变灰（一眼看得出这一行是停用的）
+    window._on_table_cell_clicked(table, 0, column)
+    qapp.processEvents()
+    from PySide6.QtGui import QColor
+
+    assert table.item(0, column).foreground().color().name() \
+        == QColor(Qt.GlobalColor.gray).name()        # 关掉的那一格变灰
+
+
+def test_monitor_column_click_toggles_watchlist_and_explains_for_strategy_rows(
+    window, seeded, qapp
+) -> None:
+    """自选行点一下就能开关监控；**策略/公式选中的票不是自选**，点了给一句指路的话
+    （不静默失败 —— 与右键菜单里那一项灰掉 + tooltip 说明是同一个判据）。"""
+    from laoa_trader.data import storage as st
+
+    column = ui_app.WATCH_MONITOR_COLUMN
+    table = window.pool_table
+    with st.connect(seeded.db_path) as conn:
+        st.upsert_watchlist(conn, "600001", name="低价样本", note="")
+    window._pool_signature = None
+    window._refresh_pool_table()
+    qapp.processEvents()
+    rows = {_symbols_of(table)[i]: i for i in range(table.rowCount())}
+    assert set(rows) == {"600002", "600001"}
+
+    # 策略标的（600002）：不能在这里关 → 文字仍是 `开启`，点一下给指路的话
+    assert table.item(rows["600002"], column).text() == ui_app.MONITOR_ON_TEXT
+    window._on_table_cell_clicked(table, rows["600002"], column)
+    qapp.processEvents()
+    assert table.item(rows["600002"], column).text() == ui_app.MONITOR_ON_TEXT
+    assert "不能在这里单独关掉监控" in window.status_label.fullText()
+    assert "策略" in window.status_label.fullText()
+
+    # 自选（600001）：点一下 → `关闭`，写回 watchlist.enabled = 0
+    window._on_table_cell_clicked(table, rows["600001"], column)
+    qapp.processEvents()
+    with st.connect(seeded.db_path) as conn:
+        assert st.watchlist_map(conn)["600001"]["enabled"] == 0
+    assert table.item(rows["600001"], column).text() == ui_app.MONITOR_OFF_TEXT
+    # 再点回来
+    window._on_table_cell_clicked(table, rows["600001"], column)
+    qapp.processEvents()
+    with st.connect(seeded.db_path) as conn:
+        assert st.watchlist_map(conn)["600001"]["enabled"] == 1
+
+
+def test_monitor_column_keeps_the_alert_content_in_the_tooltip(window, seeded, qapp) -> None:
+    """「提醒」列改成监控开关之后，**提醒内容一点没丢**：整句话都在这一格的 tooltip 里。"""
+    from laoa_trader.intraday import now_shanghai
+
+    today = now_shanghai().strftime("%Y-%m-%d")
+    with storage.connect(seeded.db_path) as conn:
+        storage.record_alerts(conn, [
+            {"symbol": "600001", "kind": "stop_loss", "price": 2.90,
+             "detail": "现价 2.90 ≤ 参考价 3.05 × 0.95"},
+        ], today)
+    window._position_signature = None
+    window._refresh_positions()
+    qapp.processEvents()
+    cell = window.position_table.item(0, ui_app.POSITION_MONITOR_COLUMN)
+    tip = cell.toolTip()
+    assert "监控：已开启" in tip
+    assert "触及止损" in tip                      # 原来「提醒」列的短标签
+    assert "现价 2.90 ≤ 参考价 3.05 × 0.95" in tip  # 整句话
+    assert "时间：" in tip                         # 连时间都在
+    assert "点这一格就能切换" in tip               # 用户怎么用这一格，也写在 tooltip 里
+
+
+def test_price_columns_have_no_star_and_say_local_close_in_the_tooltip(
+    window, seeded, qapp
+) -> None:
+    """本地收盘价**不再加 `*`**（用户把它误读成监控状态标记），改由 tooltip 说清
+    "这是本地最新收盘价（MM-DD），不是实时价"。"""
+    from laoa_trader.data import storage as st
+
+    with st.connect(seeded.db_path) as conn:
+        bar = st.latest_raw_closes(conn, ["600001"])["600001"]
+        st.upsert_watchlist(conn, "600001", name="低价样本", note="")
+    mmdd = bar["date"][5:]
+    window._pool_signature = None
+    window._position_signature = None
+    window._refresh_pool_table()
+    window._refresh_positions()
+    qapp.processEvents()
+    # 两张表各取 600001 那一行（池子表里自选排在池内行之后）
+    rows = {
+        window.pool_table: _symbols_of(window.pool_table).index("600001"),
+        window.position_table: _symbols_of(window.position_table).index("600001"),
+    }
+    for table, row in rows.items():
+        headers = ([table.horizontalHeaderItem(c).text()
+                    for c in range(table.columnCount())])
+        price_col = headers.index("现价")            # 两张表的「现价」下标不同（列不一样）
+        cells = _row_cells(table, row)
+        assert not any("*" in text for text in cells), cells
+        tip = table.item(row, price_col).toolTip()
+        assert "不是实时价" in tip
+        assert mmdd in tip
+        assert f"{bar['close']:.2f}" in tip
+        # 现价那一格就是本地收盘价本身（没有多一个字符）
+        assert table.item(row, price_col).text() == f"{bar['close']:.2f}"
 
 
 def test_quote_timestamp_text_is_beijing_time() -> None:

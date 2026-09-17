@@ -25,6 +25,7 @@ import threading
 import time
 import sqlite3
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from laoa_trader import intraday, pool, state
@@ -293,8 +294,9 @@ def run_daily(
     selection: Any = None,
     with_data: bool = True,
     stage_cb: Any = None,
+    export_dir: Any = None,
 ) -> dict:
-    """跑一次完整的日更流程：数据增量（可选）→ 策略 → 建池 → 推送。
+    """跑一次完整的日更流程：数据增量（可选）→ 策略 → 建池 → 导出桌面文件 → 推送。
 
     **界面上的【开始选股】（「策略选股」页，或托盘菜单里的同名项）与 CLI `--once`
     共用这一个函数** —— 按钮名取自 `hints.BTN_RUN_TEXT`，别处不许自己写一个
@@ -309,12 +311,18 @@ def run_daily(
         progress_cb: 数据同步进度回调 `(stage, done, total)`。
         selection: 启用的组/策略；None 时按配置解析（`enabled_groups`/`enabled_strategies`）。
         with_data: 是否先跑一次数据增量（只想重算选股时传 False）。
-        stage_cb: 阶段名回调（界面状态栏显示"跑策略/建池/推送通知"）。
+        stage_cb: 阶段名回调（界面状态栏显示"跑策略/建池/推送通知"；
+            导出成功时还会收到一句 `结果已导出到 <路径>` —— 用户要求写成桌面文件就
+            在状态栏里说一声）。
+        export_dir: 桌面文件的落点。None（默认）= 自己找桌面
+            （`pool.desktop_dir()`：系统桌面 → `Desktop`/`桌面`/OneDrive 桌面 → 数据目录兜底）。
+            **测试与特殊部署注入它** —— 传了就不会往真人桌面上写文件。
 
     Returns:
         {"sync": [...], "picks": n, "signals": n, "pool": [...], "notify": {...},
          "errors": [...], "data_date":…, "selection": {...},
-         "pushed": bool, "push_skipped": str|None}
+         "pushed": bool, "push_skipped": str|None,
+         "export_path": str|None（导出成功时是文件路径）}
     """
     cfg = cfg or get_config()
     engine = engine or DataEngine(cfg.db_path)
@@ -325,6 +333,8 @@ def run_daily(
         "sync": [], "picks": 0, "signals": 0, "pool": [], "notify": {}, "errors": [],
         "data_date": None, "selection": selection.as_dict() if selection else {},
         "pushed": False, "push_skipped": None,
+        # 桌面导出：成功时是文件路径，失败/跳过时是 None（失败原因进 errors，不静默）
+        "export_path": None,
         # 推送过滤（`push_only_proven`）：被跳过的标的与中文原因 —— 状态栏/日志/报告都从这里取
         "push_skipped_rows": [], "push_note": None, "push_skipped_kind": None,
     }
@@ -389,6 +399,40 @@ def run_daily(
     if not pool_rows:
         logger.info("今日无股票池（非交易日 / 数据不足 / 所选策略组无候选 / 没有自选股），跳过推送")
         return report
+
+    # 2.5) 桌面导出：用户要求「选股结果直接进自选股池，**也可以同时** output 一个文件到桌面」。
+    # 为什么挂在**建池成功之后**、推送之前：
+    #   * 池子已经落库（`build_pool(save=True)`），导出的就是用户马上要在界面上看到的那一份；
+    #   * 推送那一段有好几个提前 return（内容没变不重复推、全是"依赖开盘"的标的就整批不推），
+    #     导出要是挂在推送之后，这些情况下桌面就**没有文件**——而用户要的是"选完股就有"。
+    _stage("导出结果")
+    try:
+        exported = pool.export_pick_file(
+            pool_rows,
+            data_date=report["data_date"],
+            dest_dir=export_dir,
+            db_path=cfg.db_path,
+            # 桌面找不到时退回**数据目录**（用户找得到的地方），而不是悄悄不导出
+            fallback_dir=Path(cfg.db_path).parent,
+        )
+    except Exception as exc:  # noqa: BLE001 - 兜底：导出绝不能把选股/推送一起带走
+        # 内层 `export_pick_file` 自己已经兜过一层，这里是"万一它被换掉/被 monkeypatch
+        # 成会抛的实现"时的最后一道 —— 测试用 monkeypatch 抛异常正是打这一条。
+        report["errors"].append(f"导出桌面文件：{type(exc).__name__}: {exc}")
+        logger.warning(f"导出选股结果失败（不影响选股与推送）：{exc}")
+    else:
+        if exported is not None:
+            report["export_path"] = str(exported)
+            # 状态栏里也说一句（用户要求："写出去了就在状态栏/日志里说一句
+            # 结果已导出到 <路径>"）。`stage_cb` 是这一层唯一能碰到状态栏的口子
+            # （主窗口把它接到 `_set_status`），所以这里把整句话当"阶段"发出去 ——
+            # 紧接着的"推送通知"阶段可能把它顶掉，所以路径同时留在
+            # `report["export_path"]` 里，调用方想再显示一次随时能取。
+            _stage(f"结果已导出到 {exported}")
+        else:
+            # 进 errors：界面状态栏会把第一条错误说出来。用户被承诺过"桌面上会有个文件"，
+            # 没写出来就必须让他知道，而不是只写进他自己不会去看的日志。
+            report["errors"].append("导出桌面文件：没有写成功（原因见日志）")
 
     # 3) 推送（多频道并行；同一天同一批内容只推一次）
     if notify:

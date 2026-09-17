@@ -89,8 +89,13 @@ MARKET_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
 
 #: `clist` / `ulist.np` 共用的字段口径（实测值，见模块头）：
 #:   f12 代码 / f14 名称 / f2 现价 / f3 涨跌幅% / f4 涨跌额 / f5 成交量(**手**) /
-#:   f6 成交额(**元**) / f15 最高 / f16 最低 / f17 今开 / f18 昨收
-SNAPSHOT_FIELDS = "f12,f14,f2,f3,f4,f5,f6,f15,f16,f17,f18"
+#:   f6 成交额(**元**) / f15 最高 / f16 最低 / f17 今开 / f18 昨收 /
+#:   f8 换手率(%) / f21 流通市值(**元**，见 `YUAN_TO_YI`)
+#: `f8`/`f21` 是 2026-09-17 为了与公开源"统一口径"补要的两列（实测原始响应：
+#:   `{"f2":1266.98,"f5":17554,"f6":2217338283.0,"f8":0.14,"f12":"600519",
+#:     "f21":1583828386835}`
+#: ）—— 请求里不写这两个字段名，服务端**就不会返回它们**，所以字段串必须一起改。
+SNAPSHOT_FIELDS = "f12,f14,f2,f3,f4,f5,f6,f15,f16,f17,f18,f8,f21"
 
 #: 单只快照 `stock/get` 的字段（**分口径**，见模块头第 2 条）：
 #:   f43 现价 / f44 最高 / f45 最低 / f46 今开 / f47 成交量(手) / f48 成交额(元) /
@@ -146,10 +151,21 @@ MAX_PLAUSIBLE_PRICE = 10000.0
 #: 归一化后的统一口径（**与 `sources.QUOTE_FIELDS` 必须一致**，有测试钉住）。
 #: 为什么不集中在 `sources` 里共享：`sources` 会 import 本模块，
 #: 本模块再 import sources 就成环了。
+#: 2026-09-17 追加 `turnover_rate`(%) 与 `circ_mktcap`(亿)：这两列原来是公开源
+#: （腾讯/新浪）独有的，收进统一口径之后，界面不必再问"你这个来源有没有换手率"。
 UNIFIED_KEYS: tuple[str, ...] = (
     "symbol", "name", "last_price", "prev_close", "open",
     "high", "low", "volume", "turnover", "pct",
+    "turnover_rate", "circ_mktcap",
 )
+
+#: 元 → 亿（统一口径里市值一律是**亿**）。
+#: 为什么非要换算：东财 `f21` 是**元**，而腾讯 `ltsz`/`zsz` 是**亿** —— 两个来源直接
+#: 进同一张表，用户看到的市值会差 1e8 倍。实测依据（2026-09-17，同一时刻两路对拉）：
+#:   * 东财 `ulist.np`：`600519` → `f21 = 1583828386835`（元）；
+#:   * 腾讯 `qt.gtimg.cn`：`600519` → `[44] = 15838.28`（亿）；
+#:   `1583828386835 ÷ 1e8 = 15838.28`，与腾讯**一字不差** → `f21` 的单位确实是元。
+YUAN_TO_YI = 1e8
 
 #: 注入式 opener 的签名：`opener(url, params, timeout) -> dict`（**已解析的 JSON**）。
 #: 为什么契约是"解析后的 dict"而不是字节流：测试要的是"固定 JSON、完全离线"，
@@ -234,6 +250,16 @@ def _pct(value: Any, caliber: str) -> float | None:
     return number / 100.0 if caliber == CALIBER_FEN else number
 
 
+def _yi(value: Any) -> float | None:
+    """市值字段（`f21`，单位**元**）→ **亿**；取不到 → None（**不是 0**）。
+
+    `fltt=2` 影响的是价格类字段，市值不受它影响：实测（2026-09-17）带 `fltt=2` 时
+    `600519` 的 `f21` 仍是 `1583828386835`（元），÷1e8 = 15838.28 亿。
+    """
+    number = _num(value)
+    return number / YUAN_TO_YI if number is not None else None
+
+
 # ── 代码 → secid ──
 
 
@@ -298,6 +324,7 @@ def normalize_row(row: dict, caliber: str = CALIBER_YUAN) -> dict | None:
     **单位换算**（写错就是静默错价，所以每一处都注明实测依据）：
       * `f5` 成交量是**手** → ×100 得**股**（模块头第 5 条的两条算术核对）；
       * `f6` 成交额本来就是**元**，不动；
+      * `f21` 流通市值是**元** → ÷1e8 得**亿**（`_yi`，与腾讯的"亿"对齐）；
       * 价格与涨跌幅按 `caliber` 归一（见 `CALIBER_*`）。
 
     Args:
@@ -331,6 +358,10 @@ def normalize_row(row: dict, caliber: str = CALIBER_YUAN) -> dict | None:
         "volume": volume * LOTS_TO_SHARES if volume is not None else None,   # 手 → 股
         "turnover": _num(row.get("f6")),                                     # 元（不动）
         "pct": _pct(row.get("f3"), caliber),
+        # `f8` 换手率本来就是百分数原值（实测 600519 `f8=0.14`，与腾讯 `[38]` 一致）；
+        # `f21` 是**元** → ÷1e8 成亿（实测 1583828386835 → 15838.28 亿）
+        "turnover_rate": _num(row.get("f8")),
+        "circ_mktcap": _yi(row.get("f21")),
     }
 
 
@@ -698,6 +729,7 @@ __all__ = [
     "SECID_BATCH",
     "SNAPSHOT_FIELDS",
     "UNIFIED_KEYS",
+    "YUAN_TO_YI",
     "daily",
     "normalize_row",
     "rows_to_map",

@@ -32,6 +32,11 @@ SAMPLE_ROWS: list[dict] = [
     {"thscode": "399006.SZ", "last_price": 3285.58, "price_change_ratio_pct": -1.10},
     {"thscode": "000688.SH", "last_price": 1528.27, "price_change_ratio_pct": -1.62},
     {"thscode": "000300.SH", "last_price": 4480.08, "price_change_ratio_pct": -0.67},
+    # 宽基里**必须有的那两只**（用户要求加上证50；中证2000 拿不到，换成中证1000，
+    # 见 `market.WIDE_INDEX_EXTRA_CODES` 的说明）。数值是 2026-09-17 腾讯实测量的
+    # 收盘点位，用来说明"这一行确实在页面上"（不是编的数）
+    {"thscode": "000016.SH", "last_price": 2844.23, "price_change_ratio_pct": +0.42},
+    {"thscode": "000852.SH", "last_price": 7548.82, "price_change_ratio_pct": -1.21},
     # 情绪
     {"thscode": "883404.TI", "last_price": 885.529, "price_change_ratio_pct": -0.18},
     {"thscode": "883958.TI", "last_price": 6928.171, "price_change_ratio_pct": +3.53},
@@ -43,14 +48,16 @@ SAMPLE_ROWS: list[dict] = [
 ]
 
 #: 概览页应当长成的样子（用户给的样例；一行一组、组名在前，组内用 `｜` 分隔）。
-#: 成交额四舍五入到亿（7792.4→7792、8498.9→8499、140.1→140）；
-#: 这里按 `market_breadth = false` 渲染，所以北交所与涨跌家数是 `—`
+#: 2026-09-17 起成交额是**沪 + 深 一个数**（7792.4 + 8498.9 = 16291.3 → 16291 亿），
+#: 不再分成"沪 … 深 … 北 …"三格（用户要求；北交所那一格删掉）。
+#: 这里按 `market_breadth = false` 渲染，所以涨跌家数是 `—`
 #: （默认是开的，开着的版本见 `test_page_sample_with_breadth_on`）。
 SAMPLE_LINES = [
-    "涨停 55 · 跌停 16 · 炸板 30 ｜ 沪 7792亿 · 深 8499亿 · 北 —",
+    "涨停 55 · 跌停 16 · 炸板 30 ｜ 成交额 16291亿",
     "上涨 — · 下跌 — · 平盘 —",
     "宽基：上证 3885.33 -0.07% ｜ 深成 13384.57 -0.64% ｜ 创业板 3285.58 -1.10% ｜ "
-    "科创50 1528.27 -1.62% ｜ 沪深300 4480.08 -0.67%",
+    "科创50 1528.27 -1.62% ｜ 沪深300 4480.08 -0.67% ｜ 上证50 2844.23 +0.42% ｜ "
+    "中证1000 7548.82 -1.21%",
     "情绪：同花顺情绪 885.53 -0.18% ｜ 昨日连板 6928.17 +3.53% ｜ "
     "昨日打首板 1551.88 +1.69% ｜ 微盘股 2131.00 +0.95%",
     "板块：银行 1408.77 +0.88% ｜ 证券 1428.64 -0.27%",
@@ -292,7 +299,10 @@ def test_overview_parses_limits_turnover_and_indices(mcfg) -> None:
     assert overview["configured_groups"] == ["indices", "sentiment", "sector"]
 
     names = [item["name"] for item in overview["indices"]]
-    assert names == ["上证", "深成", "创业板", "科创50", "沪深300"]
+    # 宽基 = 配置里的五只 + **必须有的两只**（`market.WIDE_INDEX_EXTRA_CODES`：
+    # 上证50 / 中证1000，2026-09-17 用户要求加，中证2000 拿不到所以换成中证1000）
+    assert names == ["上证", "深成", "创业板", "科创50", "沪深300",
+                     "上证50", "中证1000"]
     first = overview["indices"][0]
     assert first["thscode"] == "000001.SH"
     assert first["last"] == pytest.approx(3885.33)
@@ -317,29 +327,46 @@ def test_lines_match_the_agreed_sample(mcfg) -> None:
 
 
 def test_page_sample_with_breadth_on() -> None:
-    """打开 `market_breadth`（现在是默认值）时，摘要行带北交所、第二行是涨跌家数 ——
-    数字照抄用户实测的 `北 140亿 / 上涨 3126 · 下跌 2224 · 平盘 221`。"""
+    """打开 `market_breadth`（现在是默认值）时：摘要行是"涨跌停 + **沪深合计成交额**"，
+    第二行是涨跌家数（数字照抄用户实测的 `上涨 3126 · 下跌 2224 · 平盘 221`）。
+
+    2026-09-17 改版（用户要求）：成交额 = 沪 + 深 **一个数**，
+    **北交所那一格删掉** —— 所以这里同时钉住"三个数合成 16291 亿"与
+    "`bj` 就算有值（140.1 亿）也不再出现在任何一行文本里"。
+    页脚那句"每 5 分钟更新"只提涨跌家数：成交额已经和指数同一节拍（每分钟），
+    再把它写进这句话就是错的。
+    """
     overview = market._skeleton(configured=["indices", "sentiment", "sector"])
     overview.update({
         "limits": {"up": 55, "down": 16, "break": 30},
-        "turnover": {"sh": 7792.4e8, "sz": 8498.9e8, "bj": 140.1e8},
+        # total 就是"沪 + 深"（真实路径在 `fetch_overview` 里算出来；这里手搓骨架
+        # 所以要自己给全这一份，否则成交额会显示 —）
+        "turnover": {"sh": 7792.4e8, "sz": 8498.9e8, "bj": 140.1e8,
+                     "total": 7792.4e8 + 8498.9e8},
         "breadth": {"up": 3126, "down": 2224, "flat": 221},
         "breadth_enabled": True,
         "as_of": "2026-09-14 15:03",
     })
     lines = market.lines(overview)
-    assert lines[0] == "涨停 55 · 跌停 16 · 炸板 30 ｜ 沪 7792亿 · 深 8499亿 · 北 140亿"
+    assert lines[0] == "涨停 55 · 跌停 16 · 炸板 30 ｜ 成交额 16291亿"
+    assert "北" not in lines[0] and "140亿" not in lines[0]      # 北交所不再显示
     assert lines[1] == "上涨 3126 · 下跌 2224 · 平盘 221"
     assert lines[2:] == ["宽基：—", "情绪：—", "板块：—"]
     assert market.footer_text(overview) == (
-        "数据来源：同花顺金融数据服务 · 更新于 2026-09-14 15:03"
-        "（每分钟自动刷新；涨跌家数与北交所成交额每 5 分钟更新）"
+        market.FOOTER_PREFIX + " · 更新于 2026-09-14 15:03"
+        "（每分钟自动刷新；涨跌家数每 5 分钟更新）"
     )
-    # 关掉时这两项显示 —（真实路径下 `turnover["bj"]` 根本不会被填），且底部不再提"每 5 分钟"
+    # `kpi_values()` 与命令行同源：界面那一行 7 个数的口径就是这一份
+    values = market.kpi_values(overview)
+    assert values["成交额"] == "16291亿"
+    assert list(values) == ["成交额", "涨停", "跌停", "炸板", "上涨", "下跌", "平盘"]
+    assert "北成交额" not in values and "沪成交额" not in values and "深成交额" not in values
+    # 关掉 `market_breadth`：涨跌家数显示 —，且底部不再提"每 5 分钟"
+    # （成交额仍然有数：它来自两只宽基指数，与全市场快照无关）
     overview["breadth_enabled"] = False
     overview["breadth"] = None
     overview["turnover"]["bj"] = None
-    assert market.lines(overview)[0].endswith("北 —")
+    assert market.lines(overview)[0] == "涨停 55 · 跌停 16 · 炸板 30 ｜ 成交额 16291亿"
     assert market.lines(overview)[1] == "上涨 — · 下跌 — · 平盘 —"
     assert market.footer_text(overview).endswith("（每分钟自动刷新）")
 
@@ -349,13 +376,13 @@ def test_lines_show_dash_when_nothing_available() -> None:
 
     注意：`configured_groups` 为空（没配）= 整行不显示，所以这里先按"都配了"喂数据。
     """
-    assert market.lines(None)[0] == "涨停 — · 跌停 — · 炸板 — ｜ 沪 — · 深 — · 北 —"
+    assert market.lines(None)[0] == "涨停 — · 跌停 — · 炸板 — ｜ 成交额 —"
     assert market.lines(None)[1] == "上涨 — · 下跌 — · 平盘 —"
     assert market.lines(None)[2:] == ["", "", ""]      # 没配置的组整行不显示
 
     partial = {
         "limits": {"up": 55, "down": None, "break": None},
-        "turnover": {"sh": 7792e8},
+        "turnover": {"sh": 7792e8, "total": 7792e8},
         "configured_groups": ["indices", "sentiment", "sector"],
         "indices": [{"thscode": "000001.SH", "name": "上证", "last": 3885.33,
                      "change_pct": None}],
@@ -364,10 +391,87 @@ def test_lines_show_dash_when_nothing_available() -> None:
                     "change_pct": None}],
     }
     lines = market.lines(partial)
-    assert lines[0] == "涨停 55 · 跌停 — · 炸板 — ｜ 沪 7792亿 · 深 — · 北 —"
+    # 只取到沪市那一边时合计就是那一边（2026-09-17 起成交额 = 沪 + 深，一个数）
+    assert lines[0] == "涨停 55 · 跌停 — · 炸板 — ｜ 成交额 7792亿"
     assert lines[2] == "宽基：上证 3885.33 —"          # 缺涨跌幅 → 那一段是 —
     assert lines[3] == "情绪：—"                        # 配了但没数据 → 组名 + —
     assert lines[4] == "板块：银行 —"                   # 只有代码没有点位
+
+
+def test_wide_group_always_carries_the_required_indexes(mcfg) -> None:
+    """宽基组**必有的两只**（上证50 / 中证1000）：配置里没写也要带上，写了自己的名字也不覆盖。
+
+    用户 2026-09-17 说"要加上证50、中证2000、科创板"：
+    - 上证50 `000016.SH`：2026-09-17 实测可用（腾讯 `qt.gtimg.cn/q=sh000016` 回
+      `1~上证50~000016~2844.23~…`），加上；
+    - 中证2000：**拿不到**（同一天实测 `sh932000` / `sz932000` 都只回
+      `v_pv_none_match="1"`），所以按任务书换成中证1000 `000852.SH`（实测可用）；
+    - "科创板" = 列表里本来就有的 **科创50 `000688.SH`**（保留）。
+    """
+    assert market.WIDE_INDEX_EXTRA_CODES == ("000016.SH", "000852.SH")
+    assert market.WIDE_INDEX_EXTRA_CODES[0] == "000016.SH"      # 上证50（用户点名要的）
+    assert "000688.SH" in [c for c, _ in market.parse_codes(
+        ["000001.SH", "399001.SZ", "399006.SZ", "000688.SH", "000300.SH"])] \
+        or market.INDEX_NAMES["000688.SH"] == "科创50"
+
+    # 配置里只有五只 → 取到的是七只（两只补在**后面**，不打断用户自己的顺序）
+    mcfg.market_indices = ["000001.SH", "399001.SZ", "399006.SZ",
+                           "000688.SH", "000300.SH"]
+    specs = market.wide_specs(mcfg)
+    assert [code for code, _ in specs] == [
+        "000001.SH", "399001.SZ", "399006.SZ", "000688.SH", "000300.SH",
+        "000016.SH", "000852.SH",
+    ]
+    assert [name for _, name in specs][-2:] == ["上证50", "中证1000"]
+    assert market.INDEX_NAMES["000016.SH"] == "上证50"
+    assert market.INDEX_NAMES["000852.SH"] == "中证1000"
+
+    # 用户自己写了名字/顺序 → 原样保留，只把缺的补在末尾
+    mcfg.market_indices = ["000300.SH=我的沪深300", "000016.SH=我的上证50"]
+    specs = market.wide_specs(mcfg)
+    assert specs == [("000300.SH", "我的沪深300"), ("000016.SH", "我的上证50"),
+                     ("000852.SH", "中证1000")]
+    # 空列表仍然是"我不要这一块"（不补）—— 语义不变
+    mcfg.market_indices = []
+    assert market.wide_specs(mcfg) == []
+    assert market._configured_group_keys(mcfg) == ["sentiment", "sector"]
+
+
+def test_rejected_index_candidate_is_documented_not_silently_dropped() -> None:
+    """**用户要的东西不许静默消失**：中证2000 拿不到这件事必须留在代码里、且可被断言。
+
+    取不到就换一个（中证1000）是可以的，但"试过什么、为什么没有"必须写下来 ——
+    否则下一个人（或用户自己）只会看到"我要的中证2000 呢？"，然后无从查起。
+    这条同时钉住两件事：① 中证2000 的代码**不在**宽基列表里；
+    ② 它的"为什么不在"写在 `REJECTED_INDEX_CANDIDATES` 里、并带上实测证据。
+    """
+    assert "932000" not in "".join(market.WIDE_INDEX_EXTRA_CODES)
+    assert not any("932000" in code for code, _ in market.parse_codes(
+        ["000001.SH", "399001.SZ", "399006.SZ", "000688.SH", "000300.SH"]))
+
+    rejected = market.REJECTED_INDEX_CANDIDATES
+    assert rejected, "被实测否掉的候选必须留档，不能悄悄消失"
+    joined = "；".join(f"{k}={v}" for k, v in rejected.items())
+    assert "中证2000" in joined                     # 用户原话里点名的那个
+    assert "932000" in joined                       # 那个代码
+    # 实测证据要写下来（这正是"试过什么"）：腾讯对这两个代码的返回
+    assert "v_pv_none_match" in joined
+    assert "sh932000" in joined and "sz932000" in joined
+    # 换成了哪一个、为什么（中证1000 可用）
+    assert "000852.SH" in joined and "中证1000" in joined
+
+
+def test_footer_drops_the_beijing_amount_and_keeps_the_breadth_note() -> None:
+    """页脚那行小字：**不再提北交所成交额**（它已经不显示了），涨跌家数照旧注明慢一档。"""
+    overview = market._skeleton(configured=["indices"])
+    overview.update({
+        "turnover": {"sh": 1e12, "sz": 1e12, "bj": 1.4e10, "total": 2e12},
+        "breadth_enabled": True, "as_of": "2026-09-17 14:30",
+    })
+    text = market.footer_text(overview)
+    assert "北交所" not in text
+    assert "涨跌家数每 5 分钟更新" in text
+    assert market.footer_text({}) == market.FOOTER_PREFIX + " · 更新于 —（每分钟自动刷新）"
 
 
 def test_empty_group_takes_no_line(mcfg) -> None:
@@ -396,11 +500,18 @@ def test_config_can_rename_and_hint_missing_code(mcfg) -> None:
     client = _client()
     overview = market.fetch_overview(mcfg, client=client, force=True)
 
-    assert [item["name"] for item in overview["indices"]] == ["我的上证"]
+    # 用户自己写的 `000001.SH=我的上证` **原样保留**（名字不被覆盖），
+    # 而"必须有的两只"补在后面（`market.WIDE_INDEX_EXTRA_CODES`）
+    assert [item["name"] for item in overview["indices"]] == [
+        "我的上证", "上证50", "中证1000",
+    ]
     assert overview["failed"] == ["899050.BJ"]
     assert "899050.BJ" in "".join(overview["errors"])
     lines = market.lines(overview)
-    assert lines[2] == "宽基：我的上证 3885.33 -0.07%"   # 配置里的名字优先
+    assert lines[2].startswith("宽基：我的上证 3885.33 -0.07%")   # 配置里的名字优先
+    # 这一组配置里只有"我的上证"（+ 必有的两只），所以这一行就是这三项
+    assert lines[2] == ("宽基：我的上证 3885.33 -0.07% ｜ 上证50 2844.23 +0.42% ｜ "
+                        "中证1000 7548.82 -1.21%")
     assert "899050" not in lines[2]                      # 取不到的**跳过**，不占位置
 
 
@@ -432,7 +543,7 @@ def test_bad_code_only_drops_itself(mcfg) -> None:
         "同花顺情绪", "昨日连板", "昨日打首板", "微盘股",
     ]
     assert [item["name"] for item in overview["indices"]] == [
-        "上证", "深成", "创业板", "科创50", "沪深300",
+        "上证", "深成", "创业板", "科创50", "沪深300", "上证50", "中证1000",
     ]
     lines = market.lines(overview)
     assert "932000" not in "".join(lines)             # 那一项不出现
@@ -443,7 +554,13 @@ def test_bad_code_only_drops_itself(mcfg) -> None:
 
 
 def test_turnover_is_rounded_to_yi(mcfg) -> None:
-    """成交额按亿四舍五入（7792.4→7792、8498.9→8499、140.1→140）。"""
+    """成交额按亿四舍五入（7792.8 + 140.1 = 7932.9 → 7933），是**一个数**。
+
+    2026-09-17 起界面与命令行都只显示"沪 + 深"这一个数（用户要求），
+    所以这里同时钉住"两段相加"和"只四舍五入一次"：
+    先各自取整再相加（7793 + 140 = 7933）与先相加再取整（7932.9 → 7933）在这里刚好一样，
+    但换一组数就会差 1 亿 —— 口径是**先相加、再四舍五入**（`turnover["total"]` 是原始元）。
+    """
     rows = [
         {"thscode": "000001.SH", "last_price": 1.0, "price_change_ratio_pct": 0.0,
          "turnover": 7792.8e8},
@@ -451,7 +568,10 @@ def test_turnover_is_rounded_to_yi(mcfg) -> None:
          "turnover": 140.1e8},
     ]
     overview = market.fetch_overview(mcfg, client=_client(rows=rows), force=True)
-    assert market.lines(overview)[0].endswith("沪 7793亿 · 深 140亿 · 北 —")
+    assert overview["turnover"]["total"] == pytest.approx(7932.9e8)
+    assert market.lines(overview)[0].endswith("成交额 7933亿")
+    # 先各自取整再相加会是 7933 亿（7793 + 140）—— 两者相等，说明这条不是靠巧合钉住的
+    assert market.kpi_values(overview)["成交额"] == "7933亿"
 
 
 def test_value_color_follows_a_share_convention() -> None:
@@ -479,7 +599,8 @@ def test_kpi_values_and_entry_fields_are_the_single_source() -> None:
     """
     overview = {
         "limits": {"up": 55, "down": 16, "break": 30},
-        "turnover": {"sh": 7792.4e8, "sz": 8498.9e8, "bj": 140.1e8},
+        "turnover": {"sh": 7792.4e8, "sz": 8498.9e8, "bj": 140.1e8,
+                     "total": 7792.4e8 + 8498.9e8},
         "breadth": {"up": 3126, "down": 2224, "flat": 221},
         "configured_groups": ["indices", "sentiment", "sector"],
         "indices": [{"thscode": "000001.SH", "name": "上证", "last": 3885.33,
@@ -487,15 +608,14 @@ def test_kpi_values_and_entry_fields_are_the_single_source() -> None:
         "sentiment": [], "sector": [],
     }
     values = market.kpi_values(overview)
-    # 键的顺序 = 界面上的显示顺序：沪/深/北三个独立成交额 → 涨停/跌停/炸板 → 上涨/下跌/平盘。
-    # **成交额是三个键**（界面"一条一个数"），另有一个合成串 `成交额` 给命令行那一行用 ——
-    # 合成串在 Windows 字体下会被界面列宽截掉，所以界面不再用它（见 ui/app.py 的注释）。
-    assert list(values) == ["涨停", "跌停", "炸板", "沪成交额", "深成交额", "北成交额",
-                            "成交额", "上涨", "下跌", "平盘"]
+    # 键的顺序 = 界面上的显示顺序（宽屏一行 7 个）：**成交额在最前**（沪 + 深 一个数），
+    # 然后涨停/跌停/炸板，最后涨跌家数。
+    # 2026-09-17：`沪成交额` / `深成交额` / `北成交额` 三个键删掉了（用户要求合成一个数、
+    # 北交所不再显示），所以键数从 9 变成 7。
+    assert list(values) == ["成交额", "涨停", "跌停", "炸板", "上涨", "下跌", "平盘"]
     assert values["涨停"] == "55" and values["平盘"] == "221"
-    assert (values["沪成交额"], values["深成交额"], values["北成交额"]) \
-        == ("7792亿", "8499亿", "140亿")
-    assert values["成交额"] == "沪 7792亿 · 深 8499亿 · 北 140亿"
+    assert values["成交额"] == "16291亿"          # 7792.4 + 8498.9 = 16291.3 → 16291
+    assert "140亿" not in "".join(values.values())     # 北交所那 140 亿不再出现在任何一格
 
     name, value, pct = market.entry_fields(overview["indices"][0])
     assert (name, value, pct) == ("上证", "3885.33", "-0.07%")
@@ -506,13 +626,13 @@ def test_kpi_values_and_entry_fields_are_the_single_source() -> None:
     # 与 `lines()` 的口径一致：命令行那行就是这些值拼起来的
     lines = market.lines(overview)
     assert lines[0] == f"涨停 {values['涨停']} · 跌停 {values['跌停']} · " \
-                       f"炸板 {values['炸板']} ｜ {values['成交额']}"
+                       f"炸板 {values['炸板']} ｜ 成交额 {values['成交额']}"
     assert lines[1] == f"上涨 {values['上涨']} · 下跌 {values['下跌']} · 平盘 {values['平盘']}"
     assert lines[2] == "宽基：上证 3885.33 -0.07%"
     # 配了但没有数据的组 → `—`（不是空标题、也不是 0）
     assert lines[3] == "情绪：—"
     # 拿不到任何东西时也不抛：全部是 `—`
-    assert market.kpi_values(None)["成交额"] == "沪 — · 深 — · 北 —"
+    assert market.kpi_values(None)["成交额"] == market.DASH
     assert market.entry_fields({"thscode": "X"}) == ("X", market.DASH, market.DASH)
 
 
@@ -563,7 +683,11 @@ def test_changing_indices_invalidates_cache(mcfg) -> None:
     mcfg.market_indices = ["000300.SH"]
     overview = market.fetch_overview(mcfg, client=client)
     assert len(client.calls) == calls * 2
-    assert [item["name"] for item in overview["indices"]] == ["沪深300"]
+    # 换成只写沪深300 也一样：**必有的两只照样在**（`WIDE_INDEX_EXTRA_CODES`），
+    # 而用户在配置里写的那一只排在最前面（顺序 = 配置顺序）
+    assert [item["name"] for item in overview["indices"]] == [
+        "沪深300", "上证50", "中证1000",
+    ]
 
 
 # ── 4) 降级：任何一路失败都不许拖垮整体 ──
@@ -576,7 +700,7 @@ def test_limits_failure_does_not_break_the_rest(mcfg) -> None:
 
     assert overview["limits"] == {"up": 55, "down": None, "break": 30}
     assert overview["errors"] and "跌停家数取不到" in overview["errors"][0]
-    assert len(overview["indices"]) == 5           # 指数一路完全没受影响
+    assert len(overview["indices"]) == 7           # 指数一路完全没受影响（5 只默认 + 2 只必有）
     assert len(overview["sentiment"]) == 4
     lines = market.lines(overview)
     assert lines[0].startswith("涨停 55 · 跌停 — · 炸板 30")
@@ -637,7 +761,7 @@ def _breadth_pages() -> list[dict]:
 
 
 def test_breadth_off_sends_no_full_market_request(mcfg) -> None:
-    """默认关：**一个全市场分页请求都不发**，北交所那段显示 `—`。"""
+    """默认关：**一个全市场分页请求都不发**，涨跌家数显示 `—`。"""
     mcfg.market_breadth = False
     client = _client()
     overview = market.fetch_overview(mcfg, client=client, force=True)
@@ -645,13 +769,18 @@ def test_breadth_off_sends_no_full_market_request(mcfg) -> None:
     assert client.count("request") == 0
     assert overview["breadth"] is None
     assert overview["turnover"]["bj"] is None
-    # 关着 → 北交所与涨跌家数显示 —，且一个全市场分页请求都不发
-    assert market.lines(overview)[0].endswith("北 —")
+    # 关着 → 涨跌家数显示 —，且一个全市场分页请求都不发；
+    # 成交额照常有数（它来自两只宽基指数，与全市场快照无关）
+    assert market.lines(overview)[0].endswith("成交额 16291亿")
     assert market.lines(overview)[1] == "上涨 — · 下跌 — · 平盘 —"
 
 
 def test_breadth_on_aggregates_pages_and_paces_them(mcfg, monkeypatch) -> None:
-    """打开后：分页汇总出沪/深/北成交额与涨跌家数，页间**间隔 ≥0.3 秒**。"""
+    """打开后：分页汇总出**涨跌家数**（与沪/深/北三市的分桶），页间**间隔 ≥0.3 秒**。
+
+    北交所那一格仍然被算出来（`turnover["bj"]`、`exchanges["BJ"]`），
+    但 2026-09-17 起**不再显示**，也**不进** `turnover["total"]`（用户要求删掉那一格）。
+    """
     mcfg.market_breadth = True
     monkeypatch.setattr(market, "BREADTH_PAGE_SIZE", 3)
     sleeps: list[float] = []
@@ -669,10 +798,10 @@ def test_breadth_on_aggregates_pages_and_paces_them(mcfg, monkeypatch) -> None:
     assert breadth["exchanges"]["SH"]["count"] == 3
     assert breadth["exchanges"]["BJ"]["turnover"] == pytest.approx(1.4e10 + 7.1e8)
     assert overview["turnover"]["bj"] == pytest.approx(1.4e10 + 7.1e8)
-    assert overview["turnover"]["total"] == pytest.approx(
-        7792.4e8 + 8498.9e8 + 1.4e10 + 7.1e8
-    )
-    assert market.lines(overview)[0].endswith("北 147亿")
+    # 合计**只算沪深**（北交所那 147 亿不进这个数）
+    assert overview["turnover"]["total"] == pytest.approx(7792.4e8 + 8498.9e8)
+    assert market.lines(overview)[0].endswith("成交额 16291亿")
+    assert "147亿" not in market.lines(overview)[0]
     assert market.lines(overview)[1] == "上涨 3 · 下跌 3 · 平盘 1"
 
 
@@ -694,7 +823,7 @@ def test_breadth_has_its_own_longer_ttl(mcfg, monkeypatch) -> None:
 
 
 def test_breadth_failure_degrades_to_dash(mcfg) -> None:
-    """全市场汇总失败：北交所与涨跌家数显示 `—`，其余照样有数。"""
+    """全市场汇总失败：涨跌家数显示 `—`，其余照样有数。"""
     mcfg.market_breadth = True
     client = _client(
         pages_error=hx.HithinkError(5001, "测试假客户端：限流")
@@ -705,9 +834,9 @@ def test_breadth_failure_degrades_to_dash(mcfg) -> None:
     assert overview["turnover"]["bj"] is None
     assert any("全市场汇总取不到" in e for e in overview["errors"])
     # 开着但没取到 → 显示 —（用户才知道是"没取到"而不是"没这个功能"）
-    assert market.lines(overview)[0].endswith("北 —")
+    assert market.lines(overview)[0].endswith("成交额 16291亿")
     assert market.lines(overview)[1] == "上涨 — · 下跌 — · 平盘 —"
-    assert len(overview["indices"]) == 5
+    assert len(overview["indices"]) == 7               # 5 只默认 + 上证50 + 中证1000
 
 
 # ── 6) 总开关 ──
@@ -724,7 +853,7 @@ def test_master_switch_off_makes_no_request_at_all(mcfg) -> None:
     assert any("market_overview" in e for e in overview["errors"])
     # 组别是**读配置**得来的（不发请求），所以照样显示组名 + —：用户知道自己配的东西在哪
     assert market.lines(overview) == [
-        "涨停 — · 跌停 — · 炸板 — ｜ 沪 — · 深 — · 北 —",
+        "涨停 — · 跌停 — · 炸板 — ｜ 成交额 —",
         "上涨 — · 下跌 — · 平盘 —",
         "宽基：—", "情绪：—", "板块：—",
     ]

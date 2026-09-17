@@ -9,6 +9,8 @@
     3. 每个来源**能做什么**（`SourceInfo.capabilities`，只写实测确认过的，
        不写"应该有"的 —— 见 `eastmoney` 的模块头"已知风险"）；
     4. 现在**从哪个来源取行情**、取回来的数是什么口径（`snapshot_map`）。
+       ⚠️ 分发版的默认顺序是 `["public", "hithink"]` —— **免 Key 的公开源是主源**，
+       同花顺是"有 Key 时接管"的备用/增强源；顺序由 `cfg.data_sources` 决定。
 
 为什么启停只用 `cfg.data_sources` 一个键表达
 --------------------------------------------
@@ -34,7 +36,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from laoa_trader.data import eastmoney, hithink as hx
+from laoa_trader.data import eastmoney, hithink as hx, public_quotes
 from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
@@ -61,9 +63,20 @@ CAPABILITY_LABELS: dict[str, str] = {
 #: `snapshot_map()` 出口的**统一口径**字段（顺序即文档顺序）。
 #: `source`（来源 id）与 `as_of`（取数时刻 unix 秒）由 `snapshot_map` 补上，
 #: 所以不在这份列表里；`eastmoney.UNIFIED_KEYS` 必须与它一致（有测试钉住）。
+#:
+#: 单位（**每个来源自己换算好，出口只有这一套口径**）：
+#:     `volume` = **股**（东财/腾讯的"手"已在各自模块里 ×100）；
+#:     `turnover` = **元**；价格 = **元**；
+#:     `pct` = **百分数**（0.71 = 0.71%）；
+#:     `turnover_rate` = **百分数**（0.14 = 0.14%）——2026-09-17 新增；
+#:     `circ_mktcap` = **亿**（东财 `f21` 是元，已在 `eastmoney._yi` 里 ÷1e8）——2026-09-17 新增。
+#: 后两列为什么收进统一口径：公开源（腾讯/新浪）本来就有，界面早就在用；
+#: 不收进来的话，`snapshot_map` 只按这份列表挑键，它们会被**静默丢掉**
+#: （见 `snapshot_map` 里的 `row.get`），于是"换一个来源换手率就没了"。
 QUOTE_FIELDS: tuple[str, ...] = (
     "symbol", "name", "last_price", "prev_close", "open",
     "high", "low", "volume", "turnover", "pct",
+    "turnover_rate", "circ_mktcap",
 )
 
 
@@ -90,13 +103,37 @@ class SourceInfo:
 
 #: 内置来源。**键顺序 = 界面默认展示顺序**（同花顺是主来源，排第一）。
 REGISTRY: dict[str, SourceInfo] = {
+    "public": SourceInfo(
+        id="public",
+        name="公开行情源（腾讯为主，免 Key）",
+        needs_key=False,
+        #: ⚠️ 只声明**已经接进界面**的能力：目前生效范围是「自选股池」「持仓监控」
+        #: 两张表的 现价/涨幅/市值/换手（快照）。`public_quotes.daily()` 虽然能取单只
+        #: 历史日K，但**还没接进下载/日更链路**，所以在界面上不声明它 ——
+        #: 声明了却取不到，用户会以为"这个源坏了"（`eastmoney` 那条同理）。
+        capabilities=frozenset({CAP_SNAPSHOT}),
+        note=(
+            "**分发版的默认主源（免 Key）**：当前生效范围是两张表的 现价/涨幅/市值/换手。"
+            "⚠️ 大盘概览、历史数据下载、涨停池、复权因子**仍然走同花顺**（要 Key）—— "
+            "没 Key 时那几项取不到，不是这个源坏了。"
+            "实测（2026-09-17）：腾讯批量接口一次 100 只、全市场 5562 只约 0.7 分钟；"
+            "字段含 现价/涨跌幅/成交量额/换手率/流通市值/总市值/市盈率/市净率/"
+            "量比/均价/涨跌停价/五档。"
+            "缺的票自动用新浪兜底（新浪的单位与腾讯不同：股与元，程序内部已统一）。"
+            "风险：它们是**公开但未授权**的行情接口，官方可能改字段或限流 ——"
+            "所以它只当主路，后面还挂着同花顺（有 Key 时）与本地库兜底；"
+            "数据为公开源准实时快照，非交易所授权行情。"
+        ),
+        key_config=None,
+    ),
     "hithink": SourceInfo(
         id="hithink",
         name="同花顺金融数据服务（内置）",
         needs_key=True,
         capabilities=frozenset({CAP_SNAPSHOT, CAP_DAILY_HISTORY, CAP_STOCK_LIST}),
         note=(
-            "主来源：全市场日线（dump 下载）、实时快照、涨停池/跌停池/炸板池、"
+            "**备用/增强源**（分发版的默认主源是免 Key 的公开源）：全市场日线（dump 下载）、"
+            "实时快照、涨停池/跌停池/炸板池、"
             "复权因子、交易日历、板块与成分股。"
             "必须自己在 https://fuyao.aicubes.cn 申请 API Key 并填在 config.toml 的"
             " hithink_api_key（或环境变量 HITHINK_FINANCE_API_KEY）；"
@@ -318,6 +355,23 @@ def _hithink_rows(cfg: Any, symbols: list[str] | None) -> dict[str, dict]:
     return hithink_rows_to_map(rows)
 
 
+# ── 取数：公开源那一路（免 Key，分发版主源）──
+
+
+def _public_rows(cfg: Any, symbols: list[str] | None) -> dict[str, dict]:
+    """公开源快照（腾讯为主、新浪兜底）→ 统一口径。
+
+    `symbols is None`（"要全市场"）时返回空：腾讯没有"给我全部"的开关，全市场得由
+    调用方提供代码表（我们的 `stock_basic` 就是）。这样公开源不需要自己去查代码表，
+    也就不会多出一个"作者静态 JSON"式的第三方依赖。
+    """
+    if symbols is None:
+        logger.debug("公开源：未给代码表，跳过（全市场请由调用方提供 symbols）")
+        return {}
+    rows = public_quotes.snapshot(symbols)
+    return {str(row["symbol"]): row for row in rows.values() if row.get("symbol")}
+
+
 # ── 取数：东方财富那一路 ──
 
 
@@ -342,6 +396,7 @@ def _eastmoney_rows(cfg: Any, symbols: list[str] | None) -> dict[str, dict]:
 #: 来源 id → 取数函数。**新增一个来源 = 往 REGISTRY 加一条 + 在这里注册一个函数**。
 #: 不在这里的来源（用户写了个没实现的 id）在 `active_sources` 就被过滤掉了。
 _SNAPSHOT_FETCHERS: dict[str, Callable[[Any, list[str] | None], dict[str, dict]]] = {
+    "public": _public_rows,
     "hithink": _hithink_rows,
     "eastmoney": _eastmoney_rows,
 }

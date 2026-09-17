@@ -4,7 +4,7 @@
 
     标题区：老A选股助手 · 运行状态：<现在在干什么>            [显示详情] [关于软件]
             （下面是"没有数据"这一类**一句话提示**，以及只在任务运行时出现的细进度条）
-    页签：全市概览 / 自选股池 / 持仓监控 / 策略选股 / 系统设置
+    页签：大盘概览 / 自选股池 / 持仓监控 / 策略选股 / 系统设置
 
 为什么要这样改（见 `docs/改版方案.md` 一、二）
 --------------------------------------------
@@ -63,26 +63,48 @@ logger = get_logger(__name__)
 #: **共用这一份** —— 分发出去之后用户看到的版本信息必须处处一致，不能各写各的
 APP_NAME = "老A选股助手"
 COPYRIGHT_TEXT = "版权所有 © 2026 async-chen，保留所有权利。"
-SOURCE_TEXT = ("数据来源：同花顺（fuyao.aicubes.cn）。"
+#: 数据来源声明（「关于软件」里那一行）。
+#:
+#: 为什么写两个来源、并点明"非交易所授权行情"：程序默认走**免 Key 的公开行情接口**
+#: （腾讯/新浪/东财），配了同花顺 Key 的用户才走同花顺。这些数据都是**准实时快照**，
+#: 不是交易所授权行情 —— 分发出去以后这句话就是用户判断"这数据能不能当真"的依据。
+SOURCE_TEXT = ("数据来源：公开行情接口（腾讯/新浪/东财）与同花顺金融数据服务（配置 Key 时）。"
+               "均为公开来源的准实时快照，非交易所授权行情。"
                "本程序仅用于个人研究与学习，不构成任何投资建议。")
 
 # ── 五个页签的标题（顺序即显示顺序）──
 #: 常量而不是散落的字面量：测试、截图脚本、托盘菜单跳转都要**按标题找页面**，
 #: 写错一个字就是 `indexOf` 返回 -1、然后静默什么都不做（Qt 不会报错，最难查的一类）
-TAB_MARKET = "全市概览"
+#:
+#: 2026-09-17：这个名字从「全市概览」改回「大盘概览」（用户要求）。
+#: 改名的代价正好是上面那句话说的那种坑 —— 凡是按标题找页面的地方（`tabs.indexOf`、
+#: 截图脚本、测试）都得跟着改，所以标题只有这一个常量，别处一律引用它。
+TAB_MARKET = "大盘概览"
 TAB_WATCH = "自选股池"
 TAB_POSITION = "持仓监控"
 TAB_FORMULA = "策略选股"
 TAB_SETTINGS = "系统设置"
 TAB_TITLES: tuple[str, ...] = (TAB_MARKET, TAB_WATCH, TAB_POSITION, TAB_FORMULA, TAB_SETTINGS)
 
-#: 「自选股池」的列（顺序即界面顺序；测试直接断言这一份）
-WATCH_HEADERS: tuple[str, ...] = ("名称(代码)", "现价", "涨幅", "板块", "来源", "提醒")
-#: 「持仓监控」的列。**没有"数量"**：用户给定的字段只有 代码 + 成本价 + 备注
-#: （`quantity` 留在库里做兼容，见 `docs/改版方案.md` 第五节）
-POSITION_HEADERS: tuple[str, ...] = (
-    "名称(代码)", "成本价", "现价", "涨幅", "盈亏比例", "止损位", "止盈位", "提醒",
+#: 「自选股池」的列（顺序即界面顺序；测试直接断言这一份）。
+#: 2026-09-17 改版（用户要求）：加「市值」「换手」两列（流通市值，单位亿；实时换手率%），
+#: `提醒` 列改成「监控开关」（显示 开启/关闭，点一格就能切换，提醒内容进 tooltip）。
+WATCH_HEADERS: tuple[str, ...] = (
+    "名称(代码)", "现价", "涨幅", "市值", "换手", "板块", "来源", "监控开关",
 )
+#: 「持仓监控」的列。**没有"数量"**：用户给定的字段只有 代码 + 成本价 + 备注
+#: （`quantity` 留在库里做兼容，见 `docs/改版方案.md` 第五节）。
+#: 同样是 2026-09-17 加的两列 + 提醒改监控开关（与上面同一套口径，两张表要一致）。
+POSITION_HEADERS: tuple[str, ...] = (
+    "名称(代码)", "成本价", "现价", "涨幅", "市值", "换手",
+    "盈亏比例", "止损位", "止盈位", "监控开关",
+)
+#: 「监控开关」列在两张表里的下标（点这一格切换监控；别处一律用它，不写死数字）。
+WATCH_MONITOR_COLUMN = WATCH_HEADERS.index("监控开关")
+POSITION_MONITOR_COLUMN = POSITION_HEADERS.index("监控开关")
+#: 监控开关那一格的两个文字（用户给定：`开启` / `关闭`）。
+MONITOR_ON_TEXT = "开启"
+MONITOR_OFF_TEXT = "关闭"
 
 #: 关于页里图标的显示边长（资源只有 256/128/48/32/16 这几档，这里由 QPixmap 平滑缩放）
 ABOUT_ICON_SIZE = 64
@@ -91,7 +113,7 @@ ABOUT_ICON_SIZE = 64
 #: 每分钟一次就够（卡片上那一行要新鲜，但不能每 5 秒打一次接口）。
 AUCTION_REFRESH_MS = 60_000
 
-#: 「全市概览」页自己的刷新周期（毫秒）—— 每分钟一次，与 5 秒的界面刷新解耦。
+#: 「大盘概览」页自己的刷新周期（毫秒）—— 每分钟一次，与 5 秒的界面刷新解耦。
 #: 取数另有 55 秒 TTL（`market_overview_ttl`），所以这一分钟里最多真打一次接口。
 MARKET_REFRESH_MS = 60_000
 
@@ -141,28 +163,36 @@ MARKET_ITEM_MARGIN = 12
 MARKET_VALUE_TRACK = "-88888.88"
 MARKET_PCT_TRACK = "-888.88%"
 
-# ── 「全市概览」的三块（用户给定的布局：竖直排列，窄窗口自动换列）──
-#: 三块的标题 = 界面上小标题的文字，**顺序就是页面上下顺序**。
+# ── 「大盘概览」的四块（用户给定的布局：竖直排列，窄窗口自动换列）──
+#: 四块的标题 = 界面上小标题的文字，**顺序就是页面上下顺序**。
 #: 常量而不是字面量：测试、截图脚本都要按名字取整块（写错一个字就是 KeyError 或
-#: 静默什么都不做），而且三块的顺序本身就是"看盘第一眼先看什么"的设计。
+#: 静默什么都不做），而且四块的顺序本身就是"看盘第一眼先看什么"的设计。
+#:
+#: 2026-09-17 改版（用户要求，顺序也是用户给的）：
+#:   1. 「成交与情绪」**挪到最上面**（在「宽基指数」之前），装的是原来那排 KPI 的小条目；
+#:   2. 「情绪指数」只剩指数条目（成交额/涨跌停/涨跌家数都搬去上面那一块了）；
+#:   3. 「热门板块」改成"上涨前五 + 下跌前五"两张表。
+MARKET_SECTION_FLOW = "成交与情绪"
 MARKET_SECTION_WIDE = "宽基指数"
 MARKET_SECTION_SENTIMENT = "情绪指数"
 MARKET_SECTION_HOT = "热门板块"
 MARKET_SECTION_TITLES: tuple[str, ...] = (
-    MARKET_SECTION_WIDE, MARKET_SECTION_SENTIMENT, MARKET_SECTION_HOT,
+    MARKET_SECTION_FLOW, MARKET_SECTION_WIDE, MARKET_SECTION_SENTIMENT,
+    MARKET_SECTION_HOT,
 )
-#: 原来的 KPI 卡片整排（7 张）折进「情绪指数」块里的**小条目**。
+#: 原来占一整排的 KPI 卡片，现在折成「成交与情绪」块里的**小条目**（一行摆下）。
 #:
-#: 为什么是**一条一个数**（9 条）而不是 3 条合成长文本：
+#: 为什么是**一条一个数**而不是一句合成长文本：
 #: 最初做成 3 条（`沪 7793亿 · 深 8499亿 · 北 140亿` 这种），在 Linux 字体下刚好，
 #: 到 Windows 上就出事了 —— **同一段中文在 Windows 上更宽**（CI 实测：那一格需要
 #: 338px、实际只分到 231px），合成文本被自己的列宽截掉半个数字，而且它撑大了整页的
-#: 最小宽度（实测 714 > 视口 706，横向差 8px）。拆成"一个数一条"之后，每条只有
-#: `沪成交额 / 7793亿` 这么短，任何字体下都塞得下，也不再撑大最小宽度。
-#: 代价是多两行 —— 换来的是**任何一台机器上都不被截**。
-MARKET_STAT_SH = "沪成交额"
-MARKET_STAT_SZ = "深成交额"
-MARKET_STAT_BJ = "北交所"
+#: 最小宽度（实测 714 > 视口 706，横向差 8px）。拆成"一个数一条"之后，每条都短，
+#: 任何字体下都塞得下，也不再撑大最小宽度。
+#:
+#: 2026-09-17：成交额从**三格**（沪/深/北）合成**一格**（`成交额` = 沪 + 深，
+#: 口径见 `market.kpi_values()`），北交所那一格**删掉**（用户要求）——
+#: 于是 9 条变 7 条，宽屏一行正好摆 7 个。
+MARKET_STAT_AMOUNT = "成交额"
 MARKET_STAT_LIMIT_UP = "涨停"
 MARKET_STAT_LIMIT_DOWN = "跌停"
 MARKET_STAT_BREAK = "炸板"
@@ -170,15 +200,59 @@ MARKET_STAT_UP = "上涨"
 MARKET_STAT_DOWN = "下跌"
 MARKET_STAT_FLAT = "平盘"
 MARKET_STAT_TITLES: tuple[str, ...] = (
-    MARKET_STAT_SH, MARKET_STAT_SZ, MARKET_STAT_BJ,
+    MARKET_STAT_AMOUNT,
     MARKET_STAT_LIMIT_UP, MARKET_STAT_LIMIT_DOWN, MARKET_STAT_BREAK,
     MARKET_STAT_UP, MARKET_STAT_DOWN, MARKET_STAT_FLAT,
 )
-#: 小条目最多铺几列（9 条正好 3×3）
-MARKET_STAT_MAX_COLUMNS = 3
-#: 「热门板块」摆前几名。12 = 用户给定的口径（与 `pool.hot_industries` 的默认 top 一致），
-#: 也正好是"两列 × 6 行"或"三列 × 4 行"都能摆满的数量。
+#: 小条目最多铺几列：**7**（用户要求"宽屏一行 7 个"）。
+#: 窄屏时沿用响应式列数机制往下走（见 `_apply_market_columns`）——
+#: 小条目的列数单独算，因为它是 7 条，而指数条目最多 5 列（`MARKET_MAX_COLUMNS`）。
+MARKET_STAT_MAX_COLUMNS = 7
+#: 小条目还没建出来时的兜底宽度（实测值优先，见 `_market_stat_need()`）
+MARKET_STAT_MIN_WIDTH = 118
+#: 实测宽度之上再留的余量：字体在不同机器上会有 ±1~2px 的差别，
+#: 卡得刚刚好会在换一台机器时变成"文字被截"（CI 上真踩过）。
+MARKET_STAT_MARGIN = 4
+#: 小条目网格的间距。**只此一处**：列数计算与 `stats_grid.setSpacing()` 都用它 ——
+#: 两处各写一个字面量，改了间距忘了改列数计算就会"莫名其妙换行"。
+MARKET_STAT_GRID_SPACING = 5
+#: 小条目**框内**（名称与数值之间）的间距。与上面的网格间距同理：为了挤下 7 条而收紧，
+#: 但不许小于 4 —— 再小两段文字就贴在一起，"看得清"比"排得下"更重要。
+STAT_INNER_SPACING = 6
+#: 「热门板块」取几个行业来算（`pool.hot_industries(top=...)`）。
+#: 12 = 用户给定的口径（与 `pool.hot_industries` 的默认 top 一致）：两张表各取前 5，
+#: 从这 12 个行业里挑，样本够宽（不会因为只取 5 个而漏掉真正涨得多的板块）。
 MARKET_HOT_TOP = 12
+
+# ── 「热门板块」：上涨前五 / 下跌前五 两张表（2026-09-17 用户要求）──
+#: 两张表的列（用户给定的表头文字，**照抄**）：
+#:     板块名称  涨停数量  涨幅  主力净额
+#: 口径：「板块名称」来自 `data.sectors.fetch_sector_rank()`（取不到时退回本地
+#: `pool.hot_industries()` 的行业名）；「涨停数量」永远来自 `pool.hot_industries()`
+#: （与选股用的是同一套口径，不另起一套）；「涨幅」= 板块当天涨跌幅（%）；
+#: 「主力净额」= 主力净流入，单位**亿**（正负号保留）。
+SECTOR_TABLE_HEADERS: tuple[str, ...] = ("板块名称", "涨停数量", "涨幅", "主力净额")
+#: 「上涨前五」/「下跌前五」的标题与各取几名（用户给定：前 5）。
+SECTOR_UP_TITLE = "上涨前五"
+SECTOR_DOWN_TITLE = "下跌前五"
+SECTOR_TOP = 5
+#: 「主力净额」的单位（元 → 亿）与显示位数：正负号保留、两位小数。
+SECTOR_NET_UNIT = 1e8
+#: 四个表头各自的 tooltip（"这一列什么意思"的说明书；列头只有四个字，写不下口径）。
+SECTOR_HEADER_TIPS: tuple[str, ...] = (
+    "板块名称：来自 `data/sectors.py` 的板块榜；取不到时退回本地"
+    "`pool.hot_industries()` 的行业名（这时下面那行说明会写明是哪种口径）",
+    "涨停数量：**当日该板块的涨停家数**（与选股用的是同一套口径：`pool.hot_industries`）。"
+    "取不到本地涨停池数据时是 `—`",
+    "涨幅：板块**当天涨跌幅**（%）；退回本地口径时它是**近 5 日**行业等权涨幅"
+    "（那时表下方会写清）",
+    "主力净额：主力资金净流入，单位**亿**（正=净流入、负=净流出）。"
+    "只有 `data/sectors.py` 的板块榜提供这一项，取不到是 `—`（不是 0）",
+)
+#: 板块表"最少要多宽"的估算参数（只影响并列还是上下排，不影响任何布局约束）：
+#: 每个单元格左右各留一点内边距，再给表框与竖向滚动条留一点。
+SECTOR_CELL_PADDING = 24
+SECTOR_TABLE_CHROME = 40
 
 # ── 「系统设置」的五组（顺序 = 页面上下顺序）──
 #: 五组各自一个带标题的块。**顺序**是用户给定的：先"数据从哪来"，
@@ -191,8 +265,9 @@ MARKET_HOT_TOP = 12
 SETTINGS_GROUPS: tuple[str, ...] = (
     "数据来源", "通知方式", "竞价扫描", "T策略", "其他",
 )
-# ── 「数据来源」：来源列表（内置同花顺 + 用户自己添加的来源）──
-#: 内置主来源的键（`cfg.data_sources` 的第一项；它提供实时快照，永远排第一）
+# ── 「数据来源」：来源列表（公开源是主源，同花顺是备用源）──
+#: 内置来源的键（它仍然读 `cfg.data_sources` 决定启停与优先级；**不再固定在第一位** ——
+#: 用户 2026-09-17 要求"公开源是主源、同花顺是备用"，而列表顺序就是优先级）。
 BUILTIN_SOURCE = "hithink"
 #: **读不到 `data/sources.py` 时**内置来源那一行用的能力文案（兜底，不是真相源）。
 #: 正常路径的能力文案来自 `sources.source_states()` 的 `capabilities_text` ——
@@ -208,10 +283,16 @@ SOURCE_ADD_UNAVAILABLE_TEXT = (
     "（启停就是「在不在这个列表里」，想停用一个来源就点它那一行的【删除】）。"
     "如果这里本该还有别的来源，请查看日志里的「数据来源注册表」相关警告。"
 )
-#: 数据来源的显示名：键 → 中文（`cfg.data_sources` 里现在只可能是 `hithink`）。
+#: 数据来源的显示名：键 → 中文。
 #: 界面上**如实显示配置里的值**，认不出的键原样显示 + 注明"界面没有它的实现" ——
 #: 改写死一行"主来源：同花顺"的话，用户手改过 `data_sources` 之后就与界面说的不一致了。
 DATA_SOURCE_LABELS: dict[str, str] = {BUILTIN_SOURCE: "同花顺金融数据服务（内置）"}
+#: 同花顺那一行显示标记 / 说明用的两种文案（用户 2026-09-17 给定）：
+#: 界面上**没有** Key 输入框了，只剩这一行说明 + 一个可点的申请地址。
+BUILTIN_BACKUP_TAG = "备用源"
+BUILTIN_KEY_URL = "https://fuyao.aicubes.cn"
+#: 那一行的原文（`{url}` 会被换成可点的 `<a href>`，见 `_backup_key_notice`）。
+BUILTIN_BACKUP_TEXT = "备用源：同花顺金融数据服务（需要 Key，申请地址 {url}）"
 #: `history_years` 那一行的中文口径：一年 ≈ 250 个交易日，0.5 年 ≈ 6 个月
 #: （与 `config.history_years` 的默认值同源，用户给定：超短线不需要长历史）
 MONTHS_PER_YEAR = 12
@@ -335,6 +416,20 @@ def _short_number(value: Any) -> str:
     return f"{number:.0f}"
 
 
+def _month_day(value: Any) -> str:
+    """`2026-09-11` → `09-11`（表格 tooltip 里说明"这是哪天的收盘价"）。
+
+    为什么只留月-日：tooltip 里那句是"这是本地最新收盘价（09-11），不是实时价"，
+    带上年份反而让人以为这是一份历史档案；认不出来的值原样返回（**不编一个日期**），
+    完全是空的时候给 `—`。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    parts = text.split("-")
+    return "-".join(parts[1:]) if len(parts) == 3 else text
+
+
 def plain_text(text: Any) -> str:
     """把后端文案里的 markdown 强调标记去掉（`**手**` → `手`），其余原样保留。
 
@@ -390,6 +485,23 @@ if QT_AVAILABLE:
         if bold is not None:
             out.setBold(bold)
         return out
+
+    def _bold_name_font(widget: Any) -> Any:
+        """**名称**用的字体：基准字号 + 加粗（字号不加，只加粗）。
+
+        用户 2026-09-17 原话："所有名称显示不清楚，都加黑显示。" 于是**所有名称**
+        （指数条目名、小条目名、行业/板块名、两张表的「名称(代码)」列）都用它。
+
+        为什么用 `QFont.setBold()` 而不是样式表 `font-weight: bold`（二者只能选一个）：
+        - 同一个控件里，那两列**数值**要靠 `setStyleSheet("color:…")` **逐值上色**
+          （见 `MarketEntry.update_item`）。样式表一旦挂到某个标签上，Qt 就按样式表解析
+          该标签的字体属性，主题 QSS（`ui/theme.py` 的 `QTableView`/`QLabel` 规则）
+          与 palette 取色的组合会变得难以预测；
+        - `setBold()` 只改这一个属性，与主题、与逐值上色都不打架 —— 确定性更强。
+        **数值不加粗**：用户说的是"名称要清楚"，加粗只给名称
+        （小条目的数值本来就是"大一号 + 加粗"，那是既有层级，这次一个字都没动）。
+        """
+        return _scaled_font(widget.font(), 0, bold=True)
 
     def _available_geometry() -> Any:
         """主屏的**可用区域**（逻辑像素，已经扣掉任务栏）；拿不到屏幕信息时返回 None。
@@ -527,29 +639,39 @@ if QT_AVAILABLE:
         用户要求数据来源做成"可添加的多个来源，各自用他自己的 Key"，所以这一行是
         列表里的一格，而不是把 Key 输入框散在页面上：
 
-            ┌ 同花顺金融数据服务（内置）  [主来源] [已配 Key]                [✓] 启用 ┐
+            ┌ 公开行情源（腾讯为主，免 Key）  [主来源]                       [✓] 启用 ┐
+            │ 提供：实时快照、历史日K、股票代码表                                     │
+            │ **分发版的默认主源**：不用申请任何 Key … 风险：公开但未授权 …          │
+            │ 免 Key：这个来源不用申请、不用填（填了也没有用）                        │
+            └────────────────────────────────────────────────────────────────────────┘
+            ┌ 同花顺金融数据服务（内置）  [备用源]                            [✓] 启用 ┐
             │ 提供：实时快照、历史日K、股票代码表                                     │
             │ 主来源：全市场日线（dump 下载）… 必须自己申请 API Key …                │
-            │ API Key [·············]  [测试连接]                                     │
-            └────────────────────────────────────────────────────────────────────────┘
-            ┌ 东方财富（公开接口，免 Key）  [免 Key]                        [✓] 启用 ┐
-            │ 提供：实时快照、历史日K、股票代码表                                     │
-            │ 免 Key：不用申请就能用 … 风险：公开但未文档化的接口 …                  │
-            │ 免 Key（这个来源不需要填 Key）                                          │
+            │ 备用源：同花顺金融数据服务（需要 Key，申请地址 fuyao.aicubes.cn）       │
             └────────────────────────────────────────────────────────────────────────┘
 
         三种行的差异全部由**构造参数**表达（不在类里 if 来源名）：
-        - 内置行：`deletable=False` + 启用勾选框 `setEnabled(False)`（"始终在用"）；
+        - 内置行：`deletable=False` + 启用勾选框 `setEnabled(False)`（"在 data_sources 里就在用"）；
         - 用户添加的来源：可删、可停用，Key 落到它自己的配置键上；
         - 认不出的来源（用户手改过 `data_sources`）：只读展示 + 注明"界面没有它的实现"。
 
         "要不要填 Key"**完全听调用方的**（`needs_key`，来自 `data.sources.source_states`）：
-        免 Key 的来源（东方财富）**不给输入框** —— 画一个填不了东西的框，
-        比不画更糟（用户会去找一个根本不存在的 Key）。
+        免 Key 的来源**不给输入框** —— 画一个填不了东西的框，比不画更糟
+        （用户会去找一个根本不存在的 Key）。
+
+        2026-09-17（用户要求）：**内置同花顺那一行不再有 Key 输入框，也没有【测试连接】**。
+        改成一行说明 + 一个**可点开**的申请地址（`key_notice` / `key_notice_url`）。
+        为什么连【测试连接】一起删：它原来测的就是"输入框里那个 Key"（见
+        `on_test_connection` 的注释），输入框没了它就没有被测对象了 ——
+        留一个点了不知道测什么的按钮，比少一个按钮更糟。
+        老用户手改 `config.toml` 的 `hithink_api_key` / 环境变量
+        `HITHINK_FINANCE_API_KEY` **照旧生效**（读取路径一个字没动），
+        只是界面上不再提供填写入口。
 
         属性（测试与将来的第二来源都按这些名字取）：`source`（键）、`name_label`、
-        `tag_label`、`capability_label`、`note_label`、`key_label`、`key_edit`（免 Key 时为
-        None）、`enabled_box`、`btn_delete`、`btn_test`（免 Key 时为 None）。
+        `tag_label`、`capability_label`、`note_label`、`key_label`、`key_edit`（免 Key 或
+        内置行时为 None）、`enabled_box`、`btn_delete`、`btn_test`（同上为 None）、
+        `key_notice_text`（内置行那句说明的纯文本）。
         """
 
         def __init__(
@@ -567,6 +689,9 @@ if QT_AVAILABLE:
             key_placeholder: str = "API Key",
             key_config: str = "",
             key_echo_password: bool = True,
+            tag: str = "",
+            key_notice: str = "",
+            key_notice_url: str = "",
         ) -> None:
             super().__init__()
             self.source = source
@@ -591,17 +716,18 @@ if QT_AVAILABLE:
                 _scaled_font(self.name_label.font(), FONT_VALUE_DELTA, bold=True)
             )
             head.addWidget(self.name_label)
-            # 标记：主来源 / 免 Key / 已配 Key / 未配 Key / 未实现 —— 一眼看出这个来源的状态
-            if builtin:
-                tag = "主来源"
-            elif not implemented:
-                tag = "未实现"
-            elif not self.needs_key:
-                tag = "免 Key"
-            elif has_key:
-                tag = "已配 Key"
-            else:
-                tag = "未配 Key"
+            # 标记：主来源 / 备用源 / 免 Key / 已配 Key / 未配 Key / 未实现 ——
+            # 一眼看出这个来源的状态。调用方给了 `tag` 就用它（内置同花顺那一行是
+            # "备用源"，而"谁是主来源"取决于 `data_sources` 的顺序，类里判不出来）
+            if not tag:
+                if not implemented:
+                    tag = "未实现"
+                elif not self.needs_key:
+                    tag = "免 Key"
+                elif has_key:
+                    tag = "已配 Key"
+                else:
+                    tag = "未配 Key"
             self.tag_label = QLabel(tag)
             self.tag_label.setObjectName("statusTag")      # 小号灰字
             self.tag_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
@@ -615,7 +741,9 @@ if QT_AVAILABLE:
             # 就是在骗用户（他会以为关掉了）
             self.enabled_box.setEnabled(False)
             self.enabled_box.setToolTip(
-                "内置主来源：程序始终用它取数（实时快照只有它提供），不能关掉"
+                "内置的同花顺：在列表里 = 在 config.toml 的 data_sources 里 = 会用；"
+                "列表顺序就是取数优先级（前一个不可用就落到下一个）。"
+                "这里不能直接关 —— 想停用它就从 data_sources 里去掉"
                 if builtin else
                 "列表里出现 = 已启用（写在 config.toml 的 data_sources 里）；"
                 "不想用它就点【删除】—— 这里不做第二个开关，免得两处说法不一致"
@@ -653,10 +781,32 @@ if QT_AVAILABLE:
             row.setSpacing(PAGE_SPACING)
             self.key_edit: Any = None
             self.btn_test: Any = None
+            #: 那一行说明的**纯文本**（界面显示的是带 `<a>` 的富文本，测试按这个属性断言文字）
+            self.key_notice_text = str(key_notice or "")
             self.key_label = QLabel("")
             self.key_label.setObjectName("statusTag")
             self.key_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-            if self.needs_key:
+            self.key_label.setWordWrap(True)
+            if key_notice:
+                # **内置同花顺那一行**（2026-09-17 用户要求）：不再有 Key 输入框、也不再有
+                # 【测试连接】（它原来测的就是"输入框里那个 Key"），只剩一行说明 ——
+                # 申请地址做成**可点开**的链接（`setOpenExternalLinks(True)` + `<a href>`）：
+                # 用户真的需要 Key 时，从这里一步就能到申请页，不用手抄地址。
+                # 富文本而不是 HTML 转义拼接：整句是程序里写死的常量，不含用户输入。
+                self.key_label.setText(
+                    self.key_notice_text.replace(
+                        key_notice_url,
+                        f'<a href="{key_notice_url}">{key_notice_url}</a>',
+                    ) if key_notice_url else self.key_notice_text
+                )
+                self.key_label.setTextFormat(Qt.TextFormat.RichText)
+                self.key_label.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextBrowserInteraction
+                )
+                self.key_label.setOpenExternalLinks(True)
+                self.key_label.setVisible(True)
+                row.addWidget(self.key_label, 1)
+            elif self.needs_key:
                 self.key_label.setVisible(False)
                 row.addWidget(self.key_label)
                 self.key_edit = QLineEdit(key_text)
@@ -686,18 +836,20 @@ if QT_AVAILABLE:
                 )
 
     class MarketStatItem(QFrame):
-        """一个小条目：标签小号灰字 + 数值大一号加粗（**横向一条**，不是一张大卡）。
+        """一个小条目：标签（**加粗名称**）+ 数值大一号加粗（**横向一条**，不是一张大卡）。
 
-        原来成交额/涨跌停/涨跌家数是**占满一整排**的 7 张 KPI 卡片；用户给定的
-        新版布局里它们折进「情绪指数」块的 3 个小条目（成交额 / 涨停家数 / 涨跌家数），
+        原来成交额/涨跌停/涨跌家数是**占满一整排**的 7 张 KPI 卡片；现在它们折进
+        「成交与情绪」块的小条目（2026-09-17 起 7 条，宽屏一行摆下）。
         所以这里刻意做得**扁而小**：一条 22 像素左右高、跟着块内网格自动换列，
-        不再单独占一排。7 个数字一个都没丢 —— 只是按"三句话"重新分组：
-        涨停家数那条里带着跌停与炸板（同属涨跌停家数），涨跌家数那条里带着平盘。
+        不再单独占一排。
 
         为什么不做成"一行长文本"：长文本靠自动换行折出来的行对不齐（数字有的在行尾、
         有的在行中），一眼就是"没排版"；一个小条目一个数值，扫一眼就能比大小。
 
-        属性：`name`（条目名）、`title_label`（小号灰标签）、`value_label`（大一号加粗数值）。
+        2026-09-17（用户要求）：名称**加粗**（`_bold_name_font`），并且**不再用灰字** ——
+        "灰 + 小号"正是用户说的"名称显示不清楚"；数值仍是"大一号 + 加粗"（既有层级，没动）。
+
+        属性：`name`（条目名）、`title_label`（加粗名称）、`value_label`（大一号加粗数值）。
         取色只用 palette + 一条细边框，不引图片/图标（打包与 DPI 缩放才不会挑环境）。
         """
 
@@ -712,12 +864,15 @@ if QT_AVAILABLE:
                 " border-radius: 6px; }"
             )
             row = QHBoxLayout(self)
-            row.setContentsMargins(8, 2, 8, 2)
-            row.setSpacing(PAGE_SPACING)
+            # 内边距与内部间距**刻意收紧**（原 8/8）：用户要求这 7 条排成一排，
+            # 在 920 逻辑宽下就差这十几个像素。收紧的是"框内的空白"，
+            # 不是文字大小 —— 名称与数值的字号层级一个都没动。
+            row.setContentsMargins(5, 2, 5, 2)
+            row.setSpacing(STAT_INNER_SPACING)
             self.title_label = QLabel(name)
-            # "小号灰字"靠**灰**与**不加粗**表达（字号层级只有三级，见 FONT_* 常量）
+            # **名称：加粗 + 正文色**（不再用灰字，见类说明与 `_bold_name_font`）
             self.title_label.setObjectName("marketStatTitle")
-            self.title_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+            self.title_label.setFont(_bold_name_font(self.title_label))
             row.addWidget(self.title_label)
             row.addStretch(1)
             self.value_label = QLabel(market.DASH)
@@ -730,7 +885,7 @@ if QT_AVAILABLE:
             row.addWidget(self.value_label)
 
     class MarketEntry(QFrame):
-        """一个指数条目：`名称（灰） ｜ 点位 ｜ 涨跌幅`（后两列右对齐、**逐值**上色）。
+        """一个指数条目：`名称（加粗） ｜ 点位 ｜ 涨跌幅`（后两列右对齐、**逐值**上色）。
 
         为什么要拆成三个 QLabel：用户要求"既然涨跌分颜色了，那情绪/板块的数字和涨跌幅
         也分一下颜色"。一行一个 QLabel 只有**一种**颜色，而情绪/板块经常同时有涨有跌，
@@ -752,7 +907,9 @@ if QT_AVAILABLE:
             self.thscode = ""
             self.name_label = QLabel(market.DASH)
             self.name_label.setObjectName("marketEntryName")
-            self.name_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+            # 指数名：**加粗 + 正文色**（用户："所有名称显示不清楚，都加黑显示"）。
+            # 数值（点位/涨跌幅）不加粗 —— 它们靠"右对齐 + 逐值上色"表达，见类说明。
+            self.name_label.setFont(_bold_name_font(self.name_label))
             self.value_label = QLabel(market.DASH)
             self.pct_label = QLabel(market.DASH)
             row = QHBoxLayout(self)
@@ -785,59 +942,240 @@ if QT_AVAILABLE:
             self.value_label.setStyleSheet(style)
             self.pct_label.setStyleSheet(style)
 
-    class IndustryEntry(QFrame):
-        """一个热门行业条目：`行业名 ｜ 涨停家数 ｜ 密度 ｜ 近 5 日等权涨幅`。
+    class SectorTable(QFrame):
+        """「上涨前五」/「下跌前五」里的一张表：小标题 + 四列。
 
-        口径与"选股时用的那套热门行业"**完全同源**（`pool.hot_industries`）：
-        涨停家数、涨停密度（行业内涨停家数 ÷ 行业内股票数）、近 5 日行业成分等权涨幅。
-        用户原来只能从推送的"热门行业半导体"这几个字里猜为什么选到某只票 ——
-        把这三个数摆出来，他就能自己核对"凭什么这个板块算热"。
+        列就是用户给定的那四个字（`SECTOR_TABLE_HEADERS`）：
+        `板块名称 | 涨停数量 | 涨幅 | 主力净额` —— 用户原话是"现在的数据都没写什么意思，
+        改成以下表格标上名称"，所以**表头文字必须写清含义**，这也是这一块的设计核心。
 
-        为什么单开一个控件而不是复用 `MarketEntry`：那一套是"名称 + 点位 + 涨跌幅"
-        三列，而这里要摆**四个**字段（还要给密度一个列宽轨道），
-        硬塞进去会让两边的列宽互相牵制，反而更容易对不齐。
-        只有最后那一列（涨幅）上色：涨停家数与密度是"数量"，
-        数量本身没有涨跌方向（照 `market.value_color` 的口径，只给真正是涨跌幅的值上色）。
+        为什么用 `QTableWidget` 而不是继续用"一行一个 QFrame"：这两张表是**表**——
+        列要对齐、要有表头、要能一眼看出"哪一列是什么"；QTableWidget 的列头就是
+        那个"写清含义"的地方，而且它还自带列宽自适应（`Stretch`），窄窗口下自己
+        横向滚动，不会把整页顶宽。
+
+        口径（都在 tooltip 里写清，因为列头只有四个字）：
+        - 板块名称：来自 `data.sectors.fetch_sector_rank()`；取不到时是本地
+          `pool.hot_industries()` 的行业名（页面上会写明是哪种口径）；
+        - 涨停数量：**当日该板块涨停家数**（`pool.hot_industries()`，与选股同一套口径）；
+        - 涨幅：板块当天涨跌幅（%），按涨跌上色（`market.value_color`）；
+        - 主力净额：主力净流入，**单位亿**（原始单位是元，这里 ÷1e8），正负号保留、
+          同样按正负上色；取不到就是 `—`（**绝不显示 0**：0 是"刚好不流入不流出"）。
         """
 
-        def __init__(self, item: dict | None = None) -> None:
+        def __init__(self, title: str) -> None:
             super().__init__()
-            self.setObjectName("marketIndustryEntry")
-            self.industry = ""
-            self.name_label = QLabel(market.DASH)
-            self.name_label.setObjectName("marketIndustryName")
-            self.name_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-            self.limit_up_label = QLabel(market.DASH)
-            self.density_label = QLabel(market.DASH)
-            self.mom_label = QLabel(market.DASH)
-            row = QHBoxLayout(self)
-            row.setContentsMargins(8, 2, 8, 2)
-            row.setSpacing(10)
-            row.addWidget(self.name_label, 1)     # 行业名吃掉多余宽度，三列数字始终靠右
-            for label, track in (
-                (self.limit_up_label, "888只"),
-                (self.density_label, "888.88%"),
-                (self.mom_label, MARKET_PCT_TRACK),
-            ):
-                label.setAlignment(
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                )
-                label.setMinimumWidth(label.fontMetrics().horizontalAdvance(track))
-                row.addWidget(label, 0)
-            if item is not None:
-                self.update_item(item)
+            self.title = title
+            self.setObjectName("marketSectorTable")
+            box = QVBoxLayout(self)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(4)
+            self.title_label = QLabel(title)
+            self.title_label.setObjectName("marketSectionTitle")   # 与分区标题同一档
+            self.title_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+            box.addWidget(self.title_label)
+            self.table = QTableWidget(0, len(SECTOR_TABLE_HEADERS))
+            self.table.setHorizontalHeaderLabels(list(SECTOR_TABLE_HEADERS))
+            self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            self.table.verticalHeader().setVisible(False)
+            self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+            self.table.setSelectionBehavior(QTableWidget.SelectRows)
+            self.table.setAlternatingRowColors(True)
+            self.table.setShowGrid(True)
+            # 表头那四个字就是"这一列什么意思"的说明书 —— 口径写进表头 tooltip
+            for column, tip in enumerate(SECTOR_HEADER_TIPS):
+                item = self.table.horizontalHeaderItem(column)
+                if item is not None:
+                    item.setToolTip(tip)
+            box.addWidget(self.table)
+            self.rows: list[dict] = []
 
-        def update_item(self, item: dict) -> None:
-            """按一个行业 dict 更新四段文本（**只有涨幅上色**，见类说明）。"""
-            self.industry = str(item.get("industry") or "")
-            self.name_label.setText(self.industry or market.DASH)
-            self.limit_up_label.setText(f"{int(item.get('limit_up') or 0)}只")
-            self.density_label.setText(percent_text(item.get("density")))
-            self.mom_label.setText(signed_percent_text(item.get("mom")))
-            color = market.value_color(
-                None if item.get("mom") is None else float(item["mom"]) * 100
+        def minimum_need(self) -> int:
+            """这张表"至少要多宽"（表头文字 + 单元格内边距 + 竖滚动条）。
+
+            为什么要问它：两张表并列还是上下排，取决于"半屏塞不塞得下"——
+            与其写死一个 600 像素的常量（换台机器字体更宽就不对了），
+            不如按当前字体量一遍（与概览条目列数同一套思路，见 `_market_item_need`）。
+            """
+            metrics = self.table.fontMetrics()
+            width = sum(metrics.horizontalAdvance(text) for text in SECTOR_TABLE_HEADERS)
+            return int(width + SECTOR_CELL_PADDING * len(SECTOR_TABLE_HEADERS)
+                       + SECTOR_TABLE_CHROME)
+
+        def set_rows(self, rows: list[dict]) -> None:
+            """填 5 行（`rows` 为空就画 0 行 + 表头，照样能看出这一列是什么）。"""
+            self.rows = list(rows or [])
+            self.table.setRowCount(len(self.rows))
+            for index, row in enumerate(self.rows):
+                self.table.setItem(index, 0, self._name_item(row))
+                self.table.setItem(index, 1, self._limit_up_item(row))
+                self.table.setItem(index, 2, self._pct_item(row))
+                self.table.setItem(index, 3, self._net_item(row))
+
+        def _name_item(self, row: dict) -> Any:
+            """板块名称：**加粗**（用户要求所有名称加黑）——数值不加粗。"""
+            item = QTableWidgetItem(str(row.get("name") or market.DASH))
+            item.setFont(_bold_name_font(self.table))
+            item.setToolTip(self._name_tip(row))
+            return item
+
+        @staticmethod
+        def _name_tip(row: dict) -> str:
+            bits = []
+            if row.get("source_text"):
+                bits.append(str(row["source_text"]))
+            if row.get("mom") is not None and row.get("pct") is None:
+                # 退回本地口径时，这一列装的其实是"近 5 日行业等权涨幅"
+                bits.append("这一列现在是**近 5 日**行业等权涨幅（不是当日涨幅），"
+                            "原因见「热门板块」下面那行说明")
+            return "\n".join(bits)
+
+        def _limit_up_item(self, row: dict) -> Any:
+            value = row.get("limit_up")
+            item = QTableWidgetItem(market.DASH if value is None else str(int(value)))
+            item.setToolTip(SECTOR_HEADER_TIPS[1])
+            item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
-            self.mom_label.setStyleSheet(f"color:{color}" if color else "")
+            return item
+
+        def _pct_item(self, row: dict) -> Any:
+            value = row.get("pct")
+            item = QTableWidgetItem(percent_value_text(value))
+            color = market.value_color(value)
+            if color:
+                # 与两张主表同一套做法：改前景色，不用富文本（排序/复制都不受影响）
+                item.setForeground(QBrush(QColor(color)))
+            item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            item.setToolTip(SECTOR_HEADER_TIPS[2])
+            return item
+
+        def _net_item(self, row: dict) -> Any:
+            """主力净额：元 → **亿**（`+1.23亿` / `-0.45亿`）；取不到是 `—`。
+
+            为什么单独写一个格式化而不是复用 `market._amount_text`：
+            那个是"成交额"口径（四舍五入到整亿、没有正负号），
+            而主力净额要的是**带符号的两位小数亿** —— 差一个符号，
+            用户就会把"净流出"看成"净流入"。
+            """
+            value = row.get("main_net")
+            if value is None:
+                item = QTableWidgetItem(market.DASH)
+                item.setToolTip(
+                    "这一列取不到：主力净额要 `data/sectors.py` 的板块榜才提供，"
+                    "现在这份数据里没有它（不是 0 —— 0 是「刚好不流入不流出」）"
+                )
+            else:
+                number = float(value) / SECTOR_NET_UNIT
+                item = QTableWidgetItem(f"{number:+.2f}亿")
+                color = market.value_color(number)
+                if color:
+                    item.setForeground(QBrush(QColor(color)))
+                item.setToolTip(f"{SECTOR_HEADER_TIPS[3]}\n原始值 {float(value):,.0f} 元")
+            item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            return item
+
+    class HotSectorsSection(QFrame):
+        """「热门板块」块 = 标题 + **上涨前五 / 下跌前五 两张表**（2026-09-17 用户要求）。
+
+        为什么改成两张表：用户原话是"把上涨前 5 和下跌前 5 都标出来。现在的数据都没写
+        什么意思，改成以下表格标上名称" —— 也就是说这一块要回答两件事：
+        **今天资金在抢谁、又在砸谁**，而且每一列的含义要写在表头上。
+        旧版是"涨停密度前 12"的一列长串（只有上榜的、全是涨的），跌得最狠的板块
+        在那套口径里根本不会出现（它按涨停密度排序）。
+
+        窄屏排布：两张表**并列**（宽屏）或**上下排**（窄屏）—— 判据是
+        "两张表的最小需要宽度之和塞不塞得下当前宽度"（`_relayout`），
+        与概览条目列数同一套思路：宁可少排一列，也不让文字被裁。
+
+        属性：`title_label`（块标题）、`tables`（`{标题: SectorTable}`）、
+        `placeholder_label`（两张表都没数据时的 `—` 占位）、`note_label`（口径说明）。
+        兼容旧接口：`entries` / `stats` 恒为空 —— 原来"一块 = 一个条目网格"，
+        现在这一块是两张表，但外面遍历各块的代码（`_render_market_overview`）不必分叉。
+        """
+
+        def __init__(self, label: str,
+                     titles: tuple[str, ...] = (SECTOR_UP_TITLE, SECTOR_DOWN_TITLE)) -> None:
+            super().__init__()
+            self.label = label
+            self.keys: tuple[str, ...] = ()
+            self.entries: list[Any] = []
+            self.stats: dict[str, Any] = {}
+            self._narrow: bool | None = None
+            self._need = 0
+            box = QVBoxLayout(self)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(6)
+            self.title_label = QLabel(label)
+            self.title_label.setObjectName("marketSectionTitle")
+            self.title_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+            box.addWidget(self.title_label)
+            #: 两张表：**上涨前五** 与 **下跌前五**（顺序就是界面上的顺序）
+            self.tables: dict[str, SectorTable] = {
+                title: SectorTable(title) for title in titles
+            }
+            self.grid = QGridLayout()
+            self.grid.setContentsMargins(0, 0, 0, 0)
+            self.grid.setSpacing(MARKET_ITEM_GAP)
+            box.addLayout(self.grid)
+            for table in self.tables.values():
+                self.grid.addWidget(table, 0, 0)
+            self.placeholder_label = QLabel(market.DASH)
+            self.placeholder_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+            box.addWidget(self.placeholder_label)
+            self.placeholder_label.setVisible(False)
+            #: 页内那行说明（"表里的数是从哪来的"）：**只在有话说时出现**
+            self.note_label = ElidedLabel("")
+            self.note_label.setObjectName("statusTag")
+            self.note_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+            box.addWidget(self.note_label)
+            self.note_label.setVisible(False)
+
+        def set_rows(self, rows: dict[str, list[dict]], note: str = "") -> None:
+            """填两张表：`{标题: 行列表}`；`note` 是"这些数从哪来"的那句话。"""
+            for title, table in self.tables.items():
+                table.set_rows(list((rows or {}).get(title) or []))
+            empty = not any(table.rows for table in self.tables.values())
+            self.placeholder_label.setVisible(empty)
+            # 界面显示用 `plain_text`（与来源说明同一套：QLabel 是纯文本，
+            # `**` 会显示成字面的星号）；tooltip 里保留原文
+            self.note_label.setFullText(plain_text(note or ""))
+            self.note_label.setToolTip(str(note or ""))
+            self.note_label.setVisible(bool(note))
+            self._need = 0
+            self._relayout()
+
+        def set_columns(self, columns: int, stat_columns: int | None = None) -> None:
+            """列数变化时重排（这一块不看列数，只看自己的宽度 —— 见 `_relayout`）。"""
+            self._relayout()
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: D102 - 见类说明
+            super().resizeEvent(event)
+            self._relayout()
+
+        def _relayout(self) -> None:
+            """按当前宽度决定两张表**并列**还是**上下排**（宽度不够就上下排）。"""
+            if not self._need:
+                self._need = sum(table.minimum_need() for table in self.tables.values())
+            need = self._need + MARKET_ITEM_GAP
+            width = max(self.width(), 0)
+            available = width or 10_000          # 还没被布局量过宽度时：按够宽算
+            narrow = available < need
+            if narrow == self._narrow:
+                return
+            self._narrow = narrow
+            for index, table in enumerate(self.tables.values()):
+                self.grid.removeWidget(table)
+                if narrow:
+                    self.grid.addWidget(table, index, 0)
+                else:
+                    self.grid.addWidget(table, 0, index)
+            for column in range(len(self.tables)):
+                self.grid.setColumnStretch(column, 1 if (not narrow or column == 0) else 0)
 
     class MarketSection(QFrame):
         """一块 = 小标题 + 条目网格（**整块就是这一个控件**）。
@@ -848,7 +1186,8 @@ if QT_AVAILABLE:
         属性：
             `label`（界面上的小标题）、`keys`（数据来自哪几组，见 `market.GROUPS`）、
             `grid`（QGridLayout）、`entries`（条目控件列表）、`stats`（小条目名→控件，
-            只有「情绪指数」块有）、`placeholder_label`（配了这一块但没取到数时的 `—`）。
+            只有「成交与情绪」块有：`with_stats=True`）、
+            `placeholder_label`（配了这一块但没取到数时的 `—`）。
         """
 
         def __init__(
@@ -886,13 +1225,13 @@ if QT_AVAILABLE:
             )
             box.addWidget(self.placeholder_label)
             self.placeholder_label.setVisible(False)
-            #: 小条目（只有「情绪指数」块有：成交额 / 涨停家数 / 涨跌家数）
+            #: 小条目（只有「成交与情绪」块有：成交额 / 涨停 / 跌停 / 炸板 / 上涨 / 下跌 / 平盘）
             self.stats: dict[str, Any] = {}
             self.stats_grid: Any = None
             if with_stats:
                 self.stats_grid = QGridLayout()
                 self.stats_grid.setContentsMargins(0, 0, 0, 0)
-                self.stats_grid.setSpacing(6)
+                self.stats_grid.setSpacing(MARKET_STAT_GRID_SPACING)
                 for column, name in enumerate(MARKET_STAT_TITLES):
                     item = MarketStatItem(name)
                     self.stats[name] = item
@@ -917,7 +1256,10 @@ if QT_AVAILABLE:
                 self._columns = 0                 # 强制下一次重排列数
             for entry, item in zip(self.entries, items):
                 entry.update_item(item)
-            self.placeholder_label.setVisible(not items)
+            # `—` 占位只在"**配了这一块**但没取到数"时出现：
+            # 成交与情绪块本来就没有条目（它装的是小条目），给它画一个吊在那里的 `—`
+            # 只会让人以为"这一块没数据"。
+            self.placeholder_label.setVisible(not items and not self.stats)
 
         def set_stat(self, name: str, text: str, *, tooltip: str = "") -> None:
             """更新一个小条目的数值（块里没有这个条目时什么都不做）。"""
@@ -938,8 +1280,14 @@ if QT_AVAILABLE:
                 entry.deleteLater()
             self.entries = []
 
-        def set_columns(self, columns: int) -> None:
-            """按列数把条目与小条目重排成网格（窄屏自动换行，绝不出现横向滚动）。"""
+        def set_columns(self, columns: int, stat_columns: int | None = None) -> None:
+            """按列数把**条目**与**小条目**各自重排成网格（窄屏自动换行，绝不横向滚动）。
+
+            为什么两套列数分开传：条目最多 5 列（`MARKET_MAX_COLUMNS`）、
+            小条目最多 7 列（`MARKET_STAT_MAX_COLUMNS`，用户要求"宽屏一行 7 个"），
+            上限不同，所以由调用方（`_apply_market_columns`）按各自实测宽度算好传进来；
+            不传时退回老的"小条目跟着条目列数走、最多 7"（老调用方与测试照样能用）。
+            """
             if columns != self._columns:
                 self._columns = columns
                 for index, entry in enumerate(self.entries):
@@ -947,64 +1295,196 @@ if QT_AVAILABLE:
                     self.grid.addWidget(entry, index // columns, index % columns)
                 for column in range(MARKET_MAX_COLUMNS):
                     self.grid.setColumnStretch(column, 1 if column < columns else 0)
-            if self.stats_grid is None or columns == self._stats_columns:
+            if self.stats_grid is None:
                 return
-            self._stats_columns = columns
-            # 小条目最多 3 个：列数比 3 多的时候按 3 排（三个条目摊在 5 列上会松得看不出关系）
-            # 小条目最多 3 列（9 条正好 3×3）：列数再多也不摊开，否则一条一列看不出关系
-            stats_columns = min(columns, MARKET_STAT_MAX_COLUMNS)
+            wanted = min(columns if stat_columns is None else stat_columns,
+                         MARKET_STAT_MAX_COLUMNS)
+            if wanted == self._stats_columns:
+                return
+            self._stats_columns = wanted
             for index, name in enumerate(MARKET_STAT_TITLES):
                 item = self.stats[name]
                 self.stats_grid.removeWidget(item)
-                self.stats_grid.addWidget(item, index // stats_columns,
-                                          index % stats_columns)
+                self.stats_grid.addWidget(item, index // wanted, index % wanted)
             for column in range(MARKET_STAT_MAX_COLUMNS):
-                self.stats_grid.setColumnStretch(
-                    column, 1 if column < stats_columns else 0
-                )
+                # 等宽列：列数已经按"最宽那条"算过了（见 `_apply_market_columns`），
+                # 所以等分之后每一列都不会小于最宽的那条 —— 这是**不会截字**的保证。
+                # （试过"按各条需要比例分配"，字体一变反而会把宽的那条挤到 sizeHint 以下，
+                #  宽字体用例当场红，所以退回等宽这套。）
+                self.stats_grid.setColumnStretch(column, 1 if column < wanted else 0)
 
     def _market_item_key(item: dict) -> str:
         """条目的身份：指数的 `thscode` 或行业的 `industry`（重建控件的判据）。"""
         return str(item.get("thscode") or item.get("industry") or "")
 
-    def hot_industry_rows(industries: Any, top: int = MARKET_HOT_TOP) -> list[dict]:
-        """`pool.hot_industries()` 的结果 → 页面上要摆的那几行（**按涨停密度降序**）。
+    def _sector_number(value: Any) -> Any:
+        """板块榜里的一个数 → float/int；空/非数字一律 None（界面画 `—`，**不是 0**）。
 
-        两个口径上的取舍都写在这里，免得将来有人"顺手"改成别的：
-        - **哪 12 个行业**用现有那套综合分（涨停密度 + 近 N 日行业等权涨幅，`score`），
-          与选股时挑"热门行业"用的是同一份实现 —— 页面上看到的板块就是策略看到的那批，
-          不然用户会问"为什么页面说有热点、策略却没选它"；
-        - **摆放顺序**按**当日涨停密度**降序（用户给定）：密度是"今天资金在打谁"的直接答案，
-          综合分里还混着中期动量，用它排序会让人看不懂为什么第二名比第一名更热。
+        为什么要单独一个宽松转换：板块榜的三个数（涨幅/主力净额/涨停家数）来自接口，
+        停牌、缺字段、字段名对不上都会是空值 —— 把空值当 0 显示，用户会把
+        "没取到"读成"确实是 0"（净额 0 = 刚好不流入不流出，是完全不同的结论）。
         """
-        rows = []
-        for name, data in (industries or {}).items():
+        if value is None or value == "":
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return int(number) if isinstance(value, int) else number
+
+
+    def sectors_module() -> Any:
+        """防御式取 `laoa_trader.data.sectors`；**拿不到就返回 None**（调用方退回本地口径）。
+
+        为什么必须 try/except 而不是顶部直接 import：这个模块是本次改版**另一个 agent
+        正在写**的（接口契约见任务书），它可能还不存在、也可能写了一半语法错 ——
+        而概览页是程序启动的**第一屏**，一个 import 失败等于整个窗口打不开。
+        拿不到时退回"本地算"（`local_sector_tables`），页面上写明是哪种口径。
+        """
+        try:
+            from laoa_trader.data import sectors as sectors_mod
+        except Exception as exc:  # noqa: BLE001 - 缺模块/写坏/依赖缺失都算"拿不到"
+            logger.info(f"板块榜模块不可用（退回本地口径）：{type(exc).__name__}: {exc}")
+            return None
+        if not callable(getattr(sectors_mod, "fetch_sector_rank", None)):
+            logger.info("板块榜模块里没有 fetch_sector_rank（退回本地口径）")
+            return None
+        return sectors_mod
+
+
+    def sector_rank_tables(
+        rank: Any, industries: Any, *, shown: int = SECTOR_TOP
+    ) -> tuple[list[dict], list[dict]]:
+        """板块榜的行 + 本地涨停家数 → `(上涨前五, 下跌前五)`。
+
+        口径（用户给定）：
+        - **排序按涨幅**：上涨前五 = 涨幅降序前 5；下跌前五 = 涨幅升序前 5
+          （涨幅 = 板块当天涨跌幅，来自 `sectors.fetch_sector_rank()`）；
+        - **涨停数量用地本那一套**：`pool.hot_industries()` 的 `limit_up`
+          （用户原话"涨停数量 = 该板块当日涨停家数；用它的口径，不要另起一套"），
+          按**板块名**对齐；对不上的显示 `—`（宁可显示"没对上"，也不要编一个 0 出来）；
+        - **主力净额**单位是元，界面上 ÷1e8 显示成"亿"（见 `SectorTable._net_item`）。
+        """
+        counts: dict[str, Any] = {}
+        for name, record in (industries or {}).items():
+            if str(name):
+                counts[str(name)] = _sector_number((record or {}).get("limit_up"))
+        rows: list[dict] = []
+        for item in rank or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
             if not name:
                 continue
+            pct = _sector_number(item.get("pct"))
+            if pct is None:
+                continue          # 没有涨幅就排不进"上涨/下跌前五"（不拿 0 顶替）
             rows.append({
-                "industry": str(name),
-                "limit_up": int((data or {}).get("limit_up") or 0),
-                "density": (data or {}).get("density"),
-                "mom": (data or {}).get("mom"),
+                "name": name,
+                "limit_up": counts.get(name),
+                "pct": pct,
+                "main_net": _sector_number(item.get("main_net")),
+                "source_text": "板块榜（`data/sectors.py` 的 fetch_sector_rank）："
+                               "涨幅=当天板块涨跌幅",
             })
-        rows.sort(key=lambda row: (
-            -(float(row["density"]) if row["density"] is not None else 0.0),
-            -int(row["limit_up"]),
-            row["industry"],          # 同密度同家数时按名字定序：**每次刷新顺序都一样**
-        ))
-        return rows[:top]
+        # 同涨幅按名字定序：**每次刷新顺序都一样**（否则两张表会自己跳来跳去）
+        up = sorted(rows, key=lambda row: (-float(row["pct"]), row["name"]))[:shown]
+        down = sorted(rows, key=lambda row: (float(row["pct"]), row["name"]))[:shown]
+        return up, down
 
-    def percent_text(value: Any) -> str:
-        """比例（0.0123）→ `1.23%`；取不到就是 `—`（涨停密度用）。"""
-        try:
-            return f"{float(value) * 100:.2f}%"
-        except (TypeError, ValueError):
-            return market.DASH
 
-    def signed_percent_text(value: Any) -> str:
-        """比例（0.0123）→ `+1.23%`（带正负号，A 股看盘的习惯写法）；取不到是 `—`。"""
+    def local_sector_tables(
+        industries: Any, *, shown: int = SECTOR_TOP
+    ) -> tuple[list[dict], list[dict]]:
+        """取不到板块榜时的**本地兜底**：按本地口径排，主力净额一律 `—`。
+
+        本地只有 `pool.hot_industries()` 给的三样东西：涨停家数、涨停密度、
+        **近 5 日行业等权涨幅**（没有"当天板块涨跌幅"，也没有主力净额）。
+        所以这里：
+        - 涨幅那一列装的是**近 5 日等权涨幅**（`mom`），页面上会写明"不是当日涨幅" ——
+          换个名字叫"涨幅"却不说明，等于拿一个别的口径冒充用户要的那个数；
+        - 主力净额那一列是 `—`（取不到），**不显示 0**；
+        - 涨停数量照旧用本地那一套口径（本来就是它算的）。
+        """
+        rows: list[dict] = []
+        for name, record in (industries or {}).items():
+            if not str(name):
+                continue
+            mom = _sector_number((record or {}).get("mom"))
+            # `mom` 是**比例**（0.0321 = 3.21%），而 `pct` 这一列全项目统一是**百分数**
+            # （板块榜给的就是百分数）—— 这里 ×100 换成同一口径，否则本地模式下
+            # 涨幅会显示成 `+0.03%`（差 100 倍）。
+            rows.append({
+                "name": str(name),
+                "limit_up": _sector_number((record or {}).get("limit_up")),
+                "pct": None if mom is None else float(mom) * 100,
+                "main_net": None,
+                "mom": mom,
+                "source_text": "本地口径：这一列是**近 5 日**行业等权涨幅（不是当日涨幅）",
+            })
+        ranked = [row for row in rows if row["pct"] is not None]
+        up = sorted(ranked, key=lambda row: (-float(row["pct"]), row["name"]))[:shown]
+        down = sorted(ranked, key=lambda row: (float(row["pct"]), row["name"]))[:shown]
+        return up, down
+
+
+    def sector_payload(cfg: Any, industries: Any) -> dict:
+        """「热门板块」两张表的数据 + 那行说明（**在后台线程里调用**）。
+
+        Returns:
+            `{"up": [...], "down": [...], "source": "sectors"|"local", "note": "..."}`。
+            `note` 就是页面上那行小字：**说明这些数是从哪来的、缺的那一列为什么缺** ——
+            用户要的东西不许静默消失，取不到就得说清是"没取到"而不是"没有"。
+        """
+        sectors_mod = sectors_module()
+        if sectors_mod is not None:
+            try:
+                rank = sectors_mod.fetch_sector_rank()
+            except Exception as exc:  # noqa: BLE001 - 板块榜失败只影响这一块
+                logger.info(f"板块榜取数失败（退回本地口径）：{type(exc).__name__}: {exc}")
+                rank = None
+            if rank:
+                up, down = sector_rank_tables(rank, industries)
+                if up or down:
+                    unmatched = [
+                        row["name"] for row in up + down if row["limit_up"] is None
+                    ]
+                    note = ("口径：涨幅 = 板块**当天**涨跌幅；涨停数量 = 当日该板块涨停家数"
+                            "（本地涨停池，与选股同一套）；主力净额单位**亿**（正=净流入）。")
+                    if unmatched:
+                        note += ("这些板块名在本地行业表里没有对应行业，涨停数量显示 —："
+                                 + "、".join(unmatched[:3])
+                                 + ("…" if len(unmatched) > 3 else ""))
+                    return {"up": up, "down": down, "source": "sectors", "note": note}
+                reason = "板块榜取到了，但没有一行带涨幅（排不出前五）"
+            else:
+                reason = "板块榜数据取不到（`data/sectors.py` 这次没返回数据）"
+        else:
+            reason = "还没有可用的板块榜模块（`data/sectors.py` 未就绪）"
+        up, down = local_sector_tables(industries)
+        note = (f"{reason}：现在按**本地口径**显示 —— 涨幅 = 近 5 日行业等权涨幅"
+                "（**不是**当日涨幅），主力净额取不到所以显示 —。"
+                "等板块榜可用后（点【立即刷新】）这里会自动换成当日口径。")
+        return {"up": up, "down": down, "source": "local", "note": note}
+
+
+    # 原来的 `percent_text()` / `signed_percent_text()`（"比例 → 百分数"）随
+    # `IndustryEntry`（旧的热门板块条目控件）一起删掉了：2026-09-17 起热门板块是两张表，
+    # 表里的 `pct` 直接就是**百分数**（板块榜给的口径），只有一个格式化函数
+    # （`percent_value_text`）。留着那两个没人调的转换函数，迟早有人拿它去格式化
+    # "已经是百分数"的值 —— 那正好是 ×100 的那个量级错误。
+
+    def percent_value_text(value: Any) -> str:
+        """**已经是百分数**的值（3.21）→ `+3.21%`；取不到是 `—`。
+
+        为什么不能直接用"比例 → 百分数"那种转换（原来那个 `signed_percent_text` 会 ×100）：
+        板块榜里的 `pct` 本来就是**百分数**（腾讯原文 `zdf=0.29` 就是 0.29%），
+        再乘一次 100 会显示成 `+29.00%` —— 量级差 100 倍，而且**看起来还是个像样的数**，
+        是最危险的一类错（`data/sectors.py` 的模块头专门讲过同一件事）。
+        所以两种口径各有一个函数，名字里就写着差在哪。
+        """
         try:
-            return f"{float(value) * 100:+.2f}%"
+            return f"{float(value):+.2f}%"
         except (TypeError, ValueError):
             return market.DASH
 
@@ -1187,7 +1667,7 @@ if QT_AVAILABLE:
             self._timer.timeout.connect(self._tick)
             self._timer.start(5000)
 
-            # 「全市概览」页**自己的**定时器：每分钟一次。
+            # 「大盘概览」页**自己的**定时器：每分钟一次。
             # 为什么不搭上面那个 5 秒的顺风车：概览是 4~6 个接口请求，
             # 5 秒一轮等于每分钟打 48 次（配额与限流都吃不消）；而且这一页
             # 只在"用户正看着它"时才需要新鲜数（见 `_market_tick`）。
@@ -1262,7 +1742,7 @@ if QT_AVAILABLE:
 
             # 五个页签（顺序即用户给定的顺序，见 `TAB_TITLES`）
             self.tabs = QTabWidget()
-            # 1) 全市概览：只读的一页，看盘第一眼要扫到（Qt 启动就显示第一个页签）
+            # 1) 大盘概览：只读的一页，看盘第一眼要扫到（Qt 启动就显示第一个页签）
             self.tabs.addTab(self._build_market_page(), TAB_MARKET)
             # 2) 自选股池：策略/公式选出来的 + 手工加的自选，**同一张表**（靠「来源」区分）
             self.watch_page = self._build_watch_pool_page()
@@ -1415,6 +1895,23 @@ if QT_AVAILABLE:
             self.pool_table = QTableWidget(0, len(WATCH_HEADERS))
             self.pool_table.setHorizontalHeaderLabels(list(WATCH_HEADERS))
             self._stretch(self.pool_table)
+            # 新加的三列各写一句"这一列什么意思"（表头只有两个字，写不下口径）
+            self._set_header_tooltip(
+                self.pool_table, WATCH_HEADERS.index("市值"),
+                "流通市值**亿**（取实时快照；没有实时快照时显示 `—`，不是 0）"
+            )
+            self._set_header_tooltip(
+                self.pool_table, WATCH_HEADERS.index("换手"),
+                "实时换手率**%**（取实时快照；没有实时快照时显示 `—`，不是 0）"
+            )
+            self._set_header_tooltip(
+                self.pool_table, WATCH_MONITOR_COLUMN,
+                "监控开关：`开启` / `关闭`（**点这一格就能切换**，与右键【关闭监控】/"
+                "【打开监控】是同一件事）。\n"
+                "自选可以开关；策略/公式选中的票不是自选，没有「停用」这一说"
+                "（点它会给一句指路的话）。\n"
+                "鼠标停在这一格上可以看到**今天最新一条提醒**的完整内容。"
+            )
             # 三件事统一：悬浮看备注、右键删除/开关监控、单击名称开雪球
             self._enable_row_interactions(self.pool_table, "pool")
             layout.addWidget(self.pool_table, 1)
@@ -1485,24 +1982,36 @@ if QT_AVAILABLE:
             self._enable_row_interactions(self.position_table, "position")
             # 列头 tooltip = 那一列的说明书（用户不用翻 README 就知道按什么口径算）
             self._set_header_tooltip(
-                self.position_table, 4,
+                self.position_table, POSITION_HEADERS.index("盈亏比例"),
                 "盈亏比例 =（现价 − 成本价）÷ 成本价。\n"
                 "现价与左边那一列**是同一个价**：有实时快照就用实时价，没有就用本地最新"
-                "收盘价（标 `*`）—— 绝不用后复权价冒充现价。\n"
+                "收盘价（鼠标停在「现价」那一格上会写明这是哪天的收盘价）——"
+                "绝不用后复权价冒充现价。\n"
                 "取不到价时显示 `—`（不是 0.00%：那会被误读成「刚好打平」）。"
             )
             self._set_header_tooltip(
-                self.position_table, 5,
+                self.position_table, POSITION_HEADERS.index("市值"),
+                "流通市值**亿**（取实时快照；没有实时快照时显示 `—`，不是 0）"
+            )
+            self._set_header_tooltip(
+                self.position_table, POSITION_HEADERS.index("换手"),
+                "实时换手率**%**（取实时快照；没有实时快照时显示 `—`，不是 0）"
+            )
+            self._set_header_tooltip(
+                self.position_table, POSITION_HEADERS.index("止损位"),
                 "止损位 = 成本价 ×（1 − 止损比例）；比例在「系统设置 → T策略」里改"
             )
             self._set_header_tooltip(
-                self.position_table, 6,
+                self.position_table, POSITION_HEADERS.index("止盈位"),
                 "止盈位 = 成本价 ×（1 + 止盈比例）；比例在「系统设置 → T策略」里改"
             )
             self._set_header_tooltip(
-                self.position_table, 7,
-                "今天这只票最新一条盘中提醒（止损/止盈/涨停打开/跌破 5 日线/放量突破/"
-                "回踩买点/做T/竞价/异动）。鼠标停到单元格上看完整那句。"
+                self.position_table, POSITION_MONITOR_COLUMN,
+                "监控开关：`开启` / `关闭`（**点这一格就能切换**，与右键【关闭监控】/"
+                "【打开监控】是同一件事）。\n"
+                "关闭 = 这只票不再产生任何盘中提醒（止损/止盈/做T/竞价/异动）。\n"
+                "鼠标停在这一格上可以看到**今天最新一条提醒**的完整内容"
+                "（止损/止盈/涨停打开/跌破 5 日线/放量突破/回踩买点/做T/竞价/异动）。"
             )
             layout.addWidget(self.position_table, 1)
             return page
@@ -1637,29 +2146,29 @@ if QT_AVAILABLE:
             row.addStretch(1)
             return row
 
-        # ── 全市概览页（第一个页签；数据口径见 market.py）──
+        # ── 大盘概览页（第一个页签；数据口径见 market.py）──
 
         def _build_market_page(self) -> Any:
-            """「全市概览」页：**三块**（宽基指数 / 情绪指数 / 热门板块）+ 单行页脚。
+            """「大盘概览」页：**四块**（成交与情绪 / 宽基指数 / 情绪指数 / 热门板块）+ 单行页脚。
 
-            用户给定的布局（`docs/改版方案.md` 第二节 TAB 1）：竖直排列、窄窗口自动换列，
-            整页**只有三块**：
+            用户 2026-09-17 给定的布局（顺序也是用户给的）：竖直排列、窄窗口自动换列，
+            整页**四块**：
 
-            1. 「宽基指数」：上证 / 深证 / 创业板 / 科创50 / 沪深300 —— 点位 + 涨跌幅
-               （各自按涨跌上色）；
-            2. 「情绪指数」：同花顺情绪/板块指数 + 原来占一整排的 KPI 卡片折成的
-               **3 个小条目**（成交额 / 涨停家数 / 涨跌家数）；
-            3. 「热门板块」：当日**涨停密度前 12** 的行业（行业名 + 涨停家数 + 密度 +
-               近 5 日行业等权涨幅，按密度降序，涨幅上色）。
+            1. 「成交与情绪」：**最上面**那一块 —— 成交额（沪+深 一个数）+ 涨停/跌停/炸板 +
+               上涨/下跌/平盘，**7 个小条目排成一行**（窄屏自动换行）；
+            2. 「宽基指数」：上证 / 深成 / 创业板 / 科创50 / 沪深300 + 上证50 / 中证1000
+               —— 点位 + 涨跌幅（各自按涨跌上色）；
+            3. 「情绪指数」：同花顺情绪/板块指数，**只有指数条目**（小条目都搬去第 1 块了）；
+            4. 「热门板块」：**上涨前五 + 下跌前五两张表**（板块名称/涨停数量/涨幅/主力净额）。
 
-            为什么把原来那一整排 KPI 卡片拆掉：它讲的是"钱、涨跌停、涨跌家数"，
-            却占了首屏最贵的一排；折进「情绪指数」块之后，首屏腾出来的位置正好留给
-            用户真正要看的**热门板块**（"今天资金在打谁"）。
+            为什么把这一块挪到最上面：用户原话是"把'成交额等元素'模块挪到「宽基指数」上面"——
+            成交额与涨跌停/涨跌家数是"今天市场整体什么状态"的第一眼信息，
+            指数点位是第二眼；顺序换了之后，第一行就把"钱和情绪"说完了。
 
             结构（也是测试的断言对象）：
                 page ─┬─ 标题行（页面标题，按钮在页脚）
                       ├─ market_scroll（可伸缩：窗口变矮时它自己滚动，页面底部那行不会被挤出去）
-                      │    └─ 宽基指数块 + 情绪指数块 + 热门板块块
+                      │    └─ 成交与情绪块 + 宽基指数块 + 情绪指数块 + 热门板块块
                       ├─ market_hint（**只在有话说时出现**：取数失败 / 涨跌家数关掉 / 板块没数据）
                       └─ market_footer（一行：数据来源小字 + 右对齐【立即刷新】）
 
@@ -1696,22 +2205,23 @@ if QT_AVAILABLE:
             content_layout.setContentsMargins(0, 0, 0, 0)
             content_layout.setSpacing(10)
             #: 块标题 → 整块控件（**顺序就是页面顺序**，见 `MARKET_SECTION_TITLES`）。
-            #: 数据来源：宽基块只吃 `market_indices`；情绪块吃 `market_sentiment_indices`
-            #: + `market_sector_indices` 两组（它们本来就是同一类同花顺板块指数，
-            #: 而用户给定的三块里只有"情绪指数"这一块装它们）+ 3 个小条目；
-            #: 热门板块块的数据来自 `pool.hot_industries()`（不是行情接口）。
+            #: 数据来源：成交与情绪块只吃 `market.kpi_values()` 的那 7 个数（没有指数条目）；
+            #: 宽基块只吃 `market_indices`；情绪块吃 `market_sentiment_indices`
+            #: + `market_sector_indices` 两组（同一类同花顺板块指数）；
+            #: 热门板块块的数据来自 `data/sectors.py` 的板块榜 + `pool.hot_industries()`
+            #: 的涨停家数（见 `sector_payload`）。
             self.market_sections: dict[str, Any] = {
+                MARKET_SECTION_FLOW: MarketSection(
+                    MARKET_SECTION_FLOW, (),
+                    with_stats=True,
+                ),
                 MARKET_SECTION_WIDE: MarketSection(
                     MARKET_SECTION_WIDE, ("indices",),
                 ),
                 MARKET_SECTION_SENTIMENT: MarketSection(
                     MARKET_SECTION_SENTIMENT, ("sentiment", "sector"),
-                    with_stats=True,
                 ),
-                MARKET_SECTION_HOT: MarketSection(
-                    MARKET_SECTION_HOT, (),
-                    entry_factory=lambda item: IndustryEntry(item),
-                ),
+                MARKET_SECTION_HOT: HotSectorsSection(MARKET_SECTION_HOT),
             }
             for title in MARKET_SECTION_TITLES:
                 content_layout.addWidget(self.market_sections[title])
@@ -1753,9 +2263,12 @@ if QT_AVAILABLE:
             self.market_page = page
             #: 每个指数条目的控件（`thscode` / `name_label` / `value_label` / `pct_label`）
             self.market_entries: list[Any] = []
-            #: 热门板块行的控件（`industry` / `limit_up_label` / `density_label` / `mom_label`）
-            self.market_industry_rows: list[Any] = []
+            #: 「热门板块」两张表的数据（`sector_payload()` 的结果：up/down/source/note）
+            self.market_sectors: dict[str, Any] = {
+                "up": [], "down": [], "source": "", "note": "",
+            }
             self._market_columns = 0
+            self._market_stat_columns = 0
             self._render_market_overview()   # 先画空骨架：第一秒就是"能看"的样子
             return page
 
@@ -1769,8 +2282,8 @@ if QT_AVAILABLE:
             字体是唯一会变的变量，所以这里直接量 sizeHint：条目要多少就给多少，
             给不了就少放几列（窗口变窄 → 列数从 5 降到 3/2/1，条目往下排）。
 
-            量的口径：各块里最宽的那个条目（指数条目是三段，行业行是四段，小条目两段）。
-            sizeHint 与当前宽度无关，所以这个值稳定、不会来回抖。
+            量的口径：各块里最宽的那个条目（指数条目是三段）。sizeHint 与当前宽度无关，
+            所以这个值稳定、不会来回抖。
             """
             need = 0
             for section in (getattr(self, "market_sections", None) or {}).values():
@@ -1779,25 +2292,41 @@ if QT_AVAILABLE:
                         getattr(entry, "name_label", None),
                         getattr(entry, "value_label", None),
                         getattr(entry, "pct_label", None),
-                        getattr(entry, "limit_up_label", None),
-                        getattr(entry, "density_label", None),
-                        getattr(entry, "mom_label", None),
                     ) if label is not None]
                     if labels:
                         need = max(need, sum(l.sizeHint().width() for l in labels)
                                    + MARKET_ITEM_GAP * (len(labels) - 1))
-                for item in section.stats.values():
-                    need = max(need, item.title_label.sizeHint().width()
-                               + item.value_label.sizeHint().width() + MARKET_ITEM_GAP)
             # 兜底：条目还没建出来（首屏空骨架）时用常量，免得算出 0 列
             return max(MARKET_ENTRY_MIN_WIDTH, need + MARKET_ITEM_MARGIN)
 
+        def _market_stat_need(self) -> int:
+            """一个小条目"至少要多宽"（实测：名称 + 数值 + 间隙）。
+
+            与小条目**列数**单独算的理由：小条目是 7 条（用户要求"宽屏一行摆 7 个"），
+            而指数条目最多 5 列（`MARKET_MAX_COLUMNS`）—— 两者上限不同，
+            所以这里量的是小条目自己的宽度，与 `_market_item_need()` 分开。
+            """
+            need = 0
+            for section in (getattr(self, "market_sections", None) or {}).values():
+                for item in section.stats.values():
+                    # 量**控件自己**的需要宽度（`sizeHint` 已经把内部的间距/边距算进去了）。
+                    # 手工"名称宽 + 数值宽"会少算那几个像素，实测就差 2px：列宽 120 时
+                    # 数值只分到 57px，而它需要 59px —— 文字被悄悄截掉一点点，正是最难发现的那种。
+                    need = max(need, int(item.sizeHint().width()))
+            # 兜底：还没建出来时用常量（免得算出 0 列）。**实测值优先**：
+            # 用户要求"这 7 条排成一排"，而常量下限（原来写死 130）在小屏上正好会把
+            # 第 7 条挤到第二行 —— 实测多少就是多少，宽度不够时再靠列数收缩。
+            return (need + MARKET_STAT_MARGIN) if need else MARKET_STAT_MIN_WIDTH
+
         def _apply_market_columns(self) -> None:
-            """按可用宽度与**实测条目宽度**决定每组每行放几个条目。
+            """按可用宽度与**实测条目宽度**决定每组每行放几个条目（小条目单独算）。
 
             为什么要响应式列数：用户要求"不出现横向滚动条或被截断"。
-            窗口变窄（或换一台字体更宽的机器）→ 列数自动从 5 降到 3/2/1，
+            窗口变窄（或换一台字体更宽的机器）→ 列数自动往下掉，
             条目自己往下排（纵向滚动），而不是把第三列挤没、或让文字被裁掉。
+            小条目最多 7 列（宽屏一行 7 个）、指数条目最多 5 列 —— 两套上限分开算，
+            但用的是同一份"按实测宽度收缩"的机制（用户要求"窄屏允许换行，
+            沿用现有响应式列数机制"）。
             """
             scroll = getattr(self, "market_scroll", None)
             sections = getattr(self, "market_sections", None)
@@ -1806,13 +2335,24 @@ if QT_AVAILABLE:
             # 用**滚动区**的宽度而不是视口宽度：视口宽度会随着纵向滚动条出现而少十几像素，
             # 拿它算列数容易出现"滚动条一出现列数就掉一档"的抖动
             width = max(scroll.width(), self.market_page.width()) - 2 * PAGE_MARGINS[0]
-            need = self._market_item_need()
-            columns = max(1, min(MARKET_MAX_COLUMNS, width // need))
-            if columns == self._market_columns:
+            columns = max(1, min(MARKET_MAX_COLUMNS,
+                                 width // self._market_item_need()))
+            # 小条目：把**间距**算进去，按"最宽那条"决定能放几列（等宽列，所以这样才不截字）。
+            # 为什么这么在意这一行：用户要求"这 7 条排成一排"，而 7 列在 920 逻辑宽下
+            # 只差几个像素 —— 条目的内边距/间距（见 `MarketStatItem` 与下面的间距常量）
+            # 是**故意收紧**的，收过头会变成"文字被截"，放松一点就换行。两个都是缺陷，
+            # 所以这几个像素被测试钉住了（`test_overview_columns_fit_the_screen_without_clipping`）。
+            stat_need = self._market_stat_need()
+            stat_columns = max(1, min(MARKET_STAT_MAX_COLUMNS,
+                                      (width + MARKET_STAT_GRID_SPACING)
+                                      // (stat_need + MARKET_STAT_GRID_SPACING)))
+            if columns == self._market_columns \
+                    and stat_columns == self._market_stat_columns:
                 return
             self._market_columns = columns
+            self._market_stat_columns = stat_columns
             for section in sections.values():
-                section.set_columns(columns)
+                section.set_columns(columns, stat_columns)
 
         def on_market_refresh_clicked(self) -> None:
             """【立即刷新】：**忽略 TTL 缓存**重取一次（用户手点的按钮就该立刻见效）。"""
@@ -1876,14 +2416,15 @@ if QT_AVAILABLE:
             worker.start()
 
         def _market_payload(self, force: bool = False, client: Any = None) -> dict:
-            """**一趟取齐**「全市概览」要的两份数据：行情概览 + 热门行业。
+            """**一趟取齐**「大盘概览」要的三份数据：行情概览 + 热门行业 + 板块榜两张表。
 
-            为什么两件事一起取（而不是给热门行业另开一个线程）：
-            - 它们更新的是**同一页**、同一个刷新节拍（60 秒一次），分两个线程会出现
+            为什么三件事一起取（而不是各开一个线程）：
+            - 它们更新的是**同一页**、同一个刷新节拍（60 秒一次），分线程会出现
               "表头写 10:31、热门板块还是 10:30 的"这种半新半旧；
             - 热门行业是一次本地库查询（当日涨停密度 + 近 5 日行业等权涨幅），
-              在后台线程里跑不占界面 —— 但**也不能放主线程**：库里几百万行行情时
-              那几条聚合查询够让界面顿一下（与下载期间的"卡死"是同一类毛病）。
+              板块榜是一次网络取数（`sectors.fetch_sector_rank()`）——
+              两件都能在后台线程里跑，但**都不能放主线程**：库里几百万行行情时那几条
+              聚合查询够让界面顿一下，而板块榜断网时要等满超时（与"卡死"是同一类毛病）。
             """
             try:
                 overview = market.fetch_overview(self.cfg, client=client, force=force)
@@ -1895,17 +2436,26 @@ if QT_AVAILABLE:
                 industries = pool.hot_industries(self.cfg.db_path, top=MARKET_HOT_TOP)
             except Exception as exc:  # noqa: BLE001 - 热门板块取不到只让那一块空着
                 logger.debug(f"取热门行业失败（热门板块空着）：{exc}")
-            return {"overview": overview, "industries": industries}
+            # 板块榜取不到就退回本地口径（`sector_payload` 里写清了原因，页面会显示）
+            sectors_data = sector_payload(self.cfg, industries)
+            return {
+                "overview": overview,
+                "industries": industries,
+                "sectors": sectors_data,
+            }
 
         def _on_market_overview_ready(self, payload: Any) -> None:
             """后台取回来了（回主线程执行）：记下结果并重画页面。
 
-            兼容两种入参：`_market_payload()` 那个 `{overview, industries}` 字典，
-            以及**直接一份 overview**（老调用方/测试直接喂一份概览时不该炸）。
+            兼容两种入参：`_market_payload()` 那个 `{overview, industries, sectors}`
+            字典，以及**直接一份 overview**（老调用方/测试直接喂一份概览时不该炸）。
             """
             if isinstance(payload, dict) and "overview" in payload:
                 overview = payload.get("overview")
                 self.market_industries = payload.get("industries") or {}
+                sectors_data = payload.get("sectors")
+                if isinstance(sectors_data, dict):
+                    self.market_sectors = sectors_data
             else:
                 overview = payload
             self.market_overview = overview if isinstance(overview, dict) else None
@@ -1941,21 +2491,19 @@ if QT_AVAILABLE:
             self._on_market_overview_ready(payload)
             return self.market_overview
 
-        def hot_industry_rows(self) -> list[dict]:
-            """当前要在「热门板块」块里摆的行（**按涨停密度降序**）。"""
-            return hot_industry_rows(self.market_industries, MARKET_HOT_TOP)
-
         def _render_market_overview(self) -> None:
-            """把概览数据画到页面上（三块条目 + 3 个小条目 + 单行来源页脚 + 页内提示）。
+            """把概览数据画到页面上（四块 + 单行来源页脚 + 页内提示）。
 
-            四件事：
-            - **三块**：宽基/情绪两块指数（每个指数一个条目控件，点位与涨跌幅**各按
-              自己的涨跌上色**，涨=红、跌=绿、平/缺=默认色，色值只在 `market.py` 里定义一次）
-              + 热门板块（`self.market_industries`，来自 `pool.hot_industries`）；
-            - **3 个小条目**：成交额 / 涨停家数 / 涨跌家数（原 KPI 卡片折进来的，
-              `market.kpi_values()` 的口径与命令行同一份）；
+            五件事：
+            - **成交与情绪块**（最上面那块）：7 个小条目（成交额 = 沪+深 / 涨停 / 跌停 /
+              炸板 / 上涨 / 下跌 / 平盘），数值来自 `market.kpi_values()`
+              （与 `--cli --market` 同一份口径）；**始终可见**（与"配没配指数"无关）；
+            - **宽基 / 情绪两块指数**：每个指数一个条目控件，点位与涨跌幅**各按自己的
+              涨跌上色**（涨=红、跌=绿、平/缺=默认色，色值只在 `market.py` 里定义一次）；
+            - **热门板块**：上涨前五 / 下跌前五两张表（`self.market_sectors`，
+              `sector_payload()` 的产物：板块榜 + 本地涨停家数）；
             - **空块**：`market_indices` 没配 → 宽基块**连标题一起隐藏**（不留空标题）；
-              配了但取不到数 → 一个 `—` 占位；热门板块没数据 → 占位 + 一行原因；
+              配了但取不到数 → 一个 `—` 占位；板块榜没数据 → 两张表空着 + 一行说明；
             - **页内提示**（`market_hint`）：取数失败的原因、以及"涨跌家数为什么是 `—`"
               （`market_breadth` 关着就不取全市场快照，`_market_hint_notes` 负责说清）。
 
@@ -1966,25 +2514,37 @@ if QT_AVAILABLE:
             values = market.kpi_values(overview)
             configured = set((overview or {}).get("configured_groups") or [])
 
+            flow = self.market_sections[MARKET_SECTION_FLOW]
+            # 这一块**始终可见**：它装的是"钱与情绪"，与配没配指数无关
+            flow.setVisible(True)
+            flow.set_items([])
+            for name, text, tip in self._market_stat_rows(values, overview):
+                flow.set_stat(name, text, tooltip=tip)
+
             wide = self.market_sections[MARKET_SECTION_WIDE]
             # 没配这一组 → 整块隐藏（连标题），而不是留一个空标题在那吊着
             wide.setVisible("indices" in configured)
             wide.set_items(list((overview or {}).get("indices") or []))
 
             sentiment = self.market_sections[MARKET_SECTION_SENTIMENT]
-            # 情绪块**始终可见**：它还装着那 3 个小条目（与"配没配指数"无关）
+            # 情绪块**始终可见**：用户给定它是固定四块之一（配空了就只有标题 + `—`）
             sentiment.setVisible(True)
             sentiment_items: list[dict] = []
             for key in sentiment.keys:
                 if key in configured:
                     sentiment_items.extend(list((overview or {}).get(key) or []))
             sentiment.set_items(sentiment_items)
-            for name, text, tip in self._market_stat_rows(values, overview):
-                sentiment.set_stat(name, text, tooltip=tip)
 
             hot = self.market_sections[MARKET_SECTION_HOT]
             hot.setVisible(True)
-            hot.set_items(self.hot_industry_rows())
+            sector_data = self.market_sectors or {}
+            hot.set_rows(
+                {
+                    SECTOR_UP_TITLE: list(sector_data.get("up") or []),
+                    SECTOR_DOWN_TITLE: list(sector_data.get("down") or []),
+                },
+                note=str(sector_data.get("note") or ""),
+            )
 
             entries: list[Any] = []
             for title in MARKET_SECTION_TITLES:
@@ -1992,11 +2552,10 @@ if QT_AVAILABLE:
                 if self._market_columns:
                     # `set_items` 重建条目后列数会归零：这里按当前列数重排一次，
                     # 否则新建出来的条目会全挤在同一行上（右边被裁掉）
-                    section.set_columns(self._market_columns)
-                if title != MARKET_SECTION_HOT:
+                    section.set_columns(self._market_columns, self._market_stat_columns)
+                if title not in (MARKET_SECTION_HOT, MARKET_SECTION_FLOW):
                     entries.extend(section.entries)
             self.market_entries = entries
-            self.market_industry_rows = list(hot.entries)
 
             self.market_as_of_label.setFullText(market.footer_text(overview))
 
@@ -2031,8 +2590,12 @@ if QT_AVAILABLE:
             所以这里不自己算数、只排版。
             """
             breadth_on = bool((overview or {}).get("breadth_enabled"))
-            amount_tip = ("沪/深成交额取自上证指数与深证成指的成交额；"
-                          "北交所靠全市场快照汇总（每 5 分钟更新一次，见页脚）")
+            amount_tip = (
+                "成交额 = **沪市 + 深市**（两个数相加，一个数）："
+                "取自上证指数与深证成指的成交额（单位元，显示成「亿」）。"
+                "与指数同一个节拍（每分钟刷新）。\n"
+                "北交所成交额**不再显示**（2026-09-17 用户要求删掉这一格）"
+            )
             limits_tip = "当日涨停 / 跌停 / 炸板家数（同花顺涨停池、跌停池、炸板池）"
             breadth_tip = ("全市场上涨 / 下跌 / 平盘家数"
                            "（翻 6 页全市场快照算出来的，每 5 分钟更新一次）")
@@ -2040,10 +2603,10 @@ if QT_AVAILABLE:
                 breadth_tip = ("现在是 `—`：market_breadth 关着，程序不去翻全市场快照"
                                "（省配额）。想看到它就在 config.toml 里把 "
                                "market_breadth 设成 true")
+            # 顺序 = 界面上的顺序（宽屏一行 7 个）：**成交额在最前**，
+            # 后面是涨跌停三个、涨跌家数三个（用户要求"与成交额排成一行"）。
             return [
-                (MARKET_STAT_SH, values["沪成交额"], amount_tip),
-                (MARKET_STAT_SZ, values["深成交额"], amount_tip),
-                (MARKET_STAT_BJ, values["北成交额"], amount_tip),
+                (MARKET_STAT_AMOUNT, values["成交额"], amount_tip),
                 (MARKET_STAT_LIMIT_UP, values["涨停"], limits_tip),
                 (MARKET_STAT_LIMIT_DOWN, values["跌停"], limits_tip),
                 (MARKET_STAT_BREAK, values["炸板"], limits_tip),
@@ -2055,11 +2618,12 @@ if QT_AVAILABLE:
         def _market_hint_notes(self, overview: Any) -> list[str]:
             """页内提示要说的每一句（空列表 = 一切正常，提示区隐藏）。
 
-            三件事各有各的说法，**不能只把 errors 贴出来**：
+            几件事各有各的说法，**不能只把 errors 贴出来**：
             - 取数失败/关闭：`market` 层已经给了中文原因（含"market_overview 已关闭"）；
             - `market_breadth` 关着 → 涨跌家数必然是一排 `—`，不说清用户会以为坏了；
             - 热门板块为空 → 告诉他是"本地还没有涨停池数据"（点【刷新数据】能补），
-              而不是让他以为这个块本来就不显示东西。
+               而不是让他以为这个块本来就不显示东西（"板块榜为什么是空的"由
+               `sector_payload()` 的 note 写在块里，那句话说清了口径与缺失原因）。
 
             后两条**只在"真的取过一轮"之后才说**（`as_of` 是那一轮的取数时间）：
             窗口刚起来、后台那一路还没回来时，任何"为什么没有数"的说法都是猜的 ——
@@ -2185,26 +2749,30 @@ if QT_AVAILABLE:
             return body
 
         def _build_settings_source_group(self, layout: Any) -> None:
-            """第 1 组「数据来源」：**来源列表**（内置同花顺 + 用户自己添加的来源）。
+            """第 1 组「数据来源」：**来源列表**（公开源为主源，同花顺为备用源）。
 
             用户要求的是"可用的其它源，让用户自主添加，用他自己的 key"，所以这一组的主体
-            是一张**来源列表**：每行是「来源名 + 提供什么 + Key 输入 + 【测试连接】+ 启用 +
-            删除」，内置的同花顺永远排第一（它是主来源：实时快照只有它提供）。
+            是一张**来源列表**：每行是「来源名 + 提供什么 + Key（或"免 Key" / 备用的申请地址）
+            + 启用 + 删除」。**列表顺序 = 取数优先级**，所以 2026-09-17 起
+            **公开源在前、内置同花顺在最后**（用户要求"公开源是主源、同花顺是备用"）。
 
-            **只列已实现的来源**：现在除了同花顺还没有第二个实现，所以：
-            - 列表里只有同花顺那一行；
+            规则：
             - 列表只画**已启用**的来源（`data_sources` 里写着的那些，顺序即优先级），
               其余已实现的来源进【添加来源】菜单（点了才写回 `data_sources`）；
               候选来自注册表，界面**不自己维护一份"还有哪些来源"**；
             - 列表里如果出现注册表里没有的名字，那只可能是用户手改过 `data_sources`：
               那一行**照实显示**并注明"界面还没有它的实现"，不假装认识它；
             - 需要 Key 的来源给 Key 输入框（键由注册表的 `key_config` 指出），
-              **免 Key 的来源不给输入框**（东方财富那种）—— 画一个填不了东西的框
-              比不画更糟，用户会去找一个根本不存在的 Key。
+              **免 Key 的来源不给输入框**（公开源那种）—— 画一个填不了东西的框
+              比不画更糟，用户会去找一个根本不存在的 Key；
+            - **内置同花顺那一行没有输入框**（2026-09-17 用户要求）：改成一行说明
+              `备用源：同花顺金融数据服务（需要 Key，申请地址 …）`，地址**可点开**；
+              它的 Key 仍然照旧从 config.toml / 环境变量读（见 `_collect_settings_updates`）。
             """
             body = self._settings_group(
                 layout, "数据来源",
-                "下面每个来源都用**它自己的 Key**；"
+                "列表顺序 = 取数优先级：公开行情源是主源（免 Key），同花顺是**备用源**"
+                "（需要 Key，见它那一行的申请地址）。"
                 f"【{BTN_DOWNLOAD_TEXT}】【{BTN_REFRESH_TEXT}】【{BTN_CHECK_TEXT}】"
                 f"【{BTN_PAUSE_TEXT}】也都在这一组里",
             )
@@ -2239,8 +2807,10 @@ if QT_AVAILABLE:
             self.source_add_hint.setWordWrap(True)
             body.addWidget(self.source_add_hint)
 
-            #: 内置来源那一行的 Key 输入框与【测试连接】（老名字保留：下载/取数/测试
-            #: 都按 `self.key_edit` 与 `self.btn_test_connection` 找它们）
+            #: 来源列表（一行一个来源）。内置同花顺那一行**没有 Key 输入框**了
+            #: （2026-09-17 用户要求），所以 `self.key_edit` / `self.btn_test_connection`
+            #: 这两个老属性**不再存在** —— 谁再按它们找控件会立刻 AttributeError，
+            #: 比"悄悄拿不到东西"好查。
             self._rebuild_source_rows()
             # 「没配 Key」的那句话写在这里（**不弹窗**）：用户点【下载数据】时，
             # 这一行会因为缺 Key 亮起来、焦点也落到输入框上 —— 指路比拦住他更有效
@@ -2781,7 +3351,20 @@ if QT_AVAILABLE:
 
         @staticmethod
         def _stretch(table: Any) -> None:
-            table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            """两张表的列宽策略：**名称列按内容给够，其余列平分剩下的宽度**。
+
+            2026-09-17：列变多了（自选股池 8 列、持仓监控 10 列），如果所有列都平分，
+            760 宽的窗口下每列只有 64 像素 —— `名称(代码)` 会被省略成"低价样本(60…"，
+            而名字正是用户最需要看清的那一列（他刚说过"所有名称显示不清楚"）。
+            所以名称列改成 `ResizeToContents`（按内容给够，不会被挤），
+            其余列仍然是 `Stretch` 平分 —— 这是**同一个策略的一处收口调整**，
+            不是另起一套：宽窗口下两种模式看起来完全一样，只有窄窗口才看得出区别。
+            `min_section` 是每列的下限，防止极窄时数字列被压到看不见（表格自己横向滚动）。
+            """
+            header = table.horizontalHeader()
+            header.setSectionResizeMode(QHeaderView.Stretch)
+            # 名称那一列按内容给宽（其余列 Stretch 平分剩余宽度）
+            header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
             table.setEditTriggers(QTableWidget.NoEditTriggers)
             table.setSelectionBehavior(QTableWidget.SelectRows)
             # 隔行浅底（主题里 `alternate-background-color` 靠这个开关才生效）：
@@ -3496,9 +4079,15 @@ if QT_AVAILABLE:
             口径（用户给定的优先级）：
             1. **有实时快照**（60 秒一取，且只在本交易时段取）→ 现价 / 涨幅都取它，
                tooltip 写明取数时刻；
-            2. 否则用**本地最新收盘价**，并在单元格里标 `*`（`12.34*`）+ tooltip 说明
-               "这是本地收盘价、不是实时价" —— 不标注就等于拿昨天的价格冒充现价；
+            2. 否则用**本地最新收盘价**，tooltip 里写清"这是本地最新收盘价（MM-DD），
+               **不是实时价**"；
             3. 两者都没有 → `—`（不画 0.00）。
+
+            2026-09-17（用户要求）：**去掉 `*` 号**。原来本地收盘价会写成 `12.34*`，
+            本意是"这不是实时价"，但用户把它当成了**监控状态标记**（以为带 `*` 表示
+            这只票没在监控）。现在单元格里**不加任何符号**，改由 tooltip 说清
+            （"本地最新收盘价（09-11），不是实时价"）—— 信息一点没少，
+            只是不再用一个会被误读的符号表达。
 
             **返回的价格与「现价」列是同一个数**：调用方（「盈亏比例」）必须用它，
             不许自己再查一次价 —— 两列显示两个价，是用户最难理解的那种不一致。
@@ -3524,12 +4113,16 @@ if QT_AVAILABLE:
                     price = float(close)
                     prev = bar.get("prev_close")
                     pct = ((price - prev) / prev * 100) if prev else None
-                    price_item = QTableWidgetItem(f"{price:.2f}*")
-                    tip = (f"本地最新收盘价 {price:.2f}（{bar.get('date') or '—'}，不复权）"
-                           "· **不是实时价**")
+                    # **不带 `*`**（用户要求）：本地价与实时价长得一样，
+                    # 区别写在 tooltip 里 —— 符号容易被误读成"监控状态"，
+                    # 而且这两年表格里最容易被问的就是"这个星号什么意思"。
+                    price_item = QTableWidgetItem(f"{price:.2f}")
+                    tip = (f"这是本地最新收盘价（{_month_day(bar.get('date'))}），"
+                           "**不是实时价**\n"
+                           f"（{price:.2f}，不复权 —— 与实时价同一口径，才能和成本价直接比）")
                     price_item.setToolTip(tip)
                     pct_item = QTableWidgetItem(
-                        f"{pct:+.2f}%*" if pct is not None else market.DASH
+                        f"{pct:+.2f}%" if pct is not None else market.DASH
                     )
                     pct_item.setToolTip(tip)
                 else:
@@ -3544,6 +4137,88 @@ if QT_AVAILABLE:
                     # 用前景色而不是富文本：与表格其余部分同一套画法，排序/复制都不受影响
                     pct_item.setForeground(QBrush(QColor(color)))
             return price_item, pct_item, price
+
+        def _snapshot_cells(self, symbol: str) -> tuple[Any, Any]:
+            """「市值」「换手」两个单元格（**取不到一律 `—`，绝不显示 0**）。
+
+            口径（用户给定）：
+            - 市值 = **流通市值**，单位**亿**，取快照里的 `circ_mktcap`
+              （`data/sources.py` 的归一字段；同花顺/公开源都给这个口径）；
+            - 换手 = **实时换手率 %**，取快照里的 `turnover_rate`；
+            - 快照没有 / 这两个字段没取到 → `—`：0 亿市值、0% 换手都是**真实存在的值**，
+              拿 0 冒充"没取到"，用户会把"数据缺了"读成"这只票没人交易"。
+
+            为什么 tooltip 里要把"为什么是 `—`"说清：这两项来自**实时快照**，
+            而快照只在交易时段取、且来源得提供这两个字段 —— 不写清楚，
+            用户会以为是程序算错了（而不是"现在没有实时快照"）。
+            """
+            quote = self.quotes.quote(symbol) or {}
+            at_text = quotes_mod.snapshot_time_text(quote.get("at"))
+            source = str(quote.get("source") or "")
+            when = f"（快照 {at_text}）" if at_text else ""
+            missing = ("现在没有这只票的实时快照，这一项显示 —（不是 0）"
+                       "。快照只在交易时段取；来源不提供这一项时也会是 —")
+            cap = quote.get("circ_mktcap")
+            if cap is None:
+                cap_item = QTableWidgetItem(market.DASH)
+                cap_item.setToolTip("流通市值：" + missing)
+            else:
+                cap_item = QTableWidgetItem(f"{float(cap):.2f}亿")
+                cap_item.setToolTip(
+                    f"流通市值 {float(cap):,.2f} 亿{when}"
+                    + (f"·来源 {source}" if source else "")
+                    + "\n（单位亿；取的是快照里的流通市值，不是总市值）"
+                )
+            turn = quote.get("turnover_rate")
+            if turn is None:
+                turn_item = QTableWidgetItem(market.DASH)
+                turn_item.setToolTip("换手率：" + missing)
+            else:
+                turn_item = QTableWidgetItem(f"{float(turn):.2f}%")
+                turn_item.setToolTip(
+                    f"实时换手率 {float(turn):.2f}%{when}"
+                    + (f"·来源 {source}" if source else "")
+                )
+            for item in (cap_item, turn_item):
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+            return cap_item, turn_item
+
+        def _monitor_cell(
+            self, symbol: str, on: bool, alert: Any, *, togglable: bool = True,
+            why: str = "",
+        ) -> Any:
+            """「监控开关」那一格：文字是 `开启` / `关闭`，tooltip 里带**今日最新一条提醒**。
+
+            2026-09-17（用户要求）：原来的「提醒」列改成「监控开关」——
+            - 单元格文字 = 监控状态（`开启` / `关闭`），**点一下就能切换**
+              （见 `_on_table_cell_clicked`；右键菜单里那两项保持同步，两处调的是同一个方法）；
+            - **原来的提醒内容一点没丢**：短标签 + 那一整句（含时间）都进 tooltip
+              （`intraday.alert_cell_text` / `alert_cell_tooltip`），
+              鼠标停在格子上就能看到 —— 列只有一格宽，写不下整句话。
+            """
+            item = QTableWidgetItem(MONITOR_ON_TEXT if on else MONITOR_OFF_TEXT)
+            item.setData(Qt.ItemDataRole.UserRole, symbol)
+            label = intraday.alert_cell_text(alert)
+            bits = [
+                f"监控：{'已开启' if on else '已关闭'}"
+                + ("（点这一格就能切换）" if togglable else "（这一行不能在这里切换）"),
+            ]
+            if why:
+                bits.append(why)
+            if label:
+                bits.append(f"今日最新一条提醒：{label}")
+            # 整句话（含时间）**一律**用 `intraday.alert_cell_tooltip`：没有提醒时它给的是
+            # "今天还没有这只票的盘中提醒" —— 自己再写一句近义的话，两处说法迟早不一致
+            bits.append(intraday.alert_cell_tooltip(alert))
+            # 整行的 tooltip（备注 / 来源明细 / 涨停原因 / 竞价）由调用方用
+            # `_attach_row_tooltip` 并进来 —— 这里不自己拼，否则同一段会写两遍
+            item.setToolTip("\n".join(bits))
+            if not on:
+                # 关了监控的那一格灰掉：与"名称变灰"同一套表达（一眼看出一行是停用的）
+                item.setForeground(QBrush(QColor(Qt.GlobalColor.gray)))
+            return item
 
         @staticmethod
         def _tag_item(text: str, symbol: str, tooltip: str = "") -> Any:
@@ -3625,19 +4300,27 @@ if QT_AVAILABLE:
             self._refresh_pool_table()
 
         def _refresh_pool_table(self) -> None:
-            """填「自选股池」：策略/公式选出来的 + 手工加的自选，以及现价/涨幅/提醒。
+            """填「自选股池」：名称/现价/涨幅/市值/换手/板块/来源/监控开关。
 
             行从 `pool.pool_page_rows()` 来（池内行 + **不在池里的自选**，见那个函数的说明）。
 
+            2026-09-17 改版（用户要求）：加「市值」「换手」两列（取自实时快照，
+            取不到 `—`），「提醒」列改成「监控开关」（开启/关闭 + 点一下切换 +
+            tooltip 里保留原来的提醒内容）。
+
             为什么还留着"内容指纹"（`_pool_signature`）：每 5 秒重建一次整张表，
             会把用户正在看的选中行与滚动位置一起清掉（桌面程序里很显眼的毛病）。
-            指纹里带上价格与提醒，所以价格一变、提醒一到，表就会重画。
+            指纹里带上价格、市值换手与监控开关那一格（含 tooltip），
+            所以价格一变、提醒一到、开关一拨，表就会重画。
             """
             rows = pool.pool_page_rows(self.cfg.db_path)
             symbols = [str(r.get("symbol") or "") for r in rows]
             local = self._local_closes(symbols)
             alerts = self._alerts_today()
             names = self._stock_names(symbols)
+            # 自选表一次查出来：每一行的监控开关状态要用它（原来右键菜单每条查一次，
+            # 现在表格每行都要画这一格，逐行开连接就太浪费了）
+            watchlist = self._watchlist_map()
             # 哪些票的**持仓**被右键关掉了监控（一次查询，见 `intraday.monitor_off_symbols`）：
             # 这一行即使是策略标的或自选，也不会产生任何盘中提醒 —— 要写进 tooltip，
             # 否则用户会以为"表里有它、提醒却从来不响"是坏了
@@ -3652,28 +4335,43 @@ if QT_AVAILABLE:
             for row in rows:
                 symbol = str(row.get("symbol") or "")
                 price_item, pct_item, _price = self._price_cells(symbol, local)
+                cap_item, turn_item = self._snapshot_cells(symbol)
                 alert = alerts.get(symbol)
-                alert_item = QTableWidgetItem(intraday.alert_cell_text(alert) or market.DASH)
-                alert_item.setToolTip(intraday.alert_cell_tooltip(alert))
-                alert_item.setData(Qt.ItemDataRole.UserRole, symbol)
                 row_tip = self._row_tooltip(row, monitor_off=symbol in monitor_off)
                 # 名称(代码)：**半角括号**，与 `docs/改版方案.md` 第四节的口径一致
                 name_item = self._tag_item(
                     f"{row.get('name') or ''}({symbol})".strip(), symbol, row_tip
                 )
+                # 「名称(代码)」这一列**加粗**（用户："所有名称显示不清楚，都加黑显示"）
+                name_item.setFont(_bold_name_font(self.pool_table))
                 industry_item = self._tag_item(str(row.get("industry") or market.DASH), symbol)
                 source_item = self._tag_item(str(row.get("source_label") or market.DASH),
                                              symbol)
-                for item in (price_item, pct_item, industry_item, source_item, alert_item):
+                # 「监控开关」：自选行可切换；**策略/公式选中的票不是自选**，
+                # 没有"停用"这一说（与右键菜单里那项灰掉是同一个判据）
+                entry = watchlist.get(symbol)
+                if entry is None:
+                    monitor_item = self._monitor_cell(
+                        symbol, True, alert, togglable=False,
+                        why="这只票是策略/公式选中的（不是自选）：要停止盯它在"
+                            "「策略选股」里关掉对应策略，或右键【删除】这一行",
+                    )
+                else:
+                    monitor_item = self._monitor_cell(
+                        symbol, bool(int(entry.get("enabled", 1) or 0)), alert,
+                    )
+                for item in (price_item, pct_item, cap_item, turn_item, industry_item,
+                             source_item, monitor_item):
                     item.setData(Qt.ItemDataRole.UserRole, symbol)
                     self._attach_row_tooltip(item, row_tip)
-                cells.append((name_item, price_item, pct_item, industry_item,
-                              source_item, alert_item))
+                cells.append((name_item, price_item, pct_item, cap_item, turn_item,
+                              industry_item, source_item, monitor_item))
 
             signature = tuple(
                 (str(r.get("symbol") or ""), r.get("name"), r.get("source_label"),
                  r.get("industry"), r.get("note"), r.get("watchlist_enabled"),
-                 c[1].text(), c[2].text(), c[5].text(), c[5].toolTip())
+                 c[1].text(), c[2].text(), c[3].text(), c[4].text(),
+                 c[WATCH_MONITOR_COLUMN].text(), c[WATCH_MONITOR_COLUMN].toolTip())
                 for r, c in zip(rows, cells)
             )
             if signature == self._pool_signature:
@@ -3688,6 +4386,22 @@ if QT_AVAILABLE:
             total, strategy, watch = pool.pool_counts(rows)
             self.pool_count_label.setText(f"共 {total} 只（策略 {strategy} · 自选 {watch}）")
             self.pool_empty_label.setVisible(not rows)
+
+        def _watchlist_map(self) -> dict[str, dict]:
+            """自选表全量（`{symbol: 行}`）—— 「监控开关」那一格要按它判能不能切换。
+
+            一次查整张表：这一列每一行都要用（原来只有右键菜单用，逐行查一次还行，
+            现在每 5 秒刷表，逐行开连接就太浪费了）。读不到就返回空字典 ——
+            这时所有行都会按"策略标的"画（不开、也不假装能切）。
+            """
+            from laoa_trader.data import storage
+
+            try:
+                with storage.connect(self.cfg.db_path) as conn:
+                    return dict(storage.watchlist_map(conn))
+            except Exception as exc:  # noqa: BLE001 - 读不到就不显示开关状态
+                logger.debug(f"取自选表失败（监控开关按策略行画）：{exc}")
+                return {}
 
         def _alerts_today(self) -> dict[str, dict]:
             """今天每只票最新一条提醒（两张表共用一次查询）。"""
@@ -3710,17 +4424,36 @@ if QT_AVAILABLE:
             return ""
 
         def _on_table_cell_clicked(self, table: Any, row: int, column: int) -> None:
-            """单击表格里的「名称(代码)」→ 用浏览器打开雪球个股页。
+            """单击「名称(代码)」→ 打开雪球；单击「监控开关」→ **切换这一行的监控**。
 
-            只认**第 0 列**（名称列）：整张表随便点一下就跳浏览器会很烦人
-            （用户只是想选行的時候就被弹走了）；"点名字看个股页"才是个明确的动作。
+            两个动作都只认**自己那一列**：整张表随便点一下就跳浏览器（或改了监控）
+            会很烦人 —— 用户只是想选一行的时候就被弹走/被改了状态。
 
-            没有合法 6 位代码的行**什么都不做**（`xueqiu_url` 返回空串）——
-            拼一个 `xueqiu.com/S/SZ` 的 404 页比不跳转更糟。
+            2026-09-17（用户要求）：监控开关"点一下就能切换"。两种情况：
+            - **持仓表**：`position.monitor` 取反（与右键【关闭监控】调的是同一个方法
+              `on_toggle_position_monitor`，两处不会各说各话）；
+            - **自选股池**：只有**自选**行能切（`watchlist.enabled`）；策略/公式选中的票
+              不是自选，没有"停用"这一说 —— 点它不静默失败，而是给一句指路的话
+              （与右键菜单里那一项灰掉 + tooltip 说明是同一个判据）。
             """
+            symbol = self._symbol_at(table, row)
+            if not symbol:
+                return
+            if column == WATCH_MONITOR_COLUMN and table is self.pool_table:
+                entry = self._watchlist_map().get(symbol)
+                if entry is None:
+                    self._toast(
+                        "这只票是策略/公式选中的（不是自选）：不能在这里单独关掉监控 ——"
+                        "在「策略选股」里关掉对应策略，或右键【删除】这一行"
+                    )
+                    return
+                self.on_watch_toggle(not bool(int(entry.get("enabled", 1) or 0)), symbol)
+                return
+            if column == POSITION_MONITOR_COLUMN and table is self.position_table:
+                self.on_toggle_position_monitor(symbol, not self._position_monitored(symbol))
+                return
             if column != 0:
                 return
-            symbol = self._symbol_at(table, row)
             url = xueqiu_url(symbol)
             if not url:
                 return
@@ -3863,7 +4596,7 @@ if QT_AVAILABLE:
         # ── 「持仓监控」页 ──
 
         def _refresh_positions(self) -> None:
-            """填「持仓监控」：名称(代码)/成本价/现价/涨幅/盈亏比例/止损位/止盈位/提醒。
+            """填「持仓监控」：名称(代码)/成本价/现价/涨幅/市值/换手/盈亏比例/止损位/止盈位/监控开关。
 
             三个关键口径：
             - **现价与盈亏比例用的是同一个价**（`_price_cells` 的返回值）—— 老代码的
@@ -3898,19 +4631,22 @@ if QT_AVAILABLE:
                 symbol = str(row.get("symbol") or "")
                 cost = float(row.get("avg_cost") or 0)
                 price_item, pct_item, price = self._price_cells(symbol, local)
+                cap_item, turn_item = self._snapshot_cells(symbol)
                 monitored = bool(int(row.get("monitor", 1) or 0))
                 note = str(row.get("note") or "").strip()
                 row_tip = "\n".join(p for p in (
                     f"备注：{note}" if note else "",
                     "监控中（盘中提醒会盯它）" if monitored
                     else "已关闭监控：不再产生任何盘中提醒（止损/止盈/做T/竞价/异动），"
-                         "也不进池子/自选的观察面（右键可打开）",
+                         "也不进池子/自选的观察面（右键或点这一格可打开）",
                 ) if p)
                 name_item = self._tag_item(
                     f"{row.get('name') or ''}({symbol})".strip(), symbol, row_tip
                 )
+                # 「名称(代码)」这一列**加粗**（用户："所有名称显示不清楚，都加黑显示"）
+                name_item.setFont(_bold_name_font(self.position_table))
                 if not monitored:
-                    # 关了监控的行用灰字：一眼能看出来（没有"状态"列，就靠颜色与 tooltip）
+                    # 关了监控的行用灰字：一眼能看出来（监控开关那一格也是灰的）
                     name_item.setForeground(QBrush(QColor(Qt.GlobalColor.gray)))
                 # 盈亏比例：与「现价」用的是同一个价格；缺价 → `—`
                 if price is None or not cost:
@@ -3927,8 +4663,10 @@ if QT_AVAILABLE:
                         f" = {profit:+.2f}%"
                     )
                 alert = alerts.get(symbol)
-                alert_item = QTableWidgetItem(intraday.alert_cell_text(alert) or market.DASH)
-                alert_item.setToolTip(intraday.alert_cell_tooltip(alert))
+                monitor_item = self._monitor_cell(
+                    symbol, monitored, alert,
+                    why="点这一格 = 关闭 / 打开监控；右键菜单里的两项是同一件事",
+                )
                 stop_item = QTableWidgetItem(
                     _fmt_float(cost * (1 - self.cfg.stop_loss)) if cost else market.DASH
                 )
@@ -3937,16 +4675,20 @@ if QT_AVAILABLE:
                 )
                 for item in (cost_item := self._tag_item(
                         _fmt_float(cost) if cost else market.DASH, symbol),
-                        price_item, pct_item, profit_item, stop_item, target_item, alert_item):
+                        price_item, pct_item, cap_item, turn_item, profit_item,
+                        stop_item, target_item, monitor_item):
                     item.setData(Qt.ItemDataRole.UserRole, symbol)
                     self._attach_row_tooltip(item, row_tip)
-                cells.append((name_item, cost_item, price_item, pct_item, profit_item,
-                              stop_item, target_item, alert_item))
+                cells.append((name_item, cost_item, price_item, pct_item, cap_item,
+                              turn_item, profit_item, stop_item, target_item,
+                              monitor_item))
 
             signature = tuple(
                 (str(r.get("symbol") or ""), r.get("name"), r.get("avg_cost"), r.get("note"),
-                 r.get("monitor"), c[2].text(), c[3].text(), c[4].text(), c[7].text(),
-                 c[7].toolTip())
+                 r.get("monitor"), c[2].text(), c[3].text(), c[4].text(), c[5].text(),
+                 c[6].text(),
+                 c[POSITION_MONITOR_COLUMN].text(),
+                 c[POSITION_MONITOR_COLUMN].toolTip())
                 for r, c in zip(rows, cells)
             )
             if signature == self._position_signature:
@@ -4690,10 +5432,13 @@ if QT_AVAILABLE:
                 logger.warning(f"读数据来源注册表失败（退回内置来源那一行）：{exc}")
                 return [self._fallback_source_state()], f"{type(exc).__name__}: {exc}"
             rows = [state for state in states if state.get("enabled")]
-            # 内置主来源**永远在列表里**（它提供实时快照）：配置里漏写它时补一行，
-            # 并如实说明"配置里没写它"
+            # 内置同花顺**永远在列表里**（它提供历史日K 的 dump 与实时快照），但
+            # **排在最后**：列表顺序 = 取数优先级，而 2026-09-17 起
+            # "公开源是主源、同花顺是备用源"（用户要求）—— 插在第一位就等于告诉用户
+            # "同花顺最优先"，与 config.py 里 `data_sources = ["public", "hithink"]`
+            # 的默认顺序正好相反。配置里漏写它时也补在这儿（并如实说明"配置里没写它"）。
             if not any(str(r.get("id")) == BUILTIN_SOURCE for r in rows):
-                rows.insert(0, self._fallback_source_state(
+                rows.append(self._fallback_source_state(
                     configured=BUILTIN_SOURCE in [
                         str(x) for x in (self.cfg.data_sources or [])
                     ]
@@ -4758,11 +5503,33 @@ if QT_AVAILABLE:
             self.source_rows = {}
             rows, fallback_reason = self._source_states()
             self._source_fallback_reason = fallback_reason
-            for state in rows:
+            #: 配置里写着的来源名（顺序 = 优先级）—— 标记怎么给按**配置**判，
+            #: 不按"这一轮画出来几行"判：注册表读不出来时只画得出同花顺一行，
+            #: 若按行数判就会给同花顺贴上"主来源"，而配置里明明还有公开源。
+            listed = [str(x).strip() for x in (self.cfg.data_sources or []) if str(x).strip()]
+            has_other = any(name.lower() != BUILTIN_SOURCE for name in listed)
+            main_id = listed[0].lower() if listed else ""
+            for index, state in enumerate(rows):
                 source = str(state.get("id") or "")
                 builtin = source == BUILTIN_SOURCE
                 unknown = bool(state.get("unknown"))
                 key_config = str(state.get("key_config") or "")
+                # 标记怎么给：
+                # - 内置同花顺 = **备用源**（用户要求）；它是列表里唯一一个来源时那才叫
+                #   主来源（老配置 `data_sources = ["hithink"]`）—— 这种时候写"备用源"
+                #   就是假话；
+                # - 排在最前的那个来源 = **主来源**（列表顺序 = 优先级）；
+                # - 其余照旧按 Key 状态给标记。
+                if builtin:
+                    # 同花顺 = **备用源**（用户要求）；配置里只有它一个时那它确实是主源，
+                    # 这时写"备用源"就是假话
+                    tag = BUILTIN_BACKUP_TAG if has_other else "主来源"
+                elif unknown:
+                    tag = "未实现"
+                elif source.lower() == main_id:
+                    tag = "主来源"            # 配置里的第一个 = 实际优先级最高的那个
+                else:
+                    tag = ""
                 row = SourceRow(
                     source,
                     name=str(state.get("name") or source),
@@ -4776,18 +5543,14 @@ if QT_AVAILABLE:
                     key_config=key_config,
                     key_placeholder=("在 fuyao.aicubes.cn/admin 获取"
                                      if builtin else "这个来源的 Key / Token"),
+                    tag=tag,
+                    # 内置同花顺那一行：**没有 Key 输入框、没有【测试连接】**，
+                    # 只有这一行说明 + 可点开的申请地址（2026-09-17 用户要求）
+                    key_notice=(BUILTIN_BACKUP_TEXT.format(url=BUILTIN_KEY_URL)
+                                if builtin else ""),
+                    key_notice_url=BUILTIN_KEY_URL if builtin else "",
                 )
-                if builtin:
-                    # 内置行的 Key 输入框与【测试连接】就是页面上那两个老控件
-                    # （属性名保留：下载 / 取数 / 测试都按 `key_edit` 找它）
-                    self.key_edit = row.key_edit
-                    self.btn_test_connection = row.btn_test
-                    row.btn_test.setToolTip(
-                        "用当前输入框里的 Key 真发一次最小请求（涨停池 1 条），"
-                        "几秒内告诉你 Key 行不行、限流没有、服务端在不在"
-                    )
-                    row.btn_test.clicked.connect(self.on_test_connection)
-                elif row.key_edit is not None and key_config:
+                if row.key_edit is not None and key_config and not builtin:
                     row.key_edit.setToolTip(
                         f"「{state.get('name')}」用它自己的 Key（写回 config.toml 的 "
                         f"{key_config}）"
@@ -4798,7 +5561,6 @@ if QT_AVAILABLE:
                     )
                 layout.addWidget(row)
                 self.source_rows[source] = row
-            listed = [str(x) for x in (self.cfg.data_sources or []) if str(x).strip()]
             if BUILTIN_SOURCE not in listed:
                 # 配置里没写内置来源：**照实说明**（不静默补上，用户要知道取数会失败）
                 logger.warning(f"data_sources 里没有内置的 {BUILTIN_SOURCE}：{listed}")
@@ -4893,23 +5655,49 @@ if QT_AVAILABLE:
             self._rebuild_source_rows()
 
         def _source_text(self, sources: Any) -> str:
-            """「数据来源 → 主来源」那一行：**照 `cfg.data_sources` 如实显示**。
+            """「数据来源 → 取数顺序」那一行：**照 `cfg.data_sources` 如实显示**。
 
-            认不出的键**原样显示**并注明"界面没有它的实现"，而不是：
-            - 写死一行"主来源：同花顺"（用户改过 `data_sources` 之后界面就在说假话）；
-            - 或者干脆不显示（那用户就不知道程序到底打算用哪个来源）。
+            为什么不写"主来源：同花顺"：主来源取决于 `data_sources` 的**顺序**
+            （2026-09-17 起默认是 `["public", "hithink"]`，公开源在前），写死一个名字，
+            用户改过 `data_sources` 之后界面就在说假话。所以这行给的是**取数顺序**本身。
+
+            认不出的键**原样显示**并注明"界面没有它的实现"，而不是干脆不显示
+            （那用户就不知道程序到底打算用哪个来源）。
             """
             names = [str(x) for x in (sources or []) if str(x).strip()]
             if not names:
-                return ("主来源：（`data_sources` 是空的 —— 程序不会取任何行情数据，"
-                        "请填上 `hithink`）")
+                return ("取数顺序：（`data_sources` 是空的 —— 程序不会取任何行情数据，"
+                        "请填上 `public`（免 Key）或 `hithink`）")
             shown = []
             for name in names:
-                label = DATA_SOURCE_LABELS.get(name.lower())
+                label = self._source_label(name)
                 shown.append(f"{label}" if label else f"{name}（界面没有它的实现，"
                                                        f"只如实显示）")
-            return (f"主来源：{'、'.join(shown)}　·　config.toml: "
+            return (f"取数顺序（前一个不可用就落到下一个）：{'、'.join(shown)}"
+                    f"　·　config.toml: "
                     f"data_sources = [{', '.join(repr(n) for n in names)}]")
+
+        @staticmethod
+        def _source_label(name: str) -> str:
+            """来源键 → 中文显示名（**先问注册表**，读不到才退回本地小表）。
+
+            为什么要问注册表：注册表（`data/sources.py`）才是"有哪些来源、各自叫什么"
+            的真相源；本地小表（`DATA_SOURCE_LABELS`）只是**读不到它时的兜底**。
+            原来只查本地小表，于是新增的公开源在"取数顺序"那一行会显示成
+            "public（界面没有它的实现）"—— 明明是主源，却写着"没有实现"，是假话。
+            """
+            key = str(name or "").lower()
+            label = DATA_SOURCE_LABELS.get(key)
+            if label:
+                return label
+            try:
+                from laoa_trader.data import sources as sources_mod
+
+                info = getattr(sources_mod, "REGISTRY", {}).get(key)
+            except Exception as exc:  # noqa: BLE001 - 读不到就用"认不出"的表达
+                logger.debug(f"读数据来源注册表失败（显示名退回本地小表）：{exc}")
+                return ""
+            return str(getattr(info, "name", "") or "") if info is not None else ""
 
         def _history_months_text(self) -> str:
             """`history_years` → `6 个月`（用户看的是"几个月"，配置里存的是"年"）。"""
@@ -5093,7 +5881,13 @@ if QT_AVAILABLE:
             """
             updates: dict[str, Any] = {
                 # 1) 数据来源
-                "hithink_api_key": self.key_edit.text().strip(),
+                #
+                # **这里没有 `hithink_api_key`**（2026-09-17 用户要求）：界面不再提供
+                # 填 Key 的入口（同花顺那一行只剩"备用源…申请地址"的说明），所以一键保存
+                # 也不该再写这个键 —— 界面上没有的东西不许被"顺手"写进配置。
+                # 向后兼容取舍：`Config.hithink_api_key` 与环境变量 HITHINK_FINANCE_API_KEY
+                # **照旧读取**（`sync` / `intraday` / `market` 取数路径一个字没改），
+                # 手改 config.toml 的老用户完全不受影响；只是新用户不再从界面写它。
                 "history_years": float(self.history_years_box.value()),
                 # 2) 通知方式（`popup_box` 单独一栏，其余三路来自 channel_boxes）
                 **self._panel_notify_updates(),
@@ -5115,9 +5909,10 @@ if QT_AVAILABLE:
                 "watchlist_in_pool": self.watchlist_in_pool_box.isChecked(),
             }
             # 每个**需要 Key 的已启用来源**各写各的 Key（`key_config` 由注册表给）：
-            # 同花顺那一栏就是上面那个 `hithink_api_key`（这里不重复写），
             # 将来再加"要 token 的来源"时，它的 Key 会自动进这一份键集合 ——
             # 界面上的输入框与写回配置的键**一一对应**，不存在"填了没保存"。
+            # 内置同花顺**没有输入框**（`row.key_edit is None`），所以它天然被跳过：
+            # "界面上有没有这个框"就是"要不要收这个键"的唯一判据，不另写一份名单。
             for state in self._enabled_keyed_sources():
                 field = state["key_config"]
                 if field in updates:
@@ -5133,7 +5928,8 @@ if QT_AVAILABLE:
 
             来源列表**唯一真相**仍是 `data/sources.py`（`source_states`）；这里只是把
             "要不要为它多收一个键"这件事问它一遍，不自己判断能力或凭据。
-            读不到注册表时返回空列表：同花顺那一栏仍然由上面那行固定收（它的键是内置的）。
+            读不到注册表时返回空列表：那一份键集合因此只有本页固定收的那些键
+            （内置同花顺的 Key 现在**不在这份名单里**，见 `_collect_settings_updates`）。
             """
             try:
                 from laoa_trader.data import sources as sources_mod
@@ -5358,19 +6154,23 @@ if QT_AVAILABLE:
 
             为什么把原来那个 `QMessageBox` 换成页内提示（用户要求"尽量减少弹窗"）：
             缺 Key 不是"必须让用户做决定"的事，而是"下一步该做什么" ——
-            弹窗只是拦住他去点确定，然后他还是得去同一个地方填 Key。
-            现在：提示出现在 Key 输入框下面（就在同一个页面、同一屏），焦点也落到输入框上，
-            `_toast` 再往运行状态里说一句 —— 三处指向同一个动作，比弹窗好找。
+            弹窗只是拦住他去点确定，然后他还是得去同一个地方改配置。
+
+            2026-09-17：界面上**没有**填 Key 的入口了（同花顺改成备用源，那一行只剩
+            "申请地址"的说明），所以这句话改成指路 **config.toml / 环境变量** ——
+            读数路径没变（`Config.hithink_api_key` 与环境变量 HITHINK_FINANCE_API_KEY
+            照旧生效），只是写的地方从界面回到了配置文件。
             """
             if self._busy():
                 return
             if not self.cfg.hithink_api_key:
                 self._show_key_hint(
-                    "❌ 还没有同花顺 API Key，下载不了数据："
-                    "在上面「数据来源」里填好并点【保存 Key】"
-                    "（也可以手改 config.toml 的 hithink_api_key）"
+                    "❌ 还没有同花顺 API Key，下载不了历史数据（历史日K 仍走同花顺）："
+                    "在 config.toml 里写 hithink_api_key = \"你的Key\"，"
+                    "或设环境变量 HITHINK_FINANCE_API_KEY，然后重启程序"
+                    f"（申请地址见上面那行的 {BUILTIN_KEY_URL}）"
                 )
-                self._toast("❌ 还没有同花顺 API Key · 在【系统设置】里填好再点【下载数据】")
+                self._toast("❌ 还没有同花顺 API Key（备用源）· 见【系统设置 → 数据来源】那一行说明")
                 return
             self._hide_key_hint()
             self._run_worker(
@@ -5382,11 +6182,18 @@ if QT_AVAILABLE:
             )
 
         def _show_key_hint(self, text: str) -> None:
-            """在「系统设置 → 数据来源」里点亮一句话，并把焦点给 Key 输入框。"""
+            """在「系统设置 → 数据来源」里点亮一句话。
+
+            2026-09-17：界面上没有 Key 输入框了，所以这里**不再把焦点给输入框**
+            （原来那句"焦点落到输入框上"是给"填 Key"用的），改为把焦点给来源列表那一行 ——
+            用户顺着看下去就是"备用源：…申请地址 …"那行说明；写 Key 的地方在 config.toml。
+            """
             try:
                 self.key_hint.setText(text)
                 self.key_hint.setVisible(True)
-                self.key_edit.setFocus()
+                row = (self.source_rows or {}).get(BUILTIN_SOURCE)
+                if row is not None:
+                    row.setFocus()
             except Exception as exc:  # noqa: BLE001 - 提示失败不影响"拒绝下载"本身
                 logger.debug(f"显示 Key 提示失败：{exc}")
 
@@ -5397,37 +6204,15 @@ if QT_AVAILABLE:
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"隐藏 Key 提示失败：{exc}")
 
-        def on_save_api_key(self) -> None:
-            """保存 API Key（写回 config.toml，保留用户自己的注释与未知键）。
-
-            改版后设置页上**没有单独的"保存 Key"按钮**了（底部一个【保存设置】会把它一起写回），
-            这个方法作为能力入口留着：托盘/脚本/测试都能直接调它，
-            而且它比一键保存多做一件事 —— 按新值立刻更新"没配 Key"那一行提示。
-            """
-            key = self.key_edit.text().strip()
-            self._save_updates({"hithink_api_key": key},
-                               "API Key 已保存" if key else "API Key 已清空")
-            # 保存后立刻按新值更新提示：填好了就把那句"还没配 Key"收掉
-            self._hide_key_hint() if key else self._show_key_hint(
-                f"❌ 还没有同花顺 API Key：填好并点【保存设置】后才能下载数据与取实时行情"
-            )
-
-        def on_test_connection(self) -> None:
-            """【测试连接】：用输入框里那个 Key 真发一次**最小请求**，把结论说成人话。
-
-            为什么需要它：Key 填错、被限流、服务端未就绪这三种情况，用户原来只有在
-            「点下载数据等了半分钟然后失败」时才知道 —— 而失败信息还可能是别的环节的。
-            这个按钮发一次 `涨停池 size=1`（一个请求），几秒内就能把"Key 行不行"钉死。
-            它**不写配置**：测的是"输入框里这个 Key"，测通了再保存。
-            """
-            if self._busy():
-                return
-            key = self.key_edit.text().strip()
-
-            def _job():
-                return probe_data_source(self.cfg, api_key=key)
-
-            self._run_worker(_job, "测试连接")
+        # 2026-09-17：这里原来有 `on_save_api_key()` 与 `on_test_connection()` 两个方法，
+        # 它们读的都是「内置同花顺那一行的 Key 输入框」（`self.key_edit`）。
+        # 用户要求把那一行改成"备用源 + 申请地址"，输入框与【测试连接】按钮一起删了 ——
+        # 没有被测对象的方法留着只会变成一颗**点了没反应的按钮**（或者一调就 AttributeError），
+        # 所以两个方法一并删掉。Key 的读写路径没有变：
+        #   * 读：`Config.hithink_api_key` / 环境变量 `HITHINK_FINANCE_API_KEY` 照旧生效；
+        #   * 写：手改 config.toml（界面上不再提供入口）。
+        # `probe_data_source()` 仍然在（它是独立函数，测试直接调它；将来要恢复
+        # "测一下配置里的 Key 能不能用"，接一个按钮上来就行）。
 
         def on_test_notify(self) -> None:
             """一键测试通知（走后台线程：飞书是网络调用，别卡住界面）。

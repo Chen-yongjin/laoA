@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
+from laoa_trader import pool
 from laoa_trader import scheduler as sched
 from laoa_trader.intraday import now_shanghai  # noqa: E402
 from laoa_trader import state
@@ -466,3 +468,117 @@ def test_stale_helper_produces_expected_lag(cfg) -> None:
     """自检：`_stale_db` 造出来的库确实"落后 N 个交易日"（否则增量用例是假绿）。"""
     _stale_db(cfg, lag=3, days=20)
     assert preflight.check(cfg.db_path, cfg)["stale_trading_days"] == 3
+
+
+# ── 6) 桌面导出：建池成功后写一份到桌面；导出失败**不影响**选股 ──
+#
+# 用户要求："选股结果直接进自选股池……（也可以同时 output 一个文件到桌面）"。
+# 导出挂在 `run_daily` 里**建池成功之后**（三条路——界面【开始选股】、定时日更、
+# CLI `--once`——都经过它），所以这里用真的 `run_daily` 跑一遍钉住接线。
+#
+# **一律注入 `export_dir=tmp_path`**：不注入就会去找真桌面
+# （`pool.desktop_dir()` → `~/Desktop`），跑一次测试就往人桌面上丢一个文件。
+
+
+def _fake_picks(*_args, **_kwargs):
+    """一条固定的候选：跑策略那一步换成它，用例就与行情走势无关（不联网、不依赖库）。
+
+    用 `ReversalStrategy`（属于默认启用的 `short` 组）：换成其它组的策略会被
+    `build_pool` 的"按选择过滤候选"剔掉，池子就是空的 —— 那不是这个用例要测的事。
+    """
+    return ({"ReversalStrategy": [{"symbol": "600001", "name": "反转样本",
+                                   "reason": "缩量回踩"}]}, [])
+
+
+def _patch_run_all(monkeypatch) -> None:
+    """把"跑策略"换成固定候选。
+
+    挂的是 `strategy.rules.run_all`：`run_daily` 里是**函数内** `import rules` 再调它，
+    所以按模块属性替换就能生效 —— 与 `tests/test_pool.py` 同一套做法。
+    """
+    from laoa_trader.strategy import rules as rules_mod
+
+    monkeypatch.setattr(rules_mod, "run_all", _fake_picks)
+
+
+def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_path) -> None:
+    """建池成功 → 往 `<export_dir>/老A选股助手-选股结果-<今天>.txt` 写一份结果。
+
+    文件里的数量/每一行都与**这一轮**的池子对得上，标题里带行情日；
+    状态栏（`stage_cb`）还要收到那句"结果已导出到 <路径>"（用户明确要求写了就说）。
+    """
+    _ready_db(cfg)
+    _patch_run_all(monkeypatch)
+    desk = tmp_path / "桌面"
+    stages: list[str] = []
+
+    report = sched.run_daily(cfg, DataEngine(cfg.db_path), notify=False,
+                             with_data=False, export_dir=desk,
+                             stage_cb=stages.append)
+
+    assert report["pool"], "这一轮应该有池子"
+    assert report["export_path"], report
+    path = Path(report["export_path"])
+    assert path.parent == desk and desk.is_dir()
+    assert path.name.startswith("老A选股助手-选股结果-")
+    assert path.name.endswith(".txt")
+    # 文件名带日期（用户给定：`老A选股助手-选股结果-2026-09-18.txt`）
+    assert path.name == f"老A选股助手-选股结果-{_today()}.txt"
+    # 状态栏也说了这一句（界面上的 `_set_status` 就是接在这个回调上的）
+    assert f"结果已导出到 {path}" in stages, stages
+
+    text = path.read_text(encoding="utf-8-sig")
+    lines = text.splitlines()
+    assert lines[0] == f"老A选股助手 · 选股结果 · {_today()}（行情日 {report['data_date']}）"
+    assert lines[1] == f"共 {len(report['pool'])} 只（策略 1 · 自选 0）"
+    assert "1. 反转样本(600001)" in lines[2]
+    assert "现价" in lines[2]                        # 库里有收盘价 → 写上现价
+    assert lines[-1] == pool.EXPORT_FOOTER
+    # 池子本身照旧落库（导出只是附赠产物，不是"改成只写文件"）
+    assert set(pool.pool_symbols(cfg.db_path)) == {row["symbol"] for row in report["pool"]}
+
+
+def test_export_failure_does_not_break_the_pipeline(cfg, monkeypatch, tmp_path,
+                                                   log_records) -> None:
+    """导出抛异常 → 选股/建池照旧跑完，原因进 `report["errors"]`（**不静默**）。
+
+    删掉 `run_daily` 里那圈 try/except，这个用例就会红：异常会从这里冒出去，
+    `report` 根本拿不到 —— 而用户点的是一次【开始选股】，不该因为桌面写不出去
+    就没选股。"记日志 + 说出来"是这一条的完整要求，只记日志不说也不行。
+    """
+    _ready_db(cfg)
+    _patch_run_all(monkeypatch)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("桌面写不出去（模拟）")
+
+    monkeypatch.setattr(sched.pool, "export_pick_file", boom)
+
+    report = sched.run_daily(cfg, DataEngine(cfg.db_path), notify=False,
+                             with_data=False, export_dir=tmp_path / "桌面")
+
+    assert report["pool"], "导出失败不该影响建池"
+    assert pool.pool_symbols(cfg.db_path), "池子还是要落库"
+    assert report["export_path"] is None
+    errors = "\n".join(report["errors"])
+    assert "导出桌面文件" in errors and "RuntimeError" in errors
+    text = messages(log_records)
+    assert "导出选股结果失败（不影响选股与推送）" in text
+    assert "桌面写不出去（模拟）" in text
+
+
+def test_export_skips_when_there_is_no_pool(cfg, monkeypatch, tmp_path) -> None:
+    """没有池子（非交易日 / 没候选）→ **不写文件**，也不该出现导出相关的报错。"""
+    _ready_db(cfg)
+    from laoa_trader.strategy import rules as rules_mod
+
+    monkeypatch.setattr(rules_mod, "run_all", lambda *a, **k: ({}, []))
+    desk = tmp_path / "桌面"
+
+    report = sched.run_daily(cfg, DataEngine(cfg.db_path), notify=False,
+                             with_data=False, export_dir=desk)
+
+    assert report["pool"] == []
+    assert report["export_path"] is None
+    assert not desk.exists()
+    assert not report["errors"]

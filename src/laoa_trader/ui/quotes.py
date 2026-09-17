@@ -81,9 +81,16 @@ def quote_of(item: dict, at: float | None = None) -> dict:
     去动 `app.py`（那是另一个人的文件），也让两边的字段一眼能对上。
     `at` 与 `as_of` 同理（`at` 是 `is_fresh` 读的时间戳）。
 
+    顺带把**换手率与流通市值**也透出来（`turnover_rate` / `circ_mktcap`）：
+    「自选股池」「持仓监控」两张表新加了「换手」「市值」两列（用户要求），
+    而它们读的就是这个字典 —— 少透一个键，那两列在**生产环境里会永远是 `—`**
+    （来源其实取到了，只是在这一层被丢掉了；这种"功能看着做了、数据却永远为空"
+    最容易被当成"数据源不给力"，其实是这里漏了两行）。
+
     Returns:
         `{"symbol", "price", "last_price", "pct", "at", "as_of", "source",
-        "name", "prev_close", "open", "high", "low", "volume", "turnover"}`
+        "name", "prev_close", "open", "high", "low", "volume", "turnover",
+        "turnover_rate", "circ_mktcap"}`
     """
     moment = time.time() if at is None else float(at)
     price = item.get("last_price")
@@ -103,6 +110,9 @@ def quote_of(item: dict, at: float | None = None) -> dict:
         "low": item.get("low"),
         "volume": item.get("volume"),        # 股（由 `sources` 归一）
         "turnover": item.get("turnover"),    # 元
+        # 下面两个是「换手」「市值」两列的数据源（取不到就是 None → 界面画 `—`，不画 0）
+        "turnover_rate": item.get("turnover_rate"),   # 换手率 %
+        "circ_mktcap": item.get("circ_mktcap"),       # 流通市值（亿）
     }
 
 

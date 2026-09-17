@@ -13,7 +13,9 @@
 * 右键菜单：内置可启停但**不可删**（置灰 + 理由），公式可删（二次确认）；
 * 备注能写进公式文件的 `# 说明:` 注释头、也能从那里读回界面；
 * 【开始选股】**只 emit `start_pick_requested`**，自己绝不跑流程；
-* 「本次选股结果」区与【全部加为自选】（写入 + `watchlist_max` 上限提示）；
+* **选股结果不在这一页**（用户要求"只要显示策略"）：结果进「自选股池」+ 导出一份到桌面，
+  这一页只留一句"结果去哪了"的说明；主窗口仍在调的那个 `show_pick_result()` 是空实现
+  （留着以免 `ui/app.py` 那边 `AttributeError`）；
 * 【试算】**在后台线程里跑**（用户实报过"窗口未响应"）。
 
 这些只有把页面真的建出来、真的点一遍才测得到。用 Qt 的 `offscreen` 平台插件，
@@ -41,7 +43,9 @@ from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QGroupBox,
     QMessageBox,
+    QPushButton,
     QScrollArea,
+    QTableWidget,
 )
 
 from laoa_trader import formulas as lib  # noqa: E402
@@ -1293,127 +1297,107 @@ def test_start_pick_signal_is_a_real_signal_on_the_page(page) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 13) 本次选股结果 + 【全部加为自选】
+# 13) 选股结果**不在这一页**（用户要求）+ 主窗口那个兼容方法 + "结果去哪了"要说清
 # ══════════════════════════════════════════════════════════════════════════
+#
+# 用户原话（2026-09-17）：「策略选股只要显示策略，不显示选股结果，选股结果直接进
+# 自选股池，可以在股池再添加删除。（也可以同时 output 一个文件到桌面）」
+#
+# 所以旧版这一页上的「本次选股结果」表 + 一句话结论 + 【全部加为自选】按钮，
+# 以及它们的渲染/写库方法（`_refresh_result` / `_render_result` / `_load_result_from_db` /
+# `_result_row` / `on_add_all_to_watchlist`）**整体删掉**（这一节原来那两个"结果区"
+# 用例与两个"加自选"用例随之作废，见报告）。取而代之要钉住三件事：
+#
+#   1. 那一块**真的没了**（控件与方法都不在）—— 用户是明确要求删的，
+#      一条断言就能挡住"哪天顺手又加回来"；
+#   2. `show_pick_result()` **还在**：主窗口 `_on_pipeline_done()` 会在每轮选股后调它，
+#      删掉它迟早变成 `AttributeError`（见那个方法的 docstring）；
+#   3. 用户必须知道结果去哪了（自选股池 + 桌面文件）—— 文案写在**界面上**，
+#      不能只躺在 docstring 里（docstring 用户看不见）。
 
 
-def _seed_pool(cfg: Config) -> None:
-    """往本地库存一份"最近一次建池"的结果（3 只：两条内置 + 一条公式）。"""
-    with storage.connect(cfg.db_path) as conn:
-        storage.write_stock_basic(conn, [("600001", "甲样本", "银行"),
-                                         ("600002", "乙样本", "白酒"),
-                                         ("600003", "丙样本", "半导体")])
-        storage.save_pool(conn, [
-            {"symbol": "600001", "name": "甲样本", "strategy": "ReversalStrategy",
-             "strategies": "ReversalStrategy,DryUpExpansionStrategy",
-             "score": 2.0, "reason": "短期反转"},
-            {"symbol": "600002", "name": "乙样本", "strategy": "公式·放量上攻",
-             "strategies": "公式·放量上攻", "score": 1.0, "reason": "公式：放量上攻"},
-            {"symbol": "600003", "name": "丙样本", "strategy": "LowPriceStrategy",
-             "strategies": "LowPriceStrategy", "score": 0.5, "reason": "低价股"},
-        ], "2026-09-11")
+def test_result_area_is_gone_from_the_page(page) -> None:
+    """这一页只有策略列表：没有结果表、没有小结、【全部加为自选】按钮。
+
+    名单里**连数据属性（`result_rows` / `result_date`）也要**：只删控件、把那份数据
+    留在页面上，下一个人想"顺手再画出来"就只差几行 —— 变异验证时正是这一条先漏了。
+    """
+    for name in ("result_box", "result_table", "result_summary", "result_hint",
+                 "btn_add_all", "result_rows", "result_date"):
+        assert not hasattr(page, name), f"「{name}」应该已经从「策略选股」页删掉"
+
+    # 全页只有一张表（策略列表），列还是用户给的那三列
+    assert page.findChildren(QTableWidget) == [page.table]
+    assert [page.table.horizontalHeaderItem(i).text()
+            for i in range(page.table.columnCount())] == list(fp.LIST_COLUMNS)
+
+    texts = [button.text() for button in page.findChildren(QPushButton)]
+    assert "全部加为自选" not in texts
+    assert "策略编辑" in texts and "开始选股" in texts
+    # 「本次选股结果」那个 QGroupBox 也不能留着（哪怕藏起来也算没删干净）
+    assert all("选股结果" not in box.title() for box in page.findChildren(QGroupBox))
 
 
-def _result_rows(page) -> list[tuple[str, str]]:
-    return [(page.result_table.item(row, 0).text(), page.result_table.item(row, 1).text())
-            for row in range(page.result_table.rowCount())]
+def test_removed_result_methods_are_really_gone() -> None:
+    """结果区的渲染/写库方法一起删掉（留半套比全留着更危险：能改库却不显示）。"""
+    for name in ("_refresh_result", "_render_result", "_load_result_from_db",
+                 "_result_row", "on_add_all_to_watchlist"):
+        assert not hasattr(fp.FormulaPage, name), name
+    assert not hasattr(fp, "RESULT_COLUMNS")            # 那两列的列头常量也带走
 
 
-def test_result_area_reads_the_latest_pool_from_the_local_db(page, page_cfg) -> None:
-    """没接线也能看到结果：`reload()`（主窗口选完后会调）从本地库读最近一次建池。"""
-    _seed_pool(page_cfg)
+def test_show_pick_result_is_kept_so_the_main_window_never_crashes(page, page_cfg,
+                                                                   qapp) -> None:
+    """主窗口还在调 `show_pick_result(...)` → 方法在、签名不缩水、空调用不炸。
 
-    page.reload()
+    `ui/app.py::_on_pipeline_done()` 里是 `getattr(page, "show_pick_result", None)` → 有就调。
+    今天删掉它不会炸（那边容错了），但哪天接线改成直接调用就是 `AttributeError`
+    把"跑完显示结论"那一段带崩 —— 所以这里把"这个方法必须存在"钉住。
+    """
+    assert callable(getattr(fp.FormulaPage, "show_pick_result", None))
+    params = inspect.signature(fp.FormulaPage.show_pick_result).parameters
+    assert list(params) == ["self", "rows", "data_date"]
+    assert params["rows"].default is None
+    assert params["data_date"].kind is inspect.Parameter.KEYWORD_ONLY   # 主窗口按关键字传
 
-    assert page.result_box.isVisible() is True
-    assert page.result_date == "2026-09-11"
-    assert _result_rows(page) == [
-        ("甲样本(600001)", "短期反转、地量后放量变盘"),
-        ("乙样本(600002)", "公式·放量上攻"),
-        ("丙样本(600003)", "低价股"),
-    ]
-    assert "共选出 3 只" in page.result_summary.text()
-    assert "自选股池" in page.result_summary.text()
-
-
-def test_show_pick_result_accepts_the_pipeline_report(page) -> None:
-    """主窗口直接把 `run_daily()` 的 report 递进来也认（pool + data_date）。"""
-    report = {
-        "data_date": "2026-09-11",
-        "pool": [
-            {"symbol": "600001", "name": "甲样本", "strategy": "ReversalStrategy",
-             "strategies": "ReversalStrategy"},
-            {"symbol": "600009", "name": "自选样本", "strategy": "", "strategies": ""},
-        ],
-    }
-
-    page.show_pick_result(report)
-
-    assert _result_rows(page) == [("甲样本(600001)", "短期反转")]   # 纯自选的行不算"选出"
-    assert "行情日 2026-09-11" in page.result_summary.text()
-
-    # 收回 → 退回本地库那条路（这个用例的库里还没有池子 → 结果区收起来）
+    # 三种调用形态都不能出事：report（dict）、行列表、None
+    page.show_pick_result({"data_date": "2026-09-11",
+                           "pool": [{"symbol": "600001", "name": "甲样本",
+                                     "strategy": "ReversalStrategy"}]})
+    page.show_pick_result([{"symbol": "600001", "strategy": "ReversalStrategy"}])
     page.show_pick_result(None)
-    assert page.result_rows == []
-    assert page.result_box.isVisible() is False
-
-
-def test_add_all_to_watchlist_writes_and_never_duplicates(page, page_cfg, qapp) -> None:
-    """【全部加为自选】：写进 `watchlist`（本地库），再点一次不会重复添加。"""
-    _seed_pool(page_cfg)
-    page.reload()
-
-    page.btn_add_all.click()
     qapp.processEvents()
 
-    with storage.connect(page_cfg.db_path) as conn:
-        rows = storage.load_watchlist(conn, enabled_only=False)
-    assert [row["symbol"] for row in rows] == ["600001", "600002", "600003"]
-    assert rows[0]["name"] == "甲样本"
-    assert rows[0]["note"] == "选股来源：短期反转、地量后放量变盘"      # 来源留在备注里
-    assert rows[1]["note"] == "选股来源：公式·放量上攻"
-    assert "已加 3 只" in page.hint_text
-
-    page.btn_add_all.click()                   # 再来一次：幂等
-    qapp.processEvents()
-    with storage.connect(page_cfg.db_path) as conn:
-        again = storage.load_watchlist(conn, enabled_only=False)
-    assert [row["symbol"] for row in again] == ["600001", "600002", "600003"]
-    assert [row["note"] for row in again] == [row["note"] for row in rows]   # 备注没被改
-    assert "没有新增自选" in page.hint_text      # 而不是含糊的"已加 0 只"
-    assert "没有重复添加" in page.hint_text
-
-
-def test_add_all_respects_watchlist_max_and_says_so(page, page_cfg, qapp) -> None:
-    """超过 `watchlist_max`：加得进几只就加几只，**其余的明确说清楚**（绝不静默丢）。"""
-    page_cfg.watchlist_max = 1
-    _seed_pool(page_cfg)
-    page.reload()
-
-    page.btn_add_all.click()
-    qapp.processEvents()
-
-    with storage.connect(page_cfg.db_path) as conn:
-        rows = storage.load_watchlist(conn, enabled_only=False)
-    assert [row["symbol"] for row in rows] == ["600001"]        # 只加得进 1 只
-    assert "watchlist_max=1" in page.hint_text
-    assert "还有 2 只" in page.hint_text
-    assert "乙样本(600002)" in page.hint_text                    # 没加进去的**点名**
-    # 结果区里也留一句"这一轮到底加了几只"（用户不用回头翻提示区）
-    assert "已加 1 只" in page.result_hint.text()
-    assert "超额未加 2 只" in page.result_hint.text()
-
-
-def test_add_all_button_is_disabled_when_there_is_no_result(page, page_cfg) -> None:
-    """还没有结果时按钮是灰的，硬调也只说"先去选股"（不会去动自选表）。"""
-    assert page.result_box.isVisible() is False
-    assert page.btn_add_all.isEnabled() is False
-
-    page.on_add_all_to_watchlist()             # 按钮点不动，直接调处理函数也得拦住
-
-    assert "还是空的" in page.hint_text
+    # **空实现**：不写库（旧版这里会把票写进 watchlist），也不新增任何控件
     with storage.connect(page_cfg.db_path) as conn:
         assert storage.load_watchlist(conn, enabled_only=False) == []
+    assert page.findChildren(QTableWidget) == [page.table]
+
+
+def test_show_pick_result_docstring_says_where_the_result_goes() -> None:
+    """docstring 要写清"界面不再显示 + 结果去哪"（看代码的人得知道用户要的东西没丢）。"""
+    doc = fp.FormulaPage.show_pick_result.__doc__ or ""
+    assert "空实现" in doc
+    assert "自选股池" in doc and "桌面" in doc
+
+
+def test_page_tells_the_user_where_the_results_go(page) -> None:
+    """结果区删了，但"结果去哪了"必须在**界面上**说清（不许静默消失）。
+
+    三处文案：顶部灰字、【开始选股】的 tooltip、点下去那一刻的提示 —
+    少一处，用户点完【开始选股】就会以为"什么都没发生"。
+    """
+    assert "自选股池" in page.page_hint.text() and "桌面" in page.page_hint.text()
+
+    tip = page.btn_start_pick.toolTip()
+    assert "自选股池" in tip and "桌面" in tip
+
+    told: list[str] = []
+    page.status_cb = told.append
+    page.btn_start_pick.click()
+    assert told and "自选股池" in told[0] and "桌面" in told[0]
+
+
 
 
 # ══════════════════════════════════════════════════════════════════════════

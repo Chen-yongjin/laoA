@@ -760,14 +760,16 @@ def test_default_notify_goes_popup_only() -> None:
 
 
 def test_data_sources_default_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`data_sources`（新增键）：默认就是内置的同花顺，环境变量 `DATA_SOURCES` 可覆盖。
+    """`data_sources`：默认 `["public", "hithink"]`（免 Key 公开源当主源），环境变量可覆盖。
 
-    这个键目前只"留结构"（辅助来源是什么还没拍板，见改版方案第七节）——
-    所以测试只钉两件事：默认值是 `["hithink"]`，且环境变量真的接上了
-    （逗号分隔，与 notify_channels 同一套 `_as_list` 写法）。
+    默认值随产品走：2026-09-17 起分发版把**免 Key 的公开源**放在第一位
+    （别人拿到程序不用先申请 Key），同花顺降为备用/增强 —— 有 Key 的用户
+    在配置里把它排前面即可自动接管。环境变量这条路（`DATA_SOURCES`，
+    逗号分隔、与 `notify_channels` 同一套 `_as_list` 写法）**一字未改**，
+    所以下面照旧钉着"环境变量真的接上了"。
     """
     cfg = load_config(tmp_path / "none.toml", use_env=False)
-    assert cfg.data_sources == ["hithink"]
+    assert cfg.data_sources == ["public", "hithink"]
 
     monkeypatch.setenv("DATA_SOURCES", "hithink,csv")
     cfg2 = load_config(tmp_path / "none.toml")
@@ -776,16 +778,29 @@ def test_data_sources_default_and_env(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setenv("DATA_SOURCES", "hithink，csv")   # 中文逗号也认
     assert load_config(tmp_path / "none.toml").data_sources == ["hithink", "csv"]
 
+    # 有 Key 的用户把自己排前面：顺序就是优先级（"同花顺自动接管"靠的就是这个）
+    monkeypatch.setenv("DATA_SOURCES", "hithink,public")
+    assert load_config(tmp_path / "none.toml").data_sources == ["hithink", "public"]
 
-def test_data_sources_in_example_config() -> None:
-    """`config.example.toml` 要带上这个新键（否则用户拿示例覆盖后它就"消失"了）。"""
+
+def test_data_sources_in_example_config(tmp_path: Path) -> None:
+    """`config.example.toml` 要带上这个键，且**与代码默认值一致**（两处漂移最容易出事）。
+
+    比的是 `load_config(不存在的路径)` 而不是 `Config()`：走一遍真实的读取+归一，
+    同时**不碰宿主机上可能存在的 config.toml**（`config_search_paths()` 会找
+    仓库根目录与 `~/.config`，开发机上真有一份的话，断言就变成了"看环境"）。
+    """
     import tomllib
     from pathlib import Path as P
 
     example = P(__file__).resolve().parents[1] / "config.example.toml"
     text = example.read_text(encoding="utf-8")
-    assert tomllib.loads(text)["data_sources"] == ["hithink"]
+    data = tomllib.loads(text)
+    assert data["data_sources"] == ["public", "hithink"]
+    assert data["data_sources"] == load_config(tmp_path / "none.toml",
+                                              use_env=False).data_sources
     assert "同花顺" in text
+    assert "免 Key" in text                  # 主源免 Key 这件事，示例里必须说清
 
 
 def test_default_history_window_is_pinned_in_example_config() -> None:
