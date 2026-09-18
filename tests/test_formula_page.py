@@ -730,7 +730,9 @@ def test_save_sanitizes_name_and_reads_back(page) -> None:
     # 列表里立刻出现（内置 5 条常驻在前，公式追加在后）
     assert page.table.rowCount() == 5 + 1
     assert page.table.item(5, 0).text() == "5日线_放量"
-    assert "已保存" in page.hint_text
+    # 2026-09-18 用户要求「成功不需要提示，失败再提示」：保存成功时提示区是空的
+    # （列表里多出来的那一行本身就是反馈）
+    assert page.hint_text == ""
 
 
 def test_save_overwrite_asks_first_and_can_be_cancelled(page,
@@ -1553,11 +1555,14 @@ def test_long_hint_is_trimmed_but_kept_in_full(page) -> None:
 #      现在失败一定弹 toast，并写出公式目录的绝对路径与最可能的原因。
 
 
-def test_saving_a_formula_makes_it_participate_right_away(page, page_cfg, qapp) -> None:
-    """保存一条能编译的公式 → **立刻参与选股**（勾上 + 写回 `enabled_formulas`）。
+def test_saving_a_formula_shows_it_at_the_bottom_unchecked(page, page_cfg, qapp) -> None:
+    """保存 → 它**自动出现在策略列表最下面**、**默认不勾选**、并且**不出任何提示**。
 
-    为什么改掉"默认不参与"：用户写公式就是为了用它，存完还得自己去找一个勾选框
-    勾一下是很不自然的第二步 —— 表现就是"我明明存了，怎么没选股"。
+    用户 2026-09-18 的原话（两句，都是产品要求）：
+      * 「保存就自动显示在策略最下面，默认不勾选」；
+      * 「成功不需要提示，失败再提示」。
+    所以这条用例同时钉三件事：进了列表最后一行、勾选框没被替用户勾上、
+    **提示区是空的**（"列表里多出来的那一行"就是成功的反馈，再讲一遍只是噪音）。
     """
     page.name_edit.setText("放量上攻（量比版）")
     page.editor.setPlainText("VR:=量比()\nC>=3 AND C<=50 AND VR>=1.5")
@@ -1565,21 +1570,42 @@ def test_saving_a_formula_makes_it_participate_right_away(page, page_cfg, qapp) 
     page.btn_save.click()
     qapp.processEvents()
 
+    # ① 在列表**最后一行**（内置在前、公式在后）
+    assert page.rows[-1].name == "放量上攻（量比版）"
+    assert page.table.item(page.table.rowCount() - 1, 0).text() == "放量上攻（量比版）"
+    # ② 默认不勾选（参不参与由用户决定），也就没写进 enabled_formulas
     box = page._row_boxes["放量上攻（量比版）"]
-    assert box.isChecked() is True, "保存后应当自动参与选股"
-    assert page_cfg.enabled_formulas == ["放量上攻（量比版）"]
-    assert 'enabled_formulas = ["放量上攻（量比版）"]' in page_cfg.source_path.read_text(
-        encoding="utf-8")
-    # 提示里要说清"在第几行"（列表长的时候光说"已保存"等于没说）
-    assert "列表第" in page.hint_text and "参与选股" in page.hint_text
+    assert box.isChecked() is False
+    assert page_cfg.enabled_formulas == []
+    # ③ 成功**不出提示**
+    assert page.hint_text == ""
 
 
-def test_saving_a_broken_formula_saves_it_but_does_not_enable_it(page, page_cfg, qapp) -> None:
-    """编译不过的公式：**照样存成草稿**（不拦着用户），但**不参与选股**并说清为什么。
+def test_saving_successfully_clears_an_old_failure_hint(page, page_cfg, qapp,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """上一次失败留下的红字，下一次保存成功时要**收掉**（否则一直挂在屏幕上像还在报错）。"""
+    def boom(*_args, **_kwargs):
+        raise OSError("Permission denied")
 
-    这条同时是"用户拿还没接进引擎的字段写公式"时的正确反馈 —— 例如
-    `流通市值`/`换手率` 现在还不存在，用户会看到一句**带行列号的中文原因**，
-    而不是"存了、勾了、什么都没发生"。
+    monkeypatch.setattr(lib, "save_formula", boom)
+    page.name_edit.setText("第一次")
+    page.editor.setPlainText("C>O")
+    page.btn_save.click()
+    qapp.processEvents()
+    assert page.hint_text, "失败必须留下提示"
+
+    monkeypatch.undo()
+    page.editor.setPlainText("C>O")
+    page.btn_save.click()
+    qapp.processEvents()
+    assert page.hint_text == ""
+
+
+def test_saving_a_broken_formula_saves_it_as_a_draft(page, page_cfg, qapp) -> None:
+    """编译不过的公式也**照样存下来**（不拦着用户存草稿），只是**不参与选股**。
+
+    这条是"用户拿还没接进引擎的字段写公式"时的正确反馈：文件在、列表里有它，
+    勾选框是灰的、鼠标停上去能看到引擎给的中文原因（例如 `流通市值` 现在还不存在）。
     """
     page.name_edit.setText("六条件版")
     page.editor.setPlainText("流通市值>=10 AND C>=3")
@@ -1589,10 +1615,12 @@ def test_saving_a_broken_formula_saves_it_but_does_not_enable_it(page, page_cfg,
 
     assert (page.directory / "六条件版.txt").exists(), "草稿要存下来（不拦着用户）"
     box = page._row_boxes["六条件版"]
-    assert box.isChecked() is False, "编译不过的公式不许被勾上（勾上也跑不了）"
+    assert box.isChecked() is False
+    assert box.isEnabled() is False, "编译不过的勾选框是灰的（勾上也跑不了）"
     assert page_cfg.enabled_formulas == []
-    assert "编译不过" in page.hint_text
-    assert "流通市值" in page.hint_text          # 引擎给的中文原因要原样透出来
+    # "存下去了但跑不了"算**有问题**，要说一句（不然用户看着那把灰勾不知道原因）——
+    # 这句话里带着引擎给的中文原因与行列号
+    assert "公式有错" in page.hint_text and "流通市值" in page.hint_text
 
 
 def test_save_failure_shows_the_formula_dir(
@@ -1618,6 +1646,6 @@ def test_save_failure_shows_the_formula_dir(
     page.btn_save.click()
     qapp.processEvents()
 
-    assert "没存上" in page.hint_text or "保存失败" in page.hint_text
-    assert str(page.directory) in page.hint_text            # 路径要写出来
+    assert "没存上" in page.hint_text
+    assert str(page.directory) in page.hint_text            # 路径要写出来（去哪个目录找）
     assert any("没存上" in t for t in toasts), f"失败必须弹 toast（不然看不见提示区）：{toasts}"
