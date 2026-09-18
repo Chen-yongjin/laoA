@@ -133,14 +133,15 @@ except Exception as _exc:  # noqa: BLE001 - 与 ui/app.py 同一个降级策略
 PANEL_WIDTH = 300
 
 #: 右侧按钮的高度（像素）。默认高度（约 26~30）下，四组 52 个按钮要把面板滚很久 ——
-#: 用户 2026-09-18 要求"把按键大小都缩小"，于是高度降一档（30→22）、字号降两档。
+#: 用户 2026-09-18 要求"把按键大小都缩小"，于是高度降一档（30→22）、字号降一档。
 BUTTON_HEIGHT = 22
 #: 右侧那批按钮的 objectName（主题 QSS 用它单独给这批按钮设 padding / min-height，
 #: 否则主题里通用的 `QPushButton { padding: 4px 12px; min-height: 20px }` 会把
 #: `setFixedHeight(22)` 顶回 30px —— 实测过，别删）
 PALETTE_BUTTON_OBJECT = "paletteButton"
-#: 按钮字号相对默认字号降几档（按钮上是中文两三个字，降两档在窄按钮里也清晰）
-BUTTON_FONT_DELTA = 2
+#: 按钮字号相对默认字号降几档。只降一档是**故意的**：再小就费眼睛了
+#: （这批按钮是给"刚上手的人"看的，宁可按钮矮一点、字要看得清）
+BUTTON_FONT_DELTA = 1
 #: 字号下限（再小就看不清了；某些平台默认字号本身就只有 8~9）
 BUTTON_FONT_MIN = 7
 
@@ -602,12 +603,18 @@ def _auction_criteria(cfg: Any) -> list[str]:
 
 
 def auction_note(cfg: Any) -> str:
-    """「备注」列那句话：口径一眼看得见 + **说清它不参与选股**。"""
+    """「备注」列那句话：**先说清它不参与选股**，再说口径。
+
+    为什么把"不参与选股"放在最前面：备注列是 Stretch 的，窗口一窄就会被省略号截掉 ——
+    而这半句正是这一行最要紧的东西（用户看到"竞价策略"四个字，第一反应必然是
+    "它也会给我选股吗"）。把结论写在能被看见的位置，比藏在末尾强。
+    """
     s = _auction_settings(cfg)
     return (
+        "只做盘中提示、不参与选股 ｜ "
         f"{' / '.join(s['at'])} 扫全市场：涨幅 {s['min_pct']:.1f}~{s['max_pct']:.1f}%、"
         f"量比≥{s['ratio']:.1f}、成交额≥{s['amount_wan']:.0f}万、打分≥{s['score']}"
-        f" → 推前 {s['items']} 只（只做提示，不参与选股）"
+        f" → 推前 {s['items']} 只"
     )
 
 
@@ -1224,7 +1231,7 @@ if QT_AVAILABLE:
                 # **顶回 30px** —— 只改代码不加这条 QSS 的话，"按钮缩小"只在没有样式表时生效
                 button.setObjectName(PALETTE_BUTTON_OBJECT)
                 button.setFixedHeight(BUTTON_HEIGHT)
-                # 字号降两档（改的是**这个控件自己的**字体副本，不动全局主题字体）。
+                # 字号降一档（改的是**这个控件自己的**字体副本，不动全局主题字体）。
                 # `pointSize() <= 0` 时说明字体是按像素设的 —— 那就不动它（免得算出负数）
                 font = button.font()
                 if font.pointSize() > 0:

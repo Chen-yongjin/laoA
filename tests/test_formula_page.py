@@ -37,7 +37,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过公式编辑器界面测试")
 
 from PySide6.QtCore import Qt, QThread  # noqa: E402
-from PySide6.QtGui import QFont, QTextCursor  # noqa: E402
+from PySide6.QtGui import QFont, QFontMetrics, QTextCursor  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
@@ -413,6 +413,43 @@ def test_palette_buttons_are_small_and_labelled_in_chinese(page) -> None:
     assert page.palette_buttons["CROSS"].text() == "上穿"
     assert page.palette_buttons["AND"].text() == "并且"
     assert page.palette_buttons[">="].text() == "大于等于"
+
+
+def test_palette_buttons_cannot_be_squashed_by_the_theme(page_cfg, tmp_path, qapp) -> None:
+    """**在真实主题下**量一遍按钮的渲染尺寸与文字（用户实报过"全变长条、字看不见"）。
+
+    这次事故的成因值得记下来：`theme.py` 里给这批按钮加的那条
+    `QPushButton#paletteButton` 一旦命中，通用 `QPushButton` 里的 `min-height: 20px`
+    就不再生效；按钮的最小高度变成 0 之后，外层 `QScrollArea` 会把 52 个按钮
+    **压扁塞进视口** —— 实测每个只剩 4 像素高（字看不见、也点不中）。
+
+    为什么原来那些断言拦不住：它们量的是 `maximumHeight()`（当时是**正确**的 22）
+    与 `button.height() <= 22`（4 <= 22 也成立）。所以这一条只认两样东西：
+    **布局之后真实渲染出来的高度**，以及**文字确实放得下**。
+    """
+    from laoa_trader.ui import theme
+
+    before = qapp.styleSheet()
+    try:
+        theme.apply_theme(qapp)                       # 与主窗口启动时同一条路径
+        fresh = fp.FormulaPage(page_cfg, directory=tmp_path / "公式-主题")
+        fresh.resize(1280, 800)
+        fresh.show()
+        fresh.btn_edit.click()                        # 右侧面板要展开才谈得上"看得见"
+        qapp.processEvents()
+
+        heights = {box.height() for box in fresh.palette_buttons.values()}
+        assert heights == {fp.BUTTON_HEIGHT}, f"按钮被压扁/撑高：{heights}"
+        area = fresh.palette_panel.findChild(QScrollArea)
+        assert area is not None and area.verticalScrollBar().maximum() > 0, \
+            "按钮被塞进视口（没有滚动条）= 已经被压扁了"
+        for token, box in fresh.palette_buttons.items():
+            assert box.isVisibleTo(fresh) and box.isEnabled(), f"{token} 点不到（不可见/禁用）"
+            need = QFontMetrics(box.font()).horizontalAdvance(box.text())
+            assert box.width() - need > 4, f"{token} 的文字放不下（会被截断）"
+        fresh.close()
+    finally:
+        qapp.setStyleSheet(before)                    # 别把主题留给后面的用例
 
 
 def test_chinese_button_still_inserts_the_engine_syntax(page) -> None:
@@ -1562,7 +1599,9 @@ def test_auction_row_sits_between_builtins_and_formulas(page) -> None:
     assert names[6] == "我的公式"
     # 备注列的数字来自 config（不是界面编的）：改一个数，备注跟着变
     note = page.table.item(5, 1).text()
-    assert "涨幅 2.0~9.0%" in note and "只做提示，不参与选股" in note
+    assert "涨幅 2.0~9.0%" in note
+    # 「不参与选股」必须在**最前面**：备注列会被省略号截断，结论不能被截掉
+    assert note.startswith("只做盘中提示、不参与选股")
     page.cfg.auction_min_pct = 5.0
     page.reload()
     assert "涨幅 5.0~9.0%" in page.table.item(5, 1).text()
