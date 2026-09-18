@@ -814,9 +814,16 @@ def test_quotes_service_gate_follows_usable_sources(
         assert both.should_request() is True              # 同花顺没 Key，公开源接管
         assert em_only.should_request() is True           # 只要东方财富也行
         assert none.should_request() is False             # 一个来源都没启用
-        # 非交易时段 / 下载中 / 没有标的，三条门槛照旧
+        # 非交易时段：**当天还没成功取过就补一次**（2026-09-18 用户实报"自选股池/持仓监控里
+        # 的市值和换手一直是空的" —— 那两列只有实时快照才给，而原来非交易时段一律不发请求，
+        # 于是晚上打开软件时"现价有数（退回本地收盘价）、这两列却是 —"）。
+        # 取到当天就收工：价格不会变，整天反复取纯属浪费配额。
         monkeypatch.setattr(intraday, "in_session", lambda now=None: False)
-        assert both.should_request() is False
+        assert both.should_request() is True, "收盘后当天还没取过 → 补一次"
+        both._fetched_day = intraday.now_shanghai().strftime("%Y-%m-%d")
+        assert both.should_request() is False, "今天已经取到过 → 不再取"
+        both._fetched_day = None
+        # 盘中照旧按节奏取（取过也不影响 should_request；限流在 tick 里管）
         monkeypatch.setattr(intraday, "in_session", lambda now=None: True)
         monkeypatch.setattr(state, "is_downloading", lambda: True)
         assert both.should_request() is False

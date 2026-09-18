@@ -11,7 +11,7 @@
 * **保存/删除** —— 文件名安全化 + 引擎认的注释头（`# 名称:` / `# 说明:`）；
 * **参与选股名单** —— `enabled_names()`：把 `config.toml` 里的 `enabled_formulas`
   收紧成"目录里真实存在且语法通过"的名字，**找不到/写错的忽略并记日志**；
-* **试算 / 成绩单** —— 供界面上的【试算】【看成绩单】用（只读本地库，不联网）。
+* **运行 / 成绩单** —— 供界面上的【运行】（原【试算】）用（只读本地库，不联网）。
 
 为什么"保存"要先做名称安全化
 -----------------------------
@@ -80,7 +80,9 @@ LIMIT_UP_HINT = (
 #: 与 `research/scorecard.py` 的默认并列口径一致，也是散户真能执行的那一档。
 DEFAULT_CONVENTION_KEY = "B"
 
-#: 【试算】最多列出多少只（名称（代码）格式太长，列满一屏就够了）
+#: 【运行】的结果**显示**最多列出多少只（名称（代码）格式太长，列满一屏就够了）。
+#: 注意：它只影响界面显示（返回值里的 `shown`），**不影响 `hits`** ——
+#: 【导出选股结果】写的是全量命中（见 `preview_hits` 的 Returns）。
 PREVIEW_LIMIT = 20
 
 #: 成绩单的进度回调类型（与本项目其它进度回调同一个签名：阶段 + 已完成 + 总数）
@@ -500,7 +502,11 @@ def preview_hits(
     Returns:
         {"date": 行情日, "count": 命中数, "hits": [{"symbol","name"}...],
          "shown": 展示数, "scanned": 扫过的票数, "skipped": 数据不足的票数,
-         "errors": [中文错误...]}
+         "errors": [中文错误...], "notes": [全局提示...]}
+
+        `hits` 是**全量**命中清单（按代码排序、不截断），`limit` 只决定 `shown`：
+        界面按 `shown` 截断**显示**（提示区一行放不下 60 只票），而【导出选股结果】
+        要写**完整**的一份 —— 给用户的文件里少几只，是最难被发现的那种错。
     """
     day = latest_trading_day(db_path)
     hits: list[dict] = []
@@ -551,7 +557,8 @@ def preview_hits(
     return {
         "date": day,
         "count": len(hits),
-        "hits": hits[:limit],
+        # 全量（界面自己按 `shown` 截断显示，导出要全量）
+        "hits": hits,
         "shown": min(len(hits), limit),
         "scanned": scanned,
         "skipped": skipped,

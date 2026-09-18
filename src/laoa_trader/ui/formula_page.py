@@ -19,11 +19,22 @@
    单击一行：内置 → 只读详情（条件说明 + 证据 + 当前状态，可复制）；
    公式 → 载入编辑器（可改可存）。右键：启用/关闭、删除（内置不可删）。
 2. **策略编辑器**（下半，点【策略编辑】或点列表里的公式行才展开）：左边框、
-   右边"点一下就插入"的按钮面板（变量 / 函数 / 运算符）。每个按钮中文 tooltip，
+   右边"点一下就插入"的按钮面板（变量 / 函数 / 排除 / 运算符）。每个按钮中文 tooltip，
    `MA` 自动带括号、光标落在括号里，`AND` 自动补空格 —— 这些交互是**实测过的**，
    见下面 `insert_token` / `insert_operator` 的注释（别回退）。
-   底部【校验】【试算】【保存】【另存为】【删除】，名称旁边多了**备注**（写进文件的
-   `# 说明:` 注释头）。
+   底部【校验】【运行】【导出选股结果】【保存】【另存为】【删除】，名称旁边多了**备注**
+   （写进文件的 `# 说明:` 注释头）。
+
+   **【运行】= 原来的【试算】**（用户 2026-09-18 要求"把试算直接改成运行"）：
+   同一件事 —— 在当前库上跑一遍这条公式、只看每只票最后一根 K 线、不推送不写库。
+   只改了界面上的两个字（用户说"试算"看不懂），**内部标识符仍叫 `preview_*`**
+   （`btn_preview` / `on_preview` / `preview_worker` / `formulas.preview_hits`）：
+   那些名字连着一批测试与文档里的引用，为一个文案做机械重命名只会制造噪音。
+   看到 `preview` 就当"这条按钮"读。
+
+   【导出选股结果】把**上一次【运行】的命中清单**（全量，不截断）写成桌面上的
+   `老A选股助手-选股结果-<日期>.txt` —— 与 `scheduler.run_daily()` 建池时导出的
+   是**同一个函数**（`pool.export_pick_file`），版式、来源列、现价列完全一致。
 3. **【开始选股】**（右上角）：本页**只 emit `start_pick_requested()`** ——
    增量数据 → 跑策略与公式 → 建池 → 推送这一整套在主窗口（`ui/app.py`）里，
    这一页不碰它（也不联网）。
@@ -67,9 +78,11 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from laoa_trader import formulas as formulas_lib
+from laoa_trader import pool as pool_mod
 from laoa_trader.config import get_config
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import base as base_mod
@@ -125,7 +138,8 @@ EDITOR_MIN_HEIGHT = 130
 #: 跳到下一个控件会让用户正在打的字跑到别处（也被原始需求点到了）。
 TAB_SPACES = "    "
 
-#: 【试算】结果里最多列几只（与 `formulas.PREVIEW_LIMIT` 一致）
+#: 【运行】结果**显示**最多列几只（与 `formulas.PREVIEW_LIMIT` 一致；
+#: 导出的桌面文件是**全量**，不按这个数截断）
 PREVIEW_LIMIT = formulas_lib.PREVIEW_LIMIT
 
 #: 提示区最多显示多少行（多行错误/很长的命中清单全塞进 QLabel 会把列表挤没；
@@ -180,7 +194,7 @@ LIST_HINT = (
 #: 编辑器里那行灰字说明（小白第一眼看的就是它）
 EDITOR_HINT = (
     "点右边的按钮就能插入；最后一行是选股条件。"
-    "写完点【校验】→【试算】→【保存】。"
+    "写完点【校验】→【运行】→【保存】；想留一份结果就点【导出选股结果】。"
 )
 
 #: 【载入示例】在没有示例文件时用的兜底公式（保证"小白第一步"一定走得通）
@@ -214,9 +228,6 @@ VARIABLES: tuple[tuple[str, str, int | None], ...] = (
     # ── 排除类标记：0/1，由代码与名称直接算出来（**不用联网、历史上也成立**）
     ("热门行业", "最近 3 个交易日里这只票的行业上过几次热门榜（0~3，"
                 "口径与「大盘概览 → 热门板块」同一套）。例：热门行业>=1 表示只选上过榜的行业", None),
-    ("ST", "是不是 ST/风险警示股（名称含 ST 就是 1）。例：ST=0 表示排除 ST", None),
-    ("科创", "是不是科创板（688/689 开头）。例：科创=0 表示排除科创板", None),
-    ("北交所", "是不是北交所（4/8/92 号段）。例：北交所=0 表示排除北交所", None),
 )
 
 FUNCTIONS: tuple[tuple[str, str, int | None], ...] = (
@@ -242,6 +253,22 @@ FUNCTIONS: tuple[tuple[str, str, int | None], ...] = (
     ("DIF", "DIF() MACD 快线 = EMA(C,12)-EMA(C,26)。例：DIF()>DEA() 是金叉状态（要 26 根 K 线）", 0),
     ("DEA", "DEA() MACD 慢线 = EMA(DIF,9)。例：DIF()>DEA()（要 35 根 K 线）", 0),
     ("MACD", "MACD() 柱状线 = (DIF-DEA)×2，正数是红柱。例：MACD()>0（要 35 根 K 线）", 0),
+)
+
+#: 「排除」组：**按钮上写的是人话（非 X），点一下插入的是条件（`X=0`）**。
+#: 2026-09-18（用户要求）：原来的 `ST` / `科创` / `北交所` 三个按钮"意思不明"——
+#: 看到 `ST` 不知道点下去是要它还是不要它。现在按钮直接写"非 ST"，点一下插入 `ST=0`，
+#: 一眼明白；同时补上「非沪市 / 非深市 / 非创业板」。
+#:
+#: 元素是四元组 `(插入的文本, 提示, 参数个数, 按钮上的字)`：前三个与其它组同形，
+#: 第四个只有这一组用（其余组的按钮字就是插入的文本本身）。
+EXCLUDES: tuple[tuple[str, str, int | None, str], ...] = (
+    ("ST=0", "非 ST：排除 ST / *ST 等风险警示股。插入 ST=0", None, "非 ST"),
+    ("北交所=0", "非北交所：排除北交所（4/8/92 号段）。插入 北交所=0", None, "非北交所"),
+    ("科创=0", "非科创板：排除科创板（688/689）。插入 科创=0", None, "非科创板"),
+    ("沪市=0", "非沪市：排除沪市（6 开头，含科创板与沪 B）。插入 沪市=0", None, "非沪市"),
+    ("深市=0", "非深市：排除深市（0/3 开头，含创业板与深 B）。插入 深市=0", None, "非深市"),
+    ("创业板=0", "非创业板：排除创业板（300/301）。插入 创业板=0", None, "非创业板"),
 )
 
 OPERATORS: tuple[tuple[str, str, int | None], ...] = (
@@ -527,9 +554,9 @@ def build_strategy_rows(
 if QT_AVAILABLE:
 
     class FormulaWorker(QThread):
-        """这一页的后台线程（**【试算】用它**）。
+        """这一页的后台线程（**【运行】用它**）。
 
-        为什么必须后台跑：试算要逐只票读 K 线并在最后一根上跑公式（真实 3 年库实测
+        为什么必须后台跑：运行要逐只票读 K 线并在最后一根上跑公式（真实 3 年库实测
         3.7 秒，全市场 5000+ 只要 7~8 秒）。在主线程里跑就是"窗口未响应"——用户以为
         程序死了，其实是它正在算。这里是 Qt 里唯一安全的做法：工作线程只算数，
         结果通过信号回主线程再碰控件。
@@ -540,7 +567,7 @@ if QT_AVAILABLE:
         （见 `FormulaPage._on_preview_failed`）。
 
         （旧版这里还兼跑"成绩单"，改版把成绩单的界面入口去掉了，
-        这个线程只服务【试算】；`formulas.run_scorecard()` 仍在，CLI 照用。）
+        这个线程只服务【运行】；`formulas.run_scorecard()` 仍在，CLI 照用。）
         """
 
         progress = Signal(str, int, int)
@@ -622,10 +649,20 @@ if QT_AVAILABLE:
             self.rows: list[StrategyRow] = []
             #: 右侧面板按钮：{token: QPushButton}（测试按 token 点，不爬布局）
             self.palette_buttons: dict[str, Any] = {}
-            #: 【试算】的后台线程；跑完置回 None（测试就等这一条来判断"落地了"）
+            #: 【运行】（原【试算】，下同）的后台线程；跑完置回 None
+            #: （测试就等这一条来判断"落地了"）
             self.preview_worker: FormulaWorker | None = None
-            #: 【试算】按下按钮那一刻的公式快照（结果属于它，不属于编辑框里现在的内容）
+            #: 【运行】按下按钮那一刻的公式快照（结果属于它，不属于编辑框里现在的内容）
             self.preview_formula: Any = None
+            #: **上一次【运行】的结果**（【导出选股结果】导的就是它）：
+            #: `{"name": 公式名, "date": 行情日, "hits": [{"symbol","name"}...], "count": N}`
+            #: 或 None（还没跑过 / 跑失败了）。
+            #:
+            #: 为什么导出要用"上一次的结果"而不是重新跑一遍：重跑可能因为盘中快照、
+            #: 数据更新而给出**与用户刚才看到的那份不一样**的清单 —— 他导出的必须是
+            #: 他看过的。另外重跑一次要扫全库（实测 7~8 秒），点一下按钮等 8 秒不像话。
+            #: 每次开始新一轮【运行】时先清空它：**绝不导出上一轮的陈结果**。
+            self.last_run: dict | None = None
             self.hint_text: str = ""
             #: 内置策略行的勾选框（键 = 类名）与公式行的勾选框（键 = 公式名）。
             #: **两个字典**而不是一个：公式名与类名理论上可能撞（用户可以把公式
@@ -689,7 +726,7 @@ if QT_AVAILABLE:
 
             # ── 提示区（多行、可复制）──
             #
-            # 为什么放在**页面最下面**（而不是编辑器里）：校验/试算/保存/勾选的消息
+            # 为什么放在**页面最下面**（而不是编辑器里）：校验/运行/保存/勾选的消息
             # 都要看得见 —— 用户把编辑器收起来之后，消息还留在屏幕上；
             # 而"提示区在编辑器里"时，收起来就什么都看不到了（用户会以为没反应）。
             self.hint_label = QLabel("")
@@ -889,14 +926,28 @@ if QT_AVAILABLE:
             self.btn_validate.clicked.connect(self.on_validate)
             action_row.addWidget(self.btn_validate)
 
-            self.btn_preview = QPushButton("试算：当前库能选出几只")
-            self.btn_preview.setToolTip("不推送、不写库，只看看最近一个交易日命中几只")
+            # 【运行】= 原来的【试算】（用户要求改这两个字："试算"看不懂）。
+            # **属性名仍是 `btn_preview`**：它连着一批测试与文档里的引用，
+            # 为一个文案做机械重命名只会制造噪音（见模块 docstring 的同一段说明）。
+            self.btn_preview = QPushButton("运行：当前库能选出几只")
+            self.btn_preview.setToolTip(
+                "在当前库上跑一遍这条公式，看看最近一个交易日命中几只。\n"
+                "不推送、不写库（结果不会进「自选股池」）"
+            )
             self.btn_preview.clicked.connect(self.on_preview)
             action_row.addWidget(self.btn_preview)
+
+            self.btn_export = QPushButton("导出选股结果")
+            self.btn_export.setToolTip(
+                "把上一次【运行】命中的全部股票写成一个文本文件，放在桌面上：\n"
+                "老A选股助手-选股结果-<今天>.txt（同一天再导出会覆盖这一个文件）"
+            )
+            self.btn_export.clicked.connect(self.on_export)
+            action_row.addWidget(self.btn_export)
             action_row.addStretch(1)
             layout.addLayout(action_row)
 
-            # ── 进度条（只在试算时出现）──
+            # ── 进度条（只在运行时出现）──
             self.progress = QProgressBar()
             self.progress.setVisible(False)
             self.progress.setRange(0, 100)
@@ -904,10 +955,10 @@ if QT_AVAILABLE:
             return side
 
         def _build_palette_side(self) -> Any:
-            """右侧：**点一下就输入**的三组按钮（变量 / 函数 / 运算符）。
+            """右侧：**点一下就输入**的四组按钮（变量 / 函数 / 排除 / 运算符）。
 
             用 `QGroupBox` 而不是 `QToolBox`：折叠起来之后，小白会以为"函数不见了"——
-            三组一起看得见、函数多了就滚动，才是"所有东西都在右边"的本意。
+            四组一起看得见、函数多了就滚动，才是"所有东西都在右边"的本意。
             """
             panel = QWidget()
             panel.setFixedWidth(PANEL_WIDTH)
@@ -926,7 +977,8 @@ if QT_AVAILABLE:
             inner_layout = QVBoxLayout(inner)
             inner_layout.setContentsMargins(0, 0, 0, 0)
             inner_layout.setSpacing(8)
-            for name, items in (("变量", VARIABLES), ("函数", FUNCTIONS), ("运算符", OPERATORS)):
+            for name, items in (("变量", VARIABLES), ("函数", FUNCTIONS),
+                                ("排除", EXCLUDES), ("运算符", OPERATORS)):
                 inner_layout.addWidget(self._build_group(name, items))
             inner_layout.addStretch(1)
             scroll.setWidget(inner)
@@ -934,13 +986,27 @@ if QT_AVAILABLE:
             self.palette_panel = panel
             return panel
 
-        def _build_group(self, title: str, items: Sequence[tuple[str, str, int | None]]) -> Any:
-            """一组按钮（两列网格）。每个按钮一个中文 tooltip（是什么 + 一个例子）。"""
+        def _build_group(
+            self,
+            title: str,
+            items: Sequence[
+                tuple[str, str, int | None] | tuple[str, str, int | None, str]
+            ],
+        ) -> Any:
+            """一组按钮（两列网格）。每个按钮一个中文 tooltip（是什么 + 一个例子）。
+
+            元素是三元组 `(插入的文本, tooltip, 参数个数)`；可选的**第四项**是
+            「按钮上的字」（只有「排除」组用：按钮写"非 ST"，插入的是 `ST=0`）。
+            """
             box = QGroupBox(title)
             grid = QGridLayout(box)
             grid.setSpacing(4)
-            for index, (token, tip, args) in enumerate(items):
-                button = QPushButton(token)
+            for index, item in enumerate(items):
+                token, tip, args = item[0], item[1], item[2]
+                # 第四项（可选）= **按钮上的字**：默认与插入的文本一致；
+                # 「排除」组用它把按钮写成"非 ST"，而插入的是 `ST=0`
+                label = item[3] if len(item) > 3 else token
+                button = QPushButton(label)
                 button.setToolTip(tip)
                 button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 # 运算符里的 `AND`/`OR`/`NOT` 走 `insert_operator`（要自动补空格），
@@ -1453,7 +1519,7 @@ if QT_AVAILABLE:
                     self.detail_text = row.detail
                     self.detail_view.setPlainText(row.detail)
 
-        # ── 编译器 / 校验 / 试算 ──────────────────────────────────────
+        # ── 编译器 / 校验 / 运行 ──────────────────────────────────────
 
         def on_open_editor(self, spec: Any = None) -> None:
             """打开公式编辑器（点【策略编辑】按钮，或点列表里的公式行）。"""
@@ -1514,7 +1580,7 @@ if QT_AVAILABLE:
                     # ⚠️ **同时弹到标题区的运行状态**（用户 2026-09-18 实报："可以再测试的
                     # 时候给个提示啊 公式有语法错误"）：提示区在**整个页面最下面**，
                     # 窗口小一点、或者用户正盯着上面那半屏时，那句话等于没写。
-                    # 【校验】【试算】两条路都会走到这里，所以一句 toast 就够覆盖两处。
+                    # 【校验】【运行】两条路都会走到这里，所以一句 toast 就够覆盖两处。
                     self._toast(message)
                 return None
 
@@ -1536,9 +1602,9 @@ if QT_AVAILABLE:
             self._set_hint("\n".join(lines))
 
         def on_preview(self) -> None:
-            """【试算】：当前库的最近一个交易日能选出几只（名称（代码）格式）。
+            """【运行】（按钮文案；内部标识符仍叫 preview）：当前库能选出几只。
 
-            **后台线程 + 公式快照**：试算要逐只票读 K 线并在最后一根上跑公式，
+            **后台线程 + 公式快照**：运行要逐只票读 K 线并在最后一根上跑公式，
             真实 3 年库实测 3.7 秒、全市场 5000+ 只要 7~8 秒 —— 在主线程里跑就是
             "窗口未响应"（用户已经为这件事抱怨过一次，那次是下载路径）。
 
@@ -1552,16 +1618,19 @@ if QT_AVAILABLE:
             if self.preview_worker is not None and self.preview_worker.isRunning():
                 # 双击 / 上一次还没跑完又点一次：不动正在跑的那次
                 # （两个线程抢同一个库没有意义，只是白扫一遍）
-                self._set_hint("试算还在跑，请稍候…（跑完会写在这里）")
+                self._set_hint("运行还在跑，请稍候…（跑完会写在这里）")
                 return
             self.preview_formula = formula
+            # 新一轮开始 = 上一轮的导出依据作废：**绝不让用户导出陈结果**
+            # （他刚点了【运行】，导出的必须是这一轮出来的清单）
+            self.last_run = None
             self.btn_preview.setEnabled(False)
             # 先设成"不确定进度"：总共有多少只票要扫，得先走一遍库才知道。
             # 让进度条先动起来，比"停在 0% 七八秒"让人安心。
             self.progress.setRange(0, 0)
-            self.progress.setFormat("正在试算…")
+            self.progress.setFormat("正在运行…")
             self.progress.setVisible(True)
-            self._set_hint("正在试算…（在后台跑，界面可以继续用）")
+            self._set_hint("正在运行…（在后台跑，界面可以继续用）")
             # ⚠️ `cfg` 必须传进去：公式用到 `流通市值` / `换手率` 时要靠它去取那一趟
             # 实时快照（不用这两个字段的公式一个请求都不发，见 `preview_hits`）。
             # 早先漏传过一次，结果是"用到市值/换手的公式在界面上永远 0 只、
@@ -1582,16 +1651,24 @@ if QT_AVAILABLE:
             单独一个**纯函数**，是为了让"结果长什么样"与"它在哪个线程跑"解耦：
             后台化只该换线程，不该换文案（用户已经见过这几句话），
             所以格式化逻辑只此一份，谁调都是同一段文本。
+
+            注：`hits` 现在是**全量**，显示按 `shown` 截断（见 `formulas.preview_hits`
+            的 Returns）—— 界面一次列 60 只票会把提示区与列表一起挤没。
             """
+            hits = list(result.get("hits") or [])
+            shown = result.get("shown")
+            if shown is None:      # 老/替身返回值里没有 `shown` 时：全列（宁可多列，不少列）
+                shown = len(hits)
+            hits = hits[:shown]
             if result["count"]:
                 # 标的写法与全项目一致：**半角** `名称(代码)`（改版方案第四节），
                 # 与「自选股池」表格、推送正文、错误信息里的写法逐字相同
                 names = "、".join(
-                    f"{hit['name']}({hit['symbol']})" for hit in result["hits"]
+                    f"{hit['name']}({hit['symbol']})" for hit in hits
                 )
                 text = (f"最近交易日 {result['date']} 命中 {result['count']} 只：{names}")
-                if result["count"] > result["shown"]:
-                    text += f" …（只列前 {result['shown']} 只）"
+                if result["count"] > shown:
+                    text += f" …（只列前 {shown} 只）"
             else:
                 text = (f"最近交易日 {result['date']}：没有命中"
                         f"（扫了 {result['scanned']} 只，{result['skipped']} 只因数据不足跳过）")
@@ -1606,31 +1683,123 @@ if QT_AVAILABLE:
                 text += f"\n（{len(result['errors'])} 只票算不出来，已跳过：{result['errors'][0]}）"
             return text
 
+        @staticmethod
+        def _run_name(formula: Any) -> str:
+            """这一轮结果挂在哪个名字下（桌面文件「来源」列的后半截）。
+
+            优先用**公式自己的名字**（`compile_current()` 把名称框的内容带进了公式对象，
+            所以这就是"按下【运行】那一刻的名字"），没有名字时写「未命名公式」——
+            宁可写一个诚实的占位词，也不要在来源列里留一段空白。
+            """
+            return str(getattr(formula, "name", "") or "").strip() or "未命名公式"
+
         def _on_preview_done(self, result: Any) -> None:
-            """试算回来了（回主线程执行）：先收起"正在跑"的样子，再写结果。"""
+            """运行回来了（回主线程执行）：先收起"正在跑"的样子，再写结果。"""
             formula = self.preview_formula
             self._finish_preview()
             if not isinstance(result, dict):
-                self._set_hint("试算没有返回结果（请重试）")
+                self._set_hint("运行没有返回结果（请重试）")
                 return
+            # 记住这一轮，供【导出选股结果】使用：导出的必须是**用户刚看过的**那一份
+            # （所以连行情日一起存下来，而不是导出时再查一次"最近交易日"——
+            # 跑完到导出之间数据可能已经更新，那样文件里的日期会与提示区不一致）
+            self.last_run = {
+                "name": self._run_name(formula),
+                "date": result.get("date"),
+                "count": int(result.get("count") or 0),
+                "hits": [dict(hit) for hit in (result.get("hits") or [])
+                         if isinstance(hit, dict) and hit.get("symbol")],
+            }
             self._set_hint(self._preview_text(formula, result))
 
-        def _on_preview_failed(self, exc: Any) -> None:
-            """试算失败：**数据问题**与**程序问题**分开说（下一步动作完全不同）。
+        def on_export(self) -> None:
+            """【导出选股结果】：把**上一次【运行】**的命中清单写成桌面上的文本文件。
 
-            注：这里的两句话与改造前的同步版本**逐字一致**。`failed` 递过来的是异常
-            对象（不是一句话），正是为了在这里用 `isinstance` 分清这两种情况 ——
-            工作线程不该替界面决定措辞。
+            三条口径：
+
+            * **导的是用户刚看过的那一份**（`self.last_run`），不重新跑一遍：
+              重跑会得到另一份清单（盘中快照/新数据都会变），而他导出的必须是他看过的；
+              再说重跑一次要扫全库 7~8 秒，点一下按钮等 8 秒不像话；
+            * **全量**：提示区只列前 `PREVIEW_LIMIT` 只（一行放不下几十只），
+              文件里是**全部**命中 —— 给用户的文件少几只，是最难被发现的那种错；
+            * **成败都要看得见**：产物落在桌面（这一页之外），"没反应"就等于
+              "不知道导没导出去"，所以提示区写清楚 + 标题区弹一句。
+
+            用的函数与「开始选股」建池时导出的是**同一个**（`pool.export_pick_file`）：
+            版式、来源列、现价列完全一致 —— 用户拿两个文件对比时不该看到两套格式。
+            """
+            run = self.last_run
+            if run is None and self.preview_worker is not None and self.preview_worker.isRunning():
+                # 正在跑：这时候说"还没运行过"是骗人的（他刚点过），
+                # 而且这一轮的结果马上就有了 —— 让他等这一轮，别导出上一轮
+                self._set_hint("运行还没跑完：等它跑完再点【导出选股结果】（导出的就是这一轮的命中）")
+                return
+            if not run:
+                self._set_hint(
+                    "还没有可导出的结果：先点【运行】看看能选出几只，再点【导出选股结果】"
+                )
+                return
+            hits = [hit for hit in (run.get("hits") or []) if hit.get("symbol")]
+            day_text = str(run.get("date") or "未知")
+            if not hits:
+                message = f"❌ 最近交易日 {day_text} 没有命中的股票，没有可导出的结果"
+                self._set_hint(message)
+                self._toast(message)
+                return
+            rows = [
+                {
+                    "symbol": str(hit["symbol"]),
+                    "name": str(hit.get("name") or ""),
+                    # 「来源」列与「自选股池」同一个词：公式选中 → `公式·<公式名>`
+                    "strategy": groups.formula_strategy_name(str(run.get("name") or "")),
+                }
+                for hit in hits
+            ]
+            try:
+                # `dest_dir` **不传**：由 `pool.desktop_dir()` 自己找桌面（Windows 上是
+                # 用户真实的桌面，可能是 OneDrive 里那一个）；找不到时退回**数据目录**
+                # （用户找得到的地方），而不是悄悄不导出。
+                path = pool_mod.export_pick_file(
+                    rows,
+                    data_date=day_text,
+                    db_path=self.cfg.db_path,
+                    fallback_dir=Path(self.cfg.db_path).parent,
+                )
+            except Exception as exc:  # noqa: BLE001 - 导出失败绝不能把这一页带崩
+                message = f"❌ 导出失败：{type(exc).__name__}: {exc}"
+                self._set_hint(message)
+                self._toast(message)
+                return
+            if path is None:
+                # `export_pick_file` 把具体原因写进日志、只返回 None（它不许影响选股流程），
+                # 所以这里给用户列出**可能**的原因与下一步，并让他去看日志
+                message = ("❌ 导出失败：文件没能写出去（桌面目录不存在、没有写权限，"
+                           "或者文件正被别的程序占用）—— 详见日志")
+                self._set_hint(message)
+                self._toast(message)
+                return
+            message = (f"✅ 已导出选股结果：{path.name}（{len(rows)} 只，行情日 {day_text}）"
+                       f"\n文件位置：{path}")
+            self._set_hint(message)
+            self._toast(f"已导出选股结果：{path.name}")
+
+        def _on_preview_failed(self, exc: Any) -> None:
+            """运行失败：**数据问题**与**程序问题**分开说（下一步动作完全不同）。
+
+            注：这里的两句话与改造前的同步版本**逐字一致**（只把"试算"这个词换成
+            按钮上的"运行"）。`failed` 递过来的是异常对象（不是一句话），
+            正是为了在这里用 `isinstance` 分清这两种情况 —— 工作线程不该替界面决定措辞。
             """
             self._finish_preview()
+            self.last_run = None      # 这一轮没有结果 → 不给导出（宁可让他重跑）
             if isinstance(exc, fm.FormulaDataError):
                 # 库不存在/读不出来：这不是公式写错了，说清楚下一步
                 self._set_hint("❌ " + str(exc))
             else:
-                self._set_hint(f"❌ 试算失败：{type(exc).__name__}: {exc}")
+                self._set_hint(f"❌ 运行失败：{type(exc).__name__}: {exc}")
 
         def _finish_preview(self) -> None:
-            """【试算】收尾：把按钮还回来、收掉进度条、放掉线程引用。
+            """【运行】收尾：把按钮还回来、收掉进度条、放掉线程引用。
 
             为什么"等它真的退出"再放引用：`finished_ok`/`failed` 是**跨线程排队**投递的，
             在工作线程 `run()` 返回之前就可能已经排到主线程执行了；这时丢掉最后一个引用，
@@ -1818,7 +1987,7 @@ if QT_AVAILABLE:
                 self.editor.setPlainText(sample.source)
                 self._set_hint(
                     f"已载入示例公式「{sample.name}」。\n"
-                    "点【校验】看看它用到什么，点【试算】看它在你的库里能选出几只。"
+                    "点【校验】看看它用到什么，点【运行】看它在你的库里能选出几只。"
                 )
             else:
                 self.name_edit.setText(SAMPLE_NAME)
@@ -1826,7 +1995,7 @@ if QT_AVAILABLE:
                 self.editor.setPlainText(SAMPLE_TEXT)
                 self._set_hint(
                     "已载入内置示例公式（公式目录里还没有示例文件，这是兜底的那条）。\n"
-                    "点【校验】→【试算】，再点【保存】就存到你的公式目录里了。"
+                    "点【校验】→【运行】，再点【保存】就存到你的公式目录里了。"
                 )
             self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
 
@@ -1968,6 +2137,7 @@ __all__ = [
     "MENU_DISABLE",
     "MENU_ENABLE",
     "OFF_GROUP_KEY",
+    "EXCLUDES",
     "OPERATORS",
     "PAGE_HINT",
     "PANEL_WIDTH",

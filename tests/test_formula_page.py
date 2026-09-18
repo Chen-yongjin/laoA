@@ -364,13 +364,50 @@ def test_every_palette_button_has_chinese_tooltip(page) -> None:
 
 def test_palette_is_two_columns_scrollable_and_fixed_width(page) -> None:
     boxes = {box.title(): box for box in page.palette_panel.findChildren(QGroupBox)}
-    assert set(boxes) == {"变量", "函数", "运算符"}
+    # 「排除」组是 2026-09-18 按要求加的（原来那三个 ST/北交所/科创 按钮"意思不明"）
+    assert set(boxes) == {"变量", "函数", "排除", "运算符"}
     for title, box in boxes.items():
         grid = box.layout()
         assert grid.columnCount() == 2, f"{title} 组不是两列"
     # 函数多 → 必须能滚动；宽度固定 → 按钮文字不会被压扁
     assert page.palette_panel.findChild(QScrollArea) is not None
     assert page.palette_panel.width() == fp.PANEL_WIDTH
+
+
+def test_exclude_palette_buttons_say_non_and_insert_flag_zero(page) -> None:
+    """「排除」那一组：按钮写的字是**非 X**，插进去的是 `X=0`。
+
+    用户 2026-09-18 的原话是"这几个按钮意思不明" —— 原来的按钮文字就是字段名
+    （`ST` / `北交所` / `科创`），看起来像"筛选出这些"，而它其实是**排除**。
+    所以按钮文字与插入文本**必须不同**：写字面意思，插引擎认的表达式。
+    """
+    _open_editor(page)
+    expected = {
+        "ST=0": "非 ST",
+        "北交所=0": "非北交所",
+        "科创=0": "非科创板",
+        "沪市=0": "非沪市",
+        "深市=0": "非深市",
+        "创业板=0": "非创业板",
+    }
+    for token, label in expected.items():
+        assert token in page.palette_buttons, f"「排除」组缺少 {token} 这个按钮"
+        assert page.palette_buttons[token].text() == label
+
+    for token, label in expected.items():
+        page.editor.setPlainText("")
+        _click(page, token)          # 插到光标处（空文本 = 插在开头）
+        assert page.editor.toPlainText() == token, f"点【{label}】插入的不是 {token}"
+        # 插进去的必须是**引擎认的**东西：编译一次，能过才算数
+        fm.compile_formula(f"M5:=MA(C,5)\nC>M5 AND {token}")
+
+
+def test_exclude_buttons_are_flags_the_engine_knows(page) -> None:
+    """这六个字段都在引擎的 `FLAG_FIELDS` 里（否则按钮插进去就是"未知字段"）。"""
+    assert set(fm.FLAG_FIELDS) == {"ST", "科创", "北交所", "沪市", "深市", "创业板"}
+    for token in ("ST=0", "北交所=0", "科创=0", "沪市=0", "深市=0", "创业板=0"):
+        field = token.split("=")[0]
+        assert field in fm.FLAG_FIELDS
 
 
 def test_page_hint_is_two_lines_and_gray(page) -> None:
@@ -463,7 +500,7 @@ def test_preview_returns_immediately_and_shows_progress(page, qapp) -> None:
     assert page.preview_worker.isRunning() is True
     assert page.btn_preview.isEnabled() is False     # 跑完之前不给再点
     assert page.progress.isVisible() is True         # 有看得见的"正在跑"
-    assert "正在试算" in page.hint_text
+    assert "正在运行" in page.hint_text
 
     _wait_preview(page, qapp)
     assert page.btn_preview.isEnabled() is True      # 跑完把按钮还回来
@@ -670,9 +707,193 @@ def test_preview_unexpected_error_is_reported_in_chinese(page, qapp,
     page.on_preview()
     _wait_preview(page, qapp)
 
-    assert page.hint_text == "❌ 试算失败：RuntimeError: 库文件被占用"
+    assert page.hint_text == "❌ 运行失败：RuntimeError: 库文件被占用"
     assert page.btn_preview.isEnabled() is True
     assert page.progress.isVisible() is False
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 6.5) 【运行】+【导出选股结果】（用户 2026-09-18 要求）
+#
+# 用户原话：「把策略编辑下面的试算直接改成运行，后面再加上导出选股结果
+# （导出到桌面文档）」。所以这一段钉住三件事：
+#   1. 按钮上的字是【运行】（"试算"这个词从界面上消失）；
+#   2. 导出的是**上一次【运行】的全量命中**（提示区只列 20 只，文件里是全部）；
+#   3. 导出的版式与「开始选股」建池时那份**同一个函数**产的（来源列写
+#      `公式·<公式名>`，与「自选股池」表格里同一个词）。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _fake_preview(monkeypatch, hits, *, shown=None, date="2026-09-11", count=None) -> None:
+    """把 `preview_hits` 换成确定性的返回值（不碰库、不起真线程的活儿）。"""
+    payload = {
+        "date": date,
+        "count": len(hits) if count is None else count,
+        "hits": list(hits),
+        "shown": len(hits) if shown is None else shown,
+        "scanned": 3,
+        "skipped": 0,
+        "errors": [],
+        "notes": [],
+    }
+    monkeypatch.setattr(lib, "preview_hits", lambda *a, **k: dict(payload))
+
+
+def _run(page, qapp) -> None:
+    """点【运行】并等它落地（后面的用例都走这一条）。"""
+    page.btn_preview.click()
+    _wait_preview(page, qapp)
+
+
+def test_pick_buttons_are_run_and_export(page) -> None:
+    """按钮文案：原来叫【试算】，用户要求改成【运行】；右边多一个【导出选股结果】。"""
+    assert page.btn_preview.text().startswith("运行")
+    assert "试算" not in page.btn_preview.text()
+    assert page.btn_export.text() == "导出选股结果"
+    # 用户点之前要知道"导出的是什么、导到哪去"
+    tip = page.btn_export.toolTip()
+    assert "桌面" in tip and "运行" in tip
+    # 提示区那句"下一步"也要跟着改口，否则用户按提示找不到【试算】这个按钮
+    assert "试算" not in fp.EDITOR_HINT and "运行" in fp.EDITOR_HINT
+
+
+def test_export_after_run_writes_every_hit_to_the_desktop(
+        page, tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    """点【导出选股结果】→ 桌面目录里出现那份文件，里面是**全部**命中。
+
+    `shown=1` 是故意的：界面提示区只列 1 只（真实场景是 20 只），文件里必须 3 只都有
+    —— "文件里少几只"在界面上完全看不出来，只能靠这条断言守。
+    """
+    hits = [{"symbol": "600001", "name": "甲样本"},
+            {"symbol": "600002", "name": "乙样本"},
+            {"symbol": "600003", "name": "丙样本"}]
+    _fake_preview(monkeypatch, hits, shown=1)
+    toasts: list[str] = []
+    page.status_cb = toasts.append        # 页面调它时会现取，所以直接挂上就行
+    page.name_edit.setText("尾盘选股策略")
+    page.editor.setPlainText("C>MA(C,5)")
+    _run(page, qapp)
+
+    assert page.last_run is not None
+    assert page.last_run["name"] == "尾盘选股策略"
+    assert len(page.last_run["hits"]) == 3           # 全量存下来给导出用
+    assert "只列前 1 只" in page.hint_text            # 界面显示确实截断了
+
+    page.btn_export.click()
+
+    # 文件落在 `tests/conftest.py` 那个"绝不写真人桌面"的守卫指定的目录里
+    files = sorted((tmp_path / "desktop-export").glob("*.txt"))
+    assert len(files) == 1, f"应当只导出 1 个文件，实际 {files}"
+    raw = files[0].read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf"), "桌面文件必须是带 BOM 的 utf-8（记事本中文不乱码）"
+    assert b"\r\n" in raw, "桌面文件用 CRLF（Windows 记事本双击就看）"
+    text = raw.decode("utf-8-sig")
+    assert "共 3 只（策略 3 · 自选 0）" in text
+    for symbol in ("600001", "600002", "600003"):
+        assert f"({symbol})" in text, f"{symbol} 没写进文件（提示区截断不能影响导出）"
+    # 「来源」列与「自选股池」表格同一个词：公式选中 → `公式·<公式名>`
+    assert "来源：公式·尾盘选股策略" in text
+    assert "行情日 2026-09-11" in text
+    assert "现价" in text                    # 库里有两个交易日 → 现价与涨跌幅都算得出来
+    # 成败都要看得见：提示区写清楚 + 标题区弹一句
+    assert "已导出选股结果" in page.hint_text and files[0].name in page.hint_text
+    assert str(files[0]) in page.hint_text
+    assert any("已导出" in t for t in toasts), toasts
+
+
+def test_export_without_a_run_asks_to_run_first(page, tmp_path: Path) -> None:
+    """还没点过【运行】：告诉他先跑一遍，**不导出空文件**。"""
+    _open_editor(page)
+
+    page.btn_export.click()
+
+    assert "先点【运行】" in page.hint_text
+    assert not (tmp_path / "desktop-export").exists()
+
+
+def test_export_with_no_hits_says_there_is_nothing(
+        page, tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    """【运行】命中 0 只：明说"没有可导出的结果"，也不落文件。"""
+    _fake_preview(monkeypatch, [], count=0)
+    toasts: list[str] = []
+    page.status_cb = toasts.append
+    page.editor.setPlainText("C>MA(C,5)")
+    _run(page, qapp)
+    assert "没有命中" in page.hint_text
+
+    page.btn_export.click()
+
+    assert "没有可导出的结果" in page.hint_text
+    assert any("没有可导出的结果" in t for t in toasts), toasts
+    assert not list((tmp_path / "desktop-export").glob("*.txt"))
+
+
+def test_export_failure_is_loud_not_silent(
+        page, tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    """写盘失败：提示区 + 标题区都要说（产物在桌面，"没反应"等于什么都没说）。"""
+    _fake_preview(monkeypatch, [{"symbol": "600001", "name": "甲样本"}])
+    toasts: list[str] = []
+    page.status_cb = toasts.append
+    page.editor.setPlainText("C>MA(C,5)")
+    _run(page, qapp)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("磁盘满了")
+
+    monkeypatch.setattr(fp.pool_mod, "export_pick_file", boom)
+
+    page.btn_export.click()
+
+    assert page.hint_text.startswith("❌ 导出失败：RuntimeError: 磁盘满了")
+    assert any("导出失败" in t for t in toasts), toasts
+
+
+def test_export_never_uses_a_previous_runs_result(
+        page, tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    """新一轮【运行】一开始，上一轮的结果就作废（导出只导"我刚看过的那一份"）。"""
+    _fake_preview(monkeypatch, [{"symbol": "600001", "name": "甲样本"}])
+    page.editor.setPlainText("C>MA(C,5)")
+    _run(page, qapp)
+    assert page.last_run is not None
+
+    # 第二次运行：把工作函数卡住，趁"正在跑"点导出
+    started, release = threading.Event(), threading.Event()
+
+    def slow_preview_hits(formula, db_path, *, limit, **kwargs):
+        started.set()
+        assert release.wait(PREVIEW_TIMEOUT), "测试没有放行工作线程"
+        return {"date": "2026-09-11", "count": 1, "shown": 1,
+                "hits": [{"symbol": "600002", "name": "乙样本"}],
+                "scanned": 1, "skipped": 0, "errors": []}
+
+    monkeypatch.setattr(lib, "preview_hits", slow_preview_hits)
+    page.on_preview()
+    assert started.wait(PREVIEW_TIMEOUT), "运行线程没起来"
+
+    page.btn_export.click()
+
+    # 正在跑：既不能导上一轮（那是陈结果），也不能说"还没运行过"（他刚点过）
+    assert "运行还没跑完" in page.hint_text
+    assert not list((tmp_path / "desktop-export").glob("*.txt"))
+
+    release.set()
+    _wait_preview(page, qapp)
+    assert page.last_run["hits"] == [{"symbol": "600002", "name": "乙样本"}]
+
+
+def test_export_source_says_unnamed_when_the_formula_has_no_name(
+        page, tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    """没填公式名：【来源】写「公式·未命名公式」，而不是留一段空白。"""
+    _fake_preview(monkeypatch, [{"symbol": "600001", "name": "甲样本"}])
+    page.name_edit.setText("")                       # 名称框留空
+    page.editor.setPlainText("C>MA(C,5)")
+    _run(page, qapp)
+
+    page.btn_export.click()
+
+    files = sorted((tmp_path / "desktop-export").glob("*.txt"))
+    assert len(files) == 1
+    assert "来源：公式·未命名公式" in files[0].read_text(encoding="utf-8-sig")
 
 
 # ══════════════════════════════════════════════════════════════════════════

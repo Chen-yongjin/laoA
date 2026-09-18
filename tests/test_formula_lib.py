@@ -296,13 +296,20 @@ def test_preview_hits_known_symbols(formula_db: str) -> None:
 
 
 def test_preview_hits_respects_limit_and_names(formula_db: str) -> None:
-    """最多列 N 只（`limit`），并且带中文名（小白只认名字）。"""
+    """`limit` 只截断**显示**（`shown`），`hits` 必须是**全量**。
+
+    为什么要钉住"全量"：界面上的【导出选股结果】写的就是 `hits`
+    （提示区只列前 20 只，文件里是全部命中）。哪天有人把 `hits[:limit]`
+    改回来，用户导出的文件就会静默少票 —— 那种错在界面上完全看不出来。
+    """
     formula = fm.compile_formula("C>MA(C,5)")
 
     result = lib.preview_hits(formula, formula_db, limit=1)
 
     assert result["count"] == 2 and result["shown"] == 1
-    assert result["hits"][0]["name"] == "甲样本"
+    assert len(result["hits"]) == 2                    # 全量，不受 limit 影响
+    assert {hit["symbol"] for hit in result["hits"]} == set(RISING)
+    assert result["hits"][0]["name"] == "甲样本"        # 带中文名（小白只认名字）
 
 
 def test_preview_hits_missing_db_is_chinese_error(tmp_path: Path) -> None:

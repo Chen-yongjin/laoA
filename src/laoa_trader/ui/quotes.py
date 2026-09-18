@@ -29,7 +29,11 @@
 
 设计取舍
 --------
-- **只在交易时段轮询**：复用 `intraday.SESSIONS` / `now_shanghai()`。收盘后价格不会变，
+- **交易时段轮询、收盘后每天补一次**：复用 `intraday.SESSIONS` / `now_shanghai()`。
+  盘中按 `REFRESH_SECONDS` 的节奏取；**收盘后不再反复取**（价格不会变），
+  但**当天只要还没成功取到过就补一次** —— `市值`/`换手` 这类"只有快照才有的字段"
+  在晚上也得有数（用户实报过"这两列一直是空的"，根因就是这里一律不发请求）。
+  原先这句写的是"只在交易时段轮询"：
   继续每 60 秒打接口纯属浪费配额（同花顺是按次限流的，`build_alerts` 那一路也在用）；
 - **绝不在下载期间跑**：`state.is_downloading()` 时跳过（导入线程正占着数据库，
   界面这一拍本来就只刷"轻"的部分，见 `app._tick`）；
@@ -257,6 +261,10 @@ class QuoteService(QObject):
         #: 否则连续失败时会每 5 秒重试一次，把限流撞得更死
         self._requested_at = 0.0
         self._worker: QuoteWorker | None = None
+        #: 最近一次**成功**取到数据的日期（`YYYY-MM-DD`）。收盘后靠它判断"今天还取过没有"：
+        #: 非交易时段价格不会变，所以一天补一次就够；不记的话，晚上开着软件会每 5 秒
+        #: 判一次、每个刷新周期都打一发请求（纯浪费），整天开着更是无意义地刷。
+        self._fetched_day: str | None = None
 
     # ── 读 ──
 
@@ -283,7 +291,19 @@ class QuoteService(QObject):
         if not sources.usable_sources(self.cfg):
             return False
         if not intraday.in_session(now):
-            return False                       # 非交易时段：价格不会变
+            # 非交易时段：价格不会变，所以**不按盘中节奏反复取**；但**收盘后补一次**
+            # ——用户实报过"自选股池/持仓监控里的市值和换手一直是空的"：
+            # 那两列只有实时快照才给（日线里没有），而盘中那道门槛在晚上直接不发请求，
+            # 于是晚上打开软件时"现价/涨幅有数（退回本地收盘价）、这两列却是 —"，
+            # 看起来就像坏了。现在：**当天还没成功取过**就补一次，取到就收工。
+            today = intraday.now_shanghai(now).strftime("%Y-%m-%d")
+            if self._fetched_day == today:
+                return False                   # 今天已经取到过了：收工
+            try:
+                return bool(self._symbols_provider())
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"取快照标的失败（本轮不取）：{exc}")
+                return False
         try:
             return bool(self._symbols_provider())
         except Exception as exc:  # noqa: BLE001 - 取不到票就当作"没有要盯的"
@@ -334,6 +354,9 @@ class QuoteService(QObject):
         self.cache.update(
             {str(s): dict(q) for s, q in quotes.items() if isinstance(q, dict)}
         )
+        # 记"今天已经取到过"（**只记成功**）：失败不记，所以下次 tick 还会重试；
+        # 记了才能让"收盘后只补一次"这条规则生效（见 `should_request`）
+        self._fetched_day = intraday.now_shanghai().strftime("%Y-%m-%d")
         self.updated.emit()
 
     def _on_failed(self, message: str) -> None:

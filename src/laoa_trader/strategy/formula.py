@@ -211,6 +211,9 @@ EXTRA_FIELDS: dict[str, str] = {
     "ST": "num",
     "科创": "num",
     "北交所": "num",
+    "沪市": "num",
+    "深市": "num",
+    "创业板": "num",
 }
 
 #: 热门行业的"上榜窗口"（交易日）：`热门行业` 的值 = 最近这么多天里上过热门榜的次数。
@@ -219,7 +222,7 @@ EXTRA_FIELDS: dict[str, str] = {
 HOT_INDUSTRY_DAYS = 3
 
 #: 排除类标记的规范名（自动补齐用；顺序即"用户最可能一起写"的顺序）
-FLAG_FIELDS: tuple[str, ...] = ("ST", "科创", "北交所")
+FLAG_FIELDS: tuple[str, ...] = ("ST", "科创", "北交所", "沪市", "深市", "创业板")
 
 _NUM = "num"
 _BOOL = "bool"
@@ -256,6 +259,27 @@ def is_bse(symbol: Any) -> bool:
     """
     code = str(symbol or "").strip()
     return code.startswith(("92", "8", "4"))
+
+
+def is_sh(symbol: Any) -> bool:
+    """是不是**沪市**（`6` 开头，含科创板；另有 `900` 沪 B 股）。
+
+    口径说明：**科创板算沪市**（688/689 就是沪市的板），所以"排除沪市"会连科创一起排掉；
+    想只排科创、留着其它沪市票，就写 `科创=0`（两个标记是独立的，互不蕴含）。
+    """
+    code = str(symbol or "").strip()
+    return code.startswith("6") or code.startswith("900")
+
+
+def is_sz(symbol: Any) -> bool:
+    """是不是**深市**（`0` / `3` 开头，另有 `200` 深 B 股）。**创业板算深市**。"""
+    code = str(symbol or "").strip()
+    return code.startswith(("0", "3")) or code.startswith("200")
+
+
+def is_chinext(symbol: Any) -> bool:
+    """是不是**创业板**（`300` / `301` 开头）。"""
+    return str(symbol or "").strip().startswith(("300", "301"))
 
 
 def _all_fields() -> dict[str, str]:
@@ -2014,8 +2038,10 @@ class Series:
         # `ST=0` 就会报"本地数据里没有字段 ST 的数据"——那是最莫名其妙的失败方式。
         n = len(self.date)
         for field_name, flag in zip(
-            FLAG_FIELDS, (is_st_name(self.name), is_star_market(self.symbol),
-                          is_bse(self.symbol)), strict=True
+            FLAG_FIELDS,
+            (is_st_name(self.name), is_star_market(self.symbol), is_bse(self.symbol),
+             is_sh(self.symbol), is_sz(self.symbol), is_chinext(self.symbol)),
+            strict=True,
         ):
             if field_name not in self.extra:
                 self.extra[field_name] = np.full(n, 1.0 if flag else 0.0)
