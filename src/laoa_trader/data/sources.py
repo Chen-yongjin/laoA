@@ -488,6 +488,82 @@ def snapshot_map(cfg: Any, symbols: list[str] | None = None) -> dict[str, dict]:
     return {}
 
 
+#: 主源**可能给不出来**的字段。目前只有这两个，「自选股池」「持仓监控」两张表各占一列。
+#:
+#: 为什么会有"主源给不出来"这回事：同花顺 fuyao 的 `/a-share/prices/snapshot` 只回
+#: `last_price / price_change / price_change_ratio_pct / open_price / high_price /
+#: low_price / prev_price / volume / turnover` —— **没有换手率、没有市值**
+#: （官方文档 `vendor/Financial-API/docs/api/endpoints-prices.md` 的"响应字段"表写得很死；
+#: 全项目能拿到流通市值的只有竞价端点 `float_market_cap`，那要求正处竞价时段）。
+#: 用户实报过："新加入的市值和换手，都没有数据" —— 因为他配了 Key、走的是同花顺主源。
+SUPPLEMENT_FIELDS: tuple[str, ...] = ("turnover_rate", "circ_mktcap")
+
+
+def supplement_map(
+    cfg: Any, quotes: dict[str, dict], symbols: list[str], *, opener: Any = None
+) -> dict[str, dict]:
+    """按**字段**补齐主源给不了的项（价格仍由主源给，只补缺的那几项）。
+
+    为什么是"字段级补齐"而不是直接换来源：同花顺的价格是最稳的一路（用户也明确要它当
+    主源），为了两列去换掉整个快照不值得；而不补的话那两列永远是 `—`。
+    所以：**先拿到谁的价格就用谁的**，缺的字段按 `data_sources` 的顺序**往后**找一个
+    能给出来的来源（默认就是免 Key 的公开源：腾讯一次 100 只，够用且便宜）。
+
+    规矩：
+        * 只给**已经有报价**的票补字段（不给没有价格的票凭空造一条记录）；
+        * 不给"主源自己"重复发请求（它已经回过一次了，缺就是缺）；
+        * 补到的字段带上 `field_source`（那一项的来源 id），界面据此如实写出处 ——
+          价格与这两项可能来自两个源，tooltip 里必须说得出这件事；
+        * **绝不抛**：补不到就还是 `None`（界面显示 `—`，与"这个源不提供"同一回事）。
+    """
+    if not quotes:
+        return quotes
+    fields = SUPPLEMENT_FIELDS
+    need = [
+        symbol for symbol in dict.fromkeys(str(s) for s in symbols)
+        if symbol in quotes and any(quotes[symbol].get(name) is None for name in fields)
+    ]
+    if not need:
+        return quotes
+    try:
+        candidates = usable_sources(cfg)
+    except Exception as exc:  # noqa: BLE001 - 来源注册表读不出来就不补
+        logger.debug(f"补齐字段时读来源注册表失败（不补）：{exc}")
+        return quotes
+    for info in candidates:
+        if CAP_SNAPSHOT not in info.capabilities:
+            continue
+        fetch = _SNAPSHOT_FETCHERS.get(info.id)
+        if fetch is None:
+            continue
+        # 已经给过数据的那个来源跳过（它缺的字段不会再变出来）
+        todo = [symbol for symbol in need if quotes[symbol].get("source") != info.id]
+        if not todo:
+            continue
+        try:
+            rows = fetch(cfg, todo)
+        except Exception as exc:  # noqa: BLE001 - 补不到就算了
+            logger.info(f"补齐字段：{info.name} 取数失败（继续试下一个）：{exc}")
+            continue
+        got = 0
+        for symbol, row in (rows or {}).items():
+            target = quotes.get(symbol)
+            if target is None:
+                continue
+            for name in fields:
+                if target.get(name) is None and row.get(name) is not None:
+                    target[name] = row[name]
+                    target.setdefault("field_source", {})[name] = info.id
+                    got += 1
+        if got:
+            logger.debug(f"补齐字段：{info.name} 补上 {got} 项（{fields}）")
+        need = [symbol for symbol in need
+                if any(quotes[symbol].get(name) is None for name in fields)]
+        if not need:
+            break
+    return quotes
+
+
 def probe_source(cfg: Any, source_id: str, symbol: str = "600519") -> dict:
     """**只测这一个来源**通不通（设置页那一行的【测试】按钮用；给界面留的钩子）。
 

@@ -862,3 +862,132 @@ def test_quote_of_shape_is_stable() -> None:
     # 没给 as_of 时用"现在"（缓存新鲜度判断要靠它）
     fresh = q.quote_of({"symbol": "600519", "last_price": 1.0})
     assert abs(fresh["at"] - time.time()) < 5
+
+
+# ── 字段级补齐：主源给不出来的项（换手率 / 流通市值）──
+#
+# 为什么必须有这几条：用户实报「新加入的市值和换手，都没有数据」——
+# 因为他配了 Key、走的是同花顺主源，而同花顺的 `/a-share/prices/snapshot`
+# **根本不返回这两项**（官方文档的"响应字段"表里只有
+# last_price/price_change/涨跌幅/开高低/昨收/量/额，见
+# `vendor/Financial-API/docs/api/endpoints-prices.md`）。
+# 于是这两列在**配了 Key 的情况下**永远是 `—`，而没配 Key（走免 Key 公开源）时反而是好的 ——
+# 这种"越想用好反而越少"的错最容易被当成数据源的问题。
+
+
+def test_hithink_mapping_carries_no_turnover_rate_or_market_cap() -> None:
+    """钉住事实本身：同花顺快照的归一结果里**没有**这两项（不是我漏映射）。
+
+    同花顺那个端点回的字段就这么多（官方文档列的十项），所以 `hithink_rows_to_map`
+    没有它们不是 bug，而是"这个来源没有这个数"。补齐是 `supplement_map` 的事。
+    """
+    rows = [{
+        "thscode": "600519.SH", "last_price": 1266.98, "prev_price": 1258.0,
+        "open_price": 1257.98, "high_price": 1267.6, "low_price": 1254.0,
+        "volume": 1_755_400, "turnover": 2_217_338_282.0,
+        "price_change_ratio_pct": 0.71,
+    }]
+    mapped = sources.hithink_rows_to_map(rows)
+    assert mapped["600519"]["last_price"] == 1266.98
+    assert mapped["600519"].get("turnover_rate") is None
+    assert mapped["600519"].get("circ_mktcap") is None
+
+
+def test_supplement_fills_the_two_fields_from_the_next_source(monkeypatch) -> None:
+    """主源（同花顺）缺这两项 → **从后面的来源按字段补上**，并标出是谁给的。
+
+    这条是用户那条实报的回归：价格仍由同花顺给（它最稳），缺的两项由公开源补 ——
+    两边的出处都要留下（`field_source`），tooltip 才能说清"价格谁给的、这两项谁给的"。
+    """
+    cfg = cfg_sources("hithink", "public")
+    cfg.hithink_api_key = "test-key"
+    quotes = {
+        "600519": {**{name: None for name in sources.QUOTE_FIELDS},
+                   "symbol": "600519", "last_price": 1266.98, "pct": 0.71,
+                   "source": "hithink", "as_of": 1.0},
+        "000001": {**{name: None for name in sources.QUOTE_FIELDS},
+                   "symbol": "000001", "last_price": 11.61, "pct": -0.77,
+                   "source": "hithink", "as_of": 1.0},
+    }
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_public(_cfg, symbols):
+        calls.append(("public", list(symbols)))
+        return {
+            "600519": {"turnover_rate": 0.42, "circ_mktcap": 15838.28},
+            "000001": {"turnover_rate": 0.55, "circ_mktcap": 2253.9},
+        }
+
+    monkeypatch.setitem(sources._SNAPSHOT_FETCHERS, "public", fake_public)
+    monkeypatch.setitem(sources._SNAPSHOT_FETCHERS, "hithink",
+                        lambda _cfg, _symbols: pytest.fail("不该再打主源一次"))
+
+    sources.supplement_map(cfg, quotes, ["600519", "000001"])
+
+    assert quotes["600519"]["circ_mktcap"] == 15838.28
+    assert quotes["600519"]["turnover_rate"] == 0.42
+    assert quotes["000001"]["turnover_rate"] == 0.55
+    # 出处：价格还是同花顺，这两项是公开源
+    assert quotes["600519"]["source"] == "hithink"
+    assert quotes["600519"]["field_source"] == {
+        "turnover_rate": "public", "circ_mktcap": "public"}
+    # 只发一趟、只问缺的那些票（不重复问主源、不整表重来）
+    assert calls == [("public", ["600519", "000001"])]
+
+
+def test_supplement_is_not_called_when_nothing_is_missing(monkeypatch) -> None:
+    """主源本来就给全了（例如免 Key 公开源）→ **一次请求都不发**。"""
+    cfg = cfg_sources("public")
+    quotes = {"600519": {"symbol": "600519", "last_price": 1266.98,
+                         "turnover_rate": 0.42, "circ_mktcap": 15838.28,
+                         "source": "public", "as_of": 1.0}}
+    monkeypatch.setitem(sources._SNAPSHOT_FETCHERS, "public",
+                        lambda _cfg, _symbols: pytest.fail("不该发请求"))
+    sources.supplement_map(cfg, quotes, ["600519"])
+    assert quotes["600519"]["turnover_rate"] == 0.42
+    assert "field_source" not in quotes["600519"]
+
+
+def test_supplement_does_not_invent_a_quote_for_unknown_symbols(monkeypatch) -> None:
+    """补字段**不许**给"没有报价"的票凭空造一条记录（那会变成"有市值没价格"的幽灵行）。"""
+    cfg = cfg_sources("hithink", "public")
+    cfg.hithink_api_key = "test-key"
+    quotes = {"600519": {"symbol": "600519", "last_price": 1266.98,
+                         "source": "hithink", "as_of": 1.0}}
+    monkeypatch.setitem(sources._SNAPSHOT_FETCHERS, "public",
+                        lambda _cfg, _symbols: {
+                            "600519": {"turnover_rate": 0.42, "circ_mktcap": 15838.28},
+                            "000001": {"turnover_rate": 0.55, "circ_mktcap": 2253.9},
+                        })
+    sources.supplement_map(cfg, quotes, ["600519"])
+    assert set(quotes) == {"600519"}
+
+
+def test_supplement_stays_quiet_when_the_second_source_fails(monkeypatch) -> None:
+    """后面的来源挂了 → 只留下 `None`（界面画 `—`），**绝不抛、也不编数**。"""
+    cfg = cfg_sources("hithink", "public")
+    cfg.hithink_api_key = "test-key"
+    quotes = {"600519": {"symbol": "600519", "last_price": 1266.98,
+                         "source": "hithink", "as_of": 1.0}}
+
+    def boom(_cfg, _symbols):
+        raise OSError("network down")
+
+    monkeypatch.setitem(sources._SNAPSHOT_FETCHERS, "public", boom)
+    sources.supplement_map(cfg, quotes, ["600519"])
+    assert quotes["600519"].get("circ_mktcap") is None
+
+
+def test_usable_sources_without_the_public_source_leaves_the_fields_empty() -> None:
+    """`data_sources` 里只有同花顺（用户明确不要别的源）→ 这两项就是 `None`。
+
+    不偷偷去用用户没启用的来源：他要的是"只走同花顺"，那这两列显示 `—` 是**如实**的
+    （tooltip 里也写明"来源不提供这一项"）。
+    """
+    cfg = cfg_sources("hithink")
+    cfg.hithink_api_key = "test-key"
+    quotes = {"600519": {"symbol": "600519", "last_price": 1266.98,
+                         "source": "hithink", "as_of": 1.0}}
+    sources.supplement_map(cfg, quotes, ["600519"])
+    assert quotes["600519"].get("turnover_rate") is None
+    assert quotes["600519"].get("circ_mktcap") is None

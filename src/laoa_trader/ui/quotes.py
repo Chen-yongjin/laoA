@@ -113,6 +113,10 @@ def quote_of(item: dict, at: float | None = None) -> dict:
         # 下面两个是「换手」「市值」两列的数据源（取不到就是 None → 界面画 `—`，不画 0）
         "turnover_rate": item.get("turnover_rate"),   # 换手率 %
         "circ_mktcap": item.get("circ_mktcap"),       # 流通市值（亿）
+        #: 这两项**可能来自另一个来源**：同花顺的快照端点不返回它们（价格却是我要的那路），
+        #: 所以 `sources.supplement_map` 会往后找一个能给出来的来源补上。
+        #: 出处单独带出来，tooltip 里才能说清"价格谁给的、这两项谁给的"。
+        "field_source": dict(item.get("field_source") or {}),
     }
 
 
@@ -193,6 +197,13 @@ def fetch_snapshot_prices(
     except Exception as exc:  # noqa: BLE001 - 取数层任何异常都不该进到界面
         logger.info(f"实时快照取数失败（表格退回本地收盘价）：{exc}")
         return {}
+    # 字段级补齐：**换手率与流通市值不算在"换来源"里** —— 同花顺那个快照端点根本
+    # 不返回这两项（价格却是我要的那一路），所以按 `data_sources` 的顺序往后找一个
+    # 能给出来的来源补上。用户实报过"新加入的市值和换手都没有数据"就是这么来的。
+    try:
+        sources.supplement_map(cfg, items, wanted)
+    except Exception as exc:  # noqa: BLE001 - 补不到就是 `—`，不该影响价格
+        logger.info(f"补齐快照字段失败（那两项会显示 —）：{exc}")
     return {symbol: quote_of(item) for symbol, item in (items or {}).items()}
 
 

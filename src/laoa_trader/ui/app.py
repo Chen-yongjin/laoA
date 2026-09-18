@@ -1913,11 +1913,11 @@ if QT_AVAILABLE:
             # 新加的三列各写一句"这一列什么意思"（表头只有两个字，写不下口径）
             self._set_header_tooltip(
                 self.pool_table, WATCH_HEADERS.index("市值"),
-                "流通市值**亿**（取实时快照；没有实时快照时显示 `—`，不是 0）"
+                "流通市值**亿**（取实时快照。⚠️ 同花顺的快照端点不返回这一项，所以主源是同花顺时会由后面的来源（免 Key 公开源）按字段补上；补不到、或 `data_sources` 里没有别的来源时显示 `—`，不是 0）"
             )
             self._set_header_tooltip(
                 self.pool_table, WATCH_HEADERS.index("换手"),
-                "实时换手率**%**（取实时快照；没有实时快照时显示 `—`，不是 0）"
+                "实时换手率**%**（取实时快照。⚠️ 同花顺的快照端点不返回这一项，所以主源是同花顺时会由后面的来源（免 Key 公开源）按字段补上；补不到、或 `data_sources` 里没有别的来源时显示 `—`，不是 0）"
             )
             self._set_header_tooltip(
                 self.pool_table, WATCH_MONITOR_COLUMN,
@@ -2006,11 +2006,11 @@ if QT_AVAILABLE:
             )
             self._set_header_tooltip(
                 self.position_table, POSITION_HEADERS.index("市值"),
-                "流通市值**亿**（取实时快照；没有实时快照时显示 `—`，不是 0）"
+                "流通市值**亿**（取实时快照。⚠️ 同花顺的快照端点不返回这一项，所以主源是同花顺时会由后面的来源（免 Key 公开源）按字段补上；补不到、或 `data_sources` 里没有别的来源时显示 `—`，不是 0）"
             )
             self._set_header_tooltip(
                 self.position_table, POSITION_HEADERS.index("换手"),
-                "实时换手率**%**（取实时快照；没有实时快照时显示 `—`，不是 0）"
+                "实时换手率**%**（取实时快照。⚠️ 同花顺的快照端点不返回这一项，所以主源是同花顺时会由后面的来源（免 Key 公开源）按字段补上；补不到、或 `data_sources` 里没有别的来源时显示 `—`，不是 0）"
             )
             self._set_header_tooltip(
                 self.position_table, POSITION_HEADERS.index("止损位"),
@@ -4173,8 +4173,20 @@ if QT_AVAILABLE:
             at_text = quotes_mod.snapshot_time_text(quote.get("at"))
             source = str(quote.get("source") or "")
             when = f"（快照 {at_text}）" if at_text else ""
+            # 这两项**可能不是价格那个来源给的**（同花顺的快照端点不返回它们，
+            # 见 `sources.SUPPLEMENT_FIELDS`），所以出处要说准
+            field_source = dict(quote.get("field_source") or {})
+            source_label = {"public": "公开行情接口（腾讯/新浪）",
+                            "eastmoney": "东方财富公开接口"}
+
+            def _who(field: str) -> str:
+                owner = str(field_source.get(field) or source or "")
+                return source_label.get(owner, owner)
+
             missing = ("现在没有这只票的实时快照，这一项显示 —（不是 0）"
-                       "。快照只在交易时段取；来源不提供这一项时也会是 —")
+                       "。快照只在交易时段取；来源不提供这一项时也会是 —"
+                       "（同花顺的快照就没有换手率与市值，这时会由后面的来源补 —— "
+                       "补不到、或 `data_sources` 里没有别的来源时，就一直是 —）")
             cap = quote.get("circ_mktcap")
             if cap is None:
                 cap_item = QTableWidgetItem(market.DASH)
@@ -4183,7 +4195,7 @@ if QT_AVAILABLE:
                 cap_item = QTableWidgetItem(f"{float(cap):.2f}亿")
                 cap_item.setToolTip(
                     f"流通市值 {float(cap):,.2f} 亿{when}"
-                    + (f"·来源 {source}" if source else "")
+                    + (f"·来源 {_who('circ_mktcap')}" if _who('circ_mktcap') else "")
                     + "\n（单位亿；取的是快照里的流通市值，不是总市值）"
                 )
             turn = quote.get("turnover_rate")
@@ -4194,7 +4206,7 @@ if QT_AVAILABLE:
                 turn_item = QTableWidgetItem(f"{float(turn):.2f}%")
                 turn_item.setToolTip(
                     f"实时换手率 {float(turn):.2f}%{when}"
-                    + (f"·来源 {source}" if source else "")
+                    + (f"·来源 {_who('turnover_rate')}" if _who('turnover_rate') else "")
                 )
             for item in (cap_item, turn_item):
                 item.setTextAlignment(
