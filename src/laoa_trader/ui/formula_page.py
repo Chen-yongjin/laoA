@@ -130,11 +130,21 @@ except Exception as _exc:  # noqa: BLE001 - 与 ui/app.py 同一个降级策略
 
 #: 右侧点选面板的固定宽度。为什么要"固定"：这一列的宽度会不停变化的话，
 #: 按钮文字会被压成 `M A (`，而按钮本身是这一页的核心交互 —— 宁可让左边的编辑区窄一点。
-PANEL_WIDTH = 300
+#:
+#: 300 → 330（2026-09-18，用户要求"一行 4 列"）：4 列时每个按钮只有
+#: `(宽度 - 滚动条 - 组框边距 - 列间距) / 4` 可用，实测最宽的那个标签
+#: （「距上次几天」/「MACD快线」在 8pt 下 55px）加内边距需要 67px ——
+#: 300 宽只能给到 66.8px（差一点点，字就会被截断），330 给到 74px 才稳。
+PANEL_WIDTH = 330
+
+#: 右侧面板**每行几个按钮**（用户 2026-09-18 要求一行 4 列）。
+#: 52 个按钮按 2 列排要滚很久；4 列之后整块面板的高度大约减半，也更能一眼扫完。
+PALETTE_COLUMNS = 4
 
 #: 右侧按钮的高度（像素）。默认高度（约 26~30）下，四组 52 个按钮要把面板滚很久 ——
-#: 用户 2026-09-18 要求"把按键大小都缩小"，于是高度降一档（30→22）、字号降一档。
-BUTTON_HEIGHT = 22
+#: 用户 2026-09-18 要求"把按键大小都缩小"，于是高度降一档（30→22）；
+#: 后来又要求"再缩小一下 + 一行 4 列"，于是再降到 20（字号仍只降一档，见下）。
+BUTTON_HEIGHT = 20
 #: 右侧那批按钮的 objectName（主题 QSS 用它单独给这批按钮设 padding / min-height，
 #: 否则主题里通用的 `QPushButton { padding: 4px 12px; min-height: 20px }` 会把
 #: `setFixedHeight(22)` 顶回 30px —— 实测过，别删）
@@ -1206,20 +1216,23 @@ if QT_AVAILABLE:
                 tuple[str, str, int | None] | tuple[str, str, int | None, str]
             ],
         ) -> Any:
-            """一组按钮（两列网格）。每个按钮一个中文 tooltip（是什么 + 一个例子）。
+            """一组按钮（`PALETTE_COLUMNS` 列网格，现在是一行 4 个）。
+            每个按钮一个中文 tooltip（是什么 + 一个例子）。
 
             元素是四元组 `(插入的文本, tooltip, 参数个数, 按钮上的字)`：前三项管
             "点下去发生什么"，第四项管"按钮上写什么"（中文），两者**故意分开** ——
             见上面 `VARIABLES` 的注释。
 
-            按钮**做得比默认小**（用户 2026-09-18 要求"把按键大小都缩小"）：
-            四组一共 52 个按钮，用默认高度时右侧面板要滚很久才看得全；
-            字号也跟着降一档，中文两三个字在窄按钮里才不会被挤成 "…"。
+            按钮**做得比默认小**（用户 2026-09-18 要求"把按键大小都缩小"、"一行 4 列"）：
+            四组一共 52 个按钮，用默认大小/两列时右侧面板要滚很久才看得全；
+            字号也跟着降一档 —— **不能再小**了，否则中文标签会被挤成 "…"
+            （宽度够不够有测试按字体实际量出来，见 `test_formula_page`）。
             """
             box = QGroupBox(title)
             grid = QGridLayout(box)
             grid.setSpacing(3)
-            grid.setContentsMargins(6, 4, 6, 4)
+            # 组框内边距压到 4/3：4 列之后横向空间很紧，省下的都给按钮宽度
+            grid.setContentsMargins(4, 3, 4, 3)
             for index, item in enumerate(items):
                 token, tip, args = item[0], item[1], item[2]
                 label = item[3] if len(item) > 3 else token
@@ -1258,7 +1271,7 @@ if QT_AVAILABLE:
                             text, args=count
                         )
                     )
-                grid.addWidget(button, index // 2, index % 2)
+                grid.addWidget(button, index // PALETTE_COLUMNS, index % PALETTE_COLUMNS)
                 self.palette_buttons[token] = button
             return box
 
@@ -2477,6 +2490,7 @@ __all__ = [
     "OPERATORS",
     "PAGE_HINT",
     "PALETTE_BUTTON_OBJECT",
+    "PALETTE_COLUMNS",
     "PANEL_WIDTH",
     "PREVIEW_LIMIT",
     "AUCTION_KEY",

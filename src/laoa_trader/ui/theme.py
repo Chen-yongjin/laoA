@@ -134,10 +134,11 @@ QPushButton {
    一旦 #paletteButton 命中，通用规则里的 `min-height: 20px` 就不再对这批按钮生效，
    而按钮的最小高度一变成 0，外面那个 QScrollArea 就会把整块内容**压扁到视口里**
    （实测：52 个按钮全被压成 4 像素高的长条 —— 字看不见、也点不中，用户实报过）。
-   `padding: 1px 4px` + `min-height: 18px` = 22 像素的实际高度（与代码里的
-   `formula_page.BUTTON_HEIGHT` 对齐；有测试按"渲染出来的高度"钉住它）。 */
+   `padding: 0px 3px` + `min-height: 18px` = 20 像素的实际高度（与代码里的
+   `formula_page.BUTTON_HEIGHT` 对齐；有测试按"渲染出来的高度"钉住它）。
+   横向 padding 只留 3px：一行 4 列之后每个按钮只有 70 多像素宽，中文标签要占大头。 */
 QPushButton#paletteButton {
-    padding: 1px 4px; min-height: 18px; border-radius: 3px;
+    padding: 0px 3px; min-height: 18px; border-radius: 3px;
 }
 QPushButton:hover {
     background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,

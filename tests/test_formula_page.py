@@ -342,7 +342,7 @@ def test_tab_inserts_spaces_and_keeps_focus(page) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 4) 右侧面板：中文 tooltip / 两列 / 可滚动 / 固定宽度
+# 4) 右侧面板：中文 tooltip / 一行 4 列 / 可滚动 / 固定宽度
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -373,12 +373,14 @@ def test_every_palette_button_has_chinese_tooltip(page) -> None:
     assert "自动补空格" in page.palette_buttons["AND"].toolTip()
 
 
-def test_palette_is_two_columns_scrollable_and_fixed_width(page) -> None:
+def test_palette_is_four_columns_scrollable_and_fixed_width(page) -> None:
     boxes = [box.title() for box in page.palette_panel.findChildren(QGroupBox)]
     # 四组、且**顺序固定**：用户 2026-09-18 要求"把排除区放在最下面"
     assert boxes == ["变量", "函数", "运算符", "排除"]
     for box in page.palette_panel.findChildren(QGroupBox):
-        assert box.layout().columnCount() == 2, f"{box.title()} 组不是两列"
+        # 一行 4 个（用户第二次要求："改成一行 4 列"）—— 52 个按钮两列要滚很久
+        assert box.layout().columnCount() == fp.PALETTE_COLUMNS == 4, \
+            f"{box.title()} 组不是一行 {fp.PALETTE_COLUMNS} 个"
     # 函数多 → 必须能滚动；宽度固定 → 按钮文字不会被压扁
     assert page.palette_panel.findChild(QScrollArea) is not None
     assert page.palette_panel.width() == fp.PANEL_WIDTH
