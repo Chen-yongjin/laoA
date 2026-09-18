@@ -289,7 +289,8 @@ SOURCE_ADD_UNAVAILABLE_TEXT = (
 #: 改写死一行"主来源：同花顺"的话，用户手改过 `data_sources` 之后就与界面说的不一致了。
 DATA_SOURCE_LABELS: dict[str, str] = {BUILTIN_SOURCE: "同花顺金融数据服务（内置）"}
 #: 同花顺那一行显示标记 / 说明用的两种文案（用户 2026-09-17 给定）：
-#: 界面上**没有** Key 输入框了，只剩这一行说明 + 一个可点的申请地址。
+#: 那一行是"<标记>：同花顺金融数据服务（需要 Key，申请地址 …）"，地址做成可点的链接；
+#: 它**在 Key 输入框下面**（2026-09-18：输入框按用户要求加回来了）。
 #: 2026-09-18（用户拍板）：**同花顺回到主源**，公开源降为兜底 ——
 #: 理由是公开接口实测会限流（腾讯 fqkline 抓 700 只左右开始连续失败、新浪列表接口
 #: 回 456），而同花顺是正经 API。所以这一行的标记从"备用源"改回"主来源"，
@@ -651,6 +652,7 @@ if QT_AVAILABLE:
 
             ┌ 同花顺金融数据服务（内置）  [主来源]                            [✓] 启用 ┐
             │ 提供：实时快照、历史日K、股票代码表                                     │
+            │ [••••••]（Key 输入框，默认空白）        [测试连接]                     │
             │ 主来源：同花顺金融数据服务（需要 Key，申请地址 fuyao.aicubes.cn）       │
             └────────────────────────────────────────────────────────────────────────┘
             ┌ 公开行情源（腾讯为主，免 Key）  [免 Key]                      [✓] 启用 ┐
@@ -668,18 +670,16 @@ if QT_AVAILABLE:
         免 Key 的来源**不给输入框** —— 画一个填不了东西的框，比不画更糟
         （用户会去找一个根本不存在的 Key）。
 
-        2026-09-17（用户要求）：**内置同花顺那一行不再有 Key 输入框，也没有【测试连接】**。
-        改成一行说明 + 一个**可点开**的申请地址（`key_notice` / `key_notice_url`）。
-        为什么连【测试连接】一起删：它原来测的就是"输入框里那个 Key"（见
-        `on_test_connection` 的注释），输入框没了它就没有被测对象了 ——
-        留一个点了不知道测什么的按钮，比少一个按钮更糟。
-        老用户手改 `config.toml` 的 `hithink_api_key` / 环境变量
-        `HITHINK_FINANCE_API_KEY` **照旧生效**（读取路径一个字没动），
-        只是界面上不再提供填写入口。
+        2026-09-17 → 2026-09-18：内置同花顺那一行**先**被改成"只有一行申请地址、没有输入框"，
+        用户随后澄清了那句话的意思 —— **"不要配 KEY" = 程序里不许预置自己的 Key，
+        不是不给用户填**（原话："设置里让你不要配 KEY，但是你也要给个 key 的输入口啊"）。
+        所以现在是：**输入框（默认空白）+【测试连接】+ 下面一行可点开的申请地址**。
+        程序侧一个字都没写死：`key_text` 只来自用户自己的 `config.toml`
+        （`hithink_api_key`）/ 环境变量 `HITHINK_FINANCE_API_KEY`，出厂包里的这两个值都是空的。
 
         属性（测试与将来的第二来源都按这些名字取）：`source`（键）、`name_label`、
-        `tag_label`、`capability_label`、`note_label`、`key_label`、`key_edit`（免 Key 或
-        内置行时为 None）、`enabled_box`、`btn_delete`、`btn_test`（同上为 None）、
+        `tag_label`、`capability_label`、`note_label`、`key_label`、`key_edit`（**免 Key 的
+        来源才为 None**）、`enabled_box`、`btn_delete`、`btn_test`（免 Key 时为 None）、
         `key_notice_text`（内置行那句说明的纯文本）。
         """
 
@@ -796,26 +796,14 @@ if QT_AVAILABLE:
             self.key_label.setObjectName("statusTag")
             self.key_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
             self.key_label.setWordWrap(True)
-            if key_notice:
-                # **内置同花顺那一行**（2026-09-17 用户要求）：不再有 Key 输入框、也不再有
-                # 【测试连接】（它原来测的就是"输入框里那个 Key"），只剩一行说明 ——
-                # 申请地址做成**可点开**的链接（`setOpenExternalLinks(True)` + `<a href>`）：
-                # 用户真的需要 Key 时，从这里一步就能到申请页，不用手抄地址。
-                # 富文本而不是 HTML 转义拼接：整句是程序里写死的常量，不含用户输入。
-                self.key_label.setText(
-                    self.key_notice_text.replace(
-                        key_notice_url,
-                        f'<a href="{key_notice_url}">{key_notice_url}</a>',
-                    ) if key_notice_url else self.key_notice_text
-                )
-                self.key_label.setTextFormat(Qt.TextFormat.RichText)
-                self.key_label.setTextInteractionFlags(
-                    Qt.TextInteractionFlag.TextBrowserInteraction
-                )
-                self.key_label.setOpenExternalLinks(True)
-                self.key_label.setVisible(True)
-                row.addWidget(self.key_label, 1)
-            elif self.needs_key:
+            if self.needs_key:
+                # 需要 Key 的来源 = **输入框 + 【测试连接】**
+                # 2026-09-18（用户澄清）：内置同花顺这一行**也要有输入口** ——
+                # 用户原话"设置里让你不要配 KEY，但是你也要给个 key 的输入口啊"：
+                # 当初那句"只保留 key 的申请地址、不保留自己的 KEY"说的是
+                # **程序里不许预置自己的（开发者的）Key**，不是"界面上不给填"。
+                # 所以现在：输入框照给、默认**空白**（`key_text` 来自用户自己的 config.toml，
+                # 程序从不写死任何 Key），下面再挂一行可点开的申请地址。
                 self.key_label.setVisible(False)
                 row.addWidget(self.key_label)
                 self.key_edit = QLineEdit(key_text)
@@ -831,6 +819,24 @@ if QT_AVAILABLE:
                 self.key_label.setVisible(True)
                 row.addWidget(self.key_label, 1)
             outer.addLayout(row)
+
+            if key_notice:
+                # 申请地址那一行（内置同花顺）：做成**可点开**的链接，
+                # 用户真的需要 Key 时一步就能到申请页，不用手抄地址。
+                # 富文本而不是 HTML 转义拼接：整句是程序里写死的常量，不含用户输入。
+                self.key_label.setText(
+                    self.key_notice_text.replace(
+                        key_notice_url,
+                        f'<a href="{key_notice_url}">{key_notice_url}</a>',
+                    ) if key_notice_url else self.key_notice_text
+                )
+                self.key_label.setTextFormat(Qt.TextFormat.RichText)
+                self.key_label.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextBrowserInteraction
+                )
+                self.key_label.setOpenExternalLinks(True)
+                self.key_label.setVisible(True)
+                outer.addWidget(self.key_label)
 
             if not implemented:
                 # 用户在 config.toml 里手写了别的来源名：**照实说**，不假装能配
@@ -2818,10 +2824,10 @@ if QT_AVAILABLE:
             self.source_add_hint.setWordWrap(True)
             body.addWidget(self.source_add_hint)
 
-            #: 来源列表（一行一个来源）。内置同花顺那一行**没有 Key 输入框**了
-            #: （2026-09-17 用户要求），所以 `self.key_edit` / `self.btn_test_connection`
-            #: 这两个老属性**不再存在** —— 谁再按它们找控件会立刻 AttributeError，
-            #: 比"悄悄拿不到东西"好查。
+            #: 来源列表（一行一个来源）。Key 输入框与【测试连接】**长在行上**
+            #: （`SourceRow.key_edit` / `SourceRow.btn_test`），不是窗口级的
+            #: `self.key_edit` —— 因为"来源可以有多个、各用各的 Key"。
+            #: 谁按窗口级的老属性找控件会立刻 AttributeError，比"悄悄拿不到东西"好查。
             self._rebuild_source_rows()
             # 「没配 Key」的那句话写在这里（**不弹窗**）：用户点【下载数据】时，
             # 这一行会因为缺 Key 亮起来、焦点也落到输入框上 —— 指路比拦住他更有效
@@ -5483,6 +5489,36 @@ if QT_AVAILABLE:
                 "note": note, "key_config": "hithink_api_key", "fallback": True,
             }
 
+        def on_test_source_key(self, source: str) -> None:
+            """【测试连接】：拿**那个来源输入框里的 Key**真发一次最小请求，结论写回提示行。
+
+            为什么不做成弹窗：结论只有一句话（能用 / 不能用 + 下一步），
+            弹窗会拦住用户；写进「数据来源」那一组的提示行里，他抬头就能看到。
+            为什么"真发一次请求"而不是只做格式校验：Key 失效、被限流、服务端没就绪
+            这几种情况的**表现一模一样**（都是取不到数），只有真打一次才分得清。
+            """
+            if self._busy():
+                return
+            row = (self.source_rows or {}).get(str(source))
+            if row is None or row.key_edit is None:
+                return
+            key = row.key_edit.text().strip()
+            if not key:
+                self._show_key_hint(
+                    "❌ 这个输入框是空的：先把 Key 填进去再点【测试连接】；"
+                    f"申请地址见下面那行（{BUILTIN_KEY_URL}）"
+                )
+                self._toast("❌ Key 是空的 · 见【系统设置】那一行的说明")
+                return
+            self._toast("正在测试这个 Key…")
+            QApplication.processEvents()
+            try:
+                text = probe_data_source(self.cfg, api_key=key)
+            except Exception as exc:  # noqa: BLE001 - 探测本身不许把界面搞崩
+                text = f"❌ 测试失败：{type(exc).__name__}: {exc}"
+            self._show_key_hint(text)
+            self._toast(text.splitlines()[0])
+
         def _source_key_text(self, key_field: str) -> str:
             """这个来源当前存着的 Key（没有对应配置键时返回空串）。"""
             if not key_field:
@@ -5556,20 +5592,25 @@ if QT_AVAILABLE:
                     key_placeholder=("在 fuyao.aicubes.cn/admin 获取"
                                      if builtin else "这个来源的 Key / Token"),
                     tag=tag,
-                    # 内置同花顺那一行：**没有 Key 输入框、没有【测试连接】**，
-                    # 只有这一行说明 + 可点开的申请地址（2026-09-17 用户要求）
+                    # 内置同花顺那一行：**输入框 + 【测试连接】照给**（2026-09-18 用户澄清），
+                    # 下面再挂一行"申请地址"（`key_notice` 那行文案）。
+                    # 程序里**不预置任何 Key**：输入框的初值就是用户自己 config.toml 里的值。
                     key_notice=(BUILTIN_BACKUP_TEXT.format(url=BUILTIN_KEY_URL)
                                 if builtin else ""),
                     key_notice_url=BUILTIN_KEY_URL if builtin else "",
                 )
-                if row.key_edit is not None and key_config and not builtin:
+                if row.key_edit is not None and key_config:
                     row.key_edit.setToolTip(
                         f"「{state.get('name')}」用它自己的 Key（写回 config.toml 的 "
-                        f"{key_config}）"
+                        f"{key_config}）；留空 = 没配，就走后面的来源兜底"
                     )
                 if not builtin:
                     row.btn_delete.clicked.connect(
                         lambda _=False, src=source: self.on_remove_source(src)
+                    )
+                if row.btn_test is not None:
+                    row.btn_test.clicked.connect(
+                        lambda _=False, src=source: self.on_test_source_key(src)
                     )
                 layout.addWidget(row)
                 self.source_rows[source] = row
@@ -5894,12 +5935,12 @@ if QT_AVAILABLE:
             updates: dict[str, Any] = {
                 # 1) 数据来源
                 #
-                # **这里没有 `hithink_api_key`**（2026-09-17 用户要求）：界面不再提供
-                # 填 Key 的入口（同花顺那一行只剩"主来源…申请地址"的说明），所以一键保存
-                # 也不该再写这个键 —— 界面上没有的东西不许被"顺手"写进配置。
-                # 向后兼容取舍：`Config.hithink_api_key` 与环境变量 HITHINK_FINANCE_API_KEY
-                # **照旧读取**（`sync` / `intraday` / `market` 取数路径一个字没改），
-                # 手改 config.toml 的老用户完全不受影响；只是新用户不再从界面写它。
+                # 数据来源那一组的**固定键**：数据量（`history_years`）。
+                # ⚠️ `hithink_api_key` **不在这份字典里**，但它**照样会被写回** ——
+                # 它由本函数末尾那段"按界面上真正存在的行收集"的循环收（那一行的 Key 输入框
+                # 就是它的入口）。为什么分两处写：需要 Key 的来源是**可添加的多个**
+                # （`data_sources` + 注册表的 `key_config`），那份名单是活的，
+                # 所以"要不要收这个键"只认**界面上有没有那个输入框**这一条判据。
                 "history_years": float(self.history_years_box.value()),
                 # 2) 通知方式（`popup_box` 单独一栏，其余三路来自 channel_boxes）
                 **self._panel_notify_updates(),
@@ -5923,38 +5964,21 @@ if QT_AVAILABLE:
             # 每个**需要 Key 的已启用来源**各写各的 Key（`key_config` 由注册表给）：
             # 将来再加"要 token 的来源"时，它的 Key 会自动进这一份键集合 ——
             # 界面上的输入框与写回配置的键**一一对应**，不存在"填了没保存"。
-            # 内置同花顺**没有输入框**（`row.key_edit is None`），所以它天然被跳过：
-            # "界面上有没有这个框"就是"要不要收这个键"的唯一判据，不另写一份名单。
-            for state in self._enabled_keyed_sources():
-                field = state["key_config"]
-                if field in updates:
-                    continue
-                row = self.source_rows.get(str(state["id"]))
-                if row is None or row.key_edit is None:
+            # 内置同花顺那一行现在**也有输入框**（2026-09-18 用户澄清："要给我一个
+            # key 的输入口"），所以 `hithink_api_key` 也由这一份循环收进来 ——
+            # "界面上有没有这个框"仍然是"要不要收这个键"的唯一判据，不另写一份名单。
+            # ⚠️ 按**界面上真正存在的行**收集，而不是按注册表的来源列表收集：
+            # 输入框长在行上，行才是"界面上有没有这个框"的唯一真相。
+            # 早先按注册表收集时有个隐蔽的漏：注册表读不出来时（`source_states` 抛异常）
+            # 内置同花顺那一行**照样画着输入框**，但收集时被跳过 —— 用户填了 Key、
+            # 点了保存、什么都没写进去（"填了没保存"正是这里最该防的事）。
+            # 这个坑是 `test_source_list_falls_back_when_the_registry_is_unreadable` 抓出来的。
+            for source, row in (self.source_rows or {}).items():
+                field = str(getattr(row, "key_config", "") or "")
+                if not field or field in updates or row.key_edit is None:
                     continue
                 updates[field] = row.key_edit.text().strip()
             return updates
-
-        def _enabled_keyed_sources(self) -> list[dict]:
-            """已启用、需要 Key、且有配置键的来源（一键保存据此决定要不要多写几个键）。
-
-            来源列表**唯一真相**仍是 `data/sources.py`（`source_states`）；这里只是把
-            "要不要为它多收一个键"这件事问它一遍，不自己判断能力或凭据。
-            读不到注册表时返回空列表：那一份键集合因此只有本页固定收的那些键
-            （内置同花顺的 Key 现在**不在这份名单里**，见 `_collect_settings_updates`）。
-            """
-            try:
-                from laoa_trader.data import sources as sources_mod
-
-                states = list(sources_mod.source_states(self.cfg))
-            except Exception as exc:  # noqa: BLE001 - 读不到就只收内置那一个键
-                logger.debug(f"读数据来源注册表失败（只收集内置来源的 Key）：{exc}")
-                return []
-            return [
-                state for state in states
-                if state.get("enabled") and state.get("needs_key")
-                and str(state.get("key_config") or "")
-            ]
 
         @staticmethod
         def _validate_updates(updates: dict) -> list[str]:
@@ -6187,8 +6211,9 @@ if QT_AVAILABLE:
                 # 一眼明白"没 Key 能看什么、不能做什么"，而不是让人以为等几天就行。
                 self._show_key_hint(
                     "❌ 完整历史数据要同花顺 API Key（每个用户自己申请一个）："
-                    "在 config.toml 里写 hithink_api_key = \"你的Key\"，"
-                    "或设环境变量 HITHINK_FINANCE_API_KEY，然后重启程序"
+                    "在**上面那一行的 Key 输入框**里填上、点【保存设置】就生效（不用重启）；"
+                    "也可以手改 config.toml 的 hithink_api_key，"
+                    "或设环境变量 HITHINK_FINANCE_API_KEY"
                     f"（申请地址见上面那行的 {BUILTIN_KEY_URL}）。"
                     "没 Key 时能用的：实时行情（自选股池/持仓监控）与大盘概览 —— "
                     "每天也会自动把当天的行情与涨停池写进库；"
@@ -6230,15 +6255,16 @@ if QT_AVAILABLE:
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"隐藏 Key 提示失败：{exc}")
 
-        # 2026-09-17：这里原来有 `on_save_api_key()` 与 `on_test_connection()` 两个方法，
-        # 它们读的都是「内置同花顺那一行的 Key 输入框」（`self.key_edit`）。
-        # 用户要求把那一行改成"来源标记 + Key 申请地址"，输入框与【测试连接】按钮一起删了 ——
-        # 没有被测对象的方法留着只会变成一颗**点了没反应的按钮**（或者一调就 AttributeError），
-        # 所以两个方法一并删掉。Key 的读写路径没有变：
-        #   * 读：`Config.hithink_api_key` / 环境变量 `HITHINK_FINANCE_API_KEY` 照旧生效；
-        #   * 写：手改 config.toml（界面上不再提供入口）。
-        # `probe_data_source()` 仍然在（它是独立函数，测试直接调它；将来要恢复
-        # "测一下配置里的 Key 能不能用"，接一个按钮上来就行）。
+        # 历史（免得后人以为这里少了个函数）：
+        #   2026-09-17 内置同花顺那一行改成"来源标记 + Key 申请地址"，随之删掉了
+        #   `on_save_api_key()` 与【测试连接】—— 输入框没了，它们就没有被测对象；
+        #   2026-09-18 用户澄清"**不要配 KEY**"指的是**程序里不许预置自己的 Key**、
+        #   不是不给填，于是那一行又把输入框加回来了，【测试连接】也随之恢复
+        #   （现在是 `on_test_source_key()`，按来源取那一行的输入框，见它上面）。
+        # Key 的读写三条路都在：
+        #   * 读：`Config.hithink_api_key` / 环境变量 `HITHINK_FINANCE_API_KEY`；
+        #   * 写：界面上（【保存设置】/【一键保存】会把它写回 config.toml）或手改文件；
+        #   * 验：【测试连接】→ `probe_data_source()`（独立函数，测试直接调它）。
 
         def on_test_notify(self) -> None:
             """一键测试通知（走后台线程：飞书是网络调用，别卡住界面）。

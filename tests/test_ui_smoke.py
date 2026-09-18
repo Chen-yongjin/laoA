@@ -891,12 +891,23 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     assert builtin.enabled_box.isEnabled() is False            # 内置来源不能在界面上关
     # 非当前页签里的控件 `isVisible()` 恒为 False，所以这里看的是「有没有被显式藏起来」
     assert builtin.btn_delete.isHidden() is True               # 也不能删
-    # **界面上没有 Key 输入框、也没有【测试连接】**（2026-09-17 用户要求）；
-    # 那一行改成"主来源 + 可点开的申请地址"
-    assert builtin.key_edit is None
-    assert builtin.btn_test is None
-    assert not hasattr(window, "key_edit")
-    assert not hasattr(window, "btn_test_connection")
+    # **有 Key 输入框、也有【测试连接】**（2026-09-18 用户澄清："设置里让你不要配 KEY，
+    # 但是你也要给个 key 的输入口啊" —— 那句"不保留自己的 KEY"说的是**程序里不许预置
+    # 开发者自己的 Key**，不是不给用户填）。同一条规则仍然成立：**程序不预置任何 Key**
+    assert builtin.key_edit is not None
+    assert builtin.btn_test is not None
+    assert builtin.btn_test.text() == "测试连接"
+    # 输入框里显示的**只能是用户自己 config 里的那个值**（不是程序写死的）：
+    # 这条夹具里是 "test-key"，所以框里就是 "test-key" —— 它证明"显示的是配置，
+    # 不是某个内置常量"。而"程序不预置自己的 Key"由下一条钉
+    assert builtin.key_edit.text() == window.cfg.hithink_api_key
+    from laoa_trader.config import Config as _Config
+    assert _Config().hithink_api_key == "", "出厂配置里不许预置任何 Key"
+    # 输入框是**密码框**（Key 不该明晃晃挂在屏幕上）
+    from PySide6.QtWidgets import QLineEdit
+    assert builtin.key_edit.echoMode() == QLineEdit.EchoMode.Password
+    # 申请地址那一行照样在（输入框 + 申请地址并存）
+    assert "fuyao.aicubes.cn" in builtin.key_label.text()
     # 2026-09-18：用户把主源换回同花顺（公开接口实测会限流，同花顺不会轻易限流），
     # 所以这一行的标记从"备用源"改回"主来源" —— 标记与文案都由 `ui_app` 的常量给出，
     # 这里同时钉"常量本身"和"界面上渲染出来的那行字"，免得两处各改一半
@@ -2104,7 +2115,7 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
     #
     # **没有 `hithink_api_key`**（2026-09-17 用户要求）：界面上不提供填 Key 的入口
     # （那一行只剩"主来源 + 申请地址"的说明；2026-09-18 用户把主源换回同花顺，
-    # 角色标记随之从"备用源"改回"主来源"，但"没有输入框"这件事没变），所以一键保存
+    # 角色标记随之从"备用源"改回"主来源"），所以一键保存
     # 也不该再写这个键。读取路径一个字没改（config.toml / 环境变量照旧生效）。
     "history_years",
     # 2) 通知方式
@@ -2121,36 +2132,40 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
     "t_high_pullback_pct", "t_low_min_drop_pct", "t_low_rebound_pct",
     # 5) 其他
     "ui_theme", "intraday_anomaly", "watchlist_max", "watchlist_in_pool",
+    # 6) 数据来源那一行里**用户自己填的** Key（2026-09-18 起内置同花顺也有输入框了）
+    "hithink_api_key",
 })
 
 
 def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None:
     """收集函数的键集合 = 五组控件的**全部**键（一键保存的"写哪些"就是它决定的）。
 
-    **34 是现在的个数**（2026-09-17：`hithink_api_key` 从这份键集合里去掉了 ——
-    界面上没有填 Key 的入口（同花顺那一行只有"主来源 + 申请地址"的说明），
-    所以一键保存也不该再写它；
-    读取路径没变，config.toml / 环境变量照旧生效）。
+    **35 是现在的个数**（2026-09-18：`hithink_api_key` 又回到了这份键集合里 ——
+    用户澄清"不要配 KEY"指的是**程序里不许预置自己的 Key**，不是不给填，
+    所以内置同花顺那一行重新有了输入框，一键保存也就该把它写回去；
+    出厂包里这个值始终是空串，程序从不写死它）。
     在此之上，每个**已启用、需要 Key 且界面上真有输入框**的来源会按注册表给的
-    `key_config` 多收一个键 —— 内置同花顺没有输入框（`row.key_edit is None`）所以被跳过，
-    公开行情源是**免 Key** 的（它那行连输入框都没有），所以当前一个都不多收；
-    将来再加"要 token 的来源"时，这里会自动多一个键
+    `key_config` 多收一个键 —— 内置同花顺就是靠这条规则被收进来的
     （`test_source_list_key_field_enters_the_one_click_save`
-    用一个注册表测试替身把那条分支钉住了）。
+    再用一个注册表测试替身把"将来再加要 token 的来源"那条分支钉住）。
+    公开行情源是**免 Key** 的（它那行连输入框都没有），所以一个都不多收。
     """
     from laoa_trader.data import sources as sources_mod
 
     extra_key_fields = {
         state["key_config"] for state in sources_mod.source_states(window.cfg)
         if state["enabled"] and state["needs_key"] and state["key_config"]
-        # 内置同花顺**不算**：它那一行没有 Key 输入框（用户要求改成"主来源 + 申请地址"），
+        # 内置同花顺也会被收（它那行现在有输入框），所以这里用替身来源单独验这条分支，
         # 而"界面上有没有这个框"正是"要不要收这个键"的判据
         and state["id"] != ui_app.BUILTIN_SOURCE
     } - SETTINGS_KEYS
     updates = window._collect_settings_updates()
     assert set(updates) == SETTINGS_KEYS | extra_key_fields
-    assert len(updates) == 34                      # 当前：34 个固定键，没有额外要 Key 的来源
-    assert "hithink_api_key" not in updates        # 界面上没有的入口，一键保存不许写
+    # 当前：35 个固定键（2026-09-18 起含 `hithink_api_key` —— 内置同花顺又有输入框了）
+    assert len(updates) == 35
+    # 2026-09-18 起**必须收**它：内置同花顺那一行有输入框，一键保存就该把它写回去
+    # （出厂值是空串，程序从不预置；"填了没保存"才是要防的那件事）
+    assert "hithink_api_key" in updates
     assert "_bad_scan_at" not in updates           # 内部提示字段不许进配置文件
 
 
@@ -2262,11 +2277,13 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
     assert 'my_own_key = "别动我"' in text
     # 回显：写了几项、写到哪个文件、现在生效的是什么
     hint = window.save_settings_hint.text()
+    # 项数就是固定键那份集合：内置同花顺那一行的 Key 现在也在里面
+    # （用户 2026-09-18 要回了输入口，`hithink_api_key` 属于固定键）
     assert hint.startswith(f"✅ 已保存 {len(SETTINGS_KEYS)} 项（已写入 config.toml）")
     assert "生效：主题 系统默认；" in hint and "T策略 开" in hint
-    # 配置里的 Key **一个字都没被这个动作碰过**：内存里那份还是原值，
-    # 文件里那一行也还是 seeded 写进去的那个空串（界面没有它的输入框 → 一键保存不收它）
-    assert 'hithink_api_key = ""' in text
+    # 那一行的 Key 现在**会被写回**：值就是输入框里显示的（= 用户 config 里的原值），
+    # 所以内容不变、但**写这一下是有的**（"填了没保存"才是要防的那件事）
+    assert f'hithink_api_key = "{before_key}"' in text
     assert window.cfg.hithink_api_key == before_key
     # 内存里的配置同步跟上（不用重启）
     assert window.cfg.history_years == 1.5
@@ -2418,23 +2435,27 @@ def test_test_connection_probe_reports_every_outcome(window) -> None:
                                                   client=BoomClient())
 
 
-def test_no_dead_test_connection_button_is_left_on_the_page(window) -> None:
-    """**不许留一颗点了没反应的按钮**：同花顺那一行现在既没有 Key 输入框，
-    也没有【测试连接】（它测的就是输入框里那个 Key）。
+def test_test_connection_button_is_wired_and_never_dead(window, qapp) -> None:
+    """那一行的【测试连接】**必须在页面上、而且真的接着东西**（点它不炸、有结论）。
 
-    这条是防"按钮还在、但点了什么都不发生"那种最糟的中间态：
-    只要页面上还能找到那个按钮，或者 `key_edit` 还挂在窗口上，就说明删得不干净。
+    这条原来防的是相反的中间态（按钮还在但点了没反应）—— 2026-09-17 曾把按钮删掉；
+    2026-09-18 用户要回输入口，按钮也就回来了。所以现在防的是同一种病的另一面：
+    **按钮画出来了、但没有接上处理函数**（点下去什么都不发生，或者 AttributeError）。
+    空 Key 时点它必须给一句"框是空的"（不发请求、不崩）。
     """
     from PySide6.QtWidgets import QPushButton
 
     builtin = window.source_rows[ui_app.BUILTIN_SOURCE]
-    assert builtin.key_edit is None
-    assert builtin.btn_test is None
-    assert not hasattr(window, "key_edit")
-    assert not hasattr(window, "btn_test_connection")
-    # 整页（含来源列表）里没有任何"测试连接"按钮
+    assert builtin.btn_test is not None
     page = _tab_page(window, ui_app.TAB_SETTINGS)
-    assert [b.text() for b in page.findChildren(QPushButton) if "测试连接" in b.text()] == []
+    buttons = [b.text() for b in page.findChildren(QPushButton) if "测试连接" in b.text()]
+    assert buttons == ["测试连接"], "页面上应当只有一个【测试连接】（在来源行里）"
+
+    # 空 Key → 明确告诉用户"先填"，绝不去发请求
+    builtin.key_edit.setText("")
+    window.on_test_source_key(ui_app.BUILTIN_SOURCE)
+    qapp.processEvents()
+    assert "空的" in window.key_hint.text() or "先" in window.key_hint.text()
     # 那一行的说明就是用户给定的那句话，且地址**可点开**
     assert builtin.key_label.openExternalLinks() is True
     assert ui_app.BUILTIN_KEY_URL in builtin.key_label.text()
@@ -2894,9 +2915,9 @@ def test_download_without_api_key_shows_inline_hint_not_dialog(window, qapp,
     为什么不做成弹窗：缺 Key 不是"要用户拍板"的事，而是"下一步该做什么" ——
     弹一个框只会拦住他，然后他还是得回同一个地方改配置。
 
-    2026-09-17：界面上**没有填 Key 的入口**了（同花顺那一行只有"主来源 + 申请地址"
-    的说明；2026-09-18 用户把主源换回同花顺，标记随之改回"主来源"），所以这句指路改成
-    **config.toml / 环境变量**；读数路径没变，只是写的地方从界面回到配置文件。
+    2026-09-18：填 Key 的入口就在**那一行的输入框**上（同花顺是主源、标记"主来源"），
+    所以这句指路**先指输入框**，再说 `config.toml` / 环境变量那两条老路（三条都有效）。
+    （中间有过一段"界面上没有输入框"的版本，已被用户否掉。）
 
     2026-09-18 追加：为什么这条用例还要断言"提示里写了没 Key 时**能用**什么" ——
     用户拍板"完整历史走用户自己的同花顺 Key、公开源退回兜底"之后，曾经试过"没 Key 时
@@ -2922,7 +2943,7 @@ def test_download_without_api_key_shows_inline_hint_not_dialog(window, qapp,
     assert win._worker is None                                  # 没起下载任务
     assert win.key_hint.isVisible() is True
     assert "API Key" in win.key_hint.text()
-    # 指路指的是**配置文件**（界面上没有输入框了）
+    # 指路指的是**配置文件**（界面上有输入框了）
     assert "config.toml" in win.key_hint.text()
     assert "hithink_api_key" in win.key_hint.text()
     assert "HITHINK_FINANCE_API_KEY" in win.key_hint.text()      # 环境变量那条路也写出来
@@ -3219,8 +3240,9 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     row = window.source_rows["fakesrc"]
     assert row.key_edit is not None                       # 要 Key → 有输入框
     assert row.tag_label.text() == "未配 Key"
-    # 同花顺仍然没有输入框（内置那一行的特例：用户要求改成"主来源 + 申请地址"）
-    assert window.source_rows["hithink"].key_edit is None
+    # 同花顺那一行的输入口由它**自己的** `key_config` 决定（不是写死的特例）
+    # 2026-09-18：内置同花顺那一行**有**输入框（用户要回了输入口）
+    assert window.source_rows["hithink"].key_edit is not None
     row.key_edit.setText("token-abc")
     updates = window._collect_settings_updates()
     assert updates[fake_key] == "token-abc"               # 它的 Key 进了一键保存的键集合
@@ -3229,10 +3251,10 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     qapp.processEvents()
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
     assert f'{fake_key} = "token-abc"' in text
-    # 34 个固定键 + 这个测试替身来源的 Key = 35 项
-    # （2026-09-17 起少了 `hithink_api_key` 那一项：界面上没有它的输入框了）
-    assert window.save_settings_hint.text().startswith("✅ 已保存 35 项")
-    assert "hithink_api_key" not in window._collect_settings_updates()
+    # 35 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 36 项
+    assert window.save_settings_hint.text().startswith("✅ 已保存 36 项")
+    # 内置同花顺的 Key 也在这份键集合里（它的输入框和替身来源的走同一条规则）
+    assert "hithink_api_key" in window._collect_settings_updates()
 
 
 def test_source_list_falls_back_when_the_registry_is_unreadable(
@@ -3257,13 +3279,15 @@ def test_source_list_falls_back_when_the_registry_is_unreadable(
     assert "注册表暂时读不出来" in row.note_label.text()      # 如实说明，不是空白
     # 这一行照旧是"主来源 + 申请地址"（它不依赖注册表，是内置的）
     assert row.tag_label.text() == ui_app.BUILTIN_BACKUP_TAG
-    assert row.key_edit is None
+    # 输入框也在：它不依赖注册表（写死的就是 `hithink_api_key`），而且这一行**需要 Key**
+    assert row.key_edit is not None
+    assert "fuyao.aicubes.cn" in row.key_label.text()
     assert row.key_label.openExternalLinks() is True
     assert window._addable_sources() == []                     # 没有候选 → 不会画假条目
     assert window._source_add_menu() is None
-    # 一键保存的键集合不受影响：**本来就没有** `hithink_api_key`
-    #（界面不提供填 Key 的入口 —— 读数路径照旧在 config.toml / 环境变量里）
-    assert "hithink_api_key" not in window._collect_settings_updates()
+    # 兜底那一行也有输入口，所以一键保存照样收 `hithink_api_key`
+    #（注册表读不出来**不影响**这一点：这个键名是内置的，不靠注册表告诉它）
+    assert "hithink_api_key" in window._collect_settings_updates()
 
 
 def test_source_list_shows_unknown_names_truthfully(window, seeded, qapp) -> None:
