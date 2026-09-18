@@ -207,10 +207,16 @@ FIELD_KINDS: dict[str, str] = {
 EXTRA_FIELDS: dict[str, str] = {
     "流通市值": "num",
     "换手率": "num",
+    "热门行业": "num",
     "ST": "num",
     "科创": "num",
     "北交所": "num",
 }
+
+#: 热门行业的"上榜窗口"（交易日）：`热门行业` 的值 = 最近这么多天里上过热门榜的次数。
+#: 用户 2026-09-18 定的口径："最近 3 天上榜的" —— 只算当天会把一天脉冲当成热门，
+#: 放宽到 3 天更稳（值域 0~3，写 `热门行业>=1` 就是"上过榜"）。
+HOT_INDUSTRY_DAYS = 3
 
 #: 排除类标记的规范名（自动补齐用；顺序即"用户最可能一起写"的顺序）
 FLAG_FIELDS: tuple[str, ...] = ("ST", "科创", "北交所")
@@ -963,6 +969,21 @@ def _impl_ema(ev: _Evaluator, node: _Call, vals: list) -> Any:
     return _ema(vals[0], ev.win(vals[1], node.args[1]), ev.n)
 
 
+def _impl_dif(ev: _Evaluator, node: _Call, vals: list) -> Any:  # noqa: ARG001
+    """`DIF()` = `EMA(C,12) - EMA(C,26)`（MACD 的快线）。"""
+    return _ema(ev.series.close, 12, ev.n) - _ema(ev.series.close, 26, ev.n)
+
+
+def _impl_dea(ev: _Evaluator, node: _Call, vals: list) -> Any:  # noqa: ARG001
+    """`DEA()` = `EMA(DIF,9)`（MACD 的慢线/信号线）。"""
+    return _ema(_impl_dif(ev, node, vals), 9, ev.n)
+
+
+def _impl_macd(ev: _Evaluator, node: _Call, vals: list) -> Any:  # noqa: ARG001
+    """`MACD()` = `(DIF - DEA) * 2`（柱状线；正=红柱、负=绿柱，通达信口径）。"""
+    return (_impl_dif(ev, node, vals) - _impl_dea(ev, node, vals)) * 2.0
+
+
 def _impl_ref(ev: _Evaluator, node: _Call, vals: list) -> Any:
     return _ref(vals[0], ev.win(vals[1], node.args[1], minimum=0, code="offset"), ev.n)
 
@@ -1055,6 +1076,13 @@ FUNCTIONS: dict[str, _FuncSpec] = {
     "IF": _FuncSpec(3, 3, "same", ("cond", _NUM, _NUM), _impl_if),
     "BARSLAST": _FuncSpec(1, 1, _NUM, ("cond",), _impl_barslast),
     # ── 本项目特有（数据来自本地库，不联网）──
+    # MACD 三件套（0 参数，按收盘价算）。
+    # `hist_default` 必须写足："最少 K 线"是这个函数**真需要的历史长度** ——
+    # DIF 要 EMA26，DEA/MACD 还叠一层 EMA9（26+9=35）。写少了，试算/回测会拿
+    # 只够 1 根的序列去算 EMA，得到一条"看着有值、其实没收敛"的曲线。
+    "DIF": _FuncSpec(0, 0, _NUM, (), _impl_dif, hist_default=26),
+    "DEA": _FuncSpec(0, 0, _NUM, (), _impl_dea, hist_default=35),
+    "MACD": _FuncSpec(0, 0, _NUM, (), _impl_macd, hist_default=35),
     "涨停天数": _FuncSpec(0, 1, _NUM, (_W,), _impl_limit_up_days, hist_arg=0, hist_default=1),
     "连板": _FuncSpec(0, 0, _NUM, (), _impl_limit_up_cnt, hist_default=1),
     "量比": _FuncSpec(0, 1, _NUM, (_W,), _impl_vol_ratio, hist_arg=0,
@@ -1731,6 +1759,9 @@ _FUNCTION_EXAMPLE: dict[str, str] = {
     "涨停天数": "涨停天数() 或 涨停天数(10)",
     "连板": "连板()",
     "量比": "量比() 或 量比(5)",
+    "DIF": "DIF()",
+    "DEA": "DEA()",
+    "MACD": "MACD()",
 }
 
 
@@ -1995,6 +2026,7 @@ def load_series(
     symbols: Sequence[str] | None = None,
     start: str | None = None,
     extra: dict[str, dict[str, float]] | None = None,
+    hot_industries: dict[str, int] | None = None,
 ) -> Iterator[Series]:
     """从本地库逐只产出 `Series`（**只读、不联网**；扩展字段由调用方给）。
 
@@ -2013,6 +2045,10 @@ def load_series(
             （它们只有"今天"这一个值，见 `EXTRA_FIELDS`）。这里只把"某一个数"
             铺成一条序列：**最后一个位置**是今天、其余是 NaN。
             `ST` / `科创` / `北交所` 三个标记不用给（`Series` 自己会补齐）。
+        hot_industries: `{行业名: 最近 N 天上榜次数}`（见 `formulas.hot_industry_counts`）。
+            给了就给每只票填 `热门行业`（按它的 `stock_basic.industry` 查表），
+            **同样是"只有今天这一个值"**（前面填 NaN）—— 它表达的是"当前状态"，
+            不是一条历史序列；写成 `REF(热门行业,5)` 是没意义的（会得到缺值）。
 
     Yields:
         Series（时间升序）。没有数据的代码会被跳过。
@@ -2082,7 +2118,10 @@ def load_series(
             # 前面填 NaN 而不是"用今天的值倒推"，是为了让"历史上根本没有这个数"
             # 这件事在序列里如实体现 —— 谁写了 `MA(流通市值,5)` 就会得到全 NaN
             # （不产生信号），而不是一条看起来很合理的假均线。
-            fields = (extra or {}).get(symbol) or {}
+            fields = dict((extra or {}).get(symbol) or {})
+            if hot_industries is not None:
+                # 「热门行业」= 最近 N 天该行业上过几次热门榜（按票的行业查表）
+                fields.setdefault("热门行业", float(hot_industries.get(industry, 0)))
             series_extra = {
                 key: np.concatenate([
                     np.full(len(dates) - 1, np.nan, dtype="float64"),

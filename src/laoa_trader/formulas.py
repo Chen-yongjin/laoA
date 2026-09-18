@@ -373,6 +373,49 @@ def latest_trading_day(db_path: str | Path) -> str | None:
 #: 需要**实时快照**的公式字段（只有今天这一个值，见 `formula.EXTRA_FIELDS`）
 SNAPSHOT_FIELDS: tuple[str, ...] = ("流通市值", "换手率")
 
+#: 需要**热门行业**（读库算，不联网）的字段名
+HOT_FIELDS: tuple[str, ...] = ("热门行业",)
+
+#: 「热门行业」上榜窗口（交易日）与取前几名 —— 与 `pool.hot_industries` 的默认 top 一致
+HOT_WINDOW_DAYS = fm.HOT_INDUSTRY_DAYS
+HOT_TOP = 12
+
+
+def hot_industry_counts(db_path: str | Path, *, days: int = HOT_WINDOW_DAYS,
+                        top: int = HOT_TOP) -> dict[str, int]:
+    """最近 `days` 个交易日里各行业"上过几次热门榜" → `{行业名: 0~days}`。
+
+    口径与「大盘概览 → 热门板块」那一套**完全同一份实现**（`pool.hot_industries`：
+    当日涨停密度 + 行业成分等权涨幅打分取前 `top`），只是**按天各算一次再并集** ——
+    用户 2026-09-18 定的口径是"最近 3 天上榜的"：只看当天会把一天的脉冲当热门。
+
+    为什么按天算：涨停密度本来就是**逐日**的量（涨停池有历史），所以"某天上过榜"
+    是可以如实算出来的；而动量那一项用的是"截至最新行情"的窗口（见 `hot_industries`
+    的说明），所以严格说是"以今天为基准回溯 3 天的榜"。这一点写在文档里，不藏着。
+    """
+    from laoa_trader import pool      # 延迟导入：pool → formula_group → formulas，模块级会成环
+    from laoa_trader.data import storage
+
+    try:
+        with storage.connect(db_path) as conn:
+            dates = [str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT date FROM limit_up_pool ORDER BY date DESC LIMIT ?",
+                (int(days),),
+            ).fetchall()]
+    except Exception as exc:  # noqa: BLE001 - 取不到就是"没有热门行业"
+        logger.info(f"读交易日失败（热门行业用不了）：{exc}")
+        return {}
+    counts: dict[str, int] = {}
+    for day in dates:
+        try:
+            names = pool.hot_industries(db_path, top=top, day=day)
+        except Exception as exc:  # noqa: BLE001
+            logger.info(f"算 {day} 的热门行业失败：{exc}")
+            continue
+        for industry in names:
+            counts[str(industry)] = counts.get(str(industry), 0) + 1
+    return counts
+
 
 def snapshot_extra(
     cfg: Any, symbols: Sequence[str], *, quotes: dict[str, dict] | None = None
@@ -469,8 +512,12 @@ def preview_hits(
     notes: list[str] = []
     scanned = 0
     skipped = 0
-    # 只有公式**真的用到了**快照字段才去取那一趟（不用就一个请求都不发）
+    # 两类"额外字段"按需准备，**用到才做**：
+    #   * 快照字段（流通市值/换手率）要联网，取一趟；
+    #   * 热门行业读库就能算（不联网），算一次。
+    # 两者互不依赖：公式只用热门行业时不该去取快照（也就一个请求都不发）。
     extra: dict[str, dict[str, float]] = {}
+    hot: dict[str, int] = {}
     note = ""
     if cfg is not None and set(formula.fields) & set(SNAPSHOT_FIELDS):
         targets = list(symbols) if symbols is not None else None
@@ -479,7 +526,10 @@ def preview_hits(
         extra, note = snapshot_extra(cfg, targets)
         if note:
             notes.append(note)
-    for series in fm.load_series(db_path, symbols=symbols, start=start, extra=extra):
+    if set(formula.fields) & set(HOT_FIELDS):
+        hot = hot_industry_counts(db_path)
+    for series in fm.load_series(db_path, symbols=symbols, start=start, extra=extra,
+                                 hot_industries=hot):
         # 数据不够长：公式的滚动窗口一定全是缺值 ⇒ 不可能出信号，直接跳过（省时间）
         if len(series.date) < formula.min_history:
             skipped += 1
@@ -718,7 +768,10 @@ __all__ = [
     "LIMIT_UP_HINT",
     "MAX_NAME_CHARS",
     "PREVIEW_LIMIT",
+    "HOT_FIELDS",
+    "HOT_WINDOW_DAYS",
     "SNAPSHOT_FIELDS",
+    "hot_industry_counts",
     "all_symbols",
     "snapshot_extra",
     "bundled_formula_dir",

@@ -1298,3 +1298,81 @@ def test_the_full_six_condition_strategy_compiles() -> None:
     amts = np.full(7, 1_000_000.0); amts[-1] = 3_000_000.0
     ok.vol, ok.amount = vols, amts
     assert bool(f.eval(ok)[-1]) is True
+
+
+# ── 2026-09-18 追加：MACD 三件套 + 热门行业 ──
+
+
+def _macd_series(closes: list[float]) -> fm.Series:
+    n = len(closes)
+    return fm.Series(
+        symbol="600000", name="浦发银行", industry="银行",
+        date=[f"2026-08-{i + 1:02d}" for i in range(n)],
+        close=np.array(closes, dtype="float64"), open=np.array(closes, dtype="float64"),
+        high=np.array(closes, dtype="float64"), low=np.array(closes, dtype="float64"),
+        vol=np.full(n, 100.0), amount=np.full(n, 1.0e6),
+        pre_close=np.array(closes, dtype="float64"),
+        limit_up_days=np.zeros(n), limit_up_cnt=np.zeros(n),
+    )
+
+
+def test_macd_functions_match_the_textbook_formula() -> None:
+    """`DIF` / `DEA` / `MACD` 就是通达信那三条公式（用 pandas 的 ewm 独立算一遍对答案）。
+
+    为什么要对答案：这三个函数是给用户直接写 `DIF()>DEA()`、`MACD()>0` 用的，
+    算错了**看不出来**（曲线照样有值）。这里用 `pandas.ewm(adjust=False)` 独立算一次
+    —— 它与本项目 `_ema` 的递推式 `(2X+(N-1)EMA_prev)/(N+1)` 是同一个东西 ——
+    对不上就说明有一边错了。
+    """
+    import pandas as pd
+
+    closes = [10 + 0.1 * i + (1.5 if i % 3 == 0 else -0.5) for i in range(40)]
+    series = _macd_series(closes)
+    # 用 `raw_num` 取**数值序列**（公式最后一行必须是 0/1 条件，所以不能直接 eval `DIF()`）
+    dif = raw_num("DIF()", series)
+    dea = raw_num("DEA()", series)
+    hist = raw_num("MACD()", series)
+
+    price = pd.Series(closes, dtype="float64")
+    ema12 = price.ewm(span=12, adjust=False).mean()
+    ema26 = price.ewm(span=26, adjust=False).mean()
+    want_dif = ema12 - ema26
+    want_dea = want_dif.ewm(span=9, adjust=False).mean()
+    want_hist = (want_dif - want_dea) * 2
+
+    # 末几位对齐即可（EMA 前几根受初值影响，`_ema` 首值取 X[0] 与 pandas 一致）
+    assert dif[-1] == pytest.approx(float(want_dif.iloc[-1]), abs=1e-9)
+    assert dea[-1] == pytest.approx(float(want_dea.iloc[-1]), abs=1e-9)
+    assert hist[-1] == pytest.approx(float(want_hist.iloc[-1]), abs=1e-9)
+    # 柱状线就是 (DIF-DEA)*2 —— 单独钉一遍关系式，免得有人改了其中一条
+    assert hist[-1] == pytest.approx((dif[-1] - dea[-1]) * 2, abs=1e-12)
+
+
+def test_macd_declares_the_history_it_needs() -> None:
+    """`DIF()` 要 26 根、`DEA()`/`MACD()` 要 35 根 —— 少报会让 EMA 没收敛就开始算。
+
+    这个数决定试算/回测**预取多少历史**：写少了不会报错，只会给出一条"看着有值、
+    其实还没收敛"的曲线 —— 那是最难发现的一类错。
+    """
+    # 用"包一层比较"的写法编译（公式最后一行必须是条件）
+    assert fm.compile_formula("DIF()>0").min_history == 26
+    assert fm.compile_formula("DEA()>0").min_history == 35
+    assert fm.compile_formula("MACD()>0").min_history == 35
+    # 三个一起用时取最大的那个
+    assert fm.compile_formula("DIF()>DEA() AND MACD()>0").min_history == 35
+
+
+def test_hot_industry_field_is_plumbed_from_the_loader() -> None:
+    """`热门行业` 由调用方按"行业 → 最近 N 天上榜次数"查表填，且**只有最后一根有值**。
+
+    为什么只有最后一根：它表达的是"当前状态"（最近 3 天上没上过榜），不是历史序列；
+    前面填 NaN，写成 `REF(热门行业,5)` 就会得到缺值 —— 避免用户以为它是一条历史曲线。
+    """
+    series = _macd_series([10.0] * 5)
+    series.extra["热门行业"] = np.concatenate([np.full(4, np.nan), np.array([2.0])])
+    f = fm.compile_formula("热门行业>=1")
+    assert bool(f.eval(series)[-1]) is True
+    assert bool(fm.compile_formula("热门行业>=3").eval(series)[-1]) is False
+    # 取不到（没给这一列）→ 全 NaN → 条件不成立，**不报错**
+    bare = _macd_series([10.0] * 5)
+    assert bool(fm.compile_formula("热门行业>=1").eval(bare)[-1]) is False

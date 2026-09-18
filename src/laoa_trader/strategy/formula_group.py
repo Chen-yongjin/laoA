@@ -131,6 +131,10 @@ def run_enabled_formulas(
     # 与"没这个功能"完全一样。取不到时**不报错**：条件不成立而已，
     # 但要在状态里说一句，否则用户看着"勾了却没出票"会以为是公式写错了。
     extra: dict[str, dict[str, float]] = {}
+    hot: dict[str, int] = {}
+    if any(set(formula.fields) & set(lib.HOT_FIELDS) for formula in active):
+        # 「热门行业」读库就能算（不联网）：最近 N 天上过热门榜的行业
+        hot = lib.hot_industry_counts(db_path)
     if any(set(formula.fields) & set(lib.SNAPSHOT_FIELDS) for formula in active):
         extra, note = lib.snapshot_extra(cfg, lib.all_symbols(db_path))
         if note:
@@ -138,7 +142,7 @@ def run_enabled_formulas(
             logger.warning(note)
 
     try:
-        series_iter = fm.load_series(db_path, extra=extra)
+        series_iter = fm.load_series(db_path, extra=extra, hot_industries=hot)
         # ⚠️ `load_series` 是**生成器**：函数体要到第一次 `next()` 才执行，
         # 所以"库不存在"这类错误是在下面这个 for 里抛出来的 —— try 必须包住整个循环
         # （只在 `fm.load_series(...)` 那一行外面的 try 拦不住任何东西，实测踩过）。

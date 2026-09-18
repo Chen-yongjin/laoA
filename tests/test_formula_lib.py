@@ -852,3 +852,57 @@ def test_run_enabled_formulas_uses_snapshot_fields(
     # 候选挂在 `picks` 上，键是**合成策略名**（`公式·<公式名>`，与内置策略同一套写法）
     assert {pick["symbol"] for pick in run.picks["公式·市值适中"]} == {"600001"}
     assert run.status == {} and run.errors == []
+
+
+def test_preview_hits_uses_hot_industries(formula_db: str, formulas_cfg: Config,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """试算：`热门行业` 按**行业**查表填进去，条件真的生效（读库、不联网）。
+
+    夹具库里三只票都是"银行"，所以只要把"银行"算成热门，三条都该入选；
+    不算热门就一只都不选 —— 这样一次就把"字段通了没有"钉死了。
+    """
+    from laoa_trader import pool
+
+    monkeypatch.setattr(lib, "hot_industry_counts",
+                        lambda _db, **kw: {"银行": 2})
+    formula = fm.compile_formula("热门行业>=1")
+
+    hit = lib.preview_hits(formula, formula_db, cfg=formulas_cfg)
+    assert {h["symbol"] for h in hit["hits"]} == {"600001", "600002", "600003"}
+
+    monkeypatch.setattr(lib, "hot_industry_counts", lambda _db, **kw: {"煤炭": 3})
+    miss = lib.preview_hits(formula, formula_db, cfg=formulas_cfg)
+    assert miss["count"] == 0
+    # 顺带确认它走的是 `hot_industries` 那一套（不是自己另发明一个口径）
+    assert callable(pool.hot_industries)
+
+
+def test_hot_industry_counts_is_the_union_over_the_window(formula_db: str,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """"最近 3 天上榜的" = **按天各算一次再并集**，并记下上过几次。
+
+    用户 2026-09-18 定的口径（原话"最近3天上榜的"）：只看当天会把一天的脉冲当热门。
+    """
+    from laoa_trader import pool
+
+    days = {"2026-09-11": {"银行", "煤炭"}, "2026-09-10": {"银行"}, "2026-09-09": {"券商"}}
+
+    def fake_hot(_db, top=12, momentum_window=5, day=None):
+        return {name: {} for name in days.get(day, set())}
+
+    monkeypatch.setattr(pool, "hot_industries", fake_hot)
+    # 让"最近 N 个交易日"查到夹具库里的那三天
+    from laoa_trader.data import storage
+    with storage.connect(formula_db) as conn:
+        storage.write_limit_up_pool(conn, [
+            ("2026-09-09", "600001", "甲样本", 1, None, None, None, None, None, None,
+             None, None, None, None, None, None, None, None, 0, "test", "2026-09-09"),
+            ("2026-09-10", "600001", "甲样本", 1, None, None, None, None, None, None,
+             None, None, None, None, None, None, None, None, 0, "test", "2026-09-10"),
+            ("2026-09-11", "600001", "甲样本", 1, None, None, None, None, None, None,
+             None, None, None, None, None, None, None, None, 0, "test", "2026-09-11"),
+        ])
+
+    counts = lib.hot_industry_counts(formula_db, days=3)
+
+    assert counts == {"银行": 2, "煤炭": 1, "券商": 1}
