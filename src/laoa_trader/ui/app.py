@@ -6033,7 +6033,23 @@ if QT_AVAILABLE:
                 return message
             message = f"✅ 已保存 {len(updates)} 项（已写入 {path.name}）{extra}"
             self._set_settings_hint(message)
+            # 「策略选股」页里也有一行「竞价策略」（它开关的就是设置里那个
+            # `intraday_auction`）：这里是**所有保存路径的唯一出口**，所以顺手把那张表
+            # 刷一次 —— 两个界面管同一个键时，最忌讳"这边改了、那边还显示旧状态"，
+            # 而用户没法从任何一句提示里看出这一点。
+            self._reload_formula_list()
             return message
+
+        def _reload_formula_list(self) -> None:
+            """刷新「策略选股」的策略列表（失败只记日志：不该影响"设置已保存"这个事实）。"""
+            page = getattr(self, "formula_page", None)
+            reload_page = getattr(page, "reload", None)
+            if not callable(reload_page):
+                return
+            try:
+                reload_page()
+            except Exception:  # noqa: BLE001 - 列表刷新失败不影响设置已写盘
+                logger.debug("策略列表刷新失败", exc_info=True)
 
         def _set_settings_hint(self, text: str) -> None:
             """把保存结果回显在按钮下面（用户不必去翻运行状态那一行）。"""

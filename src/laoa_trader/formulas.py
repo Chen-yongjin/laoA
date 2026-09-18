@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -115,29 +116,82 @@ def bundled_formula_dir() -> Path | None:
     return root if root.is_dir() else None
 
 
-def _seed_samples(target: Path) -> None:
-    """用户目录为空时，把随包的示例公式复制进去（**只在空目录做一次**）。
+#: 「这条随包公式播过种了没有」的记录文件（放在**公式目录里**，点开头所以不会被当成公式）。
+#:
+#: 为什么需要它（2026-09-18 起随包公式要能**补齐**）：新版本多带一条随包公式时，
+#: 用户的目录里已经有自己存的公式了 —— 旧规则（"只在空目录复制"）会让那条新公式**永远不出现**；
+#: 而直接"缺哪条补哪条"又会让**用户删掉的那条**每次启动都长回来。
+#: 只有记下"播过哪些"，才分得清"还没给他"与"他不要"。
+SEED_STATE_NAME = ".laoa-seeded.json"
 
-    为什么需要：打包后示例公式在 `_internal/formulas`（解包目录，用户看不到、
+
+def _read_seed_state(target: Path) -> set[str]:
+    """读播种记录（读不出来就当没播过 —— 宁可多复制一份，也别让新公式不出现）。"""
+    try:
+        data = json.loads((target / SEED_STATE_NAME).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError) as exc:
+        logger.debug(f"读随包公式播种记录失败（当作没播过）：{exc}")
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {str(name) for name in data}
+
+
+def _write_seed_state(target: Path, seeded: set[str]) -> None:
+    """写播种记录。写不进去只记日志：最坏结果是"下次启动再查一遍文件在不在"。"""
+    try:
+        (target / SEED_STATE_NAME).write_text(
+            json.dumps(sorted(seeded), ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning(f"写随包公式播种记录失败（不影响使用）：{exc}")
+
+
+def _seed_samples(target: Path) -> None:
+    """把随包公式**逐条补齐**到用户目录（缺哪条补哪条，**绝不覆盖**已有的文件）。
+
+    三条规矩：
+
+    1. **同名文件已存在 → 不碰**（用户自己存的、或改过的，永远是他的）；
+    2. **播过种的记录里有、但目录里没了 → 也不补** —— 那多半是他**故意删的**，
+       每次都长回来会让人以为程序坏了（见 `SEED_STATE_NAME` 的注释）；
+    3. **新版本多带的公式**（记录里没有、目录里也没有）→ 复制进去，
+       所以"内置策略"能随版本补齐，不用用户去别处找公式文本。
+
+    为什么需要复制这一步：打包后随包公式在 `_internal/formulas`（解包目录，用户看不到、
     也不该往里写），而用户的公式放在 exe 同级的 `formulas/`。第一版不带这一步时，
     新用户打开界面看到的是一个**空列表**，连"载入示例"都没得载 —— 小白第一步就走不下去。
-    复制只在目标目录**一个公式文件都没有**时发生，绝不会覆盖用户自己存过的公式。
     """
     source = bundled_formula_dir()
     if source is None or source == target:
         return
-    if any(p.suffix.lower() in fm.FORMULA_SUFFIXES for p in target.iterdir()):
+    bundled = [
+        path for path in sorted(source.iterdir())
+        if path.is_file() and path.suffix.lower() in fm.FORMULA_SUFFIXES
+    ]
+    if not bundled:
         return
+    seeded = _read_seed_state(target)
     copied = 0
-    for path in sorted(source.iterdir()):
-        if path.is_file() and path.suffix.lower() in fm.FORMULA_SUFFIXES:
-            try:
-                shutil.copyfile(path, target / path.name)
-                copied += 1
-            except OSError as exc:      # 权限/只读盘：示例没到位不该影响启动
-                logger.warning(f"示例公式 {path.name} 复制失败：{exc}")
+    for path in bundled:
+        if path.name in seeded:
+            continue
+        if (target / path.name).exists():
+            # 用户已经有一份同名的：认下来（记进名单），以后他删了也不补
+            seeded.add(path.name)
+            continue
+        try:
+            shutil.copyfile(path, target / path.name)
+        except OSError as exc:      # 权限/只读盘：示例没到位不该影响启动
+            logger.warning(f"随包公式 {path.name} 复制失败：{exc}")
+            continue
+        seeded.add(path.name)
+        copied += 1
+    _write_seed_state(target, seeded)
     if copied:
-        logger.info(f"已把 {copied} 条示例公式放进 {target}")
+        logger.info(f"已把 {copied} 条随包公式放进 {target}")
 
 
 def formula_dir() -> Path:
@@ -150,7 +204,8 @@ def formula_dir() -> Path:
        备份、发给别人、用记事本改都最直观；
     3. **源码运行**：仓库根 `laoA/formulas/`（就是仓库里那份，随包分发的也是它）。
 
-    目录里没有公式文件时会把随包示例复制进来（见 `_seed_samples`）—— 只做一次。
+    随包公式会**逐条补齐**进来：缺哪条补哪条、同名的绝不覆盖、用户删掉的不再补
+    （见 `_seed_samples`）—— 所以"内置公式"这件事就是"仓库里那个 `formulas/` 目录"。
     """
     override = (os.environ.get(FORMULA_DIR_ENV) or "").strip()
     if override:

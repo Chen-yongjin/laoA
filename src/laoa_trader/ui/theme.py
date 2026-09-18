@@ -128,6 +128,13 @@ QPushButton {
     border: 1px solid $btn_border; border-radius: 4px;
     padding: 4px 12px; color: $text; min-height: 20px;
 }
+/* 「策略选股」右侧元素区（变量 / 函数 / 运算符 / 排除，四组 52 个按钮）要**小一圈**：
+   用户 2026-09-18 要求"把按键大小都缩小"。这条不能删 —— 上面那通用规则里的
+   `padding: 4px 12px; min-height: 20px` 会盖掉代码里的 setFixedHeight(22)，
+   实测按钮会被顶回 30px 高（只改 Python 不改这里，"缩小"只在没有样式表时生效）。 */
+QPushButton#paletteButton {
+    padding: 1px 4px; min-height: 0px; border-radius: 3px;
+}
 QPushButton:hover {
     background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                       stop:0 $btn_hover_top, stop:1 $btn_hover_bottom);

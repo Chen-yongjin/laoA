@@ -88,11 +88,13 @@ def test_formula_dir_source_run_is_repo_formulas(monkeypatch: pytest.MonkeyPatch
 
     assert folder == lib.repo_root() / "formulas"
     assert folder.is_dir()
-    # 仓库里那三条示例公式就在里面（"载入示例"靠它）
-    assert {spec.name for spec in lib.formula_files(folder)} >= {"放量上攻", "均线多头排列"}
+    # 仓库里那几条随包公式就在里面（"载入示例"靠它；`尾盘选股策略` 是 2026-09-18 内置的那条）
+    assert {spec.name for spec in lib.formula_files(folder)} >= {
+        "放量上攻", "均线多头排列", "尾盘选股策略",
+    }
 
 
-def test_formula_dir_frozen_uses_exe_sibling(tmp_path: Path, monkeypatch) -> None:
+def test_formula_dir_frozen_uses_exe_sibling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """打包后：公式目录在 **exe 同级**（用户双击 exe 就看得见、备份得到）。"""
     monkeypatch.delenv(lib.FORMULA_DIR_ENV, raising=False)
     exe = tmp_path / "dist" / "老A选股助手" / "老A选股助手.exe"
@@ -105,11 +107,11 @@ def test_formula_dir_frozen_uses_exe_sibling(tmp_path: Path, monkeypatch) -> Non
 
     assert folder == exe.parent / "formulas"
     assert folder.is_dir()          # 不存在就创建
-    # 空目录时会自动把随包示例复制进来（否则新用户打开是空列表，第一步就走不下去）
-    assert {spec.name for spec in lib.formula_files(folder)} >= {"放量上攻"}
+    # 空目录时会自动把随包公式复制进来（否则新用户打开是空列表，第一步就走不下去）
+    assert {spec.name for spec in lib.formula_files(folder)} >= {"放量上攻", "尾盘选股策略"}
 
 
-def test_formula_dir_env_override(tmp_path: Path, monkeypatch) -> None:
+def test_formula_dir_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """环境变量优先（换机器 / 放共享盘）。"""
     target = tmp_path / "我的公式"
     monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(target))
@@ -118,17 +120,46 @@ def test_formula_dir_env_override(tmp_path: Path, monkeypatch) -> None:
     assert target.is_dir()
 
 
-def test_formula_dir_does_not_overwrite_user_files(tmp_path: Path, monkeypatch) -> None:
-    """用户目录里已经有公式时，**绝不**再往里复制示例（不能覆盖用户的东西）。"""
+def test_formula_dir_does_not_overwrite_user_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """用户已经存过同名公式时**绝不覆盖**，但其它随包公式照样补齐。
+
+    2026-09-18 起这条规则从"只在空目录复制一次"改成"**缺哪条补哪条**"：
+    新版本多带的随包公式（例如内置的 `尾盘选股策略`）在**已经用过一段时间**的
+    用户目录里也必须出现 —— 否则"内置"就只对全新安装的人有效。
+    """
     target = tmp_path / "formulas"
     target.mkdir(parents=True)
-    mine = target / "我的.txt"
-    mine.write_text("# 名称: 我的\nC>MA(C,5)\n", encoding="utf-8")
+    mine = target / "放量上攻.txt"
+    mine.write_text("# 名称: 放量上攻\nC>MA(C,999)\n", encoding="utf-8")   # 用户自己改过的
     monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(target))
 
     lib.formula_dir()
 
-    assert [p.name for p in target.iterdir()] == ["我的.txt"]
+    # 用户的文件**一个字都没被动过**
+    assert mine.read_text(encoding="utf-8") == "# 名称: 放量上攻\nC>MA(C,999)\n"
+    # 其它随包公式补进来了（内置那几条）
+    names = {p.name for p in target.iterdir()}
+    assert "均线多头排列.tvf" in names and "尾盘选股策略.txt" in names
+
+
+def test_formula_dir_never_resurrects_a_deleted_bundled_formula(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """用户删掉的随包公式**不会**在下次启动时长回来（那是"他不要"，不是"他还没有"）。
+
+    判据就是那条记录（`.laoa-seeded.json`）：播过种的名字记在里面，
+    之后目录里没了也只当"用户删了"。否则每次开机都长回来，用户会以为程序坏了。
+    """
+    target = tmp_path / "formulas"
+    target.mkdir(parents=True)
+    monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(target))
+    lib.formula_dir()                      # 第一次：播种 + 记录
+    gone = target / "尾盘选股策略.txt"
+    assert gone.exists()
+
+    gone.unlink()                          # 用户删掉它
+    lib.formula_dir()                      # 再启动一次
+
+    assert not gone.exists(), "删掉的随包公式又长回来了"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -717,11 +748,18 @@ def test_build_strategy_rows_marks_builtin_and_formula_rows(formulas_cfg: Config
 
     rows = fp.build_strategy_rows(formulas_cfg, lib.formula_files(tmp_path), {})
 
-    assert [row.kind for row in rows] == [fp.ROW_BUILTIN] * 5 + [fp.ROW_FORMULA]
+    # 5 条内置策略 → 竞价策略那一行 → 你自己的公式（用户 2026-09-18 要求把竞价扫描做成策略）
+    assert [row.kind for row in rows] == (
+        [fp.ROW_BUILTIN] * 5 + [fp.ROW_AUCTION] + [fp.ROW_FORMULA]
+    )
     assert [row.key for row in rows][:5] == fp.builtin_order()
     builtin = rows[0]
     assert builtin.is_builtin and builtin.detail and "条件说明" in builtin.detail
     assert builtin.name == rules.strategy_label(builtin.key)
+    auction = rows[5]
+    assert auction.is_auction and auction.read_only and not auction.is_builtin
+    assert auction.name == fp.AUCTION_NAME and auction.enabled is False   # 默认关
+    assert "不参与选股" in auction.note_tip and "无法回测" in auction.note_tip
     formula = rows[-1]
     assert formula.key == "放量上攻" and formula.note == "站上5日线"
     assert formula.enabled is True                    # 勾了才为真（写回 enabled_formulas）

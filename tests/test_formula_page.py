@@ -59,6 +59,11 @@ from tests.conftest import workdays_ending  # noqa: E402
 #: 小库里的三只票：甲/丙 一路上涨、乙 一路下跌（命中集合是确定的）
 RISING = ("600001", "600003")
 
+#: 表格里**固定占掉的行数**：5 条内置策略 + 1 行「竞价策略」（2026-09-18 内置的
+#: 竞价扫描开关）。公式行从这一行之后开始 —— 用例里都写 `FIXED_ROWS` 而不是 5，
+#: 免得下次再加一行固定行时又要满文件改数字。
+FIXED_ROWS = 6
+
 
 def _seed_trend_db(db_path: Path) -> None:
     """3 只票 × 30 个交易日：甲/丙 每天 +1%、乙 每天 −1%。
@@ -341,6 +346,12 @@ def test_tab_inserts_spaces_and_keeps_focus(page) -> None:
 # ══════════════════════════════════════════════════════════════════════════
 
 
+def _font_size(widget) -> int:
+    """控件的字号（按点算；字体是按像素定义的时候取像素 —— 那时 pointSize() 是 -1）。"""
+    font = widget.font()
+    return font.pointSize() if font.pointSize() > 0 else font.pixelSize()
+
+
 def test_palette_covers_variables_functions_operators(page) -> None:
     tokens = set(page.palette_buttons)
     assert {"C", "O", "H", "L", "V", "AMO", "PRE", "INDUSTRY"} <= tokens
@@ -363,15 +374,69 @@ def test_every_palette_button_has_chinese_tooltip(page) -> None:
 
 
 def test_palette_is_two_columns_scrollable_and_fixed_width(page) -> None:
-    boxes = {box.title(): box for box in page.palette_panel.findChildren(QGroupBox)}
-    # 「排除」组是 2026-09-18 按要求加的（原来那三个 ST/北交所/科创 按钮"意思不明"）
-    assert set(boxes) == {"变量", "函数", "排除", "运算符"}
-    for title, box in boxes.items():
-        grid = box.layout()
-        assert grid.columnCount() == 2, f"{title} 组不是两列"
+    boxes = [box.title() for box in page.palette_panel.findChildren(QGroupBox)]
+    # 四组、且**顺序固定**：用户 2026-09-18 要求"把排除区放在最下面"
+    assert boxes == ["变量", "函数", "运算符", "排除"]
+    for box in page.palette_panel.findChildren(QGroupBox):
+        assert box.layout().columnCount() == 2, f"{box.title()} 组不是两列"
     # 函数多 → 必须能滚动；宽度固定 → 按钮文字不会被压扁
     assert page.palette_panel.findChild(QScrollArea) is not None
     assert page.palette_panel.width() == fp.PANEL_WIDTH
+
+
+def test_palette_buttons_are_small_and_labelled_in_chinese(page) -> None:
+    """按钮：**小一圈** + 字是**中文**（用户 2026-09-18 要求）。
+
+    原话是"把按键大小都缩小，按键字符都翻译成中文，可以快速上手"：
+    原来的按钮上写的是 `C` / `MA` / `AND` / `ST`，刚上手的人看不懂；
+    现在写「收盘价」「均线」「并且」，点下去插进编辑框的仍是引擎认的语法。
+    两件事都必须同时成立 —— **中文按钮 + 语法看不出来** = 用户永远学不会写公式，
+    所以下面同时钉住"按钮是中文"与"tooltip 里写着插入的是什么语法"。
+    """
+    for token, button in page.palette_buttons.items():
+        label = button.text()
+        assert any("\u4e00" <= ch <= "\u9fff" for ch in label), (
+            f"{token} 的按钮文字还是英文/符号（{label!r}）"
+        )
+        # 语法没丢：tooltip 第一步就写着"插入 XX"
+        assert token in button.toolTip(), f"{token} 的 tooltip 里找不到插入的语法"
+        # 尺寸：比默认小一圈（高度受主题 QSS 影响，所以同时钉住"最高"和"实际"两个值）。
+        # 为什么必须看实际高度：主题里 `QPushButton { padding: 4px 12px; min-height: 20px }`
+        # 一度把 setFixedHeight(22) 顶回 30px（实测）—— 只看 maximumHeight() 会漏掉这个 bug。
+        assert button.maximumHeight() == fp.BUTTON_HEIGHT
+        assert button.height() <= fp.BUTTON_HEIGHT, f"{token} 还是默认高度（QSS 没让路？）"
+        assert _font_size(button) < _font_size(page)
+    # 抽查几个最容易"翻了但翻错"的
+    assert page.palette_buttons["C"].text() == "收盘价"
+    assert page.palette_buttons["V"].text() == "成交量"
+    assert page.palette_buttons["MA"].text() == "均线"
+    assert page.palette_buttons["CROSS"].text() == "上穿"
+    assert page.palette_buttons["AND"].text() == "并且"
+    assert page.palette_buttons[">="].text() == "大于等于"
+
+
+def test_chinese_button_still_inserts_the_engine_syntax(page) -> None:
+    """点「成交量」插进去的是 `V`（不是"成交量"三个字）—— 这是最容易翻错的一处。
+
+    每条给三样：(按钮上的字, 点完编辑框里应该是什么, 用这个语法补成的完整公式能编译)。
+    函数那条点完是 `MA()` 骨架（光标在括号里），所以断言的是骨架形状。
+    """
+    _open_editor(page)
+    cases = (
+        ("V", "成交量", "V", "X:=V\nC>MA(C,5)"),
+        ("PRE", "昨收价", "PRE", "C>PRE*1.05"),
+        ("MA", "均线", "MA()", "C>MA(C,5)"),          # 骨架：括号是空的，光标在里面
+        ("AND", "并且", "AND ", "C>MA(C,5) AND V>MA(V,5)"),
+        ("ST=0", "非 ST", "ST=0", "C>MA(C,5) AND ST=0"),
+    )
+    for token, label, expect_text, full in cases:
+        page.editor.setPlainText("")
+        _click(page, token)
+        assert page.palette_buttons[token].text() == label
+        assert page.editor.toPlainText() == expect_text, f"点【{label}】插入的不对"
+        assert label not in page.editor.toPlainText(), "把中文插进公式了"
+        # 插进去的语法是引擎认的：补成一个完整公式，必须能编译
+        fm.compile_formula(full)
 
 
 def test_exclude_palette_buttons_say_non_and_insert_flag_zero(page) -> None:
@@ -948,9 +1013,9 @@ def test_save_sanitizes_name_and_reads_back(page) -> None:
     assert [spec.name for spec in specs] == ["5日线_放量"]
     assert specs[0].ok
     assert specs[0].source.strip() == "M5:=MA(C,5)\nC>M5"
-    # 列表里立刻出现（内置 5 条常驻在前，公式追加在后）
-    assert page.table.rowCount() == 5 + 1
-    assert page.table.item(5, 0).text() == "5日线_放量"
+    # 列表里立刻出现（内置 5 条 + 竞价策略常驻在前，公式追加在后）
+    assert page.table.rowCount() == FIXED_ROWS + 1
+    assert page.table.item(FIXED_ROWS, 0).text() == "5日线_放量"
     # 2026-09-18 用户要求「成功不需要提示，失败再提示」：保存成功时提示区是空的
     # （列表里多出来的那一行本身就是反馈）
     assert page.hint_text == ""
@@ -1011,9 +1076,9 @@ def test_delete_removes_file_after_confirm(page, monkeypatch: pytest.MonkeyPatch
     page.btn_delete.click()
 
     assert lib.formula_files(page.directory) == []
-    # 内置 5 条常驻（它们**不可删**），被删掉的那条公式行没了
-    assert page.table.rowCount() == 5
-    assert all(page.table.item(row, 0).text() != "要删的" for row in range(5))
+    # 5 条内置策略 + 竞价策略常驻（它们**不可删**），被删掉的那条公式行没了
+    assert page.table.rowCount() == FIXED_ROWS
+    assert all(page.table.item(row, 0).text() != "要删的" for row in range(FIXED_ROWS))
     assert page.editor.toPlainText() == ""
     assert "已删除" in page.hint_text
 
@@ -1065,14 +1130,15 @@ def test_list_columns_are_exactly_name_note_state(page) -> None:
 
 
 def test_builtin_rows_come_first_and_show_real_evidence(page) -> None:
-    """内置 5 条常驻在前，备注列写的是**代码里已有的证据字段**（界面不编数字）。"""
-    assert page.table.rowCount() == 5
-    assert [row.key for row in page.rows] == fp.builtin_order() == [
+    """内置 5 条常驻在前（紧随其后是「竞价策略」那一行），备注列写的是代码里已有的证据。"""
+    assert page.table.rowCount() == FIXED_ROWS
+    assert [row.key for row in page.rows] == fp.builtin_order() + [fp.AUCTION_KEY] == [
         "LadderPullbackStrategy", "ReversalStrategy", "DryUpExpansionStrategy",
-        "FirstLimitUpStrategy", "LowPriceStrategy",
+        "FirstLimitUpStrategy", "LowPriceStrategy", fp.AUCTION_KEY,
     ]
     assert [row.name for row in page.rows] == [
         "连板回踩低吸", "短期反转", "地量后放量变盘", "首板缩量整理", "低价股",
+        fp.AUCTION_NAME,
     ]
 
     notes = _notes(page)
@@ -1092,7 +1158,10 @@ def test_builtin_rows_come_first_and_show_real_evidence(page) -> None:
     # 两套口径都为正的那条：evidence 字段的语义 + **组**的实测区间（标明是组数字）
     assert notes["短期反转"] == "两套口径都为正 · 组实测 " + short.note.split("：", 1)[1]
     # 数字只能来自上面这些字段：备注里出现的每个数字，都能在源字段里找到
+    # （「竞价策略」那一行的数字来自 config 的竞价参数，不在这份源字段里，单独跳过）
     for name, note in notes.items():
+        if name == fp.AUCTION_NAME:
+            continue
         spec = fp.rules_mod.STRATEGIES[[
             row.key for row in page.rows if row.name == name][0]]
         source = " ".join([
@@ -1129,9 +1198,9 @@ def test_formula_rows_are_appended_after_builtins_with_file_note(page) -> None:
     _write_formula(page.directory, "放量上攻", "C>MA(C,5)", "站上5日线且放量")
     page.reload()
 
-    assert page.table.rowCount() == 5 + 1
-    assert page.table.item(5, 0).text() == "放量上攻"
-    assert page.table.item(5, 1).text() == "站上5日线且放量"
+    assert page.table.rowCount() == FIXED_ROWS + 1
+    assert page.table.item(FIXED_ROWS, 0).text() == "放量上攻"
+    assert page.table.item(FIXED_ROWS, 1).text() == "站上5日线且放量"
 
 
 def test_list_marks_broken_formula_with_reason(page) -> None:
@@ -1141,7 +1210,7 @@ def test_list_marks_broken_formula_with_reason(page) -> None:
 
     page.reload()
 
-    assert page.table.rowCount() == 5 + 2
+    assert page.table.rowCount() == FIXED_ROWS + 2
     notes = _notes(page)
     assert notes["好公式"] == "没问题的"
     assert "⛔ 语法错" in notes["坏公式"]
@@ -1163,8 +1232,9 @@ def test_list_shows_runtime_error_from_last_run(page, monkeypatch) -> None:
 
     page.reload()
 
-    assert page.table.item(5, 1).text().startswith("⚠️ 运行时出错")
-    assert "涨停池" in page.table.item(5, 1).toolTip()
+    row = _row_index(page, "用连板的")
+    assert page.table.item(row, 1).text().startswith("⚠️ 运行时出错")
+    assert "涨停池" in page.table.item(row, 1).toolTip()
 
 
 def test_clicking_builtin_row_opens_readonly_detail(page, qapp) -> None:
@@ -1420,7 +1490,7 @@ def test_row_menu_for_formula_offers_toggle_and_delete(page, monkeypatch) -> Non
 
     assert lib.formula_files(page.directory) == []
     assert "已删除" in page.hint_text
-    assert page.table.rowCount() == 5                      # 只剩内置那 5 条
+    assert page.table.rowCount() == FIXED_ROWS             # 只剩固定的那几行
 
 
 def test_row_menu_delete_can_be_cancelled(page, monkeypatch) -> None:
@@ -1449,7 +1519,7 @@ def test_row_menu_on_builtin_cannot_delete(page, page_cfg) -> None:
     before = page_cfg.source_path.read_text(encoding="utf-8")
     picked.delete.trigger()                    # 置灰动作触发是空操作
     assert page_cfg.source_path.read_text(encoding="utf-8") == before
-    assert len(page.rows) == 5                 # 内置策略还在列表里
+    assert len(page.rows) == FIXED_ROWS        # 内置策略（与竞价那一行）还在列表里
 
 
 def test_row_menu_toggle_matches_and_updates_the_row_state(page, page_cfg, qapp) -> None:
@@ -1472,6 +1542,89 @@ def test_row_menu_toggle_matches_and_updates_the_row_state(page, page_cfg, qapp)
     assert page._builtin_boxes["LowPriceStrategy"].isChecked() is False
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 9.5) 「竞价策略」那一行（用户 2026-09-18："不是公式，是把「竞价扫描」做成策略"）
+#
+# 它排在 5 条内置策略之后、公式之前；勾它开关的是**盘中竞价扫描**（`intraday_auction`），
+# 而**不是**"参与选股" —— 这几条用例里最要紧的就是把这条界线钉死：
+# 勾完以后 `enabled_groups` / `enabled_strategies` / `enabled_formulas` 一个都不许变。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_auction_row_sits_between_builtins_and_formulas(page) -> None:
+    """位置：5 条内置之后、公式之前；备注列写的是**现读配置**的口径。"""
+    _write_formula(page.directory, "我的公式", "C>MA(C,5)")
+    page.reload()
+
+    names = [page.table.item(row, 0).text() for row in range(page.table.rowCount())]
+    assert names[:5] == ["连板回踩低吸", "短期反转", "地量后放量变盘", "首板缩量整理", "低价股"]
+    assert names[5] == fp.AUCTION_NAME
+    assert names[6] == "我的公式"
+    # 备注列的数字来自 config（不是界面编的）：改一个数，备注跟着变
+    note = page.table.item(5, 1).text()
+    assert "涨幅 2.0~9.0%" in note and "只做提示，不参与选股" in note
+    page.cfg.auction_min_pct = 5.0
+    page.reload()
+    assert "涨幅 5.0~9.0%" in page.table.item(5, 1).text()
+
+
+def test_auction_row_toggle_writes_intraday_auction_only(page, page_cfg, qapp) -> None:
+    """勾上它 → 只写 `intraday_auction`；**选股那三个键一个字都不动**。"""
+    groups_before = list(page_cfg.enabled_groups)
+    strategies_before = list(page_cfg.enabled_strategies)
+    formulas_before = list(page_cfg.enabled_formulas)
+
+    page._auction_box.setChecked(True)
+    qapp.processEvents()
+
+    assert page_cfg.intraday_auction is True
+    assert page_cfg.enabled_groups == groups_before          # 不参与选股 = 这三个键不变
+    assert page_cfg.enabled_strategies == strategies_before
+    assert page_cfg.enabled_formulas == formulas_before
+    assert "竞价策略已开启" in page.hint_text
+    assert "不参与选股" in page.hint_text
+    # 写进 config.toml 的就是那个键
+    assert "intraday_auction" in page_cfg.source_path.read_text(encoding="utf-8")
+
+    page._auction_box.setChecked(False)
+    qapp.processEvents()
+    assert page_cfg.intraday_auction is False
+    assert "竞价策略已关闭" in page.hint_text
+
+
+def test_auction_row_checkbox_follows_config(page, page_cfg) -> None:
+    """「状态」列反映 `intraday_auction`（设置页改过也一样看得到）。"""
+    assert page._auction_box.isChecked() is False
+    page_cfg.intraday_auction = True
+    page.reload()
+    assert page._auction_box.isChecked() is True
+    assert page.row_of(fp.AUCTION_KEY).enabled is True
+
+
+def test_clicking_auction_row_opens_readonly_detail_not_editor(page, qapp) -> None:
+    """单击它 → 只读详情（口径 + 两条硬限制），**绝不**把编辑器顶出来。"""
+    page.on_open_editor()
+    page.editor.setPlainText("C>MA(C,5)")          # 用户正在写的草稿
+
+    page.select_row(fp.AUCTION_KEY)
+
+    assert page.bottom_stack.currentWidget() is page.detail_page
+    assert "竞价扫描开关" in page.detail_title.text()
+    assert "无法回测" in page.detail_text and "不参与选股" in page.detail_text
+    assert page.editor.toPlainText() == "C>MA(C,5)"      # 草稿没被动过
+    assert "不是选股策略" in page.hint_text
+
+
+def test_auction_row_menu_cannot_delete_and_says_why(page) -> None:
+    """右键菜单：开关的文案说的是"竞价扫描"，删除项置灰并写明理由。"""
+    picked = page.row_menu(page.row_of(fp.AUCTION_KEY))
+    assert picked.toggle.text() == "启用"
+    assert "竞价扫描" in picked.toggle.toolTip()
+    assert picked.delete.text() == fp.MENU_DELETE_AUCTION == "删除（竞价策略是内置设置，不可删）"
+    assert picked.delete.isEnabled() is False
+    assert "系统设置" in picked.delete.toolTip()
+
+
 def test_right_click_wires_to_show_menu_for_the_clicked_row(page, qapp, monkeypatch) -> None:
     """右键某一行 → 弹的是**那一行**的菜单（顺带钉住：右键**不展开**编辑器）。"""
     _write_formula(page.directory, "放量上攻", "C>MA(C,5)")
@@ -1480,7 +1633,7 @@ def test_right_click_wires_to_show_menu_for_the_clicked_row(page, qapp, monkeypa
     monkeypatch.setattr(page, "_show_menu",
                         lambda menu, pos: captured.append(menu))
     page.table.customContextMenuRequested.emit(
-        page.table.visualItemRect(page.table.item(5, 0)).center()
+        page.table.visualItemRect(page.table.item(FIXED_ROWS, 0)).center()
     )
 
     assert len(captured) == 1
@@ -1654,7 +1807,7 @@ def test_note_is_written_into_the_file_comment_header(page) -> None:
     text = (page.directory / "放量上攻.txt").read_text(encoding="utf-8")
     assert "# 说明: 站上5日线并且放量" in text
     assert lib.formula_files(page.directory)[0].description == "站上5日线并且放量"
-    assert page.table.item(5, 1).text() == "站上5日线并且放量"       # 列表备注列
+    assert page.table.item(FIXED_ROWS, 1).text() == "站上5日线并且放量"    # 列表备注列
     # 重新载入界面 → 备注从文件读回（两处不会各说各话）
     page.note_edit.clear()
     page.table.clearSelection()          # 同一行再点一次不会触发"选中变化"（Qt 语义）
