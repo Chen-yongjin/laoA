@@ -169,6 +169,9 @@ FIELD_ALIASES: dict[str, str] = {
     "PRE_CLOSE": "PRE_CLOSE",
     "DATE": "DATE",
     "INDUSTRY": "INDUSTRY",
+    # 快照字段**不设英文别名**（只有中文名，见 `EXTRA_FIELDS`）：别名会占住那个名字，
+    # 用户再写 `LTSZ:=流通市值` 就会被拒（"变量名与内置字段同名"）—— 一个平白无故的坑。
+    # 中文名与 `量比` / `连板` / `涨停天数` 一致，而且编辑器右边的面板点一下就插入。
 }
 
 #: 规范字段名 → 静态类型（num = 数值序列，str = 字符串）
@@ -184,20 +187,69 @@ FIELD_KINDS: dict[str, str] = {
     "INDUSTRY": "str",
 }
 
-#: 扩展字段注册表 —— **竞价字段的扩展点**。
+#: 扩展字段注册表（规范名 → 静态类型）。
 #:
-#: 竞价数据默认关闭、且只有 9:25 才有值（见 `config.example.toml` 的竞价开关），
-#: 所以本轮**不实现**任何竞价字段。等竞价功能要接进公式时：
-#:   1. 在这里登记 `"JJL": "num"`（规范名 → 静态类型）；
-#:   2. 由调用方在 `Series.extra` 里塞进同名数组（长度 = 序列长度）。
-#: 解析器与求值器都只认这里登记过的名字，**不需要改本模块的其它任何一行**。
-EXTRA_FIELDS: dict[str, str] = {}
+#: 登记之后，解析器与求值器就认这个名字，取值走 `Series.extra`（同名字的一维数组）。
+#: 目前有两类：
+#:
+#: 1. **快照字段**（只有"今天"这一个值，由调用方从实时快照塞进来）：
+#:    `流通市值`（亿元）、`换手率`（%）—— 它们是用户点名要的两个选股条件，
+#:    而日线里没有这两个数（同花顺的快照端点也不返回，见 `data/sources.py` 的
+#:    `SUPPLEMENT_FIELDS`）。写法：把"今天"的值放在数组**最后一个位置**、
+#:    其余填 NaN —— 于是 `流通市值>=10` 只在最后一根 K 线上成立，
+#:    与"只看最后一根选股"的口径天然一致；取不到快照时整条都是 NaN，
+#:    条件不成立（**宁可不出信号，也不拿旧值凑**）。
+#: 2. **排除类标记**（0/1，**不需要联网**）：`ST`、`科创`、`北交所` ——
+#:    它们完全由代码与名称推出来，在 `Series.__post_init__` 里自动补齐，
+#:    所以任何入口（试算 / 选股 / 成绩单）都直接可用。
+#:    用户写法：`ST=0 AND 科创=0 AND 北交所=0`（= 排除这三类，
+#:    正是用户那条策略里的"排除ST 排除科创 排除北交所"）。
+EXTRA_FIELDS: dict[str, str] = {
+    "流通市值": "num",
+    "换手率": "num",
+    "ST": "num",
+    "科创": "num",
+    "北交所": "num",
+}
+
+#: 排除类标记的规范名（自动补齐用；顺序即"用户最可能一起写"的顺序）
+FLAG_FIELDS: tuple[str, ...] = ("ST", "科创", "北交所")
 
 _NUM = "num"
 _BOOL = "bool"
 _STR = "str"
 
 _KIND_LABEL = {_NUM: "数值", _BOOL: "条件（0/1）", _STR: "字符串"}
+
+
+def is_st_name(name: Any) -> bool:
+    """名称里带 `ST` 就算（`*ST` / `ST` / `SST` / `S佳通` 里的 `S` 不算）。
+
+    A 股的风险警示股名称一定含 `ST`（`*ST` 也含），所以按名称判既准又不用额外数据；
+    名称取自本地 `stock_basic`（选股流程本来就在读它）。
+    """
+    return "ST" in str(name or "").upper()
+
+
+def is_star_market(symbol: Any) -> bool:
+    """是不是**科创板**（`688` / `689` 开头）。
+
+    为什么单列一个"科创"标记、而不跟创业板合并：用户要的是"排除科创"，
+    而科创板的涨跌停是 20%、门槛与创业板也不同 —— 混在一起会让"排除科创"
+    顺带把创业板也排掉（那不是他要的）。
+    """
+    code = str(symbol or "").strip()
+    return code.startswith(("688", "689"))
+
+
+def is_bse(symbol: Any) -> bool:
+    """是不是**北交所**（`4` / `8` / `92` 号段）。
+
+    号段依据（与 `data/public_sync.board_of` 同一套规则，实测 2026-09-17 全市场
+    5564 只反推验证过）：北交所是 `43/83/87/88`（旧号段）与 `920`（新号段）。
+    """
+    code = str(symbol or "").strip()
+    return code.startswith(("92", "8", "4"))
 
 
 def _all_fields() -> dict[str, str]:
@@ -1700,6 +1752,13 @@ def _validate_series(series: Series) -> int:
                 f"{series.symbol} 的 {name} 有 {arr.shape[0]} 个值，"
                 f"但日期有 {n} 个 —— 序列长度必须一致"
             )
+    for name, values in series.extra.items():
+        arr = np.asarray(values, dtype="float64")
+        if arr.ndim != 1 or arr.shape[0] != n:
+            raise FormulaDataError(
+                f"{series.symbol} 的扩展字段 {name} 必须是长度 {n} 的一维序列，"
+                f"现在是 {arr.shape}"
+            )
     return n
 
 
@@ -1814,6 +1873,15 @@ class _Evaluator:
             extra = self.series.extra.get(node.name)
             if extra is not None:
                 return np.asarray(extra, dtype="float64")
+            if node.name in EXTRA_FIELDS:
+                # 注册过的扩展字段**在这只票上没有值**（典型：`流通市值`/`换手率`
+                # 只有实时快照才给，而这只票今天没取到）→ 返回**全 NaN**：
+                # 用到它的条件不成立（不出信号），而不是报错。
+                # 为什么不是报错：字段名写错在**编译期**就被拦住了（名字没注册就过不了），
+                # 能走到这里的"缺值"只可能是一只票的**数据**问题 —— 全市场几千只票
+                # 各自报一次错，会把试算的结论刷成一片"本地数据里没有字段…"，
+                # 而真正的答案只是"它们今天不满足条件"。
+                return np.full(self.n, np.nan, dtype="float64")
         raise FormulaDataError(
             f"本地数据里没有字段 {node.name} 的数据（{self.series.symbol}）"
         )
@@ -1908,14 +1976,27 @@ class Series:
             setattr(self, name, arr)
         if not isinstance(self.extra, dict):
             raise FormulaDataError("Series.extra 必须是 规范字段名 → 一维数组 的字典")
+        # 「排除 ST / 科创板 / 北交所」这三个标记**不用调用方准备**：它们完全由
+        # `symbol` 与 `name` 推出来（这两个本来就在 Series 上），所以在这里补齐 ——
+        # 任何入口（试算 / 选股 / 成绩单）都直接可用，而且**不需要联网**。
+        # 之所以做成"自动补齐"而不是"让调用方塞"：漏塞一次，用户写好的
+        # `ST=0` 就会报"本地数据里没有字段 ST 的数据"——那是最莫名其妙的失败方式。
+        n = len(self.date)
+        for field_name, flag in zip(
+            FLAG_FIELDS, (is_st_name(self.name), is_star_market(self.symbol),
+                          is_bse(self.symbol)), strict=True
+        ):
+            if field_name not in self.extra:
+                self.extra[field_name] = np.full(n, 1.0 if flag else 0.0)
 
 
 def load_series(
     db_path: str | Path,
     symbols: Sequence[str] | None = None,
     start: str | None = None,
+    extra: dict[str, dict[str, float]] | None = None,
 ) -> Iterator[Series]:
-    """从本地库逐只产出 `Series`（**只读、不联网**）。
+    """从本地库逐只产出 `Series`（**只读、不联网**；扩展字段由调用方给）。
 
     只读三处：`stock_daily_hfq`（后复权视图）、`stock_basic`（名称/行业）、
     `limit_up_pool`（涨停与连板）。**一个字都不写库**。
@@ -1928,6 +2009,10 @@ def load_series(
         db_path: 本地 SQLite 路径。
         symbols: 只取这些代码；None = 库里全部（按代码升序）。
         start: 只要 >= 该日期（"2020-01-01"）的数据。
+        extra: `{代码: {扩展字段: 值}}` —— 目前用于 `流通市值` / `换手率`
+            （它们只有"今天"这一个值，见 `EXTRA_FIELDS`）。这里只把"某一个数"
+            铺成一条序列：**最后一个位置**是今天、其余是 NaN。
+            `ST` / `科创` / `北交所` 三个标记不用给（`Series` 自己会补齐）。
 
     Yields:
         Series（时间升序）。没有数据的代码会被跳过。
@@ -1992,10 +2077,26 @@ def load_series(
                 # 后复权口径下"昨收"就是昨日的后复权收盘价，直接平移一根即可
                 pre_close[1:] = close[:-1]
 
+            # 扩展字段：把"只有今天这一个数"的值铺成一条序列（末尾是今天、前面 NaN）。
+            # 为什么这样铺：公式只看**最后一根** K 线选股，所以末尾那个值就是答案；
+            # 前面填 NaN 而不是"用今天的值倒推"，是为了让"历史上根本没有这个数"
+            # 这件事在序列里如实体现 —— 谁写了 `MA(流通市值,5)` 就会得到全 NaN
+            # （不产生信号），而不是一条看起来很合理的假均线。
+            fields = (extra or {}).get(symbol) or {}
+            series_extra = {
+                key: np.concatenate([
+                    np.full(len(dates) - 1, np.nan, dtype="float64"),
+                    np.array([float(value)], dtype="float64"),
+                ])
+                for key, value in fields.items()
+                if value is not None
+            }
+
             yield Series(
                 symbol=symbol,
                 name=name,
                 industry=industry,
+                extra=series_extra,
                 date=dates,
                 close=close,
                 open=np.array([_num_or_nan(r[1]) for r in rows], dtype="float64"),

@@ -1608,7 +1608,8 @@ def test_saving_a_broken_formula_saves_it_as_a_draft(page, page_cfg, qapp) -> No
     勾选框是灰的、鼠标停上去能看到引擎给的中文原因（例如 `流通市值` 现在还不存在）。
     """
     page.name_edit.setText("六条件版")
-    page.editor.setPlainText("流通市值>=10 AND C>=3")
+    # 用一个**真的写错**的字段名（`流通市值` 现在已经是合法字段了，不再是错误例子）
+    page.editor.setPlainText("流通市值X>=10 AND C>=3")
 
     page.btn_save.click()
     qapp.processEvents()
@@ -1620,7 +1621,7 @@ def test_saving_a_broken_formula_saves_it_as_a_draft(page, page_cfg, qapp) -> No
     assert page_cfg.enabled_formulas == []
     # "存下去了但跑不了"算**有问题**，要说一句（不然用户看着那把灰勾不知道原因）——
     # 这句话里带着引擎给的中文原因与行列号
-    assert "公式有错" in page.hint_text and "流通市值" in page.hint_text
+    assert "公式有错" in page.hint_text and "流通市值X" in page.hint_text
 
 
 def test_save_failure_shows_the_formula_dir(
@@ -1649,3 +1650,36 @@ def test_save_failure_shows_the_formula_dir(
     assert "没存上" in page.hint_text
     assert str(page.directory) in page.hint_text            # 路径要写出来（去哪个目录找）
     assert any("没存上" in t for t in toasts), f"失败必须弹 toast（不然看不见提示区）：{toasts}"
+
+
+def test_syntax_error_is_announced_outside_the_hint_area(page, qapp) -> None:
+    """语法错误必须**弹到标题区的运行状态**（不只是写在页面最下面的提示区）。
+
+    用户 2026-09-18 实报："可以再测试的时候给个提示啊 公式有语法错误" ——
+    其实【试算】/【校验】本来就把中文原因写进提示区了，但**提示区在整个页面最下面**
+    （窗口小、或用户正看着上面那半屏时，那句话等于没写）。所以编译失败时**同时**
+    调一次 `_toast`（主窗口把它显示在标题区的运行状态里，那里永远看得见）。
+    这条用例把"两条路都要弹"钉住。
+    """
+    toasts: list[str] = []
+    page.status_cb = toasts.append
+    page.editor.setPlainText("流通市值X>=10 AND C>=3")    # 写错的字段名（会编译失败）
+
+    # ①【试算】这条路
+    page.on_preview()
+    qapp.processEvents()
+    assert "流通市值X" in page.hint_text, "提示区里要有中文原因"
+    assert any("流通市值X" in t for t in toasts), f"试算时也要弹出来：{toasts}"
+
+    # ②【校验】这条路
+    toasts.clear()
+    page.on_validate()
+    qapp.processEvents()
+    assert any("流通市值X" in t for t in toasts), f"校验时也要弹出来：{toasts}"
+
+    # ③ 正常公式**不该弹**（成功不打扰）
+    toasts.clear()
+    page.editor.setPlainText("C>=3 AND C<=50")
+    page.on_validate()
+    qapp.processEvents()
+    assert toasts == []

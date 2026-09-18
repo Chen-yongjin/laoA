@@ -904,17 +904,21 @@ def test_formula_is_reusable_across_series_and_threadsafe() -> None:
 
 
 def test_extra_fields_extension_point(monkeypatch: pytest.MonkeyPatch) -> None:
-    """竞价字段的扩展点：登记名字 + 在 Series.extra 里塞数组即可用（本轮不实现竞价）。"""
+    """扩展点仍然成立：登记名字 + 在 `Series.extra` 里塞数组即可用。
+
+    （2026-09-18 起这个扩展点真派上用场了：`流通市值`/`换手率`/`ST`/`科创`/`北交所`
+    就是登记在这里的，见 `test_snapshot_fields_*` 与 `test_flag_fields_*`。）
+    """
     monkeypatch.setitem(fm.EXTRA_FIELDS, "JJL", "num")
     s = make_series([1.0, 2.0, 3.0])
     s.extra["JJL"] = np.array([0.0, 5.0, 0.0])
     f = fm.compile_formula("JJL>1")
     assert f.fields == ("JJL",)
     assert f.eval(s).tolist() == [False, True, False]
-    # 没有数据时必须给"本地数据里没有该字段"的中文错误，而不是 KeyError
-    with pytest.raises(fm.FormulaDataError) as excinfo:
-        f.eval(make_series([1.0, 2.0, 3.0]))
-    assert "JJL" in str(excinfo.value)
+    # 注册过、但这只票**没有值** → 全 NaN（条件不成立），**不报错**：
+    # 字段名写错在编译期就拦住了，能走到这里的"缺值"只可能是某只票的数据问题，
+    # 全市场几千只票各自报一次错会把结论刷成一片"本地数据里没有字段…"。
+    assert f.eval(make_series([1.0, 2.0, 3.0])).tolist() == [False, False, False]
 
 
 def test_unknown_field_still_rejected_without_registration() -> None:
@@ -1194,3 +1198,103 @@ def test_compile_is_fast_enough_for_live_validation() -> None:
     per_call_ms = (time.perf_counter() - start) / 50 * 1000
     print(f"编译一条 18 行公式：{per_call_ms:.2f}ms")
     assert per_call_ms < 20.0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 五、快照字段与排除标记（2026-09-18 用户点名要的两件事）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _series_with(symbol: str = "600000", name: str = "浦发银行", *, days: int = 3,
+                 price: float = 10.0, **extra_fields: float) -> fm.Series:
+    """造一条序列（可选把快照字段塞在**最后一根**上，与 `load_series` 的铺法一致）。"""
+    extra = {
+        key: np.concatenate([np.full(days - 1, np.nan), np.array([float(value)])])
+        for key, value in extra_fields.items()
+    }
+    return fm.Series(
+        symbol=symbol, name=name, industry="银行",
+        date=[f"2026-09-0{i + 1}" for i in range(days)],
+        close=np.full(days, price), open=np.full(days, price),
+        high=np.full(days, price), low=np.full(days, price),
+        vol=np.full(days, 100.0), amount=np.full(days, 1_000_000.0),
+        pre_close=np.full(days, price), limit_up_days=np.zeros(days),
+        limit_up_cnt=np.zeros(days), extra=extra,
+    )
+
+
+def test_snapshot_fields_are_registered_and_usable() -> None:
+    """`流通市值` / `换手率` 是注册字段，能编译、能比较（单位：亿 / %）。"""
+    f = fm.compile_formula("流通市值>=10 AND 流通市值<=300 AND 换手率>5")
+    assert set(f.fields) == {"流通市值", "换手率"}
+    assert bool(f.eval(_series_with(流通市值=50.0, 换手率=8.0))[-1]) is True
+    assert bool(f.eval(_series_with(流通市值=5.0, 换手率=8.0))[-1]) is False
+
+
+def test_snapshot_field_without_data_yields_no_signal() -> None:
+    """拿不到快照（这只票没有值）→ **条件不成立**，既不报错也不出信号。
+
+    为什么必须是"不成立"而不是"报错"：`流通市值`/`换手率` 只有实时快照才给，
+    全市场总有一些票取不到；各自报一次错会把试算结论刷成一片错误信息，
+    而真正的答案只是"它们今天不满足条件"。
+    """
+    f = fm.compile_formula("流通市值>=10")
+    assert f.eval(_series_with())[-1] == False  # noqa: E712 - numpy bool 显式比较
+
+
+def test_snapshot_field_is_only_known_on_the_last_bar() -> None:
+    """这两个数**只有今天这一个值**：前面几根是 NaN，所以 `MA(流通市值,5)` 出不了信号。
+
+    这条钉的是"不许拿今天的值倒推历史"—— 那会造出一条看起来很合理的假均线。
+    """
+    series = _series_with(days=6, 流通市值=50.0)
+    f = fm.compile_formula("MA(流通市值,5)>10")
+    assert not bool(f.eval(series)[-1])
+
+
+def test_flag_fields_are_filled_automatically() -> None:
+    """`ST` / `科创` / `北交所` **不用调用方准备**：由代码与名称自动补齐（不联网）。
+
+    漏塞一次就会让用户写好的 `ST=0` 报"本地数据里没有字段 ST 的数据"——
+    那是最莫名其妙的失败方式，所以在 `Series.__post_init__` 里就补上了。
+    """
+    assert _series_with("600519", "贵州茅台").extra["ST"][-1] == 0.0
+    assert _series_with("600004", "*ST某某").extra["ST"][-1] == 1.0
+    assert _series_with("688111", "金山办公").extra["科创"][-1] == 1.0
+    assert _series_with("300750", "宁德时代").extra["科创"][-1] == 0.0   # 创业板不是科创
+    assert _series_with("920000", "安徽凤凰").extra["北交所"][-1] == 1.0
+    assert _series_with("430047", "诺思兰德").extra["北交所"][-1] == 1.0
+    assert _series_with("600519", "贵州茅台").extra["北交所"][-1] == 0.0
+
+
+def test_exclude_conditions_work_as_users_write_them() -> None:
+    """用户那条策略里的"排除ST 排除科创 排除北交所" = `ST=0 AND 科创=0 AND 北交所=0`。"""
+    f = fm.compile_formula("ST=0 AND 科创=0 AND 北交所=0")
+    assert bool(f.eval(_series_with("600519", "贵州茅台"))[-1]) is True
+    assert bool(f.eval(_series_with("600004", "*ST某某"))[-1]) is False
+    assert bool(f.eval(_series_with("688111", "金山办公"))[-1]) is False
+    assert bool(f.eval(_series_with("920000", "安徽凤凰"))[-1]) is False
+
+
+def test_s_share_is_not_st() -> None:
+    """未股改 `S` 股（`S佳通`）**不算 ST**：判据是名称含 `ST`，不是含 `S`。"""
+    assert fm.is_st_name("S佳通") is False
+    assert fm.is_st_name("*ST英飞") is True
+    assert fm.is_st_name("ST某某") is True
+
+
+def test_the_full_six_condition_strategy_compiles() -> None:
+    """用户给的那 6 条条件**整条**能编译、能跑（这条是这次改动的验收）。"""
+    f = fm.compile_formula(
+        "LTSZ_OK:=流通市值>=10 AND 流通市值<=300\n"
+        "HSL_OK:=换手率>5\n"
+        "PRICE_OK:=C>=3 AND C<=50\n"
+        "VOL_UP:=V>REF(V,1)*1.5\n"
+        "LTSZ_OK AND HSL_OK AND PRICE_OK AND VOL_UP AND 量比()>=1.5 "
+        "AND ST=0 AND 科创=0 AND 北交所=0"
+    )
+    ok = _series_with("600000", "浦发银行", days=7, 流通市值=50.0, 换手率=8.0)
+    vols = np.full(7, 100.0); vols[-1] = 160.0
+    amts = np.full(7, 1_000_000.0); amts[-1] = 3_000_000.0
+    ok.vol, ok.amount = vols, amts
+    assert bool(f.eval(ok)[-1]) is True

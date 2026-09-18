@@ -741,3 +741,111 @@ def test_build_strategy_rows_shows_broken_and_runtime_errors(formulas_cfg: Confi
     assert by_name["坏公式"].spec.ok is False
     assert "⚠️ 运行时出错" in by_name["跑崩的"].note
     assert "涨停池" in by_name["跑崩的"].note_tip
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 快照字段（流通市值 / 换手率）的接线：谁来取、什么时候取、取不到怎么说
+#
+# 2026-09-18 用户给的那条策略要用「流通市值 10-300 亿 + 换手率 > 5%」，
+# 而这两个数**日线里没有**（同花顺的快照端点也不返回），只能从实时快照取一趟。
+# 这几条钉住三件事：取到了就真的参与选股、**不用它的公式一个请求都不发**、
+# 取不到时给一句人话（否则"勾了却没出票"会被当成公式写错）。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _fake_snapshot(monkeypatch: pytest.MonkeyPatch, quotes: dict) -> list[list[str]]:
+    """把 `sources.snapshot_map` / `supplement_map` 换成假的，并记录调用。"""
+    from laoa_trader.data import sources
+
+    calls: list[list[str]] = []
+
+    def fake_map(_cfg, symbols=None):
+        calls.append(list(symbols or []))
+        return {code: dict(row) for code, row in quotes.items() if code in set(symbols or [])}
+
+    monkeypatch.setattr(sources, "snapshot_map", fake_map)
+    monkeypatch.setattr(sources, "supplement_map", lambda *a, **k: None)
+    return calls
+
+
+def test_preview_hits_uses_snapshot_fields(formula_db: str, formulas_cfg: Config,
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """试算：`流通市值` / `换手率` 由**一趟快照**喂进来，条件真的生效。"""
+    calls = _fake_snapshot(monkeypatch, {
+        "600001": {"circ_mktcap": 50.0, "turnover_rate": 8.0},    # 合格
+        "600002": {"circ_mktcap": 5.0, "turnover_rate": 8.0},     # 市值太小
+        "600003": {"circ_mktcap": 60.0, "turnover_rate": 3.0},    # 换手不够
+    })
+    formula = fm.compile_formula("流通市值>=10 AND 流通市值<=300 AND 换手率>5")
+
+    result = lib.preview_hits(formula, formula_db, cfg=formulas_cfg)
+
+    assert {hit["symbol"] for hit in result["hits"]} == {"600001"}
+    assert calls == [["600001", "600002", "600003"]]      # 只取一趟，且只要库里的票
+
+
+def test_preview_hits_without_snapshot_fields_sends_no_request(
+    formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**不用这两个字段的公式一个请求都不发**（与"没这个功能"完全一样）。"""
+    calls = _fake_snapshot(monkeypatch, {})
+    formula = fm.compile_formula("C>MA(C,5)")
+
+    result = lib.preview_hits(formula, formula_db, cfg=formulas_cfg)
+
+    assert result["count"] == 2
+    assert calls == []
+
+
+def test_preview_hits_says_so_when_the_snapshot_is_missing(
+    formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取不到快照 → 命中 0 只，但**必须说清原因**（否则会被当成公式写错）。"""
+    _fake_snapshot(monkeypatch, {})
+    formula = fm.compile_formula("流通市值>=10")
+
+    result = lib.preview_hits(formula, formula_db, cfg=formulas_cfg)
+
+    assert result["count"] == 0
+    assert any("市值/换手" in err for err in result["errors"]), result["errors"]
+
+
+def test_snapshot_extra_skips_symbols_without_values(formula_db: str,
+                                                     formulas_cfg: Config,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """快照里没有那两个数的票**不进 extra**（缺值由引擎按"条件不成立"处理）。"""
+    _fake_snapshot(monkeypatch, {
+        "600001": {"circ_mktcap": 50.0, "turnover_rate": 8.0},
+        "600002": {"circ_mktcap": None, "turnover_rate": None},
+    })
+
+    extra, note = lib.snapshot_extra(formulas_cfg, ["600001", "600002"])
+
+    assert extra == {"600001": {"流通市值": 50.0, "换手率": 8.0}}
+    assert note == ""
+
+
+def test_run_enabled_formulas_uses_snapshot_fields(
+    formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """选股链路同样把快照喂进公式（`enabled_formulas` 里勾了它才会跑）。"""
+    from laoa_trader.strategy import formula_group
+
+    fx = formulas_cfg.data_dir / "formulas"
+    fx.mkdir(parents=True, exist_ok=True)
+    # 三个条件都写上，才能证明**两个字段都被喂进来了**（只写市值的话，600003 的
+    # 60 亿也合格 —— 那只证明了一半）
+    _write_formula(fx, "市值适中", "流通市值>=10 AND 流通市值<=300 AND 换手率>5")
+    formulas_cfg.enabled_formulas = ["市值适中"]
+    _fake_snapshot(monkeypatch, {
+        "600001": {"circ_mktcap": 50.0, "turnover_rate": 8.0},
+        "600002": {"circ_mktcap": 5.0, "turnover_rate": 8.0},
+        "600003": {"circ_mktcap": 60.0, "turnover_rate": 3.0},
+    })
+
+    run = formula_group.run_enabled_formulas(formula_db, formulas_cfg, directory=fx)
+
+    assert run.ran == ["市值适中"]
+    # 候选挂在 `picks` 上，键是**合成策略名**（`公式·<公式名>`，与内置策略同一套写法）
+    assert {pick["symbol"] for pick in run.picks["公式·市值适中"]} == {"600001"}
+    assert run.status == {} and run.errors == []

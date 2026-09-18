@@ -370,6 +370,72 @@ def latest_trading_day(db_path: str | Path) -> str | None:
     return str(row[0]) if row and row[0] else None
 
 
+#: 需要**实时快照**的公式字段（只有今天这一个值，见 `formula.EXTRA_FIELDS`）
+SNAPSHOT_FIELDS: tuple[str, ...] = ("流通市值", "换手率")
+
+
+def snapshot_extra(
+    cfg: Any, symbols: Sequence[str], *, quotes: dict[str, dict] | None = None
+) -> tuple[dict[str, dict[str, float]], str]:
+    """给公式用的快照字段 → `({代码: {"流通市值": 亿, "换手率": %}}, 提示语)`。
+
+    为什么要这一步：`流通市值` / `换手率` 日线里没有（同花顺的快照端点也不返回，
+    见 `data/sources.py` 的 `SUPPLEMENT_FIELDS`），而用户点名要拿它们选股 ——
+    所以按 `sources.snapshot_map()`（含"按字段从后面来源补齐"）取一趟，
+    再铺成公式认的 `Series.extra`。
+
+    Returns:
+        `(extra, note)`：`note` 是**取不到时给用户看的一句人话**（拿到了就是空串）——
+        取不到就等于条件永远不成立（0 只），不说清用户会以为公式写错了。
+    """
+    from laoa_trader.data import sources
+
+    codes = [str(c) for c in dict.fromkeys(symbols) if str(c)]
+    if not codes:
+        return {}, ""
+    if quotes is None:
+        try:
+            quotes = sources.snapshot_map(cfg, codes)
+        except Exception as exc:  # noqa: BLE001 - 取不到就是没有这两个字段
+            logger.info(f"取快照失败（市值/换手用不了）：{exc}")
+            quotes = {}
+        else:
+            try:
+                # 同花顺的快照不返回这两项 → 按字段从后面的来源（默认免 Key 公开源）补
+                sources.supplement_map(cfg, quotes, codes)
+            except Exception as exc:  # noqa: BLE001
+                logger.info(f"补齐快照字段失败（市值/换手可能不全）：{exc}")
+    extra: dict[str, dict[str, float]] = {}
+    for symbol, row in (quotes or {}).items():
+        values = {name: row.get("circ_mktcap" if name == "流通市值" else "turnover_rate")
+                  for name in SNAPSHOT_FIELDS}
+        values = {k: float(v) for k, v in values.items() if v is not None}
+        if values:
+            extra[symbol] = values
+    if extra:
+        return extra, ""
+    return {}, ("⚠️ 市值/换手这两个数现在取不到（没有实时行情快照），"
+                "用到它们的条件一律不成立 —— 所以可能一只都选不出来。"
+                "交易时段再试，或者在「系统设置 → 数据来源」里确认来源可用。")
+
+
+def all_symbols(db_path: str | Path) -> list[str]:
+    """库里有行情的全部代码（试算/选股要拿它去取快照）。读不出来就返回空列表。
+
+    为什么单独一个函数：`load_series()` 是**逐只 yield** 的生成器（内存友好），
+    拿不到"一共有哪些代码"；而取快照必须先把代码表交出去。直接 `list(load_series())`
+    会把全市场序列都读进内存 —— 那是几百 MB，正是这个模块一直在避免的事。
+    """
+    try:
+        with sqlite3.connect(str(db_path), timeout=60) as conn:
+            return [str(r[0]) for r in conn.execute(
+                f"SELECT DISTINCT symbol FROM {fm.HFQ_TABLE} ORDER BY symbol"  # noqa: S608
+            ).fetchall()]
+    except Exception as exc:  # noqa: BLE001 - 取不到就是没有这两个字段
+        logger.info(f"读代码表失败（市值/换手用不了）：{exc}")
+        return []
+
+
 def preview_hits(
     formula: fm.Formula,
     db_path: str | Path,
@@ -377,12 +443,16 @@ def preview_hits(
     limit: int = PREVIEW_LIMIT,
     start: str | None = None,
     symbols: Sequence[str] | None = None,
+    cfg: Any = None,
 ) -> dict:
-    """在**当前本地库**上跑一遍公式，返回最新行情日的命中清单（不联网、只读）。
+    """在**当前本地库**上跑一遍公式，返回最新行情日的命中清单（只读）。
 
     口径与内置策略一致：只看**每只票最后一根 K 线**，命中即"当日收盘后选中"。
     最后一根 K 线早于全市场最新行情日的票会被跳过（停牌/退市：它的"最后一根"
     是旧的，拿它当"今天选中"是错的）。
+
+    联网与否：公式里用到 `流通市值` / `换手率` 时才会取**一趟**实时快照
+    （这两个数日线里没有，见 `snapshot_extra`）；不用它们的公式**一个请求都不发**。
 
     Returns:
         {"date": 行情日, "count": 命中数, "hits": [{"symbol","name"}...],
@@ -394,7 +464,17 @@ def preview_hits(
     errors: list[str] = []
     scanned = 0
     skipped = 0
-    for series in fm.load_series(db_path, symbols=symbols, start=start):
+    # 只有公式**真的用到了**快照字段才去取那一趟（不用就一个请求都不发）
+    extra: dict[str, dict[str, float]] = {}
+    note = ""
+    if cfg is not None and set(formula.fields) & set(SNAPSHOT_FIELDS):
+        targets = list(symbols) if symbols is not None else None
+        if targets is None:
+            targets = all_symbols(db_path)
+        extra, note = snapshot_extra(cfg, targets)
+        if note:
+            errors.append(note)
+    for series in fm.load_series(db_path, symbols=symbols, start=start, extra=extra):
         # 数据不够长：公式的滚动窗口一定全是缺值 ⇒ 不可能出信号，直接跳过（省时间）
         if len(series.date) < formula.min_history:
             skipped += 1
@@ -632,6 +712,9 @@ __all__ = [
     "LIMIT_UP_HINT",
     "MAX_NAME_CHARS",
     "PREVIEW_LIMIT",
+    "SNAPSHOT_FIELDS",
+    "all_symbols",
+    "snapshot_extra",
     "bundled_formula_dir",
     "delete_formula",
     "describe_for_save",
