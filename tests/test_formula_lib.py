@@ -807,7 +807,10 @@ def test_preview_hits_says_so_when_the_snapshot_is_missing(
     result = lib.preview_hits(formula, formula_db, cfg=formulas_cfg)
 
     assert result["count"] == 0
-    assert any("市值/换手" in err for err in result["errors"]), result["errors"]
+    # 这句是**全局提示**（影响整次试算），不是"某只票算不出来" —— 放在 `notes` 里，
+    # 界面才会把它单独渲染一行，而不是说成"1 只票算不出来"（票数是假的）
+    assert any("市值/换手" in note for note in result["notes"]), result["notes"]
+    assert result["errors"] == []
 
 
 def test_snapshot_extra_skips_symbols_without_values(formula_db: str,

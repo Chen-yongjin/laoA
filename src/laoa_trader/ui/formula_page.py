@@ -1557,8 +1557,13 @@ if QT_AVAILABLE:
             self.progress.setFormat("正在试算…")
             self.progress.setVisible(True)
             self._set_hint("正在试算…（在后台跑，界面可以继续用）")
+            # ⚠️ `cfg` 必须传进去：公式用到 `流通市值` / `换手率` 时要靠它去取那一趟
+            # 实时快照（不用这两个字段的公式一个请求都不发，见 `preview_hits`）。
+            # 早先漏传过一次，结果是"用到市值/换手的公式在界面上永远 0 只、
+            # 而且连"取不到快照"这句提示都不出现"—— 用户只会以为公式写错了。
             worker = FormulaWorker(
-                formulas_lib.preview_hits, formula, self.cfg.db_path, limit=PREVIEW_LIMIT
+                formulas_lib.preview_hits, formula, self.cfg.db_path,
+                limit=PREVIEW_LIMIT, cfg=self.cfg,
             )
             self.preview_worker = worker
             worker.finished_ok.connect(self._on_preview_done)
@@ -1588,6 +1593,10 @@ if QT_AVAILABLE:
             hint = formulas_lib.limit_up_hint(formula)
             if hint:
                 text += "\n⚠️ " + hint
+            # 全局提示（例如"市值/换手取不到"）单独一行 —— 它跟"某只票算不出来"不是
+            # 一回事：混进 `errors` 会被渲染成"1 只票算不出来"，票数是假的
+            for note in result.get("notes") or []:
+                text += "\n" + str(note)
             if result["errors"]:
                 text += f"\n（{len(result['errors'])} 只票算不出来，已跳过：{result['errors'][0]}）"
             return text

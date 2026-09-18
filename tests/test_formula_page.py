@@ -482,7 +482,7 @@ def test_preview_runs_off_the_gui_thread(page, qapp, monkeypatch) -> None:
     """
     seen: dict = {}
 
-    def fake_preview_hits(formula, db_path, *, limit):
+    def fake_preview_hits(formula, db_path, *, limit, **kwargs):   # 界面还会传 cfg
         seen["thread"] = QThread.currentThread()
         seen["formula"] = formula
         seen["db_path"] = db_path
@@ -588,7 +588,7 @@ def test_preview_result_belongs_to_the_clicked_formula(page, qapp,
     """
     started, release = threading.Event(), threading.Event()
 
-    def slow_preview_hits(formula, db_path, *, limit):
+    def slow_preview_hits(formula, db_path, *, limit, **kwargs):   # 界面还会传 cfg
         started.set()
         assert release.wait(PREVIEW_TIMEOUT), "测试没有放行工作线程"
         return {"date": "2026-09-11", "count": 0, "hits": [], "shown": 0,
@@ -615,7 +615,7 @@ def test_preview_double_click_only_starts_one_worker(page, qapp,
     started, release = threading.Event(), threading.Event()
     calls: list = []
 
-    def slow_preview_hits(formula, db_path, *, limit):
+    def slow_preview_hits(formula, db_path, *, limit, **kwargs):   # 界面还会传 cfg
         calls.append(1)
         started.set()
         assert release.wait(PREVIEW_TIMEOUT), "测试没有放行工作线程"
@@ -642,7 +642,7 @@ def test_preview_double_click_only_starts_one_worker(page, qapp,
 def test_preview_data_error_is_reported_as_data_problem(page, qapp,
                                                         monkeypatch: pytest.MonkeyPatch) -> None:
     """库不存在（`FormulaDataError`）：说**数据**的事，让用户去下载数据。"""
-    def boom(formula, db_path, *, limit):
+    def boom(formula, db_path, *, limit, **kwargs):               # 界面还会传 cfg
         raise fm.FormulaDataError("本地数据库不存在：/x/trader.db（请先在界面点【下载数据】）")
 
     monkeypatch.setattr(lib, "preview_hits", boom)
@@ -660,7 +660,7 @@ def test_preview_data_error_is_reported_as_data_problem(page, qapp,
 def test_preview_unexpected_error_is_reported_in_chinese(page, qapp,
                                                          monkeypatch: pytest.MonkeyPatch) -> None:
     """其它异常（程序问题）：带上类型名说清楚，界面不崩、按钮也还回来。"""
-    def boom(formula, db_path, *, limit):
+    def boom(formula, db_path, *, limit, **kwargs):               # 界面还会传 cfg
         raise RuntimeError("库文件被占用")
 
     monkeypatch.setattr(lib, "preview_hits", boom)
@@ -1683,3 +1683,69 @@ def test_syntax_error_is_announced_outside_the_hint_area(page, qapp) -> None:
     page.on_validate()
     qapp.processEvents()
     assert toasts == []
+
+
+def test_preview_passes_the_config_so_snapshot_fields_work(page, page_cfg, qapp,
+                                                          monkeypatch) -> None:
+    """【试算】必须把 `cfg` 传进 `preview_hits` —— 否则用到**市值/换手**的公式永远 0 只。
+
+    这是"漏接一根线"的典型：`preview_hits` 早就支持按需取快照，但界面调它时没传
+    `cfg`，于是那条路根本不会去取数 —— 表现是"公式明明对、就是一只都选不出来，
+    而且连'取不到快照'那句提示都不出现"。用户只会以为公式写错了。
+    这条用例把整条链路钉住：**界面 → 取快照 → 喂进公式 → 出票**。
+    """
+    from datetime import date, timedelta
+
+    from laoa_trader.data import sources, storage
+
+    # 造一只票的库（试算要按"最后一根 = 全市场最新行情日"过滤）
+    days = [(date(2026, 9, 1) + timedelta(days=i)).isoformat() for i in range(10)]
+    with storage.connect(page_cfg.db_path) as conn:
+        storage.write_stock_basic(conn, [("600001", "甲样本", "银行")])
+        storage.write_daily_raw(conn, [
+            ("600001", day, 10.0, 10.2, 9.8, 10.0, 1e6, 1e7) for day in days])
+        storage.write_calendar(conn, days)
+
+    # 快照：这只票市值 50 亿（合格）
+    monkeypatch.setattr(sources, "snapshot_map",
+                        lambda _cfg, symbols=None: {"600001": {"circ_mktcap": 50.0,
+                                                              "turnover_rate": 8.0}})
+    monkeypatch.setattr(sources, "supplement_map", lambda *a, **k: None)
+
+    _open_editor(page)
+    page.editor.setPlainText("流通市值>=10 AND 流通市值<=300")
+    page.on_preview()
+    _wait_preview(page, qapp)
+
+    assert "命中 1 只" in page.hint_text, page.hint_text
+    assert "甲样本(600001)" in page.hint_text
+
+
+def test_preview_says_why_when_snapshot_is_unavailable(page, page_cfg, qapp,
+                                                       monkeypatch) -> None:
+    """取不到快照时，那句"市值/换手现在取不到"要**单独一行**说出来。
+
+    不能混进"某只票算不出来"那一条 —— 那是逐票错误，混进去会被渲染成
+    "1 只票算不出来，已跳过：⚠️ 市值/换手…"，票数是假的、原因也被张冠李戴。
+    """
+    from datetime import date, timedelta
+
+    from laoa_trader.data import sources, storage
+
+    days = [(date(2026, 9, 1) + timedelta(days=i)).isoformat() for i in range(10)]
+    with storage.connect(page_cfg.db_path) as conn:
+        storage.write_stock_basic(conn, [("600001", "甲样本", "银行")])
+        storage.write_daily_raw(conn, [
+            ("600001", day, 10.0, 10.2, 9.8, 10.0, 1e6, 1e7) for day in days])
+        storage.write_calendar(conn, days)
+
+    monkeypatch.setattr(sources, "snapshot_map", lambda _cfg, symbols=None: {})
+    monkeypatch.setattr(sources, "supplement_map", lambda *a, **k: None)
+
+    _open_editor(page)
+    page.editor.setPlainText("流通市值>=10")
+    page.on_preview()
+    _wait_preview(page, qapp)
+
+    assert "市值/换手" in page.hint_text
+    assert "只票算不出来" not in page.hint_text      # 不许说成一个假的票数

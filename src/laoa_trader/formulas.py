@@ -462,6 +462,11 @@ def preview_hits(
     day = latest_trading_day(db_path)
     hits: list[dict] = []
     errors: list[str] = []
+    #: **全局提示**（与"某只票算不出来"分开）：典型是"市值/换手现在取不到"这类
+    #: 影响整次试算的话。为什么必须分开：界面把 `errors` 渲染成
+    #: "（N 只票算不出来，已跳过：…）"—— 把一句全局提示混进去，用户看到的是
+    #: "1 只票算不出来"，票数是假的、原因也被张冠李戴。
+    notes: list[str] = []
     scanned = 0
     skipped = 0
     # 只有公式**真的用到了**快照字段才去取那一趟（不用就一个请求都不发）
@@ -473,7 +478,7 @@ def preview_hits(
             targets = all_symbols(db_path)
         extra, note = snapshot_extra(cfg, targets)
         if note:
-            errors.append(note)
+            notes.append(note)
     for series in fm.load_series(db_path, symbols=symbols, start=start, extra=extra):
         # 数据不够长：公式的滚动窗口一定全是缺值 ⇒ 不可能出信号，直接跳过（省时间）
         if len(series.date) < formula.min_history:
@@ -501,6 +506,7 @@ def preview_hits(
         "scanned": scanned,
         "skipped": skipped,
         "errors": errors,
+        "notes": notes,
     }
 
 
