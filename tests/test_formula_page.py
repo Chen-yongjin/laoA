@@ -1040,12 +1040,16 @@ def test_reload_keeps_enabled_checkbox_state_from_config(page, page_cfg) -> None
 
 
 def test_enable_checkbox_writes_config_toml(page, page_cfg, qapp) -> None:
-    """勾公式 → config.toml 出现 enabled_formulas，**用户注释与未知键都保留**。"""
-    page.name_edit.setText("放量上攻")
-    page.editor.setPlainText("C>MA(C,5)")
-    page.btn_save.click()
+    """勾公式 → config.toml 出现 enabled_formulas，**用户注释与未知键都保留**。
+
+    公式在这里**直接落文件**、不走编辑器保存：编辑器保存会按 2026-09-18 的新行为
+    自动勾上「参与选股」（用户实报"存了却不参与"之后改的），而这条用例要测的是
+    "勾选动作写回哪个键"，所以需要一个**存在但未启用**的公式当起点。
+    """
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5)")
+    page.reload()
     box = page._row_boxes["放量上攻"]
-    assert box.isChecked() is False            # 默认**不参与**
+    assert box.isChecked() is False            # 直接落文件的公式默认**不参与**
 
     box.setChecked(True)
     qapp.processEvents()
@@ -1062,9 +1066,8 @@ def test_enable_checkbox_writes_config_toml(page, page_cfg, qapp) -> None:
 
 def test_uncheck_enable_removes_from_config(page, page_cfg, qapp,
                                           monkeypatch: pytest.MonkeyPatch) -> None:
-    page.name_edit.setText("放量上攻")
-    page.editor.setPlainText("C>MA(C,5)")
-    page.btn_save.click()
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5)")   # 同上的理由：落文件，不经过编辑器保存
+    page.reload()
     box = page._row_boxes["放量上攻"]
     box.setChecked(True)
     qapp.processEvents()
@@ -1080,9 +1083,8 @@ def test_uncheck_enable_removes_from_config(page, page_cfg, qapp,
 def test_enable_write_failure_reverts_checkbox(page, page_cfg, qapp,
                                               monkeypatch: pytest.MonkeyPatch) -> None:
     """写不进去（只读盘）时把勾选退回去 —— 界面显示的必须与生效的一致。"""
-    page.name_edit.setText("放量上攻")
-    page.editor.setPlainText("C>MA(C,5)")
-    page.btn_save.click()
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5)")   # 落文件，不经过编辑器保存
+    page.reload()
     box = page._row_boxes["放量上攻"]
 
     def boom(*_args, **_kwargs):
@@ -1538,3 +1540,84 @@ def test_long_hint_is_trimmed_but_kept_in_full(page) -> None:
     assert page.hint_text == long_text                 # 完整文本留档（可选中复制）
     assert len(page.hint_label.text().splitlines()) == fp.HINT_MAX_LINES + 1
     assert f"还有 {30 - fp.HINT_MAX_LINES} 行没显示" in page.hint_label.text()
+
+
+# ── 保存之后：用户必须**一眼看得出它进了列表、而且参与选股**（2026-09-18 用户实报）──
+#
+# 用户原话：「编辑器保存了 策略里就不显示，这个问题很严重」。
+# 我在源码环境里复现不出来（列表确实会立刻多一行），但顺着这句话查出三件事会让用户
+# 产生同样的感觉，所以三条都改掉并钉住：
+#   1. 公式追加在**列表末尾**，窗口小的时候它在视野外 → 保存后要滚到那一行并说出第几行；
+#   2. 新存的公式**默认不参与选股**（要用户自己再找一个勾选框勾一下）→ 现在保存即参与；
+#   3. 保存**失败**时只写提示区、不弹 toast，而提示区在编辑器底部、窗口小就看不见 →
+#      现在失败一定弹 toast，并写出公式目录的绝对路径与最可能的原因。
+
+
+def test_saving_a_formula_makes_it_participate_right_away(page, page_cfg, qapp) -> None:
+    """保存一条能编译的公式 → **立刻参与选股**（勾上 + 写回 `enabled_formulas`）。
+
+    为什么改掉"默认不参与"：用户写公式就是为了用它，存完还得自己去找一个勾选框
+    勾一下是很不自然的第二步 —— 表现就是"我明明存了，怎么没选股"。
+    """
+    page.name_edit.setText("放量上攻（量比版）")
+    page.editor.setPlainText("VR:=量比()\nC>=3 AND C<=50 AND VR>=1.5")
+
+    page.btn_save.click()
+    qapp.processEvents()
+
+    box = page._row_boxes["放量上攻（量比版）"]
+    assert box.isChecked() is True, "保存后应当自动参与选股"
+    assert page_cfg.enabled_formulas == ["放量上攻（量比版）"]
+    assert 'enabled_formulas = ["放量上攻（量比版）"]' in page_cfg.source_path.read_text(
+        encoding="utf-8")
+    # 提示里要说清"在第几行"（列表长的时候光说"已保存"等于没说）
+    assert "列表第" in page.hint_text and "参与选股" in page.hint_text
+
+
+def test_saving_a_broken_formula_saves_it_but_does_not_enable_it(page, page_cfg, qapp) -> None:
+    """编译不过的公式：**照样存成草稿**（不拦着用户），但**不参与选股**并说清为什么。
+
+    这条同时是"用户拿还没接进引擎的字段写公式"时的正确反馈 —— 例如
+    `流通市值`/`换手率` 现在还不存在，用户会看到一句**带行列号的中文原因**，
+    而不是"存了、勾了、什么都没发生"。
+    """
+    page.name_edit.setText("六条件版")
+    page.editor.setPlainText("流通市值>=10 AND C>=3")
+
+    page.btn_save.click()
+    qapp.processEvents()
+
+    assert (page.directory / "六条件版.txt").exists(), "草稿要存下来（不拦着用户）"
+    box = page._row_boxes["六条件版"]
+    assert box.isChecked() is False, "编译不过的公式不许被勾上（勾上也跑不了）"
+    assert page_cfg.enabled_formulas == []
+    assert "编译不过" in page.hint_text
+    assert "流通市值" in page.hint_text          # 引擎给的中文原因要原样透出来
+
+
+def test_save_failure_shows_the_formula_dir(
+    page, page_cfg, qapp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写不进去时：提示里必须带**公式目录的绝对路径**，而且**要弹 toast**。
+
+    为什么这两条都要：提示区在编辑器底部，窗口小一点就看不见 —— 用户会以为"存上了"，
+    然后在策略列表里找不到（这正是用户报"保存了却不显示"最可能的样子）。
+    带路径是因为下一步他要自己去看那个目录（或把程序搬到可写目录）。
+    """
+    def boom(*_args, **_kwargs):
+        raise OSError("Permission denied")
+
+    monkeypatch.setattr(lib, "save_formula", boom)
+    # 这一页的 `_toast` 是交给外部回调去显示的（主窗口把它挂到标题区的运行状态上），
+    # 所以这里把回调接过来，验证"失败真的往外说了"
+    toasts: list[str] = []
+    page.status_cb = toasts.append
+    page.name_edit.setText("写不进去的")
+    page.editor.setPlainText("C>O")
+
+    page.btn_save.click()
+    qapp.processEvents()
+
+    assert "没存上" in page.hint_text or "保存失败" in page.hint_text
+    assert str(page.directory) in page.hint_text            # 路径要写出来
+    assert any("没存上" in t for t in toasts), f"失败必须弹 toast（不然看不见提示区）：{toasts}"

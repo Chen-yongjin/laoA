@@ -1141,12 +1141,17 @@ if QT_AVAILABLE:
                     return row
             return None
 
-        def select_row(self, name: str) -> None:
-            """按名称选中一行（**用户切行时才载入编辑区/展开详情**）。"""
+        def select_row(self, name: str) -> int | None:
+            """按名称选中一行（**用户切行时才载入编辑区/展开详情**）。
+
+            Returns:
+                那一行的下标（保存后要 `scrollToItem` 滚过去）；没找到就是 `None`。
+            """
             for index, row in enumerate(self.rows):
                 if row.key == name:
                     self.table.selectRow(index)
-                    return
+                    return index
+            return None
 
         def _restore_selection(self, key: str) -> None:
             """刷列表后把选中恢复到原来那一行（**不触发**"打开"动作）。"""
@@ -1729,10 +1734,22 @@ if QT_AVAILABLE:
                 )
             except ValueError as exc:
                 self._set_hint("❌ " + str(exc))
+                self._toast("❌ 没保存：" + str(exc))
                 return
             except OSError as exc:
-                self._set_hint(f"❌ 保存失败：{exc}（公式目录可能没有写权限，"
-                               "可以把程序放到有写权限的目录）")
+                # ⚠️ 这里**必须弹 toast**：提示区在编辑器底部，窗口小一点就看不见，
+                # 用户会以为"存上了"（2026-09-18 用户报"保存了策略里不显示"，
+                # 最可能就是这类"失败只写在看不见的地方"）。
+                # ⚠️ 写的是**这一页实际用的**目录（`self.directory` 可能是
+                # `LAOA_TRADER_FORMULAS` 或调用方传进来的），不是默认值 ——
+                # 打默认值会让用户去一个错的目录里找自己刚存的公式
+                message = (f"❌ 公式没存上：{exc}\n"
+                           f"公式目录：{self.directory or formulas_lib.formula_dir()}\n"
+                           "（多半是这个目录不可写：程序放在 Program Files / 只读盘，"
+                           "或被 Windows「受控文件夹访问」挡住了 —— "
+                           "把程序整个移到「文档」或桌面这类可写目录再试）")
+                self._set_hint(message)
+                self._toast("❌ 公式没存上（公式目录不可写？见提示区）")
                 return
             # 把安全化后的名字、最终写进文件的备注都回显：用户填 `涨/跌` 时看到的是
             # `涨_跌`，备注留空时看到的是自动生成的那句"用到的字段/函数" ——
@@ -1743,13 +1760,30 @@ if QT_AVAILABLE:
             if saved is not None:
                 self.note_edit.setText(saved.description or "")
             self.reload()
-            self.select_row(name)
+            # 2026-09-18（用户实报"编辑器保存了、策略里就不显示"）：保存成功后要做三件事，
+            # 少任何一件都会让人以为"没保存上"：
+            #   1. **滚到那一行**（公式追加在列表末尾，窗口小的时候它在视野外，
+            #      用户看到的就是"列表里没有它"）；
+            #   2. **默认就参与选股**（能编译过才勾）：用户写公式就是为了用它，
+            #      存完还得自己再找一个勾选框勾一下，是很不自然的第二步；
+            #   3. 提示里写清"在第几行、参不参与选股、为什么"。
+            index = self.select_row(name)
+            if index is not None:
+                self.table.scrollToItem(self.table.item(index, 0))
+            compile_error = "" if (saved is None or saved.ok) else (
+                saved.error_text or "（公式有语法错）")
+            if saved is not None and saved.ok:
+                if name not in (self.cfg.enabled_formulas or []):
+                    self.set_row_enabled(ROW_FORMULA, name, True)
+                state_text = "已勾上「参与选股」"
+            else:
+                state_text = f"⚠️ 这条公式**编译不过，先不参与选股**：{compile_error}"
+            where = f"列表第 {index + 1} 行" if index is not None else "列表里"
             self._set_hint(
-                f"✅ 已保存「{name}」（{len(body)} 字符）\n"
-                f"文件：{path}\n"
-                "想让它参与选股，就在上面「状态」列勾上它。"
+                f"✅ 已保存「{name}」（{len(body)} 字符）· {where} · {state_text}\n"
+                f"文件：{path}"
             )
-            self._toast(f"公式「{name}」已保存")
+            self._toast(f"公式「{name}」已保存（{state_text}）")
 
         def on_load_sample(self) -> None:
             """【载入示例】：给小白一个**能跑通**的起点。"""
