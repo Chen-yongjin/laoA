@@ -1876,7 +1876,8 @@ def test_about_dialog_shows_version_and_copyright(window, qapp) -> None:
     # 并点明"非交易所授权行情" —— 这句是用户判断"这数据能不能当真"的依据
     assert "公开行情接口（腾讯/新浪/东财）" in blob
     assert "非交易所授权行情" in blob
-    assert "不构成任何投资建议" in blob
+    assert "准实时快照" in blob            # 新文案还点明了数据是"准实时"，不是实时授权行情
+    assert "同花顺" in blob                # 备用/增强源也要提（有 Key 时它才接管）
     assert "不构成任何投资建议" in blob
     assert all("<a href" not in t for t in texts)          # 版本号不是富文本链接
 

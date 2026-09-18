@@ -474,6 +474,27 @@ def test_footer_drops_the_beijing_amount_and_keeps_the_breadth_note() -> None:
     assert market.footer_text({}) == market.FOOTER_PREFIX + " · 更新于 —（每分钟自动刷新）"
 
 
+def test_footer_names_the_real_sources_and_the_disclaimer() -> None:
+    """页脚那行小字要**如实**写清"数据哪来的"，并点明非交易所授权行情。
+
+    为什么单列一条：其它用例都是拿 `market.FOOTER_PREFIX` 自己跟自己比（`… == 前缀 + …`），
+    常量一改就跟着变，**钉不住内容**。而页脚是唯一告诉用户"这些数字哪来的"的地方 ——
+    2026-09-17 主源从同花顺换成**免 Key 公开行情源**之后，这里再只写"同花顺"就是在说假话
+    （概览取数实际走的是腾讯/新浪/东财那一路）。所以把内容钉在这里：
+    公开行情接口、两个具体来源、同花顺（备用/增强）、以及"非交易所授权行情"这句免责。
+    """
+    prefix = market.FOOTER_PREFIX
+    assert "公开行情接口" in prefix                      # 真实主源要写出来
+    assert "腾讯" in prefix and "新浪" in prefix         # 具体到哪个接口，不含糊
+    assert "同花顺" in prefix                            # 备用/增强源也要写明（有 Key 时用它）
+    assert "非交易所授权行情" in prefix                  # 这句是用户判断"数据能不能当真"的依据
+    assert "数据来源" in prefix
+    # "多久更新一次"与来源同属页脚必须说清的两件事，一起钉住
+    text = market.footer_text({"as_of": "2026-09-17 14:30"})
+    assert text.startswith(prefix)
+    assert "更新于 2026-09-17 14:30" in text and "每分钟自动刷新" in text
+
+
 def test_empty_group_takes_no_line(mcfg) -> None:
     """某组配置为空 → **整行不显示**（不留一个空的"板块："）。"""
     mcfg.market_sector_indices = []

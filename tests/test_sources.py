@@ -125,11 +125,15 @@ def test_every_snapshot_source_has_a_fetcher() -> None:
 
     漂移的后果特别隐蔽：列表里能看到这个来源、能启用、界面一切正常，
     但取数时它被 `_SNAPSHOT_FETCHERS.get()` 静默跳过 —— 表现成"表格永远是空的"。
+    反方向也要钉：**没**声明快照能力的来源不许挂在分派表上（那是"幽灵来源"，
+    配置里没有任何 id 能指向它），分派表的键也不许是注册表之外的 id。
     """
     for info in sources.REGISTRY.values():
         if sources.CAP_SNAPSHOT in info.capabilities:
             assert info.id in sources._SNAPSHOT_FETCHERS, info.id
-    assert set(sources._SNAPSHOT_FETCHERS) == set(sources.REGISTRY)
+        else:
+            assert info.id not in sources._SNAPSHOT_FETCHERS, info.id
+    assert set(sources._SNAPSHOT_FETCHERS) <= set(sources.REGISTRY)
 
 
 def test_capabilities_only_use_known_values() -> None:
