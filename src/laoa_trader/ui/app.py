@@ -1913,11 +1913,11 @@ if QT_AVAILABLE:
             # 新加的三列各写一句"这一列什么意思"（表头只有两个字，写不下口径）
             self._set_header_tooltip(
                 self.pool_table, WATCH_HEADERS.index("市值"),
-                "流通市值**亿**（取实时快照。⚠️ 同花顺的快照端点不返回这一项，所以主源是同花顺时会由后面的来源（免 Key 公开源）按字段补上；补不到、或 `data_sources` 里没有别的来源时显示 `—`，不是 0）"
+                "流通市值**亿**（取实时快照；没有实时快照时显示 `—`，不是 0）"
             )
             self._set_header_tooltip(
                 self.pool_table, WATCH_HEADERS.index("换手"),
-                "实时换手率**%**（取实时快照。⚠️ 同花顺的快照端点不返回这一项，所以主源是同花顺时会由后面的来源（免 Key 公开源）按字段补上；补不到、或 `data_sources` 里没有别的来源时显示 `—`，不是 0）"
+                "实时换手率**%**（取实时快照；没有实时快照时显示 `—`，不是 0）"
             )
             self._set_header_tooltip(
                 self.pool_table, WATCH_MONITOR_COLUMN,
@@ -2006,11 +2006,11 @@ if QT_AVAILABLE:
             )
             self._set_header_tooltip(
                 self.position_table, POSITION_HEADERS.index("市值"),
-                "流通市值**亿**（取实时快照。⚠️ 同花顺的快照端点不返回这一项，所以主源是同花顺时会由后面的来源（免 Key 公开源）按字段补上；补不到、或 `data_sources` 里没有别的来源时显示 `—`，不是 0）"
+                "流通市值**亿**（取实时快照；没有实时快照时显示 `—`，不是 0）"
             )
             self._set_header_tooltip(
                 self.position_table, POSITION_HEADERS.index("换手"),
-                "实时换手率**%**（取实时快照。⚠️ 同花顺的快照端点不返回这一项，所以主源是同花顺时会由后面的来源（免 Key 公开源）按字段补上；补不到、或 `data_sources` 里没有别的来源时显示 `—`，不是 0）"
+                "实时换手率**%**（取实时快照；没有实时快照时显示 `—`，不是 0）"
             )
             self._set_header_tooltip(
                 self.position_table, POSITION_HEADERS.index("止损位"),
@@ -4159,34 +4159,24 @@ if QT_AVAILABLE:
             """「市值」「换手」两个单元格（**取不到一律 `—`，绝不显示 0**）。
 
             口径（用户给定）：
-            - 市值 = **流通市值**，单位**亿**，取快照里的 `circ_mktcap`
-              （`data/sources.py` 的归一字段；同花顺/公开源都给这个口径）；
+            - 市值 = **流通市值**，单位**亿**，取快照里的 `circ_mktcap`；
             - 换手 = **实时换手率 %**，取快照里的 `turnover_rate`；
             - 快照没有 / 这两个字段没取到 → `—`：0 亿市值、0% 换手都是**真实存在的值**，
               拿 0 冒充"没取到"，用户会把"数据缺了"读成"这只票没人交易"。
 
-            为什么 tooltip 里要把"为什么是 `—`"说清：这两项来自**实时快照**，
-            而快照只在交易时段取、且来源得提供这两个字段 —— 不写清楚，
-            用户会以为是程序算错了（而不是"现在没有实时快照"）。
+            2026-09-18（用户要求）：tooltip **不再写出处**（原来会写"·来源 公开行情接口
+            （腾讯/新浪）"这类标注），表头那段"为什么可能是别的来源给的"说明也去掉了 ——
+            用户原话"把数据来源说明去掉，不需要"。所以这里只说**数值与时刻**，
+            以及"为什么是 `—`"这半句（那半句有必要：不写清，用户会以为程序算错了，
+            而不是"现在没有实时快照"）。
+
+            ⚠️ 数据层仍然记着"哪个字段是谁给的"（`sources.supplement_map` 的
+            `field_source`，见那里的说明）—— 那是排查用的，**不要再往界面上加回来**。
             """
             quote = self.quotes.quote(symbol) or {}
             at_text = quotes_mod.snapshot_time_text(quote.get("at"))
-            source = str(quote.get("source") or "")
             when = f"（快照 {at_text}）" if at_text else ""
-            # 这两项**可能不是价格那个来源给的**（同花顺的快照端点不返回它们，
-            # 见 `sources.SUPPLEMENT_FIELDS`），所以出处要说准
-            field_source = dict(quote.get("field_source") or {})
-            source_label = {"public": "公开行情接口（腾讯/新浪）",
-                            "eastmoney": "东方财富公开接口"}
-
-            def _who(field: str) -> str:
-                owner = str(field_source.get(field) or source or "")
-                return source_label.get(owner, owner)
-
-            missing = ("现在没有这只票的实时快照，这一项显示 —（不是 0）"
-                       "。快照只在交易时段取；来源不提供这一项时也会是 —"
-                       "（同花顺的快照就没有换手率与市值，这时会由后面的来源补 —— "
-                       "补不到、或 `data_sources` 里没有别的来源时，就一直是 —）")
+            missing = "现在没有这只票的实时快照，这一项显示 —（不是 0）"
             cap = quote.get("circ_mktcap")
             if cap is None:
                 cap_item = QTableWidgetItem(market.DASH)
@@ -4195,8 +4185,7 @@ if QT_AVAILABLE:
                 cap_item = QTableWidgetItem(f"{float(cap):.2f}亿")
                 cap_item.setToolTip(
                     f"流通市值 {float(cap):,.2f} 亿{when}"
-                    + (f"·来源 {_who('circ_mktcap')}" if _who('circ_mktcap') else "")
-                    + "\n（单位亿；取的是快照里的流通市值，不是总市值）"
+                    "\n（单位亿；取的是快照里的流通市值，不是总市值）"
                 )
             turn = quote.get("turnover_rate")
             if turn is None:
@@ -4204,10 +4193,7 @@ if QT_AVAILABLE:
                 turn_item.setToolTip("换手率：" + missing)
             else:
                 turn_item = QTableWidgetItem(f"{float(turn):.2f}%")
-                turn_item.setToolTip(
-                    f"实时换手率 {float(turn):.2f}%{when}"
-                    + (f"·来源 {_who('turnover_rate')}" if _who('turnover_rate') else "")
-                )
+                turn_item.setToolTip(f"实时换手率 {float(turn):.2f}%{when}")
             for item in (cap_item, turn_item):
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
