@@ -477,12 +477,19 @@ def write_stock_basic(
     rows: Iterable[Sequence[Any]],
     *,
     industry_only: bool = False,
+    names_only: bool = False,
 ) -> int:
     """代码/名称/行业 upsert。行顺序：symbol,name,industry。
 
     Args:
         industry_only: True 时只更新行业（名称用 COALESCE 保留已有值）——
             行业同步拿到的名称字段偶尔为空，不能把已缓存的中文名冲掉。
+        names_only: True 时只更新名称（**行业用 COALESCE 保留已有值**）——
+            免 Key 的日更只有"代码 + 名称"（公开源没有行业分类），
+            而 `industry_only` 那个分支会把 `industry=NULL` 一起写进去，
+            于是"曾经配过 Key、同步过行业"的用户一旦落到公开源日更，
+            5000 多只的行业归属会被**静默清空**（`pool.py` 的"只看热门行业"
+            会跟着静默失效）。这两个方向必须分开。
     """
     now = _now()
     if industry_only:
@@ -490,6 +497,27 @@ def write_stock_basic(
             "INSERT INTO stock_basic (symbol, name, industry, updated_at) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(symbol) DO UPDATE SET industry = excluded.industry, "
             "name = COALESCE(stock_basic.name, excluded.name), "
+            "updated_at = excluded.updated_at"
+        )
+        total = 0
+        batch: list[tuple] = []
+        for r in rows:
+            batch.append((r[0], r[1], r[2], now))
+            if len(batch) >= 5000:
+                conn.executemany(sql, batch)
+                conn.commit()
+                total += len(batch)
+                batch.clear()
+        if batch:
+            conn.executemany(sql, batch)
+            conn.commit()
+            total += len(batch)
+        return total
+    if names_only:
+        sql = (
+            "INSERT INTO stock_basic (symbol, name, industry, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(symbol) DO UPDATE SET name = excluded.name, "
+            "industry = COALESCE(excluded.industry, stock_basic.industry), "
             "updated_at = excluded.updated_at"
         )
         total = 0

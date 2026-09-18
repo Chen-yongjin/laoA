@@ -348,7 +348,10 @@ class Config:
     #: **不给每个来源加 `xxx_enabled` 布尔键**：一个键只表达一件事，
     #: 免得出现"列表里有、开关却是关"这种自相矛盾的状态。
     #: 环境变量 `DATA_SOURCES`（逗号分隔，写法与 notify_channels 一致）。
-    data_sources: list[str] = field(default_factory=lambda: ["public", "hithink"])
+    #: 2026-09-18（用户拍板）：**同花顺是主源**（它是正经 API、不会像公开接口那样限流），
+    #: 免 Key 的公开源排第二，只当"没配 Key / Key 失效"时的**兜底** ——
+    #: 顺序即优先级（见 `data/sources.py`），所以这一行的顺序就是产品行为。
+    data_sources: list[str] = field(default_factory=lambda: ["hithink", "public"])
     data_dir: Path = field(default_factory=default_data_dir)
 
     # ── 策略组（跑哪几组 / 哪几条策略）──
@@ -937,7 +940,7 @@ def _apply_env(cfg: Config) -> Config:
         ("LAOA_ENABLED_STRATEGIES", "enabled_strategies"),
         ("LAOA_ENABLED_FORMULAS", "enabled_formulas"),
         ("NOTIFY_CHANNELS", "notify_channels"),
-        ("DATA_SOURCES", "data_sources"),       # 数据来源（默认主源=公开源，免 Key；同花顺为备用/增强）
+        ("DATA_SOURCES", "data_sources"),       # 数据来源（默认主源=同花顺，需 Key；公开源为兜底）
         ("AUCTION_SCAN_AT", "auction_scan_at"),
         ("AUCTION_BOARDS", "auction_boards"),
         ("MARKET_INDICES", "market_indices"),

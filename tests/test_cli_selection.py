@@ -23,7 +23,16 @@ from tests.conftest import READY_THRESHOLDS
 
 @pytest.fixture()
 def seeded(cfg, tmp_path):
-    """一份能跑出候选的库 + 指向它的 config.toml（内容固定，便于比对是否被改动）。"""
+    """一份能跑出候选的库 + 指向它的 config.toml（内容固定，便于比对是否被改动）。
+
+    ⚠️ 别把这份 fixture 读成"没 Key 也能选股"（2026-09-18 用户核实后要求写准）：
+    这份库是**手工造的就绪库** —— 复权事件与行业归属都是这里显式写进去的（只有同花顺那条
+    dump 路给得到这两样），`hithink_api_key = ""` 只是为了让用例不发任何请求。
+    真实情形是：**没 Key 时只能用免 Key 公开源，而公开源给不出这两样，选股永远过不了
+    数据闸门**（见 `tests/test_public_sync.py` 里
+    `test_public_source_data_can_never_pass_the_stock_picking_gate`）。
+    本文件测的是"数据已经就绪之后，选股/覆盖参数本身对不对" —— 那是纯本地的事。
+    """
     end = datetime(2026, 9, 11).date()
     days: list[str] = []
     cursor = end

@@ -57,12 +57,86 @@ def _isolate_global_config(monkeypatch: pytest.MonkeyPatch):
     yield
 
 
+
+
+def _install_network_block() -> dict:
+    """把 socket 层的连接与域名解析换成"立刻抛 `NetworkBlocked`"。
+
+    抽成函数是为了让"按用例"与"整场"两处**共用同一份实现** —— 两份实现迟早会漂移，
+    而漂移的表现是"某条路径悄悄真的联网了"，那正是最不该发生的事。
+    """
+    real = {
+        "connect": socket.socket.connect,
+        "connect_ex": socket.socket.connect_ex,
+        "create_connection": socket.create_connection,
+        "getaddrinfo": socket.getaddrinfo,
+    }
+
+    def _refuse(address) -> None:
+        raise NetworkBlocked(
+            f"测试不允许联网，但检测到对 {address!r} 的连接尝试；"
+            "请把该调用改成注入假 client / 假 Session（见 tests/conftest.py）"
+        )
+
+    def connect(self, address, *args, **kwargs):
+        if self.family in (socket.AF_INET, socket.AF_INET6):
+            _refuse(address)
+        return real["connect"](self, address, *args, **kwargs)
+
+    def connect_ex(self, address, *args, **kwargs):
+        if self.family in (socket.AF_INET, socket.AF_INET6):
+            _refuse(address)
+        return real["connect_ex"](self, address, *args, **kwargs)
+
+    def create_connection(address, *args, **kwargs):
+        _refuse(address)
+
+    def getaddrinfo(host, *args, **kwargs):
+        if host not in _LOCAL_HOSTS:
+            raise NetworkBlocked(f"测试不允许做域名解析，但检测到 {host!r}")
+        return real["getaddrinfo"](host, *args, **kwargs)
+
+    socket.socket.connect = connect
+    socket.socket.connect_ex = connect_ex
+    socket.create_connection = create_connection
+    socket.getaddrinfo = getaddrinfo
+    return real
+
+
+def _restore_network(real: dict) -> None:
+    socket.socket.connect = real["connect"]
+    socket.socket.connect_ex = real["connect_ex"]
+    socket.create_connection = real["create_connection"]
+    socket.getaddrinfo = real["getaddrinfo"]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _block_network_for_the_whole_session():
+    """**整场**封网（不只是每个用例期间）—— 这条是防进程崩，不是防"测试联网"。
+
+    为什么必须整场：界面用例会起后台 `QThread` 取数，而 `_block_network` 是**按用例**
+    打桩的，用例一结束就撤销。漏网的线程于是拿着**未打桩**的 `socket.getaddrinfo`
+    去做真实 DNS —— 而 `QuoteService.stop()` 只等 3 秒，窗口一销毁，Qt 就
+    `abort()`（实测：整套用例跑到一半以 `Fatal Python error: Aborted` 结束，
+    崩溃线程栈正停在 `socket.py … getaddrinfo`）。
+    整场封住之后，这种线程只会拿到一个**立刻抛出**的 `NetworkBlocked`
+    （产品代码本来就捕获它），既不会真联网、也不会挂住线程。
+    """
+    real = _install_network_block()
+    _restore_network_on_exit = real
+    try:
+        yield
+    finally:
+        _restore_network(_restore_network_on_exit)
+
+
 @pytest.fixture(autouse=True)
 def _block_network(monkeypatch: pytest.MonkeyPatch):
     """封死 IPv4/IPv6 的连接与域名解析；放行 AF_UNIX（Qt/DBus 等本地 IPC 需要）。
 
     AF_UNIX 特意放行：Qt 的托盘/D-Bus 在本机走 unix socket，那不是"联网"；
     而 TCP/UDP 一律拒绝 —— 单元测试不该有任何真实外呼。
+    实现与"整场封网"共用（见 `_install_network_block`）。
     """
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex

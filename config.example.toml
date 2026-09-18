@@ -42,7 +42,7 @@ hithink_api_key = ""
 # 说明：**没有** `xxx_enabled` 这类开关 —— 一个键只表达一件事，
 # 不会出现"列表里有、开关却是关"这种自相矛盾的状态；界面上勾选/取消就是在改这一行。
 # 环境变量：DATA_SOURCES="public,hithink"（逗号分隔，与 notify_channels 写法一致）。
-data_sources = ["public", "hithink"]
+data_sources = ["hithink", "public"]
 
 # 本地数据目录。默认 %LOCALAPPDATA%\LaoATrader\data（Windows）。
 # 数据库 trader.db、dump 缓存都在这里；数据约 1~2 GB，建议放在 SSD 上。

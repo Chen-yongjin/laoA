@@ -1509,19 +1509,36 @@ def daily_update(
     cfg: Config | None = None,
     client: hx.HithinkClient | None = None,
     progress_cb: ProgressCb | None = None,
+    note_cb: NoteCb | None = None,
 ) -> list[SyncResult]:
     """每天开机/定时跑的一组同步（逐项独立，某项失败不影响其它项）。
+
+    2026-09-17（免 Key 分发版）：**没有同花顺 Key 时改走免 Key 的公开源日更**
+    （`data/public_sync.daily_update_public`）—— 一趟全市场快照出当日日线、涨停池、
+    代码表与交易日历。以前这里直接返回一条"日更失败（没有 Key）"，于是分发版用户
+    装上之后**数据永远是空的、选股一条也跑不出来**。
+
+    为什么在这里分派、而不是让界面各自判断：日更是"界面按钮 / 定时任务 / 命令行"
+    三个入口共用的（`scheduler.daily_task` 也调它）。分派只写一处，三个入口的行为
+    才不会各说各话。
 
     Returns:
         各项的 SyncResult 列表。
     """
     cfg = cfg or get_config()
     results: list[SyncResult] = []
-    try:
-        client = client or make_client(cfg)
-    except Exception as exc:  # noqa: BLE001 - 没 Key 时全部标记失败，界面照常可用
-        failed = SyncResult(stage="日更数据", ok=False, error=str(exc))
-        return [failed]
+    if client is None:
+        try:
+            client = make_client(cfg)
+        except Exception as exc:  # noqa: BLE001 - 没 Key 是最常见的情况：走公开源
+            # 延迟导入：`public_sync` 要用本模块的 `SyncResult` / `throttle_progress`，
+            # 模块级互相 import 会成环；而本模块只在**运行时**才需要它，所以放在这里。
+            from laoa_trader.data import public_sync
+
+            logger.info(f"日更：无同花顺凭据（{exc}），改走免 Key 公开源")
+            return public_sync.daily_update_public(
+                cfg, progress_cb=progress_cb, note_cb=note_cb,
+            )
 
     results.append(sync_daily(cfg, client=client, progress_cb=progress_cb))
     for fn in (sync_calendar, sync_industry, sync_index):

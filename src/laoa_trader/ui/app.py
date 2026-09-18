@@ -65,10 +65,12 @@ APP_NAME = "老A选股助手"
 COPYRIGHT_TEXT = "版权所有 © 2026 async-chen，保留所有权利。"
 #: 数据来源声明（「关于软件」里那一行）。
 #:
-#: 为什么写两个来源、并点明"非交易所授权行情"：程序默认走**免 Key 的公开行情接口**
-#: （腾讯/新浪/东财），配了同花顺 Key 的用户才走同花顺。这些数据都是**准实时快照**，
-#: 不是交易所授权行情 —— 分发出去以后这句话就是用户判断"这数据能不能当真"的依据。
-SOURCE_TEXT = ("数据来源：公开行情接口（腾讯/新浪/东财）与同花顺金融数据服务（配置 Key 时）。"
+#: 为什么写两个来源、并点明"非交易所授权行情"：程序主源是**同花顺**（配了 Key 时），
+#: 没配 Key / Key 失效时由**免 Key 的公开行情接口**（腾讯/新浪/东财）兜底。
+#: 这些数据都是**准实时快照**，不是交易所授权行情 —— 分发出去以后这句话
+#: 就是用户判断"这数据能不能当真"的依据。
+#: 2026-09-18：顺序跟着主源调整（同花顺在前），与页脚 `market.FOOTER_PREFIX` 同一口径。
+SOURCE_TEXT = ("数据来源：同花顺金融数据服务（配置 Key 时）与公开行情接口（腾讯/新浪/东财）。"
                "均为公开来源的准实时快照，非交易所授权行情。"
                "本程序仅用于个人研究与学习，不构成任何投资建议。")
 
@@ -265,9 +267,8 @@ SECTOR_TABLE_CHROME = 40
 SETTINGS_GROUPS: tuple[str, ...] = (
     "数据来源", "通知方式", "竞价扫描", "T策略", "其他",
 )
-# ── 「数据来源」：来源列表（公开源是主源，同花顺是备用源）──
-#: 内置来源的键（它仍然读 `cfg.data_sources` 决定启停与优先级；**不再固定在第一位** ——
-#: 用户 2026-09-17 要求"公开源是主源、同花顺是备用"，而列表顺序就是优先级）。
+# ── 「数据来源」：来源列表（**同花顺是主源，公开源是兜底**）──
+#: 内置来源的键（它仍然读 `cfg.data_sources` 决定启停与优先级）。
 BUILTIN_SOURCE = "hithink"
 #: **读不到 `data/sources.py` 时**内置来源那一行用的能力文案（兜底，不是真相源）。
 #: 正常路径的能力文案来自 `sources.source_states()` 的 `capabilities_text` ——
@@ -289,10 +290,14 @@ SOURCE_ADD_UNAVAILABLE_TEXT = (
 DATA_SOURCE_LABELS: dict[str, str] = {BUILTIN_SOURCE: "同花顺金融数据服务（内置）"}
 #: 同花顺那一行显示标记 / 说明用的两种文案（用户 2026-09-17 给定）：
 #: 界面上**没有** Key 输入框了，只剩这一行说明 + 一个可点的申请地址。
-BUILTIN_BACKUP_TAG = "备用源"
+#: 2026-09-18（用户拍板）：**同花顺回到主源**，公开源降为兜底 ——
+#: 理由是公开接口实测会限流（腾讯 fqkline 抓 700 只左右开始连续失败、新浪列表接口
+#: 回 456），而同花顺是正经 API。所以这一行的标记从"备用源"改回"主来源"，
+#: 并且要**如实说明为什么值得为它申请一个 Key**：完整历史只有它给得到。
+BUILTIN_BACKUP_TAG = "主来源"
 BUILTIN_KEY_URL = "https://fuyao.aicubes.cn"
 #: 那一行的原文（`{url}` 会被换成可点的 `<a href>`，见 `_backup_key_notice`）。
-BUILTIN_BACKUP_TEXT = "备用源：同花顺金融数据服务（需要 Key，申请地址 {url}）"
+BUILTIN_BACKUP_TEXT = "主来源：同花顺金融数据服务（需要 Key，申请地址 {url}）"
 #: `history_years` 那一行的中文口径：一年 ≈ 250 个交易日，0.5 年 ≈ 6 个月
 #: （与 `config.history_years` 的默认值同源，用户给定：超短线不需要长历史）
 MONTHS_PER_YEAR = 12
@@ -455,8 +460,13 @@ def probe_data_source(cfg: Config, api_key: str = "", client: Any = None) -> str
 
     key = str(api_key or "").strip()
     if not key:
-        return ("❌ 还没填 API Key：先在输入框里填上（或让它先保存为空）——"
-                "没有 Key 时下载历史数据与实时行情都用不了")
+        # 2026-09-18 改口：原来写"没有 Key 时下载历史数据与实时行情都用不了"→ 也不对。
+        # 现在的事实：没 Key 时**行情与大盘概览照常**（免 Key 公开源兜底），
+        # **完整历史与选股要 Key**（数据自检要求复权事件与行业归属，只有同花顺那条路给）。
+        # 这里只说这三件事，不承诺"装历史包"之类已经不存在的路（历史包方案已被用户否掉）。
+        return ("❌ 还没填 API Key（这是【测试连接】要用的那一个）："
+                "不填也能看行情与大盘概览（免 Key 公开源）；"
+                "但完整历史与**选股**要它 —— 自检要求复权事件与行业归属齐备")
     try:
         probe = client or hx.HithinkClient(api_key=key, timeout=8.0, retries=1)
         total = int(probe.special_pool_total(market.LIMIT_UP_PATH))
@@ -639,15 +649,14 @@ if QT_AVAILABLE:
         用户要求数据来源做成"可添加的多个来源，各自用他自己的 Key"，所以这一行是
         列表里的一格，而不是把 Key 输入框散在页面上：
 
-            ┌ 公开行情源（腾讯为主，免 Key）  [主来源]                       [✓] 启用 ┐
+            ┌ 同花顺金融数据服务（内置）  [主来源]                            [✓] 启用 ┐
             │ 提供：实时快照、历史日K、股票代码表                                     │
-            │ **分发版的默认主源**：不用申请任何 Key … 风险：公开但未授权 …          │
-            │ 免 Key：这个来源不用申请、不用填（填了也没有用）                        │
+            │ 主来源：同花顺金融数据服务（需要 Key，申请地址 fuyao.aicubes.cn）       │
             └────────────────────────────────────────────────────────────────────────┘
-            ┌ 同花顺金融数据服务（内置）  [备用源]                            [✓] 启用 ┐
-            │ 提供：实时快照、历史日K、股票代码表                                     │
-            │ 主来源：全市场日线（dump 下载）… 必须自己申请 API Key …                │
-            │ 备用源：同花顺金融数据服务（需要 Key，申请地址 fuyao.aicubes.cn）       │
+            ┌ 公开行情源（腾讯为主，免 Key）  [免 Key]                      [✓] 启用 ┐
+            │ 提供：实时快照                                                         │
+            │ 兜底源（没配同花顺 Key 时）：两张表的行情 + 大盘概览 + 每日增量；        │
+            │ 实测会被限流；完整历史与选股要 Key（自检要求复权事件与行业归属）        │
             └────────────────────────────────────────────────────────────────────────┘
 
         三种行的差异全部由**构造参数**表达（不在类里 if 来源名）：
@@ -716,9 +725,9 @@ if QT_AVAILABLE:
                 _scaled_font(self.name_label.font(), FONT_VALUE_DELTA, bold=True)
             )
             head.addWidget(self.name_label)
-            # 标记：主来源 / 备用源 / 免 Key / 已配 Key / 未配 Key / 未实现 ——
-            # 一眼看出这个来源的状态。调用方给了 `tag` 就用它（内置同花顺那一行是
-            # "备用源"，而"谁是主来源"取决于 `data_sources` 的顺序，类里判不出来）
+            # 标记：主来源 / 免 Key / 已配 Key / 未配 Key / 未实现 ——
+            # 一眼看出这个来源的状态。调用方给了 `tag` 就用它（"主来源"那一行是按
+            # `data_sources` 的顺序算出来的，类里判不出来，所以由调用方传进来）
             if not tag:
                 if not implemented:
                     tag = "未实现"
@@ -2749,12 +2758,12 @@ if QT_AVAILABLE:
             return body
 
         def _build_settings_source_group(self, layout: Any) -> None:
-            """第 1 组「数据来源」：**来源列表**（公开源为主源，同花顺为备用源）。
+            """第 1 组「数据来源」：**来源列表**（**同花顺是主源，公开源是兜底**）。
 
             用户要求的是"可用的其它源，让用户自主添加，用他自己的 key"，所以这一组的主体
             是一张**来源列表**：每行是「来源名 + 提供什么 + Key（或"免 Key" / 备用的申请地址）
             + 启用 + 删除」。**列表顺序 = 取数优先级**，所以 2026-09-17 起
-            **公开源在前、内置同花顺在最后**（用户要求"公开源是主源、同花顺是备用"）。
+            **顺序就是优先级**：2026-09-18 起同花顺（要 Key）排第一，公开源紧随其后兜底。
 
             规则：
             - 列表只画**已启用**的来源（`data_sources` 里写着的那些，顺序即优先级），
@@ -2766,13 +2775,15 @@ if QT_AVAILABLE:
               **免 Key 的来源不给输入框**（公开源那种）—— 画一个填不了东西的框
               比不画更糟，用户会去找一个根本不存在的 Key；
             - **内置同花顺那一行没有输入框**（2026-09-17 用户要求）：改成一行说明
-              `备用源：同花顺金融数据服务（需要 Key，申请地址 …）`，地址**可点开**；
+              `主来源：同花顺金融数据服务（需要 Key，申请地址 …）`，地址**可点开**；
               它的 Key 仍然照旧从 config.toml / 环境变量读（见 `_collect_settings_updates`）。
             """
             body = self._settings_group(
                 layout, "数据来源",
-                "列表顺序 = 取数优先级：公开行情源是主源（免 Key），同花顺是**备用源**"
-                "（需要 Key，见它那一行的申请地址）。"
+                # ⚠️ 这一行是**用户可见**的小字（QLabel 不解析 markdown），别写 `**加粗**`
+                # —— 那会原样显示成两个星号（用户明确说过不喜欢这种星号）。
+                "列表顺序 = 取数优先级：同花顺是主源（需要 Key，见它那一行的申请地址）；"
+                "公开行情源是兜底（免 Key，实测会被限流，只在没配 Key / Key 失效时用）。"
                 f"【{BTN_DOWNLOAD_TEXT}】【{BTN_REFRESH_TEXT}】【{BTN_CHECK_TEXT}】"
                 f"【{BTN_PAUSE_TEXT}】也都在这一组里",
             )
@@ -5434,7 +5445,7 @@ if QT_AVAILABLE:
             rows = [state for state in states if state.get("enabled")]
             # 内置同花顺**永远在列表里**（它提供历史日K 的 dump 与实时快照），但
             # **排在最后**：列表顺序 = 取数优先级，而 2026-09-17 起
-            # "公开源是主源、同花顺是备用源"（用户要求）—— 插在第一位就等于告诉用户
+            # "同花顺是主源、公开源兜底"（用户 2026-09-18 拍板）—— 插在第一位就等于告诉用户
             # "同花顺最优先"，与 config.py 里 `data_sources = ["public", "hithink"]`
             # 的默认顺序正好相反。配置里漏写它时也补在这儿（并如实说明"配置里没写它"）。
             if not any(str(r.get("id")) == BUILTIN_SOURCE for r in rows):
@@ -5507,27 +5518,28 @@ if QT_AVAILABLE:
             #: 不按"这一轮画出来几行"判：注册表读不出来时只画得出同花顺一行，
             #: 若按行数判就会给同花顺贴上"主来源"，而配置里明明还有公开源。
             listed = [str(x).strip() for x in (self.cfg.data_sources or []) if str(x).strip()]
-            has_other = any(name.lower() != BUILTIN_SOURCE for name in listed)
+            #: 配置里的第一个 = 实际优先级最高的那个（标记就按它判，不写死来源名）
             main_id = listed[0].lower() if listed else ""
             for index, state in enumerate(rows):
                 source = str(state.get("id") or "")
                 builtin = source == BUILTIN_SOURCE
                 unknown = bool(state.get("unknown"))
                 key_config = str(state.get("key_config") or "")
-                # 标记怎么给：
-                # - 内置同花顺 = **备用源**（用户要求）；它是列表里唯一一个来源时那才叫
-                #   主来源（老配置 `data_sources = ["hithink"]`）—— 这种时候写"备用源"
-                #   就是假话；
-                # - 排在最前的那个来源 = **主来源**（列表顺序 = 优先级）；
-                # - 其余照旧按 Key 状态给标记。
-                if builtin:
-                    # 同花顺 = **备用源**（用户要求）；配置里只有它一个时那它确实是主源，
-                    # 这时写"备用源"就是假话
-                    tag = BUILTIN_BACKUP_TAG if has_other else "主来源"
-                elif unknown:
+                # 标记**完全按配置顺序判定**（列表顺序 = 优先级），不写死任何一个来源名：
+                # 用户手改 `data_sources` 之后，界面说的必须还是配置里的事实。
+                # 2026-09-18 起默认顺序是 ["hithink", "public"]，所以同花顺显示"主来源"；
+                # 公开源**有意不贴"兜底"**，而是让行自己显示"免 Key"（那是用户能据此判断
+                # "能不能用"的状态，比再贴一个角色词有用）；哪天用户把公开源排到第一，
+                # "主来源"会自动跟着挪过去。
+                # 只有**排在第一位**的那个给角色标记（"主来源"）；其余留给行自己按
+                # Key 状态显示（"免 Key" / "已配 Key" / "未配 Key"）—— 那三个状态都是
+                # 用户能动手解决或能据此判断"能不能用"的，比再贴一个"兜底"有用。
+                # "谁是兜底"由**顺序**（列表顺序 = 优先级）与每行的 note 说明表达，
+                # 而 note 里已经写着"没配同花顺 Key 时的兜底源"。
+                if unknown:
                     tag = "未实现"
                 elif source.lower() == main_id:
-                    tag = "主来源"            # 配置里的第一个 = 实际优先级最高的那个
+                    tag = "主来源"
                 else:
                     tag = ""
                 row = SourceRow(
@@ -5883,7 +5895,7 @@ if QT_AVAILABLE:
                 # 1) 数据来源
                 #
                 # **这里没有 `hithink_api_key`**（2026-09-17 用户要求）：界面不再提供
-                # 填 Key 的入口（同花顺那一行只剩"备用源…申请地址"的说明），所以一键保存
+                # 填 Key 的入口（同花顺那一行只剩"主来源…申请地址"的说明），所以一键保存
                 # 也不该再写这个键 —— 界面上没有的东西不许被"顺手"写进配置。
                 # 向后兼容取舍：`Config.hithink_api_key` 与环境变量 HITHINK_FINANCE_API_KEY
                 # **照旧读取**（`sync` / `intraday` / `market` 取数路径一个字没改），
@@ -6055,7 +6067,7 @@ if QT_AVAILABLE:
                 return
             lines = []
             if not bool(getattr(self.cfg, "intraday_auction", False)):
-                lines.append("竞价扫描当前**关着**：一次请求都不发（勾上「启用竞价扫描」并保存即可开）")
+                lines.append("竞价扫描当前关着：一次请求都不发（勾上「启用竞价扫描」并保存即可开）")
             else:
                 slots = ", ".join(getattr(self.cfg, "auction_scan_at", None) or [])
                 lines.append(f"已启用：每个交易日 {slots} 各扫一次全市场"
@@ -6156,7 +6168,7 @@ if QT_AVAILABLE:
             缺 Key 不是"必须让用户做决定"的事，而是"下一步该做什么" ——
             弹窗只是拦住他去点确定，然后他还是得去同一个地方改配置。
 
-            2026-09-17：界面上**没有**填 Key 的入口了（同花顺改成备用源，那一行只剩
+            2026-09-17 起界面上**没有**填 Key 的入口（那一行只剩
             "申请地址"的说明），所以这句话改成指路 **config.toml / 环境变量** ——
             读数路径没变（`Config.hithink_api_key` 与环境变量 HITHINK_FINANCE_API_KEY
             照旧生效），只是写的地方从界面回到了配置文件。
@@ -6164,13 +6176,27 @@ if QT_AVAILABLE:
             if self._busy():
                 return
             if not self.cfg.hithink_api_key:
+                # 2026-09-18（用户拍板）：**历史数据走用户自己的同花顺 Key**，一次拿到
+                # 多年历史；公开源那一路退回"兜底"—— 没 Key 时它照样把**当天**的
+                # 行情/涨停池写进库（见 `public_sync.daily_update_public`）。
+                # ⚠️ 别写成"历史一天天攒起来就够了"：**攒够了也选不了股** ——
+                # 数据自检（`preflight.check`）要求"复权事件非空 + 行业覆盖 ≥90%"，
+                # 而这两样只有同花顺那条路会写（`storage.write_adjust_events` 全项目
+                # 只被 `sync.py` 那条 dump 路调用）。这是**设计如此**，不是待修项：
+                # 缺事件就等于拿"算错的复权价"去选票。所以这句话要说得让人
+                # 一眼明白"没 Key 能看什么、不能做什么"，而不是让人以为等几天就行。
                 self._show_key_hint(
-                    "❌ 还没有同花顺 API Key，下载不了历史数据（历史日K 仍走同花顺）："
+                    "❌ 完整历史数据要同花顺 API Key（每个用户自己申请一个）："
                     "在 config.toml 里写 hithink_api_key = \"你的Key\"，"
                     "或设环境变量 HITHINK_FINANCE_API_KEY，然后重启程序"
-                    f"（申请地址见上面那行的 {BUILTIN_KEY_URL}）"
+                    f"（申请地址见上面那行的 {BUILTIN_KEY_URL}）。"
+                    "没 Key 时能用的：实时行情（自选股池/持仓监控）与大盘概览 —— "
+                    "每天也会自动把当天的行情与涨停池写进库；"
+                    "但**选股要 Key**：数据自检要求「复权事件」与「行业归属」齐备"
+                    "（这两样只有同花顺那条路给得到），缺了就拒绝选股"
+                    "（就是不让程序拿算错的复权价去选票）"
                 )
-                self._toast("❌ 还没有同花顺 API Key（备用源）· 见【系统设置 → 数据来源】那一行说明")
+                self._toast("❌ 选股要同花顺 Key · 没 Key 时行情与大盘概览可用 · 见【系统设置】")
                 return
             self._hide_key_hint()
             self._run_worker(
@@ -6186,7 +6212,7 @@ if QT_AVAILABLE:
 
             2026-09-17：界面上没有 Key 输入框了，所以这里**不再把焦点给输入框**
             （原来那句"焦点落到输入框上"是给"填 Key"用的），改为把焦点给来源列表那一行 ——
-            用户顺着看下去就是"备用源：…申请地址 …"那行说明；写 Key 的地方在 config.toml。
+            用户顺着看下去就是"主来源：…申请地址 …"那行说明；写 Key 的地方在 config.toml。
             """
             try:
                 self.key_hint.setText(text)
@@ -6206,7 +6232,7 @@ if QT_AVAILABLE:
 
         # 2026-09-17：这里原来有 `on_save_api_key()` 与 `on_test_connection()` 两个方法，
         # 它们读的都是「内置同花顺那一行的 Key 输入框」（`self.key_edit`）。
-        # 用户要求把那一行改成"备用源 + 申请地址"，输入框与【测试连接】按钮一起删了 ——
+        # 用户要求把那一行改成"来源标记 + Key 申请地址"，输入框与【测试连接】按钮一起删了 ——
         # 没有被测对象的方法留着只会变成一颗**点了没反应的按钮**（或者一调就 AttributeError），
         # 所以两个方法一并删掉。Key 的读写路径没有变：
         #   * 读：`Config.hithink_api_key` / 环境变量 `HITHINK_FINANCE_API_KEY` 照旧生效；

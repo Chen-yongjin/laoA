@@ -9,8 +9,11 @@
     3. 每个来源**能做什么**（`SourceInfo.capabilities`，只写实测确认过的，
        不写"应该有"的 —— 见 `eastmoney` 的模块头"已知风险"）；
     4. 现在**从哪个来源取行情**、取回来的数是什么口径（`snapshot_map`）。
-       ⚠️ 分发版的默认顺序是 `["public", "hithink"]` —— **免 Key 的公开源是主源**，
-       同花顺是"有 Key 时接管"的备用/增强源；顺序由 `cfg.data_sources` 决定。
+       ⚠️ 默认顺序是 `["hithink", "public"]` —— **同花顺是主源**（正经 API、
+       不会像公开接口那样限流：实测公开接口抓全市场历史时，腾讯 fqkline 到 700 只
+       左右就开始连续失败——222 只失败、9 分钟没有一次成功——新浪列表接口直接回
+       HTTP 456），免 Key 的公开源是**兜底**（没配 Key / Key 失效时才用）；
+       顺序由 `cfg.data_sources` 决定，**谁在前面谁先取**。
 
 为什么启停只用 `cfg.data_sources` 一个键表达
 --------------------------------------------
@@ -101,8 +104,24 @@ class SourceInfo:
     key_config: str | None = None
 
 
-#: 内置来源。**键顺序 = 界面默认展示顺序**（同花顺是主来源，排第一）。
+#: 内置来源。**键顺序 = 界面里"没启用的来源"的展示顺序**（启用的那几个按
+#: `data_sources` 的顺序排，也就是真正的优先级）；2026-09-18 起同花顺是主源，所以排第一。
 REGISTRY: dict[str, SourceInfo] = {
+    "hithink": SourceInfo(
+        id="hithink",
+        name="同花顺金融数据服务（内置）",
+        needs_key=True,
+        capabilities=frozenset({CAP_SNAPSHOT, CAP_DAILY_HISTORY, CAP_STOCK_LIST}),
+        note=(
+            "**主源**（默认排第一；免 Key 的公开源只当兜底）：全市场日线（dump 下载）、"
+            "实时快照、涨停池/跌停池/炸板池、"
+            "复权因子、交易日历、板块与成分股。"
+            "必须自己在 https://fuyao.aicubes.cn 申请 API Key 并填在 config.toml 的"
+            " hithink_api_key（或环境变量 HITHINK_FINANCE_API_KEY）；"
+            "没配 Key 时这一路直接跳过（不会偷偷去请求）。"
+        ),
+        key_config="hithink_api_key",
+    ),
     "public": SourceInfo(
         id="public",
         name="公开行情源（腾讯为主，免 Key）",
@@ -113,33 +132,22 @@ REGISTRY: dict[str, SourceInfo] = {
         #: 声明了却取不到，用户会以为"这个源坏了"（`eastmoney` 那条同理）。
         capabilities=frozenset({CAP_SNAPSHOT}),
         note=(
-            "**分发版的默认主源（免 Key）**：当前生效范围是两张表的 现价/涨幅/市值/换手。"
-            "⚠️ 大盘概览、历史数据下载、涨停池、复权因子**仍然走同花顺**（要 Key）—— "
-            "没 Key 时那几项取不到，不是这个源坏了。"
+            "**没配同花顺 Key 时的兜底源**：当前生效范围是两张表的 现价/涨幅/市值/换手。"
+            "**大盘概览也有免 Key 兜底**（指数/成交额/涨跌停家数都从这里的全市场快照算，"
+            "见 `data/public_market.py`）；"
+            "⚠️ 但**完整历史下载与选股仍然要同花顺 Key**：数据自检要求\"复权事件\"与"
+            "\"行业归属\"齐备，这两样只有同花顺那条路给得到 —— 没 Key 时选股会被自检拒绝，"
+            "不是这个源坏了。"
             "实测（2026-09-17）：腾讯批量接口一次 100 只、全市场 5562 只约 0.7 分钟；"
             "字段含 现价/涨跌幅/成交量额/换手率/流通市值/总市值/市盈率/市净率/"
             "量比/均价/涨跌停价/五档。"
             "缺的票自动用新浪兜底（新浪的单位与腾讯不同：股与元，程序内部已统一）。"
-            "风险：它们是**公开但未授权**的行情接口，官方可能改字段或限流 ——"
-            "所以它只当主路，后面还挂着同花顺（有 Key 时）与本地库兜底；"
+            "风险：它们是**公开但未授权**的接口，实测会被限流、也会改字段（2026-09-18："
+            "腾讯 fqkline 抓 700 只左右开始连续失败、新浪列表接口回 456），"
+            "所以它只当兜底，主源是同花顺（有 Key 时先走它）；"
             "数据为公开源准实时快照，非交易所授权行情。"
         ),
         key_config=None,
-    ),
-    "hithink": SourceInfo(
-        id="hithink",
-        name="同花顺金融数据服务（内置）",
-        needs_key=True,
-        capabilities=frozenset({CAP_SNAPSHOT, CAP_DAILY_HISTORY, CAP_STOCK_LIST}),
-        note=(
-            "**备用/增强源**（分发版的默认主源是免 Key 的公开源）：全市场日线（dump 下载）、"
-            "实时快照、涨停池/跌停池/炸板池、"
-            "复权因子、交易日历、板块与成分股。"
-            "必须自己在 https://fuyao.aicubes.cn 申请 API Key 并填在 config.toml 的"
-            " hithink_api_key（或环境变量 HITHINK_FINANCE_API_KEY）；"
-            "没配 Key 时这一路直接跳过（不会偷偷去请求）。"
-        ),
-        key_config="hithink_api_key",
     ),
     "eastmoney": SourceInfo(
         id="eastmoney",
@@ -355,7 +363,7 @@ def _hithink_rows(cfg: Any, symbols: list[str] | None) -> dict[str, dict]:
     return hithink_rows_to_map(rows)
 
 
-# ── 取数：公开源那一路（免 Key，分发版主源）──
+# ── 取数：公开源那一路（免 Key，兜底）──
 
 
 def _public_rows(cfg: Any, symbols: list[str] | None) -> dict[str, dict]:

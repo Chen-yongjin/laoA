@@ -61,6 +61,7 @@ from datetime import datetime
 from typing import Any
 
 from laoa_trader.data import hithink as hx
+from laoa_trader.data import public_market
 from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
@@ -94,7 +95,7 @@ WIDE_GROUP_KEY = "indices"
 #: 为什么不说死"同花顺"：概览取数的来源随用户的 `data_sources` 与"有没有配 Key"而变
 #: （分发版的主源是**免 Key 的公开行情源**，同花顺是备用/增强）。写死一个名字，
 #: 等于在用户面前说假话 —— 页脚是**唯一**告诉用户"这些数字哪来的"的地方。
-FOOTER_PREFIX = "数据来源：公开行情接口（腾讯/新浪/东财）与同花顺金融数据服务；非交易所授权行情"
+FOOTER_PREFIX = "数据来源：同花顺金融数据服务（配置 Key 时）与公开行情接口（腾讯/新浪/东财）；非交易所授权行情"
 
 #: 沪/深成交额的取数口径：这两个指数的 turnover 就是两市成交额
 SH_TURNOVER_CODE = "000001.SH"
@@ -499,10 +500,15 @@ def _fetch_groups(
 
     rows = list((result or {}).get("item") or [])
     failed = [str(code) for code in ((result or {}).get("failed") or [])]
+    # 来源**明确不认**的代码（免 Key 源没有同花顺板块指数 `.TI` 这种标的）不当失败：
+    # 它没写错，是这一路根本没有这种标的 —— 混进 `failed` 会让用户去改一个没错的代码。
+    unsupported = {str(code) for code in ((result or {}).get("unsupported") or [])}
     # 服务端"请求成功但这只没返回"时也要算取不到：否则用户看到自己配的指数凭空少了
     # 一个，只会以为配置没生效（比报错更难查）
     returned = {str(row.get("thscode") or "") for row in rows}
     for thscode in codes:
+        if thscode in unsupported:
+            continue
         if thscode not in returned and thscode not in failed:
             failed.append(thscode)
     if failed:
@@ -528,6 +534,12 @@ def _skeleton(
         "failed": [],
         "errors": list(errors or []),
         "stale": False,
+        #: 这一趟是谁供的数（`"public"` = 免 Key 公开源；`"hithink"` = 同花顺）。
+        #: 放在骨架里而不是只在 `fetch_overview` 里加：**每一条返回路径都要有这两个键**，
+        #: 否则界面读到 None 会在"没 Key 直连骨架"那条路上把来源写错。
+        "price_source": "",
+        #: 涨跌停家数是不是 5 分钟一档（免 Key 路径是；同花顺那三个池子是 55 秒一档）
+        "pools_slow": False,
     }
     for _, _, key in GROUPS:
         data[key] = []
@@ -536,39 +548,52 @@ def _skeleton(
     return data
 
 
-def fetch_overview(cfg: Any, client: Any = None, *, force: bool = False) -> dict:
-    """取一次大盘概览（带 TTL 缓存与逐路降级，**永不抛异常**）。
+def _public_client() -> Any:
+    """免 Key 的"同花顺客户端替身"（腾讯/新浪；见 `data/public_market.py`）。
 
-    Args:
-        cfg: 配置对象（用到 `market_overview` / 三个组别列表 /
-            `market_breadth` / `market_overview_ttl`）。
-        client: 取数对象；缺省按配置构造真实 `HithinkClient`（测试注入假客户端）。
-        force: 忽略缓存强制重取（界面按钮与测试用；`--cli --market` 也用它）。
+    这里**唯一**一处"没 Key 时换谁取数"的决定点：换成同一个形状的客户端之后，
+    `_collect_overview` 一行都不用分叉 —— 否则就会出现"界面走一套、命令行走另一套"，
+    而这个项目已经在"界面和命令行对不上"上踩过一次了。
 
-    Returns:
-        见 `_skeleton()` 的键；取不到的部分是 None/空列表，原因在 `errors` 里。
-        用缓存时 `stale` 为 True。
+    注意这里**不传** `force`：那个开关属于"概览要不要重取"，而扫描层有自己的 5 分钟
+    缓存（见 `public_market.SCAN_TTL`），穿透下去会变成"每次刷新重扫全市场"。
     """
-    configured = _configured_group_keys(cfg)
-    if not bool(getattr(cfg, "market_overview", True)):
-        # 总开关关掉 = **一个请求都不发**（用户可能就是想省配额）
-        return _skeleton(["大盘概览已关闭（market_overview = false）"], configured)
+    return public_market.PublicMarketClient(
+        timeout=MARKET_TIMEOUT, pace=public_market.SCAN_PACE,
+    )
 
-    signature = _signature(cfg)
-    if not force:
-        cached = _cached_overview(signature, _ttl(cfg))
-        if cached is not None:
-            return cached
 
-    errors: list[str] = []
-    if client is None:
-        try:
-            client = _make_client(cfg)
-        except Exception as exc:  # noqa: BLE001 - 没 Key 是最常见的情况，照常返回骨架
-            logger.info(f"大盘概览无法取数：{_why(exc)}")
-            return _remember(signature, _skeleton([_why(exc)], configured))
+def _is_auth_problem(errors: list[str]) -> bool:
+    """失败原因是不是"同花顺凭据不可用"这一类（可以改走免 Key 源的那种）。
 
-    overview = _skeleton(configured=configured)
+    只看这一种：网络不通、服务端 500 之类换成公开源也一样拿不到，
+    那种情况再扫一趟全市场只是白花 56 个请求。
+    """
+    text = "｜".join(str(e) for e in errors)
+    return ("Key" in text) or ("未配置" in text) or ("无效" in text) or ("未就绪" in text)
+
+
+def _note_public_limits(cfg: Any, errors: list[str]) -> None:
+    """免 Key 路径下，把"哪几组没有公开等价物"如实说出来（不是报错，是口径说明）。
+
+    为什么要写在 `errors` 里（界面 tooltip/命令行都会显示）：用户配了同花顺的板块指数
+    （`881155.TI` 这种）却看到 `板块：—`，"数据没刷新/程序坏了"是最自然的推测 ——
+    必须有个地方说明白"这一组公开源没有对应标的，配 Key 才有"。
+    """
+    missing: list[str] = []
+    for source_attr, label, _key in GROUPS:
+        specs = parse_codes(getattr(cfg, source_attr, None))
+        if specs and all(str(code).upper().endswith(".TI") for code, _ in specs):
+            missing.append(label)
+    if missing:
+        _note(errors, "免 Key 公开源没有这几组的对应标的（配同花顺 Key 才会显示）："
+                      + "、".join(missing))
+
+
+def _collect_overview(cfg: Any, client: Any, errors: list[str], *, signature: tuple,
+                      force: bool) -> dict:
+    """真正取一趟概览（三路各自降级）。`fetch_overview` 只管"用哪个客户端"。"""
+    overview = _skeleton(configured=_configured_group_keys(cfg))
     overview["as_of"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     overview["limits"] = _fetch_limits(client, errors)
@@ -604,6 +629,78 @@ def fetch_overview(cfg: Any, client: Any = None, *, force: bool = False) -> dict
     available = [v for v in (turnover["sh"], turnover["sz"]) if v]
     turnover["total"] = sum(available) if available else None
 
+    if not has_data(overview):
+        # 一项都没取到 → **不写"取数时间"**。`as_of` 是给用户判断"这个数有多新"用的：
+        # 明明什么都没有、页脚却显示"更新于 09:13"，比空白更糟 —— 它让人以为这是
+        # 刚取到的数据。（页脚本来就支持 `—` 这个写法，见 `footer_text`。）
+        overview["as_of"] = ""
+    return overview
+
+
+def fetch_overview(cfg: Any, client: Any = None, *, force: bool = False) -> dict:
+    """取一次大盘概览（带 TTL 缓存与逐路降级，**永不抛异常**）。
+
+    Args:
+        cfg: 配置对象（用到 `market_overview` / 三个组别列表 /
+            `market_breadth` / `market_overview_ttl`）。
+        client: 取数对象；缺省按配置构造真实 `HithinkClient`（测试注入假客户端）。
+        force: 忽略缓存强制重取（界面按钮与测试用；`--cli --market` 也用它）。
+
+    Returns:
+        见 `_skeleton()` 的键；取不到的部分是 None/空列表，原因在 `errors` 里。
+        用缓存时 `stale` 为 True。
+
+    2026-09-17（免 Key 分发版）：**没配同花顺 Key 时不再返回空骨架**，而是改走免 Key
+    的公开源（腾讯/新浪）。这样"装上就能看大盘"这条承诺在概览页成立；
+    页脚与 tooltip 里的数据来源、以及哪几项是 5 分钟一档，都跟着一起变（见
+    `footer_text`），不会出现"数字是新的、说明是旧的"。
+    """
+    configured = _configured_group_keys(cfg)
+    if not bool(getattr(cfg, "market_overview", True)):
+        # 总开关关掉 = **一个请求都不发**（用户可能就是想省配额）
+        return _skeleton(["大盘概览已关闭（market_overview = false）"], configured)
+
+    signature = _signature(cfg)
+    if not force:
+        cached = _cached_overview(signature, _ttl(cfg))
+        if cached is not None:
+            return cached
+
+    errors: list[str] = []
+    public_path = False
+    if client is None:
+        try:
+            client = _make_client(cfg)
+        except Exception as exc:  # noqa: BLE001 - 没 Key 是最常见的情况：改走公开源
+            logger.info(f"大盘概览：无同花顺凭据（{_why(exc)}），改走免 Key 公开源")
+            errors.append("未配置同花顺 Key：大盘概览走免 Key 公开行情源（腾讯/新浪）")
+            client = _public_client()
+            public_path = True
+
+    overview = _collect_overview(cfg, client, errors, signature=signature, force=force)
+
+    # 凭据在"构造时没报错、请求时才报错"的情形（Key 写错/过期/服务端未就绪）也要能落到
+    # 公开源：否则用户看到的就是一整页 `—` 加一句"Key 无效"，而他明明可以免 Key 看盘。
+    if not public_path and not has_data(overview) and _is_auth_problem(errors):
+        logger.info("大盘概览：同花顺凭据不可用，改走免 Key 公开源重取一次")
+        retry_errors: list[str] = [
+            "同花顺凭据不可用，本次已改走免 Key 公开行情源（腾讯/新浪）："
+            + "；".join(errors)
+        ]
+        client = _public_client()
+        overview = _collect_overview(cfg, client, retry_errors,
+                                     signature=signature, force=force)
+        errors = retry_errors
+        public_path = True
+
+    #: 这一趟是谁供的数（页脚文案、tooltip、测试都读它）。不写进结果的话，
+    #: 用户没法知道"我加了 Key 到底有没有生效"，我们也没法在测试里钉住这件事。
+    overview["price_source"] = "public" if public_path else "hithink"
+    #: 免 Key 路径下 涨停/跌停/炸板 与 涨跌家数 **都是同一趟 5 分钟缓存的扫描**，
+    #: 所以页脚要改口说"这几项 5 分钟更新"（`footer_text`），否则就是在骗人。
+    overview["pools_slow"] = bool(public_path)
+    if public_path:
+        _note_public_limits(cfg, errors)
     overview["errors"] = errors
     return _remember(signature, overview)
 
@@ -795,8 +892,16 @@ def footer_text(overview: dict | None) -> str:
     data = overview or {}
     as_of = str(data.get("as_of") or "") or DASH
     tail = "每分钟自动刷新"
+    # 哪几项是"慢一档"的，必须**逐项说清**：免 Key 路径下 涨跌停家数 与 涨跌家数
+    # 都是同一趟 5 分钟缓存的全市场扫描（56 个请求，不可能每分钟重扫一遍，
+    # 那既吃不消也会被限流）；同花顺路径下 涨跌停家数 是 3 个池子请求、跟着 55 秒走。
+    slow: list[str] = []
+    if data.get("pools_slow"):
+        slow.append("涨跌停家数")
     if data.get("breadth_enabled"):
-        tail += "；涨跌家数每 5 分钟更新"
+        slow.append("涨跌家数")
+    if slow:
+        tail += f"；{'、'.join(slow)}每 5 分钟更新"
     return f"{FOOTER_PREFIX} · 更新于 {as_of}（{tail}）"
 
 

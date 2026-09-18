@@ -1,11 +1,14 @@
-"""免 Key 公开行情源（腾讯为主、新浪兜底、东财补齐）——分发版的**主源**。
+"""免 Key 公开行情源（腾讯为主、新浪兜底、东财补齐）——**没配 Key 时的兜底源**。
 
 为什么需要它
 ------------
 单机版原来是"同花顺 fuyao 为主"，而它**必须自己申请 API Key**（去 fuyao.aicubes.cn 注册）。
 做分发版时这是最大的门槛：别人拿到 exe，第一步就卡在"要先去申请一个 Key"。
-所以分发版把**免 Key 的公开行情源**做成主源，同花顺降级为**备用/增强源**
-（有 Key 的用户自动用它拿 10 年历史、竞价、估值、涨停池）。
+所以做分发版时先把它接成了主源；但 2026-09-18 用户拍板**换回同花顺当主源**
+（理由很实在：这些公开接口会限流 —— 腾讯 fqkline 抓 700 只左右就开始连续失败、
+新浪列表接口直接回 456 —— 而同花顺是正经 API，不会这么脆）。
+于是本模块的定位改成：**没配 Key / Key 失效时的兜底**，让"没 Key 也看得到行情"成立，
+但完整历史仍要用户自己的 Key（见 `ui/app.py` 里【下载数据】的说明）。
 
 本模块只做"取数 + 单位归一"，不管优先级与降级顺序 —— 那部分在 `sources.py`
 （`data_sources` 的顺序即优先级），这样"谁是主源"是配置问题，不是代码问题。
@@ -81,6 +84,11 @@ def market_prefix(symbol: str) -> str:
     if not code:
         return ""
     head = code[0]
+    if head == "9":
+        # ⚠️ 9 开头有**两种**：`900xxx` 是沪市 B 股（sh），`920xxx` 是**北交所**新股号段（bj）。
+        # 一律当 sh 的代价很隐蔽：实测 `sh920000` 返回空、`bj920000` 才有数据，
+        # 于是 344 只北交所票会从所有表格里**静默消失**（不报错、就是不出现）。
+        return "bj" if code.startswith("92") else "sh"
     if head in "69":
         return "sh"
     if head in "03":
@@ -108,23 +116,25 @@ def _num(value: Any) -> float | None:
     return out if out == out else None        # 过滤 nan
 
 
-def _parse_tencent(payload: str) -> dict[str, dict]:
-    """腾讯批量响应 → `{symbol: 归一化字典}`。
+def _iter_tencent_rows(payload: str) -> Iterable[tuple[str, dict]]:
+    """腾讯批量响应 → `[(带前缀的代码, 归一化字典)]`。
 
-    响应形如：`v_sh600519="1~贵州茅台~600519~1266.98~1258.00~...";`（GBK 解码后）。
-    字段靠**下标**取（接口不给字段名），所以每个下标都在模块 docstring 里对着实测值写清了；
-    越界一律当"取不到"，不让任何一只票把整批拖挂。
+    ⚠️ 为什么键要用**带前缀的代码**（`sh000001`）而不是响应里的裸代码（`000001`）：
+    两者的区别不是洁癖，是**撞键**。`000001` 既是上证指数（`sh000001`）也是平安银行
+    （`sz000001`），同一批里同时出现时，按裸代码归档会让后一行覆盖前一行 ——
+    结果是"大盘概览上的上证指数显示成平安银行的股价"，而且不报任何错。
+    响应变量名 `v_sh000001` 里本来就有前缀，用它最省事也最准。
     """
-    out: dict[str, dict] = {}
     for line in payload.split(";"):
         line = line.strip()
-        if not line.startswith("v_") or '"' not in line:
+        if not line.startswith("v_") or "=" not in line or '"' not in line:
             continue
+        key = line.split("=", 1)[0].strip()[2:].lower()      # `v_sh600519` → `sh600519`
         body = line.split('"', 1)[1].rsplit('"', 1)[0]
         parts = body.split("~")
         # 只要求"核心几列在"（名称/代码/现价/昨收/今开/量）；其余靠 `at()` 取，
         # 取不到就是 None。**不要**写成"必须满 88/52 列才认" —— 上游哪天裁剪字段，
-        # 那种写法会把整批数据全丢，而这恰恰是免 Key 主源最不能出的故障。
+        # 那种写法会把整批数据全丢，而这恰恰是免 Key 兜底源最不能出的故障。
         if len(parts) < 6:
             continue
 
@@ -143,7 +153,7 @@ def _parse_tencent(payload: str) -> dict[str, dict]:
         if turnover_yuan is None:
             amount_wan = _num(at(37))
             turnover_yuan = amount_wan * 1e4 if amount_wan is not None else None
-        out[symbol] = {
+        yield key, {
             "symbol": symbol,
             "name": str(at(1) or "").strip() or None,
             "last_price": _num(at(3)),
@@ -167,7 +177,24 @@ def _parse_tencent(payload: str) -> dict[str, dict]:
             "at": str(at(30) or "").strip() or None,
             "provider": "tencent",
         }
+
+
+def _parse_tencent(payload: str) -> dict[str, dict]:
+    """腾讯批量响应 → `{裸代码: 归一化字典}`（`snapshot()` 用的那种键）。
+
+    响应的原文与字段下标的说明见 `_iter_tencent_rows`；这一层只是把带前缀的键
+    换成裸代码（本项目内部一直用裸 6 位）。**指数量那些"同码不同物"的场景不许用这个函数**
+    —— 见 `batch_quotes` 的说明。
+    """
+    out: dict[str, dict] = {}
+    for _key, row in _iter_tencent_rows(payload):
+        out[row["symbol"]] = row
     return out
+
+
+def _parse_tencent_prefixed(payload: str) -> dict[str, dict]:
+    """腾讯批量响应 → `{带前缀的代码: 归一化字典}`（指数/股票不会撞键）。"""
+    return dict(_iter_tencent_rows(payload))
 
 
 def _parse_sina(payload: str) -> dict[str, dict]:
@@ -216,6 +243,45 @@ def _chunks(items: Sequence[str], size: int) -> Iterable[list[str]]:
         yield list(items[start:start + size])
 
 
+def batch_quotes(
+    prefixed: Sequence[str],
+    *,
+    opener: Opener | None = None,
+    timeout: float = TIMEOUT,
+    pace: float = BATCH_PACE,
+) -> dict[str, dict]:
+    """按**已经带前缀**的代码取一批快照 → `{prefixed代码: 归一化字典}`。
+
+    为什么要单独一个"我自己给全代码"的入口：`snapshot()` 是按代码首字符猜前缀的
+    （股票号段不会歧义），但**指数会**——`000001` 既是上证指数（`sh000001`）
+    也是平安银行（`sz000001`）。指数点位这种一眼就能看出对错的数，绝不能靠猜。
+
+    只走腾讯（指数没有新浪兜底那一套字段口径问题，而且这一批很小）。
+    """
+    fetch = opener or _urllib_get
+    wanted = list(dict.fromkeys(
+        str(s).strip().lower() for s in (prefixed or []) if str(s).strip()
+    ))
+    result: dict[str, dict] = {}
+    for batch in _chunks(wanted, TENCENT_BATCH):
+        url = f"https://qt.gtimg.cn/q={','.join(batch)}"
+        try:
+            raw = fetch(url, {"User-Agent": _UA, "Referer": "https://gu.qq.com/"}, timeout)
+            parsed = _parse_tencent_prefixed(raw.decode("gbk", errors="replace"))
+        except Exception as exc:  # noqa: BLE001 - 一批失败不该影响其它批
+            logger.info(f"腾讯批量快照这一批失败（{len(batch)} 只）：{exc}")
+            continue
+        # 键已经是**我们请求的那个写法**（`sh000001`），直接合并：
+        # 指数与股票同码（`000001`）时不会互相覆盖 —— 见 `_iter_tencent_rows`
+        for code in batch:
+            row = parsed.get(code)
+            if row is not None:
+                result[code] = row
+        if pace:
+            time.sleep(pace)
+    return result
+
+
 def snapshot(
     symbols: Sequence[str] | None = None,
     *,
@@ -247,13 +313,16 @@ def snapshot(
         return {}
 
     for batch in _chunks(wanted, TENCENT_BATCH):
-        query = ",".join(f"{market_prefix(code)}{code}" for code in batch)
-        url = f"https://qt.gtimg.cn/q={query}"
-        try:
-            raw = fetch(url, {"User-Agent": _UA, "Referer": "https://gu.qq.com/"}, timeout)
-            result.update(_parse_tencent(raw.decode("gbk", errors="replace")))
-        except Exception as exc:  # noqa: BLE001 - 一批失败不该影响其它批
-            logger.info(f"腾讯快照这一批失败（{len(batch)} 只）：{exc}")
+        # 复用 `batch_quotes`（同一份分批/解析/归档逻辑），拿回来再按**裸代码**归档：
+        # 上层（`sources`/界面）用的键一直是裸 6 位，改成带前缀会牵动一大片
+        got = batch_quotes(
+            [f"{market_prefix(code)}{code}" for code in batch],
+            opener=fetch, timeout=timeout, pace=0,
+        )
+        for code in batch:
+            row = got.get(f"{market_prefix(code)}{code}")
+            if row is not None:
+                result[code] = row
         if pace:
             time.sleep(pace)
 

@@ -864,23 +864,25 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     assert not hasattr(window, "group_boxes")
     assert not hasattr(window, "strategy_boxes")
 
-    # 数据来源：**来源列表**。2026-09-17 起默认是 `["public", "hithink"]`
-    # （公开源是主源、同花顺是备用源），所以列表里是两行、同花顺排最后
-    assert window.cfg.data_sources == ["public", "hithink"]
+    # 数据来源：**来源列表**。2026-09-18 用户拍板把主次换回来了 ——
+    # 默认 `["hithink", "public"]`（同花顺是主源、免 Key 的公开源是兜底），
+    # 所以列表里是两行、同花顺排第一（**列表顺序 = 优先级**）
+    assert window.cfg.data_sources == ["hithink", "public"]   # 2026-09-18：同花顺回到主源
     assert "同花顺金融数据服务（内置）" in window.data_source_label.text()
     assert "hithink" in window.data_source_label.text()        # 把配置里的原值也写出来
     assert window.data_source_label.text().startswith("取数顺序")   # 顺序 = 优先级
     # 列表只画**已启用**的来源（这一份配置里的两个）；能力文案来自注册表
-    assert list(window.source_rows) == ["public", ui_app.BUILTIN_SOURCE]
+    assert list(window.source_rows) == [ui_app.BUILTIN_SOURCE, "public"]
     from laoa_trader.data import sources as sources_mod
 
     state = {s["id"]: s for s in sources_mod.source_states(window.cfg)}
-    public = window.source_rows["public"]
-    assert public.tag_label.text() == "主来源"                  # 排第一的那个 = 主源
     builtin = window.source_rows[ui_app.BUILTIN_SOURCE]
     assert builtin.name_label.text() == state["hithink"]["name"]
-    # 同花顺 = **备用源**（用户明确要求"同花顺改成备用源"）
-    assert builtin.tag_label.text() == ui_app.BUILTIN_BACKUP_TAG == "备用源"
+    # 排第一的那个 = 主来源（角色标记只给第一位）
+    assert builtin.tag_label.text() == "主来源"
+    # 公开源排在它后面 → 不给角色标记，而是按 Key 状态显示"免 Key"（它确实不用 Key）
+    public = window.source_rows["public"]
+    assert public.tag_label.text() == "免 Key"
     # 能力说明写在界面上（换来源会丢掉什么，用户必须看得见）——**文案来自真相源**
     assert builtin.capability_label.text() == \
         "提供：" + state["hithink"]["capabilities_text"]
@@ -890,14 +892,20 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     # 非当前页签里的控件 `isVisible()` 恒为 False，所以这里看的是「有没有被显式藏起来」
     assert builtin.btn_delete.isHidden() is True               # 也不能删
     # **界面上没有 Key 输入框、也没有【测试连接】**（2026-09-17 用户要求）；
-    # 那一行改成"备用源 + 可点开的申请地址"
+    # 那一行改成"主来源 + 可点开的申请地址"
     assert builtin.key_edit is None
     assert builtin.btn_test is None
     assert not hasattr(window, "key_edit")
     assert not hasattr(window, "btn_test_connection")
-    assert builtin.key_notice_text == (
-        "备用源：同花顺金融数据服务（需要 Key，申请地址 https://fuyao.aicubes.cn）")
-    assert "备用源：同花顺金融数据服务（需要 Key，申请地址" in builtin.key_label.text()
+    # 2026-09-18：用户把主源换回同花顺（公开接口实测会限流，同花顺不会轻易限流），
+    # 所以这一行的标记从"备用源"改回"主来源" —— 标记与文案都由 `ui_app` 的常量给出，
+    # 这里同时钉"常量本身"和"界面上渲染出来的那行字"，免得两处各改一半
+    assert ui_app.BUILTIN_BACKUP_TAG == "主来源"
+    assert builtin.key_notice_text == ui_app.BUILTIN_BACKUP_TEXT.format(
+        url=ui_app.BUILTIN_KEY_URL)
+    assert builtin.key_notice_text.startswith("主来源：同花顺金融数据服务（需要 Key，申请地址")
+    assert "主来源：同花顺金融数据服务（需要 Key，申请地址" in builtin.key_label.text()
+    assert "备用源" not in builtin.key_label.text()          # 旧口径的标记不许再出现
     assert f'href="{ui_app.BUILTIN_KEY_URL}"' in builtin.key_label.text()   # 地址可点开
     assert builtin.key_label.openExternalLinks() is True
     # 注册表里还有**没启用**的来源（东方财富）→ 进【添加来源】候选，不画进列表
@@ -2094,8 +2102,9 @@ def test_save_notify_feishu_without_credentials_hints(window, seeded, qapp) -> N
 SETTINGS_KEYS: frozenset[str] = frozenset({
     # 1) 数据来源
     #
-    # **没有 `hithink_api_key`**（2026-09-17 用户要求）：同花顺改成备用源之后，界面上
-    # 不再提供填 Key 的入口（那一行只剩"备用源 + 申请地址"的说明），所以一键保存
+    # **没有 `hithink_api_key`**（2026-09-17 用户要求）：界面上不提供填 Key 的入口
+    # （那一行只剩"主来源 + 申请地址"的说明；2026-09-18 用户把主源换回同花顺，
+    # 角色标记随之从"备用源"改回"主来源"，但"没有输入框"这件事没变），所以一键保存
     # 也不该再写这个键。读取路径一个字没改（config.toml / 环境变量照旧生效）。
     "history_years",
     # 2) 通知方式
@@ -2119,7 +2128,8 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     """收集函数的键集合 = 五组控件的**全部**键（一键保存的"写哪些"就是它决定的）。
 
     **34 是现在的个数**（2026-09-17：`hithink_api_key` 从这份键集合里去掉了 ——
-    同花顺改成备用源，界面上没有填 Key 的入口，所以一键保存也不该再写它；
+    界面上没有填 Key 的入口（同花顺那一行只有"主来源 + 申请地址"的说明），
+    所以一键保存也不该再写它；
     读取路径没变，config.toml / 环境变量照旧生效）。
     在此之上，每个**已启用、需要 Key 且界面上真有输入框**的来源会按注册表给的
     `key_config` 多收一个键 —— 内置同花顺没有输入框（`row.key_edit is None`）所以被跳过，
@@ -2133,7 +2143,7 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     extra_key_fields = {
         state["key_config"] for state in sources_mod.source_states(window.cfg)
         if state["enabled"] and state["needs_key"] and state["key_config"]
-        # 内置同花顺**不算**：它那一行没有 Key 输入框（用户要求改成"备用源 + 申请地址"），
+        # 内置同花顺**不算**：它那一行没有 Key 输入框（用户要求改成"主来源 + 申请地址"），
         # 而"界面上有没有这个框"正是"要不要收这个键"的判据
         and state["id"] != ui_app.BUILTIN_SOURCE
     } - SETTINGS_KEYS
@@ -2147,7 +2157,8 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
 def _change_every_settings_control(window) -> None:
     """把设置页**每一个**控件都改一遍（一键保存的验收要用；不留一个"没被覆盖"的键）。
 
-    2026-09-17：这一组里**没有** Key 输入框了（同花顺改备用源），所以这里也不改它 ——
+    2026-09-17：这一组里**没有** Key 输入框了（同花顺那一行只有"主来源 + 申请地址"
+    的说明；2026-09-18 用户把主源换回同花顺，角色标记随之改回"主来源"），所以这里也不改它 ——
     `_collect_settings_updates()` 的键集合里同样没有 `hithink_api_key`。
     """
     # 1) 数据来源
@@ -2371,7 +2382,7 @@ def test_test_connection_probe_reports_every_outcome(window) -> None:
     成功 / 没填 Key / Key 无效 / 服务端未就绪 / 网络异常五种结果逐一钉住。
 
     2026-09-17：界面上那个【测试连接】**按钮**被删掉了（用户要求把同花顺那一行改成
-    "备用源 + 申请地址"，输入框没了按钮就没有被测对象），但**函数保留**：
+    "主来源 + 申请地址"，输入框没了按钮就没有被测对象），但**函数保留**：
     它是独立能力，测试直接调它（将来要恢复"测一下配置里的 Key 能不能用"，
     接一个按钮上来就行）。
     """
@@ -2878,13 +2889,20 @@ def test_no_first_run_hint_when_data_ready(seeded, qapp) -> None:
 
 def test_download_without_api_key_shows_inline_hint_not_dialog(window, qapp,
                                                               monkeypatch) -> None:
-    """没配 Key 就点【下载数据】：**不弹窗**，在「系统设置」里点亮提示 + 指路。
+    """没配 Key 就点【下载数据】：**拒绝 + 不弹窗**，在「系统设置」里点亮提示 + 指路。
 
     为什么不做成弹窗：缺 Key 不是"要用户拍板"的事，而是"下一步该做什么" ——
     弹一个框只会拦住他，然后他还是得回同一个地方改配置。
 
-    2026-09-17：界面上**没有填 Key 的入口**了（同花顺改备用源），所以这句指路改成
+    2026-09-17：界面上**没有填 Key 的入口**了（同花顺那一行只有"主来源 + 申请地址"
+    的说明；2026-09-18 用户把主源换回同花顺，标记随之改回"主来源"），所以这句指路改成
     **config.toml / 环境变量**；读数路径没变，只是写的地方从界面回到配置文件。
+
+    2026-09-18 追加：为什么这条用例还要断言"提示里写了没 Key 时**能用**什么" ——
+    用户拍板"完整历史走用户自己的同花顺 Key、公开源退回兜底"之后，曾经试过"没 Key 时
+    自动装随包历史包"，那个方案也被否掉了（`data/history_pack.py` 已删除）。于是
+    "点了没反应"和"提示只说缺什么、不说还能干什么"都会让用户以为整个程序不可用 ——
+    必须同时说清"能看行情与大盘概览"和"选股要 Key"，这两句是这条路径的全部信息量。
     """
     from PySide6.QtWidgets import QMessageBox
 
@@ -2908,6 +2926,12 @@ def test_download_without_api_key_shows_inline_hint_not_dialog(window, qapp,
     assert "config.toml" in win.key_hint.text()
     assert "hithink_api_key" in win.key_hint.text()
     assert "HITHINK_FINANCE_API_KEY" in win.key_hint.text()      # 环境变量那条路也写出来
+    # **说清"没 Key 时能干什么、不能干什么"**（2026-09-18 用户拍板：历史走 Key、
+    # 公开源退回兜底）——只说"缺 Key"会让人以为整个程序用不了
+    assert "大盘概览" in win.key_hint.text()                     # 免 Key 兜底仍然可看
+    assert "行情" in win.key_hint.text()
+    assert "选股要 Key" in win.key_hint.text()                   # 但选股确实要它
+    assert "自动" in win.key_hint.text()                         # 当天的行情仍会自动落库
     assert "系统设置" in win.status_label.fullText()
     # 在 config.toml 里写好 Key（老用户的做法）→ 提示收掉，再点就能下载
     config_file = win.cfg.source_path
@@ -3120,7 +3144,7 @@ def test_source_list_adds_eastmoney_without_a_fake_key_box(
     from laoa_trader.data import sources as sources_mod
 
     config_file = seeded.data_dir / "config.toml"
-    assert window.cfg.data_sources == ["public", "hithink"]
+    assert window.cfg.data_sources == ["hithink", "public"]   # 2026-09-18：同花顺回到主源
     assert "eastmoney" in sources_mod.REGISTRY           # 后端已实现第二个来源
 
     # 【添加来源】的菜单里就是它（抽成方法之后测试不用去点会阻塞的 `exec`）
@@ -3130,11 +3154,11 @@ def test_source_list_adds_eastmoney_without_a_fake_key_box(
 
     window.on_add_source("eastmoney")
     qapp.processEvents()
-    assert window.cfg.data_sources == ["public", "hithink", "eastmoney"]
-    assert 'data_sources = ["public", "hithink", "eastmoney"]' in config_file.read_text(
+    assert window.cfg.data_sources == ["hithink", "public", "eastmoney"]
+    assert 'data_sources = ["hithink", "public", "eastmoney"]' in config_file.read_text(
         encoding="utf-8")
-    # 列表顺序 = 优先级：公开源（主）→ 同花顺（备用，永远排在最后）→ 用户新加的
-    assert list(window.source_rows) == ["public", "hithink", "eastmoney"]
+    # 列表顺序 = 优先级：同花顺（主）→ 公开源（兜底）→ 用户新加的（追加在末尾）
+    assert list(window.source_rows) == ["hithink", "public", "eastmoney"]
     row = window.source_rows["eastmoney"]
     assert row.name_label.text() == "东方财富（公开接口，免 Key）"
     assert row.tag_label.text() == "免 Key"
@@ -3160,9 +3184,9 @@ def test_source_list_adds_eastmoney_without_a_fake_key_box(
     # 删除 → 回到原来的两个来源
     row.btn_delete.click()
     qapp.processEvents()
-    assert window.cfg.data_sources == ["public", "hithink"]
-    assert list(window.source_rows) == ["public", "hithink"]
-    assert 'data_sources = ["public", "hithink"]' in config_file.read_text(
+    assert window.cfg.data_sources == ["hithink", "public"]   # 2026-09-18：同花顺回到主源
+    assert list(window.source_rows) == ["hithink", "public"]   # 2026-09-18：同花顺回到主源
+    assert 'data_sources = ["hithink", "public"]' in config_file.read_text(
         encoding="utf-8")
     # 内置那一条**删不掉**（历史日K 的 dump 只有它提供）
     window.on_remove_source("hithink")
@@ -3189,13 +3213,13 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
         note="测试替身：只用来验证「要 Key 的来源」这条分支。",
         key_config=fake_key,
     ))
-    seeded.data_sources = ["public", "hithink", "fakesrc"]
+    seeded.data_sources = ["hithink", "public", "fakesrc"]
     window._rebuild_source_rows()
     qapp.processEvents()
     row = window.source_rows["fakesrc"]
     assert row.key_edit is not None                       # 要 Key → 有输入框
     assert row.tag_label.text() == "未配 Key"
-    # 同花顺仍然没有输入框（内置那一行的特例：用户要求改成"备用源 + 申请地址"）
+    # 同花顺仍然没有输入框（内置那一行的特例：用户要求改成"主来源 + 申请地址"）
     assert window.source_rows["hithink"].key_edit is None
     row.key_edit.setText("token-abc")
     updates = window._collect_settings_updates()
@@ -3231,7 +3255,7 @@ def test_source_list_falls_back_when_the_registry_is_unreadable(
     assert list(window.source_rows) == [ui_app.BUILTIN_SOURCE]
     row = window.source_rows[ui_app.BUILTIN_SOURCE]
     assert "注册表暂时读不出来" in row.note_label.text()      # 如实说明，不是空白
-    # 这一行照旧是"备用源 + 申请地址"（它不依赖注册表，是内置的）
+    # 这一行照旧是"主来源 + 申请地址"（它不依赖注册表，是内置的）
     assert row.tag_label.text() == ui_app.BUILTIN_BACKUP_TAG
     assert row.key_edit is None
     assert row.key_label.openExternalLinks() is True

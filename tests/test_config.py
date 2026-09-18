@@ -760,16 +760,20 @@ def test_default_notify_goes_popup_only() -> None:
 
 
 def test_data_sources_default_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`data_sources`：默认 `["public", "hithink"]`（免 Key 公开源当主源），环境变量可覆盖。
+    """`data_sources`：默认 `["hithink", "public"]`（**同花顺是主源**），环境变量可覆盖。
 
-    默认值随产品走：2026-09-17 起分发版把**免 Key 的公开源**放在第一位
-    （别人拿到程序不用先申请 Key），同花顺降为备用/增强 —— 有 Key 的用户
-    在配置里把它排前面即可自动接管。环境变量这条路（`DATA_SOURCES`，
-    逗号分隔、与 `notify_channels` 同一套 `_as_list` 写法）**一字未改**，
-    所以下面照旧钉着"环境变量真的接上了"。
+    默认值随产品走，而且这个决定被用户来回拍过两次，所以这里把"为什么"写清楚：
+    2026-09-17 一度把免 Key 的公开源放在第一位（"别人拿到程序不用先申请 Key"）；
+    2026-09-18 用户改回来（原话："那还是不要换源吧 真晕 同花顺不会轻易限流"）——
+    公开接口**实测会限流**：腾讯 fqkline 抓 700 只左右就开始连续失败、新浪列表接口
+    直接回 HTTP 456，而同花顺是正经 API。顺序即优先级，所以这一行就是产品行为。
+    环境变量这条路（`DATA_SOURCES`，逗号分隔、与 `notify_channels` 同一套 `_as_list`
+    写法）**一字未改**，所以下面照旧钉着"环境变量真的接上了"。
     """
     cfg = load_config(tmp_path / "none.toml", use_env=False)
-    assert cfg.data_sources == ["public", "hithink"]
+    # 2026-09-18 用户拍板：同花顺回到主源（正经 API、不会像公开接口那样限流），
+    # 免 Key 的公开源降为兜底 —— 顺序即优先级，所以这一行就是产品行为
+    assert cfg.data_sources == ["hithink", "public"]
 
     monkeypatch.setenv("DATA_SOURCES", "hithink,csv")
     cfg2 = load_config(tmp_path / "none.toml")
@@ -778,9 +782,9 @@ def test_data_sources_default_and_env(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setenv("DATA_SOURCES", "hithink，csv")   # 中文逗号也认
     assert load_config(tmp_path / "none.toml").data_sources == ["hithink", "csv"]
 
-    # 有 Key 的用户把自己排前面：顺序就是优先级（"同花顺自动接管"靠的就是这个）
-    monkeypatch.setenv("DATA_SOURCES", "hithink,public")
-    assert load_config(tmp_path / "none.toml").data_sources == ["hithink", "public"]
+    # 顺序就是优先级：把公开源排到前面，它就是第一顺位（换来源不必改代码）
+    monkeypatch.setenv("DATA_SOURCES", "public,hithink")
+    assert load_config(tmp_path / "none.toml").data_sources == ["public", "hithink"]
 
 
 def test_data_sources_in_example_config(tmp_path: Path) -> None:
@@ -796,11 +800,16 @@ def test_data_sources_in_example_config(tmp_path: Path) -> None:
     example = P(__file__).resolve().parents[1] / "config.example.toml"
     text = example.read_text(encoding="utf-8")
     data = tomllib.loads(text)
-    assert data["data_sources"] == ["public", "hithink"]
+    assert data["data_sources"] == ["hithink", "public"]   # 与代码默认值必须一致（主源=同花顺）
     assert data["data_sources"] == load_config(tmp_path / "none.toml",
                                               use_env=False).data_sources
     assert "同花顺" in text
-    assert "免 Key" in text                  # 主源免 Key 这件事，示例里必须说清
+    # 示例文件是**用户唯一能看到"这两个源是什么关系"的地方**，所以两句都要有：
+    # 主源（同花顺）要 Key、以及兜底源（公开源）免 Key —— 2026-09-18 换了主次之后
+    # 这两句的主语也跟着换了（原来"免 Key"是描述主源的）
+    assert "Key" in text
+    assert "免 Key" in text                  # 兜底源免 Key 这件事，示例里必须说清
+    assert "兜底" in text                    # 定位也要写明，否则用户以为公开源还是主源
 
 
 def test_default_history_window_is_pinned_in_example_config() -> None:

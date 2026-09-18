@@ -2,8 +2,10 @@
 
 外加一小节"接线测试"（`ui/quotes.py` 那四条门槛里最要紧的一条）：
 **一个 Key 都没配时，两张表的现价/涨幅照样要能取到** ——
-2026-09-17 起出厂顺序是 `["public", "hithink"]`（**免 Key 的公开源当主源**），
-所以那条用例现在盯的是 `public`（同花顺降为"有 Key 时的备用/增强"）。
+出厂顺序是 `["hithink", "public"]`（**同花顺是主源**），所以那条用例盯的是 `public`：
+同花顺没 Key 时它接管，定位是**兜底**而不是主源。
+2026-09-18 用户把主次换回来了：公开接口实测会限流（腾讯 fqkline 抓 700 只左右就开始
+连续失败、新浪列表接口直接回 HTTP 456），而同花顺是正经 API、不会这么脆。
 
 全部用例都不联网：来源取数函数被换成假函数、公开源的 HTTP 层被换成假 opener，
 socket 层还有 conftest 的 `_block_network` 兜底（真外呼会直接失败，而不是悄悄打接口）。
@@ -95,9 +97,11 @@ def unified(symbol: str, **overrides) -> dict:
 def test_registry_has_all_builtin_sources() -> None:
     """内置来源一共三个（原名叫 `..._both_builtin_sources`，现在不止两个）。
 
-    改名与新断言的理由：2026-09-17 起 `public`（免 Key 公开源）是**分发版主源**
-    ——"装上就能看行情"这条产品承诺在注册表这一层就要成立，所以它的关键属性
+    改名与新断言的理由：`public`（免 Key 公开源）是**没配同花顺 Key 时的兜底源**
+    ——"不填 Key 也能看行情"这条产品承诺在注册表这一层就要成立，所以它的关键属性
     单独钉死（免 Key、名字写明"免 Key"、能力含快照）。
+    ⚠️ 2026-09-18 用户把主源换回同花顺（公开接口实测会被限流），所以它的定位是
+    **兜底**而不是主源 —— 这条用例盯的是"它确实兜得住"，不是"它是第一顺位"。
     """
     assert set(sources.REGISTRY) == {"public", "hithink", "eastmoney"}
     pub_info = sources.REGISTRY["public"]
@@ -108,7 +112,7 @@ def test_registry_has_all_builtin_sources() -> None:
     assert em_info.needs_key is False and em_info.key_config is None
     assert hx_info.name == "同花顺金融数据服务（内置）"
     assert "免 Key" in pub_info.name and "免 Key" in em_info.name
-    # 主源：能出实时快照（否则"免 Key 也能看行情"根本没有来源支撑）
+    # 兜底源：能出实时快照（否则"没 Key 也能看行情"这句话根本没有来源支撑）
     assert sources.CAP_SNAPSHOT in pub_info.capabilities
     # ⚠️ 只许声明**已经接进链路**的能力。`public_quotes.daily()` 确实能取单只历史日K，
     # 但它没接进下载/日更链路，所以这里**必须**只有 snapshot：谁要是顺手把
@@ -116,7 +120,9 @@ def test_registry_has_all_builtin_sources() -> None:
     # 用户只会认为"这个源坏了"—— 能力声明是给用户看的承诺，不是实现清单。
     assert pub_info.capabilities == frozenset({sources.CAP_SNAPSHOT})
     # 没接通的链路必须在界面能看到的 note 里点名，否则用户会归因错误
-    assert "大盘概览" in pub_info.note and "历史数据下载" in pub_info.note
+    # 没接通的链路要在界面能看到的 note 里点名（概览现在**有**免 Key 兜底，所以这里
+    # 点名的是"完整历史下载与选股"——2026-09-18 用户拍板：那两样要 Key）
+    assert "大盘概览" in pub_info.note and "完整历史下载" in pub_info.note
     assert pub_info.note            # 风险与口径如实写在这一行里（界面直接显示它）
 
 
@@ -240,10 +246,12 @@ def test_source_states_lists_all_sources_with_enabled_first() -> None:
     """界面要能**添加来源**，所以没启用的也要列出来（这是与 active_sources 的关键差别）。
 
     期望值随注册表走：启用的是 `eastmoney` 排第一，其余按 `REGISTRY` 的定义顺序
-    跟在后面 —— 现在是 `public`（第二个内置来源）与 `hithink`。
+    跟在后面 —— 现在是 `hithink`（主源，注册表里排第一）与 `public`（兜底）。
     """
     states = sources.source_states(cfg_sources("eastmoney"))
-    assert [row["id"] for row in states] == ["eastmoney", "public", "hithink"]
+    # 没启用的排前面之后，剩下的按**注册表顺序**（2026-09-18 用户把主源换回同花顺，
+    # 所以它在注册表里也排第一）
+    assert [row["id"] for row in states] == ["eastmoney", "hithink", "public"]
     assert [row["enabled"] for row in states] == [True, False, False]
     assert set(states[0]) == {
         "id", "name", "enabled", "needs_key", "has_key",
@@ -252,6 +260,13 @@ def test_source_states_lists_all_sources_with_enabled_first() -> None:
 
 
 def test_source_states_default_order_and_texts() -> None:
+    """`source_states` 给界面渲染的那几行：能力文案、角色说明（note）都要如实。
+
+    2026-09-18 用户把主次换回来（**同花顺是主源**、免 Key 公开源是兜底），所以
+    `note` 这一栏也跟着改口 —— 而这正是**界面直接显示给用户看的那句话**：
+    它要是还写着"公开源是主源"，用户就会按错误的理解去配 Key/排顺序。
+    这条用例原来只断言 `note` 非空（等于没钉内容），这里补上两边的关键词。
+    """
     states = {row["id"]: row for row in sources.source_states(cfg_sources("hithink"))}
     assert states["hithink"]["enabled"] is True
     assert states["hithink"]["has_key"] is False              # 没配 Key
@@ -271,7 +286,16 @@ def test_source_states_default_order_and_texts() -> None:
     assert states["public"]["capabilities_text"] == "实时快照"
     assert states["public"]["capabilities"] == ("snapshot",)
     assert "免 Key" in states["public"]["name"]
-    assert states["hithink"]["note"]
+    # 两边的角色说明必须是**新口径**（这一栏直接显示在界面上，写错就是在说假话）
+    hx_note = states["hithink"]["note"]
+    pub_note = states["public"]["note"]
+    assert hx_note
+    assert "主源" in hx_note and "默认排第一" in hx_note       # 同花顺 = 主源
+    assert "兜底" in hx_note                                   # 公开源在它这里是兜底
+    assert pub_note
+    assert "兜底" in pub_note and "没配同花顺 Key" in pub_note  # 公开源 = 兜底源
+    # 兜底源也不能过度承诺：完整历史与选股仍然要同花顺 Key（2026-09-18 用户拍板）
+    assert "完整历史" in pub_note and "选股" in pub_note
 
 
 def test_source_states_capabilities_text_drops_missing_ones() -> None:
@@ -389,7 +413,7 @@ def test_snapshot_map_with_no_enabled_source_sends_no_request(
 def test_snapshot_map_uses_the_public_source_without_any_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """只启用 `public`、**一个 Key 都没配** → 照样拿到统一口径的行情（免 Key 主源）。
+    """只启用 `public`、**一个 Key 都没配** → 照样拿到统一口径的行情（免 Key 兜底源）。
 
     用真实响应做假 HTTP 层：这条用例真正要保护的是"**没 Key 也有数**"，
     以及"公开源那一路的单位也已经归一成股/元"（两张表的口径不随来源变化）。
@@ -463,10 +487,11 @@ def test_snapshot_map_prefers_hithink_over_public_when_a_key_is_configured(
 def test_snapshot_map_falls_through_when_the_public_source_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """免 Key 主源（公开源）挂了 → 只记日志，落到下一个来源，**绝不抛异常**。
+    """免 Key 兜底源（公开源）挂了 → 只记日志，落到下一个来源，**绝不抛异常**。
 
-    公开接口随时可能限流/改字段，所以"主源失败"是常态而不是意外：
-    用户配的备用来源必须能接管（这条就是那份承诺的用例）。
+    公开接口随时可能限流/改字段（2026-09-18 实测：腾讯 fqkline 抓 700 只左右开始连续
+    失败、新浪列表接口回 HTTP 456），所以"兜底源失败"是常态而不是意外：
+    配了 Key 的同花顺就该能接管（这条就是那份承诺的用例）。
     """
     monkeypatch.setattr(hx, "available", lambda: False)
     monkeypatch.setattr(em, "snapshot",
@@ -680,7 +705,7 @@ def test_probe_source_tolerates_bad_symbol_input(monkeypatch: pytest.MonkeyPatch
 
 
 def test_probe_source_public_says_ok_without_any_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """**【测试】按钮对免 Key 主源也要给"通"**（用户没配任何 Key 时的第一行）。
+    """**【测试】按钮对免 Key 兜底源也要给"通"**（用户没配任何 Key 时的第一行）。
 
     设置页那一行的意义就是"点一下看它到底通不通"；公开源不需要 Key，
     所以这里 `has_key` 必须为真、`ok` 必须为真 —— 否则用户会去找一个不存在的 Key。
@@ -705,16 +730,16 @@ def test_quotes_uses_the_public_source_when_no_key_is_configured(
     """**主目标**：一个 Key 都不配 → 两张表照样有现价/涨幅（落到免 Key 的公开源）。
 
     原名 `test_quotes_uses_eastmoney_when_hithink_key_is_missing`：**意图一字未改**
-    （"绝不因为没 Key 就什么都不返回"），变的是"第一个免 Key 的来源"—— 出厂顺序
-    2026-09-17 起是 `["public", "hithink"]`，所以现在落到 `public`。
-    东方财富那条路仍在，只是排到了公开源后面（下方第二个场景）。
+    （"绝不因为没 Key 就什么都不返回"），变的是"第一个免 Key 的来源"—— 出厂顺序是
+    `["hithink", "public"]`，同花顺没 Key 时**跳过**它、落到 `public` 兜底。
+    东方财富那条路仍在，只是排在公开源后面（下方第二个场景）。
     """
     from laoa_trader.ui import quotes as q
 
     monkeypatch.setattr(hx, "available", lambda: False)
     monkeypatch.setattr(pq, "_urllib_get", fake_public_opener())   # 离线：真实响应做假 HTTP 层
 
-    # ① 出厂默认顺序（`Config()` 就是 `["public", "hithink"]`）
+    # ① 出厂默认顺序（`Config()` 就是 `["hithink", "public"]`；同花顺没 Key → 落到兜底）
     out = q.fetch_snapshot_prices(Config(), ["600519"])
     assert set(out) == {"600519"}                    # 没 Key 也**不是空**
     quote = out["600519"]
@@ -749,7 +774,7 @@ def test_quotes_sends_nothing_without_a_usable_source(monkeypatch: pytest.Monkey
     monkeypatch.setattr(hx, "available", lambda: False)
     entered: list[str] = []
     # 盯**三层**：`quotes` 自己的门槛（连 `sources.snapshot_map` 都不进）、
-    # 来源层的取数函数、以及免 Key 主源自己的 HTTP 层 ——
+    # 来源层的取数函数、以及免 Key 兜底源自己的 HTTP 层 ——
     # 只看其中一层的话，另一层被删掉（或绕过）是看不出来的
     monkeypatch.setattr(sources, "snapshot_map",
                         lambda *a, **k: entered.append("snapshot_map") or {})
@@ -785,7 +810,7 @@ def test_quotes_service_gate_follows_usable_sources(
     empty_symbols = q.QuoteService(cfg_sources("public"), lambda: [])
     try:
         assert only_hx.should_request() is False          # 没 Key 且没有别的来源
-        assert only_public.should_request() is True       # 免 Key 主源：不用配任何 Key
+        assert only_public.should_request() is True       # 免 Key 兜底源：不用配任何 Key
         assert both.should_request() is True              # 同花顺没 Key，公开源接管
         assert em_only.should_request() is True           # 只要东方财富也行
         assert none.should_request() is False             # 一个来源都没启用
