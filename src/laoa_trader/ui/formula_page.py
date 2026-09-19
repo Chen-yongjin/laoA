@@ -188,8 +188,10 @@ ROW_AUCTION = "auction"
 AUCTION_KEY = "auction"
 AUCTION_NAME = "竞价策略"
 
-#: 列表列头（用户给定，**一个字都不加**）
-LIST_COLUMNS: tuple[str, ...] = ("名称", "备注", "状态")
+#: 列表列头（用户给定，**一个字都不加**）。
+#: 2026-09-18 用户改过一次字：`名称 | 备注 | 状态` → `策略名称 | 说明 | 策略选取`
+#: （"策略选取"这一列就是那个勾：勾上 = 这条策略参与选股）。
+LIST_COLUMNS: tuple[str, ...] = ("策略名称", "说明", "策略选取")
 
 #: 右键菜单项文案
 MENU_ENABLE = "启用"
@@ -211,14 +213,25 @@ OFF_GROUP_KEY = "none"
 #: 得先翻过大段文字才看得见公式本身（同一个上限库里有 `MAX_DESC_CHARS`）。
 MAX_NOTE_CHARS = formulas_lib.MAX_DESC_CHARS
 
+#: 「本次选股结果」表的列（用户 2026-09-18 要求把结果界面加回来）。
+#: 来源列与「自选股池」那一列**同一个词**（`策略·短期反转` / `公式·放量上攻`）——
+#: 两处说法不一样的话，用户没法拿它对账。
+RESULT_COLUMNS: tuple[str, ...] = ("名称", "代码", "来源")
+
+#: 结果页在**还没跑过选股**时那句话
+RESULT_HINT_IDLE = (
+    "这里显示**本次选股结果**（平时隐藏）：点右上角【开始选股】跑一轮，跑完结果就出现在这里，"
+    "可以【一键加入自选】或【导出结果到桌面】。"
+)
+
 #: 顶部那行灰字说明（用户打开这一页先看到的东西）。
 #: **必须写明结果去哪了**：这一页不再显示选股结果（用户要求），
 #: 不写的话用户点完【开始选股】会以为"什么都没发生"。
 PAGE_HINT = (
-    "勾「状态」列 = 这条策略/公式参与选股（只有「竞价策略」那一行例外：它开关的是盘中"
-    "竞价扫描，不参与选股）；单击一行看详情（公式会载入编辑器）；"
-    "右键 = 启用 / 关闭 / 删除；点【开始选股】跑一轮 —— "
-    "选出的票直接进「自选股池」（在那里增删），并同时导出一份到桌面的文本文件。"
+    "勾「策略选取」列 = 这条策略/公式参与选股（只有「竞价策略」那一行例外：它开关的是盘中"
+    "竞价扫描，不参与选股）；单击一行看详情（公式会载入编辑器）；右键 = 启用 / 关闭 / 删除；"
+    "点【开始选股】跑一轮 —— 这一块会变成【本次选股结果】，可以一键加入自选、导出到桌面，"
+    "结果同时也会进「自选股池」并自动导出一份到桌面。"
 )
 
 #: 策略列表上方那句灰字
@@ -374,9 +387,9 @@ class StrategyRow:
     key: str
     #: 展示名（内置 = 中文名）
     name: str
-    #: 「备注」列的文本
+    #: 「说明」列的文本
     note: str
-    #: 「备注」列的 tooltip（完整证据/错误全文）
+    #: 「说明」列的 tooltip（完整证据/错误全文）
     note_tip: str
     #: 是否参与选股（内置查 `enabled_groups`/`enabled_strategies`，公式查 `enabled_formulas`；
     #: 竞价策略查 `intraday_auction` —— 它不是选股策略，这条注释只说明"状态从哪来"）
@@ -444,7 +457,7 @@ def _group_note_tail(group: Any) -> str:
 
 
 def builtin_strategy_note(class_name: str) -> str:
-    """内置策略「备注」列的那句话 —— **只搬真实字段，一个字都不编**。
+    """内置策略「说明」列的那句话 —— **只搬真实字段，一个字都不编**。
 
     取材顺序（都是代码里已有的结论，界面不做任何"计算"）：
 
@@ -480,7 +493,7 @@ def builtin_strategy_note(class_name: str) -> str:
 
 
 def builtin_strategy_tip(class_name: str) -> str:
-    """内置策略「备注」列的 tooltip：把来源与出处写清楚（用户不用翻代码/文档）。"""
+    """内置策略「说明」列的 tooltip：把来源与出处写清楚（用户不用翻代码/文档）。"""
     cls = rules_mod.STRATEGIES.get(class_name)
     group = _group_of_builtin(class_name)
     lines = [f"{rules_mod.strategy_label(class_name)}（{class_name}）"]
@@ -562,7 +575,7 @@ def _cfg_list(cfg: Any, key: str) -> str:
 # 下面那几个默认值只在 `cfg` 是测试替身、没有这些字段时兜底，与 `config.py` 的出厂值一致。
 
 def auction_enabled(cfg: Any) -> bool:
-    """竞价扫描开着没有（= 这一行的「状态」列）。"""
+    """竞价扫描开着没有（= 这一行的「策略选取」列）。"""
     return bool(getattr(cfg, "intraday_auction", False))
 
 
@@ -613,7 +626,7 @@ def _auction_criteria(cfg: Any) -> list[str]:
 
 
 def auction_note(cfg: Any) -> str:
-    """「备注」列那句话：**先说清它不参与选股**，再说口径。
+    """「说明」列那句话：**先说清它不参与选股**，再说口径。
 
     为什么把"不参与选股"放在最前面：备注列是 Stretch 的，窗口一窄就会被省略号截掉 ——
     而这半句正是这一行最要紧的东西（用户看到"竞价策略"四个字，第一反应必然是
@@ -629,7 +642,7 @@ def auction_note(cfg: Any) -> str:
 
 
 def auction_note_tip(cfg: Any) -> str:
-    """「备注」列的 tooltip：口径全文 + 两条硬限制（不参与选股 / 无法回测）。"""
+    """「说明」列的 tooltip：口径全文 + 两条硬限制（不参与选股 / 无法回测）。"""
     lines = [
         f"{AUCTION_NAME}（{AUCTION_KEY}）：它不是选股策略，而是「系统设置 → 竞价扫描」"
         "那个功能的开关。",
@@ -658,7 +671,7 @@ def auction_detail(cfg: Any) -> str:
         f"{AUCTION_NAME}（{AUCTION_KEY}）—— 内置的竞价扫描开关，只读",
         "",
         "当前状态：" + ("✅ 已开启（每天到点自动扫全市场）" if enabled else "☐ 未开启"),
-        "写回的配置键：intraday_auction（勾「状态」列或右键【启用】即写回 config.toml）",
+        "写回的配置键：intraday_auction（勾「策略选取」列或右键【启用】即写回 config.toml）",
         "",
         "── 口径（数字就是设置页那几个框，界面不另算）──",
     ]
@@ -697,7 +710,7 @@ def auction_row(cfg: Any) -> StrategyRow:
 
 
 def formula_row_note(spec: Any, runtime_error: str = "") -> tuple[str, str]:
-    """公式行「备注」列的 (文本, tooltip)。
+    """公式行「说明」列的 (文本, tooltip)。
 
     备注 = 公式文件里的 `# 说明:`（保存时界面写进去的），再叠加两类**必须让人看见**的问题：
 
@@ -705,8 +718,8 @@ def formula_row_note(spec: Any, runtime_error: str = "") -> tuple[str, str]:
       所以不能只藏在提示里；完整错误（带行号列号）进 tooltip；
     * 上一次运行的运行期错误（`⚠️ 运行时出错：…`，`formula_group.last_status()`）。
 
-    为什么把这两条放「备注」列而不是「状态」列：用户给定的列头只有
-    `名称 | 备注 | 状态`，而「状态」列被"参与选股"这个勾占满了（一格一义），
+    为什么把这两条放「说明」列而不是「策略选取」列：列头只有三格，
+    而「策略选取」列被"参与选股"这个勾占满了（一格一义），
     把错误塞进同一格会让"这一格到底能不能点"变得要猜。
     """
     note = str(getattr(spec, "description", "") or "").strip()
@@ -889,6 +902,11 @@ if QT_AVAILABLE:
             self._row_boxes: dict[str, Any] = {}
             #: 「竞价策略」那一行的勾选框（只有一行，所以不放进上面两个字典）
             self._auction_box: Any = None
+            #: **本次选股结果**（结果页那张表的行）：`[{"symbol","name","label"}...]`。
+            #: 平时是空的；点【开始选股】跑完由主窗口调 `show_pick_result()` 填进来。
+            self.result_rows: list[dict] = []
+            #: 本次结果的行情日（导出文件与结论那句都用它）
+            self.result_date: Any = None
             #: 载入行时别把"选中变化"当成用户点击，也别让刷列表打开编辑器
             self._loading = False
             #: 当前展开的内置策略详情（刷列表后要跟着更新）
@@ -970,6 +988,22 @@ if QT_AVAILABLE:
             而同一批票本来就有一张更该看的表 —— 「自选股池」页（结果就在那里，
             还能右键删、手工加）。摆两块显示同一批票只会让用户不确定"哪一块说了算"。
             """
+            # 2026-09-18（用户要求）：列表与"本次选股结果"**同一个位置两块页面** ——
+            # 平时显示策略列表；点【开始选股】切到结果页，跑完就在那里看结果、
+            # 一键加入自选、导出到桌面；点【返回策略列表】回来。
+            # 为什么用 QStackedWidget 而不是把结果表藏在下面：用户明确说
+            # "策略列表界面变为选股结果界面（平时隐藏）" —— 同一个位置切换，不占两份高度。
+            stack = QStackedWidget()
+            self.list_page = self._build_list_page()
+            self.result_page = self._build_result_page()
+            stack.addWidget(self.list_page)
+            stack.addWidget(self.result_page)
+            stack.setCurrentWidget(self.list_page)
+            self.list_stack = stack
+            return stack
+
+        def _build_list_page(self) -> Any:
+            """策略列表页（上半的主视图）。"""
             side = QWidget()
             layout = QVBoxLayout(side)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -1001,6 +1035,71 @@ if QT_AVAILABLE:
             layout.addWidget(self.table, 1)
 
             return side
+
+        def _build_result_page(self) -> Any:
+            """选股结果页（**平时隐藏**；点【开始选股】或跑完选股才切过来）。
+
+            用户 2026-09-18 的要求（推翻了 2026-09-17 的"这一页不显示结果"）：
+            "选股状态时，策略列表界面变为选股结果界面（选股结果界面平时隐藏），
+            结果可以一键加入自选和导出。"
+
+            所以这一页只有三样东西：一句结论（几只 / 行情日 / 有没有错）、
+            结果表、三个按钮（加入自选 / 导出到桌面 / 返回策略列表）。
+            它与「自选股池」页**不冲突**：选股本来就会把票写进股池（那是最完整的表，
+            能删能加），这里只是"刚跑完的这一批"的现场，方便立刻加自选或导出。
+            """
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+
+            self.result_hint = QLabel(RESULT_HINT_IDLE)
+            self.result_hint.setObjectName("statusTag")
+            self.result_hint.setWordWrap(True)
+            self.result_hint.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            layout.addWidget(self.result_hint)
+
+            self.result_table = QTableWidget(0, len(RESULT_COLUMNS))
+            self.result_table.setHorizontalHeaderLabels(list(RESULT_COLUMNS))
+            self.result_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self.result_table.setToolTip(
+                "本次选股选出来的票（按池子分数排序）。这张表是「刚跑完的这一批」的现场，"
+                "完整的池子看「自选股池」页"
+            )
+            header = self.result_table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            layout.addWidget(self.result_table, 1)
+
+            row = QHBoxLayout()
+            self.btn_add_all = QPushButton("一键加入自选")
+            self.btn_add_all.setToolTip(
+                "把这些票写进「自选股池」（只写本地库、不联网）：以后它们即使不进池也留在"
+                "自选表里；已经在自选里的不会重复添加，也不会覆盖你写过的备注"
+            )
+            self.btn_add_all.clicked.connect(self.on_add_all_to_watchlist)
+            row.addWidget(self.btn_add_all)
+
+            self.btn_export_result = QPushButton("导出结果到桌面")
+            self.btn_export_result.setToolTip(
+                "把这张表里的票写成一个文本文件放到桌面："
+                "老A选股助手-选股结果-<今天>.txt（与【开始选股】自动导出的那份同一个文件名，"
+                "同一天会覆盖它）"
+            )
+            self.btn_export_result.clicked.connect(self.on_export_result)
+            row.addWidget(self.btn_export_result)
+
+            self.btn_back_to_list = QPushButton("返回策略列表")
+            self.btn_back_to_list.setToolTip("回到策略列表（结果还留着，下次选股会刷新）")
+            self.btn_back_to_list.clicked.connect(self.on_back_to_list)
+            row.addWidget(self.btn_back_to_list)
+            row.addStretch(1)
+            layout.addLayout(row)
+            return page
 
         def _set_header_tooltip(self, column: int, text: str) -> None:
             """给表头写 tooltip（用户不用翻文档就知道这一列是什么口径）。"""
@@ -1116,7 +1215,7 @@ if QT_AVAILABLE:
             self.note_edit = QLineEdit()
             self.note_edit.setPlaceholderText("这条公式是干什么的（可留空 —— 留空则自动填「用到的字段/函数」）")
             self.note_edit.setToolTip(
-                "会写进公式文件的「# 说明:」注释头，列表的「备注」列显示的就是它；"
+                "会写进公式文件的「# 说明:」注释头，列表的「说明」列显示的就是它；"
                 f"最长 {MAX_NOTE_CHARS} 字，不能换行（注释头只有一行）"
             )
             note_row.addWidget(self.note_edit, 1)
@@ -1536,7 +1635,7 @@ if QT_AVAILABLE:
                 self.bottom_stack.setCurrentWidget(self.detail_page)
                 self.bottom_stack.setVisible(True)
                 self._set_hint(
-                    f"「{row.name}」不是选股策略，是盘中提示的开关：勾「状态」列（或右键"
+                    f"「{row.name}」不是选股策略，是盘中提示的开关：勾「策略选取」列（或右键"
                     "【启用】）就开启竞价扫描，每个交易日到点自动扫全市场。\n"
                     "它不会往「自选股池」加票、也不改变选股结果；"
                     "涨幅 / 量比 / 成交额那些参数在「系统设置 → 竞价扫描」里改。"
@@ -1548,7 +1647,7 @@ if QT_AVAILABLE:
             self.bottom_stack.setCurrentWidget(self.detail_page)
             self.bottom_stack.setVisible(True)
             self._set_hint(
-                f"「{row.name}」是内置策略：只能启用/关闭（勾「状态」列，或右键【启用】/【关闭】），"
+                f"「{row.name}」是内置策略：只能启用/关闭（勾「策略选取」列，或右键【启用】/【关闭】），"
                 "不能改也不能删。\n"
                 "想按自己的条件来：点【策略编辑】照它写一条公式，保存后勾上「参与选股」。"
             )
@@ -2360,41 +2459,189 @@ if QT_AVAILABLE:
         # （`pool.export_pick_file()`，由 `scheduler.run_daily` 在建池成功后调用）。
 
         def show_pick_result(self, rows: Any = None, *, data_date: str | None = None) -> None:
-            """界面不再显示结果（用户要求），这个方法保留为**空实现**以免调用方崩；
-            结果通过【自选股池】与桌面导出文件呈现。
+            """把这一轮选股的结果显示在**结果页**上（主窗口跑完 `run_daily` 会调它）。
 
-            为什么留着一个什么都不做的方法（而不是删掉）：
-
-            * `ui/app.py` 的 `_on_pipeline_done()` 还在调它
-              （`getattr(page, "show_pick_result", None)` → 有就调）。删掉方法本身
-              不会炸（那边用的是 `getattr`），但一旦哪天接线改成直接调用，
-              这里就会变成 `AttributeError` **把结论显示那段带崩** ——
-              一个空的兼容方法比"指望调用方老记得容错"可靠得多；
-            * 参数原样收下（report 或行列表都行），签名不缩水：
-              调用方不用为了这一页改代码（`app.py` 属于另一个改动方）。
-
-            它现在做的事**只有写日志**：把"这一轮到底选出了几只"记进日志文件，
-            方便事后对账（对完账就知道桌面文件里应该有哪几只）。
+            用户 2026-09-18 的要求（推翻了 2026-09-17 的"这一页不显示结果"）：
+            "选股状态时，策略列表界面变为选股结果界面（选股结果界面平时隐藏），
+            结果可以一键加入自选和导出。"
 
             Args:
-                rows: `run_daily()` 的 report（dict，取 `pool`/`data_date`）或行列表；
-                    两者都收下只是为了兼容，内容不会被展示。
+                rows: `run_daily()` 的 report（dict，取 `pool` / `data_date` / `errors`）
+                    或**行列表**（老调用方的写法，照样收下）。
                 data_date: 行情日（report 里没有时用这个）。
             """
+            errors: list[str] = []
             picked: list[dict] = []
             if isinstance(rows, dict):
                 data_date = data_date or rows.get("data_date")
                 picked = [r for r in (rows.get("pool") or []) if isinstance(r, dict)]
+                errors = [str(e) for e in (rows.get("errors") or [])]
             elif rows is not None:
                 picked = [r for r in rows if isinstance(r, dict)]
-            # 只数**选出来的**票（带来源策略的行），与建池那份清单同一口径
-            selected = [r for r in picked if r.get("symbol")
-                        and str(r.get("strategy") or r.get("strategies") or "")]
-            logger.debug(
-                "选股结果不在这张页面显示（用户要求）：本轮 %d 只（行情日 %s）——"
-                "结果在「自选股池」页与桌面导出文件里",
-                len(selected), data_date or "未知",
+            self._fill_result(picked, data_date=data_date, errors=errors)
+            self.show_result_page()
+            logger.info(
+                "本次选股结果已显示在「策略选股」页：%d 只（行情日 %s）",
+                len(self.result_rows), data_date or "未知",
             )
+
+        def _result_label(self, row: dict) -> str:
+            """结果表「来源」列：与「自选股池」那一列**同一个函数**（`pool.source_label`）。"""
+            try:
+                return pool_mod.source_label(row, None)
+            except Exception:  # noqa: BLE001 - 来源算不出来不该让结果表画不出来
+                logger.debug("算来源列失败", exc_info=True)
+                return str(row.get("strategy") or row.get("strategies") or "—")
+
+        def _fill_result(self, picked: list[dict], *, data_date: Any = None,
+                         errors: list[str] | None = None) -> None:
+            """把池子行铺进结果表，并写好那句结论。
+
+            **只列"选出来的"票**（带来源的行）：`run_daily` 的池子里还会混进自选股
+            （那是"我自己加的"，不是"这次选出来的"），口径与建池那份清单一致。
+            """
+            rows = [r for r in picked
+                    if r.get("symbol") and str(r.get("strategy") or r.get("strategies") or "")]
+            self.result_rows = [
+                {"symbol": str(r["symbol"]), "name": str(r.get("name") or ""),
+                 "label": self._result_label(r)}
+                for r in rows
+            ]
+            self.result_date = data_date
+            self.result_table.setRowCount(len(self.result_rows))
+            for index, row in enumerate(self.result_rows):
+                for column, text in enumerate((row["name"], row["symbol"], row["label"])):
+                    item = QTableWidgetItem(text)
+                    if column == 2:
+                        item.setToolTip(f"{row['name']}（{row['symbol']}）· 来源：{row['label']}")
+                    self.result_table.setItem(index, column, item)
+            day = str(data_date or "未知")
+            if self.result_rows:
+                self.result_hint.setText(
+                    f"本次选股结果：共 {len(self.result_rows)} 只（行情日 {day}）。"
+                    "它们已经进了「自选股池」，这里可以再【一键加入自选】或【导出结果到桌面】。"
+                )
+            else:
+                self.result_hint.setText(
+                    f"本次选股没有选到票（行情日 {day}）。"
+                    "常见原因：勾选的策略/公式没有命中、或数据还没更新；"
+                    "可以点【返回策略列表】改一改再跑一轮。"
+                )
+            for message in (errors or []):
+                # 出错的那几条（数据闸门拦住、公式出错…）直接说在结论下面 ——
+                # 用户点完【开始选股】最想知道的就是"为什么没结果"
+                self.result_hint.setText(self.result_hint.text() + "\n❌ " + message)
+
+        def show_result_page(self) -> None:
+            """切到结果页（【开始选股】按下时与跑完时都走这里）。"""
+            if getattr(self, "list_stack", None) is not None:
+                self.list_stack.setCurrentWidget(self.result_page)
+
+        def show_list_page(self) -> None:
+            """切回策略列表页（【返回策略列表】）。"""
+            if getattr(self, "list_stack", None) is not None:
+                self.list_stack.setCurrentWidget(self.list_page)
+
+        def on_back_to_list(self) -> None:
+            """【返回策略列表】：回到列表（结果留着，下次选股刷新）。"""
+            self.show_list_page()
+            self._set_hint("已回到策略列表（本次结果还留着，点【开始选股】会刷新它）")
+
+        def on_add_all_to_watchlist(self) -> None:
+            """【一键加入自选】：把本次结果的票写进 `watchlist`（**只写本地库，不联网**）。
+
+            三条口径（与 `pool.merge_watchlist()` 一致，2026-09-18 从旧版结果区搬回来）：
+
+            1. **不重复添加**：已经在自选表里的代码直接跳过（`upsert_watchlist` 本身幂等，
+               但我们也不去动用户的备注 —— 他给自己那只票写过什么，不该被这一下改掉）；
+            2. **尊重 `watchlist_max`**：上限只数**启用**的自选（与池子那边同一口径），
+               满了就**明确说**"还有哪几只没加进去、怎么解决"，绝不静默丢；
+            3. **保留来源**：新加的票在备注里写上"选股来源：<策略/公式>"——
+               池子重算后它们会离开池子，备注是这几只票"当初为什么在这"的唯一线索。
+            """
+            if not self.result_rows:
+                self._set_hint("❌ 还没有选股结果：先点【开始选股】跑一轮")
+                return
+            from laoa_trader.data import storage
+
+            limit = max(int(getattr(self.cfg, "watchlist_max", 0) or 0), 0)
+            try:
+                with storage.connect(self.cfg.db_path) as conn:
+                    existing = storage.load_watchlist(conn, enabled_only=False)
+                    enabled_count = sum(1 for row in existing if int(row.get("enabled", 1)) == 1)
+                    known = {str(row["symbol"]) for row in existing}
+                    fresh = [row for row in self.result_rows if row["symbol"] not in known]
+                    room = max(limit - enabled_count, 0)
+                    added: list[dict] = []
+                    skipped: list[dict] = []
+                    for row in fresh:
+                        if len(added) >= room:
+                            skipped.append(row)
+                            continue
+                        storage.upsert_watchlist(
+                            conn, row["symbol"], name=row["name"],
+                            note=f"选股来源：{row['label']}",
+                        )
+                        added.append(row)
+            except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，不让按钮把界面带走
+                self._set_hint(f"❌ 加自选失败：{type(exc).__name__}: {exc}")
+                return
+            already = len(self.result_rows) - len(fresh)
+            lines: list[str] = []
+            if added:
+                lines.append(
+                    f"✅ 已加 {len(added)} 只进「自选股池」"
+                    f"（现在共 {enabled_count + len(added)} 只自选，上限 {limit}）。"
+                )
+            if already:
+                lines.append(f"另有 {already} 只本来就在自选里，没有重复添加、也没改你的备注。")
+            if skipped:
+                names = "、".join(f"{r['name']}({r['symbol']})" for r in skipped[:12])
+                lines.append(
+                    f"⚠️ 自选已达上限 {limit} 只，这 {len(skipped)} 只**没有**加进去：{names}"
+                    "（去「自选股池」删几只，或把「系统设置」里的自选上限调大，再点一次）"
+                )
+            if not lines:
+                lines.append("本次结果的票都已经在自选里了（没有重复添加）。")
+            lines.append("在「自选股池」页能看到它们（右键可删）。")
+            text = "\n".join(lines)
+            self._set_hint(text)
+            self._toast("已加入自选股池" if added else "这些票都已在自选里")
+
+        def on_export_result(self) -> None:
+            """【导出结果到桌面】：把结果表里的票写成桌面文本文件。
+
+            与编辑器里那个【导出选股结果】、以及 `scheduler.run_daily()` 自动导出的
+            是**同一个函数**（`pool.export_pick_file`）：版式、来源列、现价列完全一致，
+            同一天的文件名也一样（互相覆盖，不会攒出一堆）。
+            """
+            if not self.result_rows:
+                self._set_hint("❌ 还没有选股结果：先点【开始选股】跑一轮，再导出")
+                return
+            rows = [{"symbol": row["symbol"], "name": row["name"], "source_label": row["label"]}
+                    for row in self.result_rows]
+            try:
+                path = pool_mod.export_pick_file(
+                    rows,
+                    data_date=str(self.result_date or "") or None,
+                    db_path=self.cfg.db_path,
+                    fallback_dir=Path(self.cfg.db_path).parent,
+                )
+            except Exception as exc:  # noqa: BLE001 - 导出失败绝不能把这一页带崩
+                message = f"❌ 导出失败：{type(exc).__name__}: {exc}"
+                self._set_hint(message)
+                self._toast(message)
+                return
+            if path is None:
+                message = ("❌ 导出失败：文件没能写出去（桌面目录不存在、没有写权限，"
+                           "或者文件正被别的程序占用）—— 详见日志")
+                self._set_hint(message)
+                self._toast(message)
+                return
+            message = (f"✅ 已导出选股结果：{path.name}（{len(rows)} 只）"
+                       f"\n文件位置：{path}")
+            self._set_hint(message)
+            self._toast(f"已导出选股结果：{path.name}")
 
         # ── 小工具 ────────────────────────────────────────────────────
 
@@ -2440,8 +2687,14 @@ if QT_AVAILABLE:
             （`scheduler.run_daily` 里建池成功后做的）—— 这句提示里得说出来，
             否则用户点完看不到任何结果会以为程序没反应。
             """
+            # 切到结果页先摆一句"正在选股…"：用户按下按钮之后**马上**要有个地方等着结果
+            # （用户 2026-09-18 要求"选股状态时，策略列表界面变为选股结果界面"）。
+            # 跑完主窗口会调 `show_pick_result()` 把真正的结果填进来。
+            self.result_hint.setText("正在选股…（跑完结果就出现在这里，不用再点别的）")
+            self.result_table.setRowCount(0)
+            self.show_result_page()
             self._toast("开始选股：正在按勾选的策略与公式跑一轮…"
-                        "（结果直接进「自选股池」，并同时导出到桌面一个文本文件）")
+                        "（结果会显示在这一页，并同时进「自选股池」+ 导出到桌面）")
             self.start_pick_requested.emit()
 
         def on_copy_detail(self) -> None:
@@ -2491,6 +2744,8 @@ __all__ = [
     "PAGE_HINT",
     "PALETTE_BUTTON_OBJECT",
     "PALETTE_COLUMNS",
+    "RESULT_COLUMNS",
+    "RESULT_HINT_IDLE",
     "PANEL_WIDTH",
     "PREVIEW_LIMIT",
     "AUCTION_KEY",

@@ -2463,42 +2463,34 @@ def test_test_connection_button_is_wired_and_never_dead(window, qapp) -> None:
         ui_app.Qt.TextInteractionFlag.TextBrowserInteraction
 
 
-def test_pick_result_is_no_longer_shown_on_the_formula_page(window, qapp) -> None:
-    """选股跑完 → **不再把结果喂进「策略选股」页**（用户 2026-09-17 拍板：那一页只显示策略，
-    结果直接进自选股池，另外导出一份桌面文件）。
+def test_pick_result_is_shown_on_the_formula_page_again(window, qapp) -> None:
+    """选股跑完 → 结果**显示在「策略选股」页的结果页上**（用户 2026-09-18 改的口径）。
 
-    为什么这条留着（而不是删掉）：它盯的正是"别把那张结果表加回来"。
-    旧版这一页下半挂着「本次选股结果」表 + 一句话结论 +【全部加为自选】，
-    用户明确要求删掉；`FormulaPage.show_pick_result()` 保留成**空实现**
-    （`app.py` 的 `_on_pipeline_done()` 还在调它），所以这条同时钉住两件事：
-    ① 页面上确实没有结果表；② 调那个空方法不炸、也不改变页面。
+    口径变过一次，两个日期都写在这里（免得下一个人以为哪一版是漏改）：
+    2026-09-17 用户要求"这一页只显示策略，不显示结果"；2026-09-18 改成
+    "选股状态时，策略列表界面变为选股结果界面（平时隐藏），结果可以一键加入自选和导出"。
+
+    所以这条盯两件事：① 主窗口跑完 → 结果确实进了结果表、页面切到结果页；
+    ② 主窗口对"没有这个方法的页面"仍然容错（`getattr` 老写法不许退化）。
     """
     report = {
         "data_date": "2026-09-11",
         "picks": 2,
         "pool": [
-            {"symbol": "600002", "name": "半导体甲", "strategy": "ReversalStrategy",
-             "strategies": "ReversalStrategy,DryUpExpansionStrategy"},
-            # 纯自选行（没有来源策略）→ 本来也不算"本次选股结果"
+            {"symbol": "600002", "name": "半导体甲", "strategy": "公式·放量上攻",
+             "strategies": "公式·放量上攻"},
+            # 纯自选行（没有来源策略）→ 不算"本次选股结果"
             {"symbol": "300750", "name": "电池龙头", "strategy": "", "strategies": ""},
         ],
     }
-    window._on_pipeline_done("开始选股", report)      # 主窗口仍然调它：不许抛
+    window._on_pipeline_done("开始选股", report)      # 主窗口调它：不许抛
     qapp.processEvents()
 
     page = window.formula_page
-    # ① 结果表连骨头都不剩（属性查一遍；旧版是 result_box / result_table / result_rows）
-    for stale in ("result_rows", "result_table", "result_box", "result_summary",
-                  "result_date", "on_add_all_to_watchlist"):
-        assert not hasattr(page, stale), stale
-    # ② 空实现：收下参数、什么都不做、也不改变页面上的控件数
-    from PySide6.QtWidgets import QLabel
+    assert [row["symbol"] for row in page.result_rows] == ["600002"]
+    assert page.list_stack.currentWidget() is page.result_page      # 切到结果页
+    assert page.result_table.rowCount() == 1
 
-    before = len(page.findChildren(QLabel))
-    assert page.show_pick_result(report, data_date="2026-09-11") is None
-    assert page.show_pick_result([{"symbol": "600002"}]) is None
-    qapp.processEvents()
-    assert len(page.findChildren(QLabel)) == before
     # 结论照旧进运行状态（用户照样知道"跑完了、选出了几只"）
     text = window.status_label.fullText()
     assert "开始选股完成" in text and "池子 2 只" in text
@@ -2508,14 +2500,12 @@ def test_pick_result_is_no_longer_shown_on_the_formula_page(window, qapp) -> Non
         def reload(self):
             pass
 
-    monkeypatch_page = NoResultPage()
     original = window.formula_page
-    window.formula_page = monkeypatch_page
+    window.formula_page = NoResultPage()
     try:
         window._on_pipeline_done("开始选股", report)     # 不抛异常
     finally:
         window.formula_page = original
-
 
 def test_alert_texts_use_halfwidth_parens(window) -> None:
     """提醒相关的**所有用户可见文本**都是半角 `名称(代码)`：表格目标列 / 浮窗行 / 详情。
