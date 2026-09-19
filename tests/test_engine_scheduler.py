@@ -169,12 +169,20 @@ def test_run_daily_notifies_pool_with_plan_params(cfg, db, monkeypatch) -> None:
     monkeypatch.setattr(notify_mod, "notify_all", fake_notify_all)
     monkeypatch.setattr(scheduler.sync, "daily_update", lambda *a, **k: [])
 
-    def fake_run_all(engine, settings=None, **kwargs):
-        # 用默认启用组（short）里的策略：池子只收启用组的标的（停用组的会被丢掉）
-        return {"ReversalStrategy": [{"symbol": "600001", "name": "低价样本",
-                                      "reason": "短期反转"}]}, []
+    def fake_formulas(*_args, **_kwargs):
+        # 2026-09-18（用户要求）：候选只来自**勾选的公式**，所以这里给的是
+        # `公式·X` 这种合成键（不是策略类名）。键写错的话建池会把它当"老策略类名"丢掉。
+        from laoa_trader.strategy import formula_group, groups as groups_mod
 
-    monkeypatch.setattr("laoa_trader.strategy.rules.run_all", fake_run_all)
+        run = formula_group.FormulaRun()
+        run.picks = {groups_mod.formula_strategy_name("短期反转"): [
+            {"symbol": "600001", "name": "低价样本", "reason": "短期反转"},
+        ]}
+        run.ran = ["短期反转"]
+        return run
+
+    monkeypatch.setattr("laoa_trader.strategy.formula_group.run_enabled_formulas",
+                        fake_formulas)
     monkeypatch.setattr("laoa_trader.pool.hot_industries", lambda db_path, **k: {})
 
     report = scheduler.run_daily(cfg, DataEngine(db), notify=True)
@@ -186,17 +194,22 @@ def test_run_daily_notifies_pool_with_plan_params(cfg, db, monkeypatch) -> None:
     assert "止损" in body and "止盈" in body
 
 
-def test_run_daily_survives_strategy_crash(cfg, db, monkeypatch) -> None:
-    """策略层整体崩掉时，流程仍返回结构化报告（界面据此提示）。"""
+def test_run_daily_survives_formula_crash(cfg, db, monkeypatch) -> None:
+    """候选那一层（现在是「公式」组）整体崩掉时，流程仍返回结构化报告（界面据此提示）。
+
+    2026-09-18 起"策略层"就是"公式层"（内置策略退出了选股链路），所以这条从
+    `rules.run_all` 崩溃改成 `formula_group.run_enabled_formulas` 崩溃 ——
+    要保的东西没变：异常不许冒出去，必须变成 `report["errors"]` 里一句能看懂的中文。
+    """
     monkeypatch.setattr(scheduler.sync, "daily_update", lambda *a, **k: [])
 
     def boom(*args, **kwargs):
-        raise RuntimeError("策略全炸了")
+        raise RuntimeError("公式全炸了")
 
-    monkeypatch.setattr("laoa_trader.strategy.rules.run_all", boom)
+    monkeypatch.setattr("laoa_trader.strategy.formula_group.run_enabled_formulas", boom)
     report = scheduler.run_daily(cfg, DataEngine(db), notify=False)
     # 错误里要能看出"哪一步炸了"（前缀是"选股："）+ 原始异常（用户据此报障）
-    assert any("选股：" in e and "策略全炸了" in e for e in report["errors"])
+    assert any("选股：" in e and "公式全炸了" in e for e in report["errors"])
     assert report["pool"] == []
 
 

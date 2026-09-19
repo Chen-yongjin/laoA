@@ -309,7 +309,9 @@ def run_daily(
         engine: DataEngine。
         notify: 是否推送（False = 只入库；CLI/界面的"不推送"试跑用）。
         progress_cb: 数据同步进度回调 `(stage, done, total)`。
-        selection: 启用的组/策略；None 时按配置解析（`enabled_groups`/`enabled_strategies`）。
+        selection: **2026-09-18 起不再用于选股，只为兼容老调用方保留这个参数**。
+            内置策略已整体改成随包公式（可改可删），"跑哪些策略"由 `config.toml` 的
+            `enabled_formulas` 决定（建池里读它），外面传什么都不影响结果。
         with_data: 是否先跑一次数据增量（只想重算选股时传 False）。
         stage_cb: 阶段名回调（界面状态栏显示"跑策略/建池/推送通知"；
             导出成功时还会收到一句 `结果已导出到 <路径>` —— 用户要求写成桌面文件就
@@ -320,18 +322,23 @@ def run_daily(
 
     Returns:
         {"sync": [...], "picks": n, "signals": n, "pool": [...], "notify": {...},
-         "errors": [...], "data_date":…, "selection": {...},
+         "errors": [...], "data_date":…, "selection": {}(恒为空，只为兼容),
          "pushed": bool, "push_skipped": str|None,
          "export_path": str|None（导出成功时是文件路径）}
     """
     cfg = cfg or get_config()
     engine = engine or DataEngine(cfg.db_path)
-    from laoa_trader.strategy import groups as groups_mod
 
-    selection = selection if selection is not None else groups_mod.resolve_from_config(cfg)
+    # ⚠️ 2026-09-18（用户要求）：**不再解析 `enabled_groups` / `enabled_strategies`**。
+    # 「内置策略」（写在 `strategy/rules.py` 里的 5 条 Python 策略）整体改成了**随包公式**
+    # （可改可删），所以"跑哪些策略"这件事现在只有一个答案：`config.toml` 里
+    # `enabled_formulas` 勾了哪几条公式 —— 建池里读它（`formula_group`），
+    # 这里不需要也不该再替它做一次选择。
+    #
+    # `selection` 参数**只为兼容老调用方保留**（CLI/测试还在传），不再参与选股。
     report: dict[str, Any] = {
         "sync": [], "picks": 0, "signals": 0, "pool": [], "notify": {}, "errors": [],
-        "data_date": None, "selection": selection.as_dict() if selection else {},
+        "data_date": None, "selection": {},
         "pushed": False, "push_skipped": None,
         # 桌面导出：成功时是文件路径，失败/跳过时是 None（失败原因进 errors，不静默）
         "export_path": None,
@@ -339,20 +346,15 @@ def run_daily(
         "push_skipped_rows": [], "push_note": None, "push_skipped_kind": None,
     }
 
-    strategies_off = selection is not None and selection.empty
+    # 一条公式都没勾 = **只盯自选股**。这是**默认状态、不是错误**（公式默认一条都不勾），
+    # 所以不写 `errors`，只置 `strategies_off` 让调度器/界面知道"这轮没有公式标的"。
+    # 池子照常建：成员还有自选股 —— "即使策略池为空也必须照常盯自选股"这条口径没变。
+    enabled_formulas = [str(n) for n in (getattr(cfg, "enabled_formulas", None) or [])]
+    strategies_off = not enabled_formulas
     if strategies_off:
-        # 分两种情况，都不该"顺手跑全量"：
-        #   1. 用户**明确**关掉策略（enabled_groups=["none"]）→ 这是正常用法：只盯自选股；
-        #   2. 组名/策略名全拼错 → 是配置错误，必须把原因说出来。
-        # 两种情况下**都要继续建池**：池子成员除了策略标的还有自选股，
-        # 策略为空不代表没东西可盯（需求："即使策略池为空也必须照常盯自选股"）。
-        if getattr(selection, "explicit_off", False):
-            logger.info("策略已关闭（enabled_groups=[\"none\"]）：本次只处理自选股")
-            report["strategies_off"] = True
-        else:
-            msg = "没有启用任何策略：" + "；".join(selection.warnings)
-            report["errors"].append(msg)
-            logger.warning(msg)
+        logger.info("没有勾选任何公式：本次只处理自选股"
+                    "（在「策略选股」页勾上公式即可参与选股）")
+        report["strategies_off"] = True
 
     def _stage(name: str) -> None:
         if stage_cb:
@@ -370,26 +372,26 @@ def run_daily(
             report["errors"].append(f"数据更新：{type(exc).__name__}: {exc}")
             logger.warning(f"数据更新失败：{exc}")
 
-    # 2) 策略 + 建池
+    # 2) 建池（候选由 `build_pool()` 里的「公式」组现算 —— 这是唯一的候选来源）
     try:
-        from laoa_trader.strategy import rules
+        _stage("建池")
+        report["pool"] = pool.build_pool(engine, cfg, report=report)
 
-        picks_all: dict[str, list[dict]] = {}
-        if not strategies_off:
-            _stage("跑策略")
-            # 策略只跑**一遍**：候选放宽到 200 既能满足建池（叠加热门行业过滤后还要剩够 10 只），
-            # 又能覆盖信号落库（取每条策略前 30 条，与服务器版口径一致）。
-            # 跑两遍的话每条策略都要重扫全市场面板，纯浪费一倍时间。
-            picks_all, errors = rules.run_all(engine, cfg, top_n=200, selection=selection)
-            report["errors"].extend(errors)
-            report["picks"] = sum(len(v) for v in picks_all.values())
-            report["signals"] = rules.save_signals(
+        # 信号落库（`signal` 表，供盘中风控观察池）：用**这一轮真正跑的公式**的候选。
+        # 候选行由建池写进 `report["formulas"]["rows"]`（它在建池里已经算过一遍，
+        # 这里只是取出来截断入库，不重跑）。
+        # 一条公式都没勾时这里是空的 —— 与"没有候选"是同一件事，不必特殊处理。
+        formula_rows = (report.get("formulas") or {}).get("rows") or {}
+        picks_all = {key: list(rows) for key, rows in formula_rows.items()}
+        report["picks"] = sum(len(v) for v in picks_all.values())
+        if picks_all:
+            # `save_signals()` 只是"把候选写进 signal 表"的写库函数（与策略实现无关），
+            # 所以继续借它用；`rules` 这个模块本身已经不参与选股了。
+            from laoa_trader.strategy import rules as rules_mod
+
+            report["signals"] = rules_mod.save_signals(
                 engine, {k: v[:SIGNAL_TOP_N] for k, v in picks_all.items()}
             )
-        _stage("建池")
-        report["pool"] = pool.build_pool(
-            engine, cfg, picks=picks_all, selection=selection, report=report
-        )
     except Exception as exc:  # noqa: BLE001
         report["errors"].append(f"选股：{type(exc).__name__}: {exc}")
         logger.exception("选股失败")
@@ -466,6 +468,10 @@ def run_daily(
         # 标题不该比正文还长。
         picked_formulas = list((report.get("formulas") or {}).get("picks") or {})
         if picked_formulas:
+            # 懒加载：`groups` 只在"标题里给公式点名"这一处用得到（把合成名
+            # `公式·放量上攻` 还原成用户起的名字），没必要为它拖慢模块导入。
+            from laoa_trader.strategy import groups as groups_mod
+
             names = "、".join(
                 groups_mod.formula_name_of(key) for key in picked_formulas[:2]
             )
@@ -681,7 +687,11 @@ class Scheduler:
         progress_cb: sync.ProgressCb | None = None,
         stage_cb: Any = None,
     ) -> dict:
-        """立刻跑一次（不受时间限制）：界面【开始选股】与 CLI `--once` 用。"""
+        """立刻跑一次（不受时间限制）：界面【开始选股】与 CLI `--once` 用。
+
+        `selection` 与 `run_daily()` 一样**只为兼容老调用方保留**（2026-09-18 起
+        不再参与选股：候选只来自 `config.toml` 里 `enabled_formulas` 勾的公式）。
+        """
         report = run_daily(
             self.cfg, self.engine, notify=notify, with_data=with_data,
             selection=selection, progress_cb=progress_cb, stage_cb=stage_cb,

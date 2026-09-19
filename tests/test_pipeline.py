@@ -4,7 +4,10 @@
 - 同一天跑两次：`signal` / `stock_pool` 不产生重复行、不重复推同一批卡片；
 - 手动跑（`run_daily`）与定时跑（`Scheduler._maybe_daily` → `run_daily_now`）走同一个函数；
 - CLI `--groups` / `--strategies` 临时覆盖、`--once` / `--pool` 可用；
-- 观察池（盘中提醒）只含启用组产生的标的。
+- 观察池（盘中提醒）只含**勾选公式**产生的标的。
+
+2026-09-18（用户要求）：候选**只来自勾选的公式** —— 5 条内置策略退出了选股链路，
+所以下面凡是要"池子里有票"的用例，都必须先勾上一条公式（`_enable_formulas`）。
 """
 
 from __future__ import annotations
@@ -60,11 +63,29 @@ def _run(cfg, monkeypatch, **kwargs):
     return sched.run_daily(cfg, DataEngine(cfg.db_path), **kwargs)
 
 
+def _enable_formulas(monkeypatch, tmp_path, cfg, formulas: dict[str, str]) -> None:
+    """写几条公式文件、在配置里勾上它们（2026-09-18 起这是**唯一**的候选来源）。
+
+    小库价格是确定的：600001 = 3.0 元（横盘）、600003 ≈ 12.4 元（每天 −1.2% 跌了 40 天），
+    所以 `C<5` 只选 600001、`C>10` 只选 600003 —— 断言仍然精确，不靠"大概能选中"。
+    """
+    folder = tmp_path / "formulas"
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, body in formulas.items():
+        (folder / f"{name}.txt").write_text(
+            f"# 名称: {name}\n# 说明: 测试用（{name}）\n{body}\n", encoding="utf-8"
+        )
+    monkeypatch.setenv("LAOA_TRADER_FORMULAS", str(folder))
+    cfg.enabled_formulas = list(formulas)
+
+
 # ── 幂等 ──
 
 
-def test_run_twice_is_idempotent_for_signals_and_pool(ready_db, monkeypatch) -> None:
+def test_run_twice_is_idempotent_for_signals_and_pool(ready_db, tmp_path, monkeypatch) -> None:
+    """同一天跑两次：`signal` / `stock_pool` 不产生重复行。"""
     cfg = ready_db
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"低价": "C<5", "反转": "C>10"})
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
     first = _run(cfg, monkeypatch, notify=False, with_data=False)
     assert first["pool"], "第一次就该有池子"
@@ -83,9 +104,10 @@ def test_run_twice_is_idempotent_for_signals_and_pool(ready_db, monkeypatch) -> 
     assert not second["errors"]
 
 
-def test_run_twice_pushes_only_once(ready_db, monkeypatch) -> None:
+def test_run_twice_pushes_only_once(ready_db, tmp_path, monkeypatch) -> None:
     """同一天同一批内容只推一次（否则手动跑 + 定时跑会发两遍卡片）。"""
     cfg = ready_db
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"低价": "C<5", "反转": "C>10"})
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
     sent: list[str] = []
 
@@ -105,16 +127,17 @@ def test_run_twice_pushes_only_once(ready_db, monkeypatch) -> None:
     assert "已推送过" in second["push_skipped"]
     assert len(sent) == 1                    # 没有第二次推送
 
-    # 池子内容变了（换一天/换策略）就应该允许再推
-    third = _run(cfg, monkeypatch, notify=True, with_data=False,
-                 selection=groups.resolve(["swing"], []))
+    # 池子内容变了（改了勾选的公式）就应该允许再推
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"低价": "C<5"})     # 只剩 600001
+    third = _run(cfg, monkeypatch, notify=True, with_data=False)
     assert third["pushed"] is True
     assert len(sent) == 2
 
 
-def test_manual_and_scheduled_share_one_pipeline(ready_db, monkeypatch) -> None:
+def test_manual_and_scheduled_share_one_pipeline(ready_db, tmp_path, monkeypatch) -> None:
     """界面手动按钮与 19:15 定时任务必须走**同一个函数**（口径一致才谈得上幂等）。"""
     cfg = ready_db
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"低价": "C<5"})
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
     monkeypatch.setattr(sched.intraday, "is_trading_day", lambda *a, **k: True)
     pushed: list[str] = []
@@ -132,8 +155,9 @@ def test_manual_and_scheduled_share_one_pipeline(ready_db, monkeypatch) -> None:
     assert len(pushed) == 1
 
 
-def test_push_log_records_fingerprint(ready_db, monkeypatch) -> None:
+def test_push_log_records_fingerprint(ready_db, tmp_path, monkeypatch) -> None:
     cfg = ready_db
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"低价": "C<5"})
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
     monkeypatch.setattr("laoa_trader.notify.notify_all",
                         lambda title, lines, kinds=None, cfg=None: {"tray": {"ok": True}})
@@ -159,25 +183,28 @@ def test_pool_fingerprint_changes_with_content() -> None:
 # ── 选择贯穿：池子 / 信号 / 观察池 ──
 
 
-def test_selection_flows_to_pool_signals_and_watch(ready_db, monkeypatch) -> None:
-    """禁用 swing 后：策略不跑、信号不落、池子不含该组标的、观察池也不盯它。"""
+def test_enabled_formula_flows_to_pool_signals_and_watch(
+        ready_db, tmp_path, monkeypatch) -> None:
+    """勾上的公式要**贯穿全链路**：进池 → 落 signal → 进盘中观察池。
+
+    这是 2026-09-18 新口径的端到端用例（取代原来那条"按策略组过滤"的）：
+    "跑哪些策略"现在只有 `enabled_formulas` 一个答案，链路上任何一环漏掉它都会红。
+    """
     cfg = ready_db
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"反转": "C>10"})   # 只选 600003
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
-    selection = groups.resolve(["short"], [])
-    report = _run(cfg, monkeypatch, notify=False, with_data=False, selection=selection)
-    assert report["pool"], "短线组应该有候选（短期反转）"
-    assert all(row["strategy"] in set(selection.strategies) for row in report["pool"])
-    assert "600001" not in [row["symbol"] for row in report["pool"]]
+    report = _run(cfg, monkeypatch, notify=False, with_data=False)
+    assert [row["symbol"] for row in report["pool"]] == ["600003"]
+    assert report["pool"][0]["strategy"] == "公式·反转"
 
     with storage.connect(cfg.db_path) as conn:
         strategies = {r[0] for r in conn.execute("SELECT DISTINCT strategy FROM signal")}
-    assert strategies and strategies <= set(selection.strategies)
+    assert strategies == {"公式·反转"}          # 信号表里的正是这一轮跑的公式
 
-    # 观察池：只盯启用组产生的标的
-    targets, pool_symbols = intraday.watch_targets(cfg.db_path, selection=selection)
-    assert targets
-    assert all(sym != "600001" for sym in pool_symbols)
-    assert "600001" not in targets
+    # 观察池：盯的就是池子里那只（600001 没被任何公式选中，不该出现）
+    targets, pool_symbols = intraday.watch_targets(cfg.db_path)
+    assert pool_symbols == {"600003"}
+    assert set(targets) == {"600003"}
 
 
 def test_watch_targets_filters_stale_pool_rows(cfg, monkeypatch) -> None:
@@ -225,16 +252,22 @@ def test_watch_targets_filters_recent_signals(cfg) -> None:
     assert set(targets) == {"600003"}        # 信号兜底也要按选择过滤
 
 
-def test_run_daily_refuses_when_selection_empty(ready_db, monkeypatch) -> None:
-    """选择解析为空（名字全拼错）时：不跑、不落库，并明确说明原因。"""
+def test_run_daily_without_any_formula_is_normal_not_an_error(
+        ready_db, monkeypatch) -> None:
+    """**一条公式都没勾 = 只盯自选股**：不报错、不落信号、照常往下走。
+
+    2026-09-18 起公式默认一条都不勾，所以这是**最常见的正常状态**（不是配置错误）——
+    老版本的"没有启用任何策略"报错口径（selection 解析为空 → 写 errors）已经作废。
+    """
     cfg = ready_db
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
-    report = _run(cfg, monkeypatch, notify=False, with_data=False,
-                  selection=groups.resolve(["nope"], []))
+    report = _run(cfg, monkeypatch, notify=False, with_data=False)
     assert report["pool"] == []
-    assert report["errors"] and "没有启用任何策略" in report["errors"][0]
+    assert report["strategies_off"] is True     # 调度器/界面靠它知道"这轮没有公式标的"
+    assert not [e for e in report["errors"] if "没有启用" in e or "公式" in e]
     with storage.connect(cfg.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0] == 0
 
 
 def test_refresh_data_only_syncs(ready_db, monkeypatch) -> None:
@@ -269,20 +302,27 @@ def test_refresh_data_never_raises(cfg, monkeypatch) -> None:
     assert "断网了" in results[0].error
 
 
-def test_run_daily_reports_stage_names(ready_db, monkeypatch) -> None:
-    """界面状态栏靠 stage_cb 显示"跑策略/建池/推送通知"。"""
+def test_run_daily_reports_stage_names(ready_db, tmp_path, monkeypatch) -> None:
+    """界面状态栏靠 stage_cb 显示阶段名："数据增量 / 建池 / 推送通知"。
+
+    （2026-09-18 起**没有"跑策略"这一档**了：候选由建池里的「公式」组现算，
+    所以阶段名少了它 —— 断言跟着改。）
+    """
     cfg = ready_db
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"低价": "C<5"})
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
     monkeypatch.setattr("laoa_trader.notify.notify_all",
                         lambda *a, **k: {"tray": {"ok": True}})
     stages: list[str] = []
     _run(cfg, monkeypatch, notify=True, with_data=True, stage_cb=stages.append)
     assert stages[:1] == ["数据增量"]
-    assert "跑策略" in stages and "建池" in stages and "推送通知" in stages
+    assert "建池" in stages and "推送通知" in stages
+    assert "跑策略" not in stages        # 内置策略退出选股链路后不再有这一档
 
 
-def test_broken_stage_callback_does_not_break_run(ready_db, monkeypatch) -> None:
+def test_broken_stage_callback_does_not_break_run(ready_db, tmp_path, monkeypatch) -> None:
     cfg = ready_db
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"低价": "C<5"})
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
 
     def boom(_name):

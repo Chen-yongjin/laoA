@@ -177,7 +177,7 @@ def _split_list(text: str | None) -> list[str]:
     return [item.strip() for item in text.replace("，", ",").split(",") if item.strip()]
 
 
-def _apply_selection_override(cfg, args) -> None:
+def _apply_selection_override(cfg, args) -> int | None:
     """把 `--groups/--strategies` 临时写进**内存里的** cfg（配置文件不动）。
 
     语义（尽量不让人意外）：
@@ -186,15 +186,40 @@ def _apply_selection_override(cfg, args) -> None:
         - 只给 `--strategies` → 就这几条策略（组范围放宽成全组，否则会被配置里
           关掉的组"二次过滤"，用户会觉得"我明明指定了却不跑"）；
         - 两个都给 → 组定范围、策略定取舍（取交集）。
+
+    ⚠️ 2026-09-18（用户要求）：这两个参数**不再影响选股结果** —— 候选只来自
+    `enabled_formulas` 勾选的公式，内置策略退出了选股链路。它们现在只对
+    `--list-groups` / `--scorecard` 这些**研究用**入口有意义。
+    但**拼错仍然当场拦住**：用户明确敲了参数却写错名字，沉默地跑下去最糟糕
+    （他会以为"我指定的那组跑了"）。
+
+    Returns:
+        None = 继续；整数 = 直接返回的退出码（参数写错）。
     """
     from laoa_trader.strategy import groups as groups_mod
+    from laoa_trader.strategy import rules as rules_mod
 
     cli_groups = _split_list(args.groups)
     cli_strategies = _split_list(args.strategies)
     if not cli_groups and not cli_strategies:
-        return
+        return None
+
+    unknown_groups = [key for key in cli_groups if key not in groups_mod.GROUPS]
+    if unknown_groups:
+        print(f"❌ 未知策略组：{'、'.join(unknown_groups)}"
+              f"（可用：{' / '.join(groups_mod.GROUP_ORDER)}；用 --list-groups 看全部）")
+        return 1
+    known_names = set(rules_mod.STRATEGIES)
+    known_names |= {rules_mod.strategy_label(n) for n in rules_mod.STRATEGIES}
+    unknown_strategies = [name for name in cli_strategies if name not in known_names]
+    if unknown_strategies:
+        print(f"❌ 未知策略：{'、'.join(unknown_strategies)}"
+              "（写中文名或类名都行；用 --list-groups 看全部）")
+        return 1
+
     cfg.enabled_groups = cli_groups or list(groups_mod.GROUP_ORDER)
     cfg.enabled_strategies = cli_strategies
+    return None
 
 
 def _preflight_gate(cfg, auto_download: bool) -> int | None:
@@ -665,7 +690,9 @@ def cli(argv: list[str] | None = None) -> int:
     _PROGRESS_LAST.clear()          # 每轮重新计数：同一阶段第二次跑也要有进度输出
 
     cfg = load_config(args.config) if args.config else get_config()
-    _apply_selection_override(cfg, args)
+    override_code = _apply_selection_override(cfg, args)
+    if override_code is not None:
+        return override_code          # 参数写错：当场退出（别沉默地跑下去）
     _apply_run_time_override(cfg, args)
 
     if args.list_groups:
@@ -761,28 +788,26 @@ def cli(argv: list[str] | None = None) -> int:
     if args.once:
         from laoa_trader.scheduler import data_gate, run_daily
 
-        from laoa_trader.strategy import groups as groups_mod
-
         # 数据闸门（与界面【开始选股】、调度线程同一口径）：
-        # 没数据就跑策略 = 选出错的票，所以这里明确拒绝并返回非零退出码
+        # 没数据就跑公式 = 选出错的票，所以这里明确拒绝并返回非零退出码
         gate = data_gate(cfg, DataEngine(cfg.db_path))
         if not gate["ok"]:
             print(f"❌ {gate['message']}")
             return 1
 
-        selection = groups_mod.resolve_from_config(cfg)
-        for warn in selection.warnings:
-            print(f"⚠️ {warn}")
-        if selection.empty and not getattr(selection, "explicit_off", False):
-            print("没有启用任何策略（检查 enabled_groups / enabled_strategies 或用 --list-groups）")
-            return 1
-        if selection.explicit_off:
-            print("策略已关闭（enabled_groups = [\"none\"]）：本次只处理自选股")
+        # ⚠️ 2026-09-18（用户要求）：**候选只来自勾选的公式** —— 5 条写在代码里的
+        # Python 策略退出了选股链路，`enabled_groups` / `enabled_strategies` 不再影响
+        # 选股结果（`--groups` / `--strategies` 这两个覆盖参数仍然接受、也仍写进配置，
+        # 但只对 `--list-groups` / `--scorecard` 这些**研究用**入口有意义）。
+        # 所以这里不再因为"没有启用任何策略"而拒绝运行：一条公式都没勾 = 只盯自选股，
+        # 那是**默认的正常状态**。
+        enabled = [str(n) for n in (getattr(cfg, "enabled_formulas", None) or [])]
+        if enabled:
+            print("本次按勾选的公式选股：" + "、".join(enabled))
         else:
-            print(f"启用的策略组：{selection.describe()}")
+            print("没有勾选任何公式（enabled_formulas 为空）：本次只处理自选股")
 
-        report = run_daily(cfg, DataEngine(cfg.db_path), notify=not args.no_notify,
-                           selection=selection)
+        report = run_daily(cfg, DataEngine(cfg.db_path), notify=not args.no_notify)
         print(f"数据日期：{report['data_date']}")
         print(f"候选信号：{report['picks']} 条；写入信号 {report.get('signals', 0)} 行；"
               f"股票池：{len(report['pool'])} 只")

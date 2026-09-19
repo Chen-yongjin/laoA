@@ -275,44 +275,73 @@ def test_signals_only_contain_selected_strategies(full_db) -> None:
     assert "LowPriceStrategy" not in names      # 被禁用的组没有落信号
 
 
-def test_pool_excludes_disabled_group_symbols(full_db, cfg) -> None:
-    """建池只从启用组的候选里合成：禁用 swing 后低价股（600001）不该进池子。"""
+def test_selection_no_longer_filters_pool_candidates(full_db, cfg, tmp_path,
+                                                    monkeypatch) -> None:
+    """`selection` **不再过滤候选**（2026-09-18 口径）：池子只看勾了哪些公式。
+
+    老口径下"禁用 swing 组 → 低价股的标的被剔出池子"；现在策略组退出选股链路，
+    候选只来自 `enabled_formulas`，所以传什么 selection 都不影响结果 ——
+    这条把新口径钉住（老用例的两个断言已经没有对应的代码路径了）。
+    """
+    from laoa_trader.strategy import formula_group, groups as groups_mod
+
     engine = DataEngine(full_db)
-    pool_on = pool.build_pool(engine, cfg, hot_only=False, save=False,
-                              selection=groups.resolve([], []))
-    assert "600001" in [row["symbol"] for row in pool_on]
+    run = formula_group.FormulaRun()
+    run.picks = {groups_mod.formula_strategy_name("测试公式"): [
+        {"symbol": "600001", "name": "低价样本", "reason": "测试"},
+    ]}
+    run.ran = ["测试公式"]
+    monkeypatch.setattr(formula_group, "run_enabled_formulas", lambda *a, **k: run)
 
-    pool_off = pool.build_pool(engine, cfg, hot_only=False, save=False,
-                               selection=groups.resolve(["short"], []))
-    symbols = [row["symbol"] for row in pool_off]
-    assert "600001" not in symbols
-    assert all(row["strategy"] in set(groups.resolve(["short"], []).strategies)
-               for row in pool_off)
+    for selection in (groups.resolve([], []), groups.resolve(["short"], [])):
+        built = pool.build_pool(engine, cfg, hot_only=False, save=False,
+                                selection=selection)
+        assert [row["symbol"] for row in built] == ["600001"]
+        assert built[0]["strategy"] == "公式·测试公式"
 
 
-def test_pool_filters_injected_picks_by_selection(full_db, cfg) -> None:
-    """即使调用方传进来的候选混了未启用策略，也不能进池子（双保险）。"""
+def test_pool_drops_candidates_that_are_not_formulas(full_db, cfg) -> None:
+    """调用方传进来的**非公式候选**（老策略类名）一律丢掉。
+
+    2026-09-18 起那 5 条内置策略退出选股链路，界面上再也选不出它们 ——
+    让这种键进池子只会让「来源」列出现一个用户找不到对应行的"策略·X"。
+    公式候选照常保留（双保险只剩这一条）。
+    """
     engine = DataEngine(full_db)
     picks = {
         "LowPriceStrategy": [{"symbol": "600001", "name": "甲", "reason": "低价股"}],
-        "ReversalStrategy": [{"symbol": "600003", "name": "乙", "reason": "短期反转"}],
+        "公式·我的公式": [{"symbol": "600003", "name": "乙", "reason": "短期反转"}],
     }
-    built = pool.build_pool(engine, cfg, hot_only=False, save=False, picks=picks,
-                            selection=groups.resolve(["short"], []))
+    built = pool.build_pool(engine, cfg, hot_only=False, save=False, picks=picks)
+
     assert [row["symbol"] for row in built] == ["600003"]
+    assert built[0]["strategy"] == "公式·我的公式"
 
 
-def test_pool_rows_carry_group_label(full_db, cfg) -> None:
+def test_pool_rows_carry_no_group_for_formula_picks(full_db, cfg, monkeypatch) -> None:
+    """公式标的在表格里**没有组别/持有期**（`group_label` 是「—」、`horizon` 是 0）。
+
+    2026-09-18 起池子里只可能有公式标的（+自选），而"组别 / T+N"是内置策略那一套的
+    概念 —— 公式没有组，所以这两列如实写"没有"，而不是借一个相近的组名糊上去。
+    """
+    from laoa_trader.strategy import formula_group, groups as groups_mod
+
     engine = DataEngine(full_db)
-    pool.build_pool(engine, cfg, hot_only=False, save=True, day="2026-09-11",
-                    selection=groups.resolve([], []))
+    run = formula_group.FormulaRun()
+    run.picks = {groups_mod.formula_strategy_name("测试公式"): [
+        {"symbol": "600001", "name": "低价样本", "reason": "测试"},
+    ]}
+    run.ran = ["测试公式"]
+    monkeypatch.setattr(formula_group, "run_enabled_formulas", lambda *a, **k: run)
+
+    pool.build_pool(engine, cfg, hot_only=False, save=True, day="2026-09-11")
     rows = pool.pool_table_rows(cfg.db_path)
     assert rows
     for row in rows:
-        assert row["group"] in groups.GROUP_ORDER
-        assert row["group_label"] == groups.group_label(row["group"])
-        assert row["horizon"] == groups.group_horizon(row["group"])
-    by_symbol = {r["symbol"]: r for r in rows}
-    if "600001" in by_symbol:
-        assert by_symbol["600001"]["group_label"] == "波段·T+10"
-        assert by_symbol["600001"]["horizon"] == 10
+        # 公式归到 `formula` 这个**合成组**（`groups.group_of` 认它），
+        # 它不是"波段/短线"那种真实分组，标签就是"公式"
+        assert row["group"] == "formula"
+        assert row["group_label"] == groups.group_label("formula") == "公式"
+        assert row["horizon"] == 0            # 公式没有目标持有期
+        # 「来源」列照旧回答问题："是哪条公式选出来的"
+        assert row["source_label"] == "公式·测试公式"

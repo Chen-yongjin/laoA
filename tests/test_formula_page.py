@@ -52,17 +52,18 @@ from laoa_trader import formulas as lib  # noqa: E402
 from laoa_trader.config import Config  # noqa: E402
 from laoa_trader.data import storage  # noqa: E402
 from laoa_trader.strategy import formula as fm  # noqa: E402
-from laoa_trader.strategy import groups, rules  # noqa: E402
 from laoa_trader.ui import formula_page as fp  # noqa: E402
 from tests.conftest import workdays_ending  # noqa: E402
 
 #: 小库里的三只票：甲/丙 一路上涨、乙 一路下跌（命中集合是确定的）
 RISING = ("600001", "600003")
 
-#: 表格里**固定占掉的行数**：5 条内置策略 + 1 行「竞价策略」（2026-09-18 内置的
-#: 竞价扫描开关）。公式行从这一行之后开始 —— 用例里都写 `FIXED_ROWS` 而不是 5，
-#: 免得下次再加一行固定行时又要满文件改数字。
-FIXED_ROWS = 6
+#: 表格里**固定占掉的行数**：只剩最上面那一行「竞价策略」（内置的竞价扫描开关）。
+#:
+#: 2026-09-18 之前这里是 6（5 条内置策略 + 竞价策略）—— 用户要求把内置策略改成
+#: 随包公式之后，列表里不再有内置行，固定行只剩竞价那一条，公式行从第 2 行开始。
+#: 用例里都写 `FIXED_ROWS` 而不是写死 1，免得下次行数再变又要满文件改数字。
+FIXED_ROWS = 1
 
 
 def _seed_trend_db(db_path: Path) -> None:
@@ -1171,68 +1172,55 @@ def test_list_columns_are_the_names_the_user_asked_for(page) -> None:
     assert columns == list(fp.LIST_COLUMNS) == ["策略名称", "说明", "策略选取"]
 
 
-def test_builtin_rows_come_first_and_show_real_evidence(page) -> None:
-    """内置 5 条常驻在前（紧随其后是「竞价策略」那一行），备注列写的是代码里已有的证据。"""
-    assert page.table.rowCount() == FIXED_ROWS
-    assert [row.key for row in page.rows] == fp.builtin_order() + [fp.AUCTION_KEY] == [
-        "LadderPullbackStrategy", "ReversalStrategy", "DryUpExpansionStrategy",
-        "FirstLimitUpStrategy", "LowPriceStrategy", fp.AUCTION_KEY,
-    ]
-    assert [row.name for row in page.rows] == [
-        "连板回踩低吸", "短期反转", "地量后放量变盘", "首板缩量整理", "低价股",
-        fp.AUCTION_NAME,
-    ]
+def test_auction_row_is_first_and_formulas_follow(page) -> None:
+    """列表第一行是「竞价策略」，其余全是公式（2026-09-18 起内置策略改成随包公式）。
 
-    notes = _notes(page)
-    ultra = fp.groups.GROUPS["ultra"]
-    swing = fp.groups.GROUPS["swing"]
-    short = fp.groups.GROUPS["short"]
-    # ⛔ 组默认关闭 → 备注就是那句停用理由（一个字都没加）
-    assert notes["连板回踩低吸"] == "⛔ 默认关闭：" + ultra.disabled_reason
-    assert notes["低价股"] == "⛔ 默认关闭：" + swing.disabled_reason
-    # ⚠️ 策略自己写了 evidence_note（正 α 只在"开盘买"口径存在）→ 原样搬过来
-    assert notes["地量后放量变盘"] == (
-        "⚠️ " + rules.STRATEGIES["DryUpExpansionStrategy"].evidence_note
-    )
-    assert notes["首板缩量整理"] == (
-        "⚠️ " + rules.STRATEGIES["FirstLimitUpStrategy"].evidence_note
-    )
-    # 两套口径都为正的那条：evidence 字段的语义 + **组**的实测区间（标明是组数字）
-    assert notes["短期反转"] == "两套口径都为正 · 组实测 " + short.note.split("：", 1)[1]
-    # 数字只能来自上面这些字段：备注里出现的每个数字，都能在源字段里找到
-    # （「竞价策略」那一行的数字来自 config 的竞价参数，不在这份源字段里，单独跳过）
-    for name, note in notes.items():
-        if name == fp.AUCTION_NAME:
-            continue
-        spec = fp.rules_mod.STRATEGIES[[
-            row.key for row in page.rows if row.name == name][0]]
-        source = " ".join([
-            str(getattr(spec, "evidence_note", "") or ""), ultra.disabled_reason,
-            swing.disabled_reason, short.note, ultra.note, swing.note,
-        ])
-        for chunk in note.replace("⚠️", "").replace("⛔", "").replace("：", " ").split():
-            if any(ch.isdigit() for ch in chunk):
-                assert chunk in source, f"{name} 的备注里出现了源字段里没有的数字：{chunk!r}"
+    老版本这里依次是 5 条内置策略 + 竞价策略 + 公式；所以这条用例原来叫
+    `test_builtin_rows_come_first_and_show_real_evidence`，还逐条核对过内置策略
+    「备注」列里的证据数字来自 `rules.py` / `groups.py` 的字段。现在那些行没有了，
+    于是它改成钉住**新的列表构成**：第一行是竞价策略（唯一不是选股策略的行），
+    后面每一行都必须有对应的公式文件（不允许出现"没有文件的幽灵行"）。
+    """
+    _write_formula(page.directory, "我的公式", "C>MA(C,5)", "站上5日线")
+    page.reload()
+
+    assert page.table.item(0, 0).text() == fp.AUCTION_NAME
+    assert page.rows[0].is_auction and page.rows[0].read_only
+    formula_names = [row.key for row in page.rows[1:]]
+    assert formula_names == ["我的公式"]
+    # 每一行都能对上一个真文件（公式行不是画出来的）
+    files = {spec.name for spec in lib.formula_files(page.directory)}
+    assert set(formula_names) <= files
+    # 说明列来自公式文件的 `# 说明:` 注释头（界面不编）
+    assert _notes(page)["我的公式"] == "站上5日线"
 
 
-def test_builtin_rows_are_readonly_and_status_column_is_a_checkbox(page) -> None:
-    """「状态」列是勾选框（勾上 = 参与选股），勾选状态来自 `groups.resolve_from_config()`。"""
+def test_status_column_is_a_checkbox_for_every_row(page) -> None:
+    """「策略选取」列是勾选框；勾选状态与配置一致（公式看 `enabled_formulas`）。
+
+    2026-09-18 起内置策略改成了随包公式，所以这里不再有"组/策略"那套解析：
+    每一行的状态只来自两个地方 —— `enabled_formulas`（公式）与 `intraday_auction`
+    （竞价策略那一行）。
+    """
     from PySide6.QtWidgets import QCheckBox
+
+    _write_formula(page.directory, "甲公式", "C>MA(C,5)")
+    page.cfg.enabled_formulas = ["甲公式"]
+    page.reload()
 
     boxes = {}
     for index, row in enumerate(page.rows):
         holder = page.table.cellWidget(index, 2)
         box = holder.findChild(QCheckBox)
-        assert box is not None, f"{row.name} 的「状态」列不是勾选框"
+        assert box is not None, f"{row.name} 的「策略选取」列不是勾选框"
         boxes[row.key] = box.isChecked()
-        assert "参与选股" in box.toolTip()
+        assert "勾上" in box.toolTip()
 
-    enabled = fp.builtin_enabled(page.cfg)
-    assert boxes == {row.key: (row.key in enabled) for row in page.rows}
-    # 出厂默认只开 `short`（三条），超短与波段那两条默认关
-    assert boxes["ReversalStrategy"] is True
-    assert boxes["LadderPullbackStrategy"] is False
-    assert boxes["LowPriceStrategy"] is False
+    assert boxes == {
+        fp.AUCTION_KEY: fp.auction_enabled(page.cfg),      # 竞价那一行看 intraday_auction
+        "甲公式": True,                                     # 公式看 enabled_formulas
+    }
+    assert boxes[fp.AUCTION_KEY] is False                   # 竞价默认关
 
 
 def test_formula_rows_are_appended_after_builtins_with_file_note(page) -> None:
@@ -1279,22 +1267,25 @@ def test_list_shows_runtime_error_from_last_run(page, monkeypatch) -> None:
     assert "涨停池" in page.table.item(row, 1).toolTip()
 
 
-def test_clicking_builtin_row_opens_readonly_detail(page, qapp) -> None:
-    """单击内置策略行 → **只读详情**（条件说明 + 证据 + 当前状态），可复制。"""
+def test_clicking_readonly_row_shows_detail_and_copy_works(page, qapp) -> None:
+    """单击**只读行**（现在只有「竞价策略」）→ 详情页可复制，且不碰编辑器的草稿。
+
+    这条用例原来叫 `test_clicking_builtin_row_opens_readonly_detail`，钉的是"内置策略
+    只能看不能改"：条件说明来自 `rules.py` 里那条策略的 docstring、证据来自它的
+    `evidence` 字段。2026-09-18 内置策略改成随包公式之后，只读行只剩竞价那一行，
+    于是改钉"只读详情这条交互还在"：**可复制**（用户要贴到群里/记事本）、
+    以及**绝不用详情顶掉用户正在写的公式**。
+    """
     page.on_open_editor()                                  # 先把编辑器打开
     page.editor.setPlainText("C>MA(C,5)")                  # 用户正在写的草稿
-    page.select_row("LowPriceStrategy")
+    page.select_row(fp.AUCTION_KEY)
     qapp.processEvents()
 
     assert page.bottom_stack.currentWidget() is page.detail_page
     assert page.detail_view.isReadOnly() is True
-    assert page.detail_text.startswith("低价股（LowPriceStrategy）")
-    assert "条件说明" in page.detail_text
-    assert inspect.getdoc(rules.STRATEGIES["LowPriceStrategy"]) in page.detail_text
-    assert "证据" in page.detail_text
-    assert fp.groups.GROUPS["swing"].disabled_reason in page.detail_text
-    assert "当前状态：☐ 未参与选股" in page.detail_text
-    # 内置策略**不进编辑器**：用户手里的草稿一个字都没被换掉
+    assert page.detail_text.startswith(f"{fp.AUCTION_NAME}（{fp.AUCTION_KEY}）")
+    assert "无法回测" in page.detail_text
+    # 只读行**不进编辑器**：用户手里的草稿一个字都没被换掉
     assert page.editor.toPlainText() == "C>MA(C,5)"
     assert page.name_edit.text() == ""
 
@@ -1302,17 +1293,22 @@ def test_clicking_builtin_row_opens_readonly_detail(page, qapp) -> None:
     assert QApplication.clipboard().text() == page.detail_text
 
 
-def test_builtin_detail_state_follows_the_checkbox(page, qapp) -> None:
-    """勾上内置策略后，详情里的"当前状态"立刻跟着变（两处说法不能打架）。"""
-    page.select_row("LowPriceStrategy")
-    qapp.processEvents()
-    assert "未参与选股" in page.detail_text
+def test_readonly_detail_state_follows_the_checkbox(page, qapp) -> None:
+    """勾上「竞价策略」后，详情里的"当前状态"立刻跟着变（两处说法不能打架）。
 
-    page._builtin_boxes["LowPriceStrategy"].setChecked(True)
+    原来是钉内置策略的（勾上 → 详情显示"✅ 参与选股"）；内置行没了之后，
+    同一条规矩落在竞价那一行上：勾上写 `intraday_auction`，详情里那句
+    "当前状态"必须同步 —— 否则用户勾完去看详情，会以为没生效。
+    """
+    page.select_row(fp.AUCTION_KEY)
+    qapp.processEvents()
+    assert "当前状态：☐ 未开启" in page.detail_text
+
+    page._auction_box.setChecked(True)
     qapp.processEvents()
 
-    assert "当前状态：✅ 参与选股" in page.detail_text
-    assert "swing" in page.detail_text            # 状态说明里写着现在启用了哪些组
+    assert "当前状态：✅ 已开启" in page.detail_text
+    assert "intraday_auction" in page.detail_text
 
 
 def test_selecting_row_loads_formula_into_editor(page, qapp) -> None:
@@ -1357,16 +1353,21 @@ def test_reload_does_not_clobber_editor_draft_or_open_panels(page, qapp) -> None
 
 
 def test_reload_keeps_enabled_checkbox_state_from_config(page, page_cfg) -> None:
-    page_cfg.enabled_formulas = ["甲公式"]
-    page.name_edit.setText("甲公式")
-    page.editor.setPlainText("C>MA(C,5)")
-    page.btn_save.click()
+    """`reload()` 之后勾选状态必须与配置一致（公式看 enabled_formulas、竞价看开关）。
+
+    原来是三条断言钉内置策略的组/策略解析；现在只剩两个来源，所以改成：
+    文件里存在但没勾的公式**不勾**、配置里勾了的**勾上**、竞价开关照配置走。
+    """
+    _write_formula(page.directory, "没勾的", "C>MA(C,5)")
+    _write_formula(page.directory, "勾了的", "C>MA(C,6)")
+    page_cfg.enabled_formulas = ["勾了的"]
+    page_cfg.intraday_auction = True
 
     page.reload()
 
-    assert page._row_boxes["甲公式"].isChecked() is True
-    assert page._builtin_boxes["ReversalStrategy"].isChecked() is True   # 内置那三条照旧
-    assert page._builtin_boxes["LowPriceStrategy"].isChecked() is False
+    assert page._row_boxes["没勾的"].isChecked() is False
+    assert page._row_boxes["勾了的"].isChecked() is True
+    assert page._auction_box.isChecked() is True
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1433,70 +1434,86 @@ def test_enable_write_failure_reverts_checkbox(page, page_cfg, qapp,
     assert "保存失败" in page.hint_text
 
 
-def test_builtin_check_writes_both_group_and_strategy_keys(page, page_cfg, qapp) -> None:
-    """勾内置策略 → **同时**写 `enabled_groups` 与 `enabled_strategies`。
+def test_no_row_writes_the_legacy_group_keys(page, page_cfg, qapp) -> None:
+    """列表里**没有任何一行**再会去写 `enabled_groups` / `enabled_strategies`。
 
-    为什么两个都要写（这页最容易踩的坑）：`groups.resolve()` 在两者都非空时取**交集**，
-    而 `enabled_groups` 的出厂值是 `["short"]`。只写 `enabled_strategies` 的话，
-    勾上「低价股」（swing 组）会算出**空交集** → 整轮选股被跳过（"勾了却不跑"）。
+    老版本这条用例（`test_builtin_check_writes_both_group_and_strategy_keys`）钉的是
+    "勾内置策略必须同时写组与策略两个键"—— 那是内置策略时代最坑的一处
+    （`groups.resolve()` 在两者都非空时取交集，只写一个会"勾了却不跑"）。
+    2026-09-18 内置策略改成随包公式之后，那两个键不再由这一页维护，
+    于是这条用例反过来钉：**勾公式、勾竞价，都别去动它们** ——
+    用户 config.toml 里留着的老值要原样保留（他手写过的配置不该被界面悄悄改掉）。
     """
-    box = page._builtin_boxes["LowPriceStrategy"]
-    assert box.isChecked() is False
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5)")
+    page.reload()
+    before_groups = list(page_cfg.enabled_groups)
+    before_strategies = list(page_cfg.enabled_strategies)
 
-    box.setChecked(True)
+    page._row_boxes["放量上攻"].setChecked(True)
+    qapp.processEvents()
+    page._auction_box.setChecked(True)
     qapp.processEvents()
 
+    assert page_cfg.enabled_groups == before_groups
+    assert page_cfg.enabled_strategies == before_strategies
+    assert page_cfg.enabled_formulas == ["放量上攻"]
+    assert page_cfg.intraday_auction is True
+    # 配置里那两个键的**原文**也还在（保存设置时不认识的键要保留）
     text = page_cfg.source_path.read_text(encoding="utf-8")
-    assert 'enabled_groups = ["short", "swing"]' in text
-    assert ('enabled_strategies = ["ReversalStrategy", "DryUpExpansionStrategy", '
-            '"FirstLimitUpStrategy", "LowPriceStrategy"]') in text
     assert "# 用户自己的注释（保存设置后必须还在）" in text
     assert 'my_own_key = "别动我"' in text
-    # 两条路都要真的生效：解析出来的策略就是这四条（交集不为空）
-    assert fp.builtin_enabled(page_cfg) == {
-        "ReversalStrategy", "DryUpExpansionStrategy", "FirstLimitUpStrategy",
-        "LowPriceStrategy",
-    }
-    assert "已参与选股" in page.hint_text
-    assert "enabled_groups" in page.hint_text and "enabled_strategies" in page.hint_text
 
 
-def test_uncheck_one_short_member_keeps_the_other_two(page, page_cfg, qapp) -> None:
-    """出厂配置（只写组、没写策略）下取消勾选**一条**：另外两条必须还在。"""
-    page._builtin_boxes["ReversalStrategy"].setChecked(False)
-    qapp.processEvents()
+def test_uncheck_one_formula_keeps_the_others(page, page_cfg, qapp) -> None:
+    """取消勾选**一条**公式：另外两条必须还在（`enabled_formulas` 是逐条维护的列表）。
 
-    assert page_cfg.enabled_groups == ["short"]
-    assert page_cfg.enabled_strategies == [
-        "DryUpExpansionStrategy", "FirstLimitUpStrategy"
-    ]
-    assert fp.builtin_enabled(page_cfg) == {
-        "DryUpExpansionStrategy", "FirstLimitUpStrategy"
-    }                                          # 旧的「组=short 全选」语义被收紧成两条
-
-
-def test_uncheck_all_builtins_writes_explicit_off(page, page_cfg, qapp) -> None:
-    """全部取消勾选 → 写 `enabled_groups = ["none"]`（= 只盯自选股）。
-
-    为什么不能写空列表：`resolve()` 里"两个键都空"是**全选**这个安全默认，
-    写空会反过来变成"五条策略一起跑"—— 与用户的意图正好相反。
+    对应老版本的 `test_uncheck_one_short_member_keeps_the_other_two`（那条钉的是
+    "取消一条内置策略、另外两条照旧"）—— 同样的规矩现在落在公式上。
     """
-    for box in list(page._builtin_boxes.values()):
-        box.setChecked(False)
+    _write_formula(page.directory, "甲", "C>MA(C,5)")
+    _write_formula(page.directory, "乙", "C>MA(C,6)")
+    _write_formula(page.directory, "丙", "C>MA(C,7)")
+    page_cfg.enabled_formulas = ["甲", "乙", "丙"]
+    page.reload()
+
+    page._row_boxes["乙"].setChecked(False)
     qapp.processEvents()
 
-    assert page_cfg.enabled_groups == [fp.OFF_GROUP_KEY] == ["none"]
-    assert page_cfg.enabled_strategies == []
-    selection = groups.resolve_from_config(page_cfg)
-    assert selection.explicit_off is True
-    assert selection.strategies == ()
-    assert "只盯自选股" in page.hint_text
+    assert page_cfg.enabled_formulas == ["甲", "丙"]
+    assert page._row_boxes["甲"].isChecked() is True
+    assert page._row_boxes["丙"].isChecked() is True
+    assert "enabled_formulas" in page_cfg.source_path.read_text(encoding="utf-8")
 
 
-def test_builtin_write_failure_reverts_checkbox(page, page_cfg, qapp,
-                                                monkeypatch: pytest.MonkeyPatch) -> None:
-    """内置策略写不进去时同样退回勾选（界面不能显示成"已经开了"）。"""
-    box = page._builtin_boxes["LowPriceStrategy"]
+def test_uncheck_all_formulas_writes_an_empty_list(page, page_cfg, qapp) -> None:
+    """全部取消勾选 → `enabled_formulas = []`（= 只盯自选股），**不写** `["none"]`。
+
+    老版本这条是内置策略的（`test_uncheck_all_builtins_writes_explicit_off`）：
+    那时"全部关掉"必须写 `enabled_groups = ["none"]`，因为那两个键"都空 = 全选"。
+    公式这一路没有这个坑 —— `enabled_formulas` 空列表就是"一条都不跑"，
+    写 `["none"]` 反而会让它去加载一个叫 none 的公式（加载不到、白写一行配置）。
+    """
+    _write_formula(page.directory, "甲", "C>MA(C,5)")
+    page_cfg.enabled_formulas = ["甲"]
+    page.reload()
+
+    page._row_boxes["甲"].setChecked(False)
+    qapp.processEvents()
+
+    assert page_cfg.enabled_formulas == []
+    assert 'enabled_formulas = []' in page_cfg.source_path.read_text(encoding="utf-8")
+    assert "none" not in page_cfg.source_path.read_text(encoding="utf-8")
+    assert "已退出选股" in page.hint_text
+
+
+def test_auction_toggle_write_failure_reverts_checkbox(page, page_cfg, qapp,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """竞价策略写不进去（只读盘）时同样退回勾选 —— 界面不能显示成"已经开了"。
+
+    老版本这条钉的是内置策略；内置行没了之后，同一条规矩落在竞价那一行上
+    （它写的是 `intraday_auction`，写失败回退的路径与公式那条完全一样）。
+    """
+    box = page._auction_box
 
     def boom(*_args, **_kwargs):
         raise OSError("只读文件系统")
@@ -1507,9 +1524,7 @@ def test_builtin_write_failure_reverts_checkbox(page, page_cfg, qapp,
 
     assert box.isChecked() is False
     assert "保存失败" in page.hint_text
-    assert fp.builtin_enabled(page_cfg) == {
-        "ReversalStrategy", "DryUpExpansionStrategy", "FirstLimitUpStrategy"
-    }                                          # 配置一个字都没变
+    assert page_cfg.intraday_auction is False       # 配置一个字都没变
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1547,69 +1562,95 @@ def test_row_menu_delete_can_be_cancelled(page, monkeypatch) -> None:
     assert "已取消删除" in page.hint_text
 
 
-def test_row_menu_on_builtin_cannot_delete(page, page_cfg) -> None:
-    """内置策略：删除项**置灰并写明理由**（不是悄悄消失 —— 那会像"程序坏了"）。"""
-    picked = page.row_menu(page.row_of("LowPriceStrategy"))
+def test_row_menu_has_no_builtin_entry_anymore(page, page_cfg) -> None:
+    """右键菜单里再也没有"内置策略不可删"那一套（防止老文案/老分支回流）。
 
-    assert [action.text() for action in picked.menu.actions()] == [
-        "启用", fp.MENU_DELETE_BUILTIN,
-    ]
-    assert fp.MENU_DELETE_BUILTIN == "删除（内置策略不可删）"
-    assert picked.delete.isEnabled() is False
-    assert "只能启用/关闭" in picked.delete.toolTip()
-    # 菜单里没有【删除】的落点，点它也不会动内置策略或配置
+    老版本这条叫 `test_row_menu_on_builtin_cannot_delete`：点开内置策略行会看到
+    置灰的「删除（内置策略不可删）」。2026-09-18 内置策略改成随包公式之后，
+    列表里**只有两种行**：公式（可删）与竞价策略（不可删，理由不同）——
+    所以这里钉三件事：
+    ① 那个常量与那条分支都不在了；② 竞价那一行仍然置灰并写明理由；
+    ③ **每个公式行的删除项都是可点的**（不能因为删了内置分支就顺手把公式也锁死）。
+    """
+    assert not hasattr(fp, "MENU_DELETE_BUILTIN")
+    assert not hasattr(fp.FormulaPage, "on_toggle_builtin")
+
+    auction = page.row_menu(page.row_of(fp.AUCTION_KEY))
+    assert auction.delete.text() == fp.MENU_DELETE_AUCTION
+    assert auction.delete.isEnabled() is False
+    assert "系统设置" in auction.delete.toolTip()
+
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5)")
+    page.reload()
+    picked = page.row_menu(page.row_of("放量上攻"))
+    assert picked.delete.text() == fp.MENU_DELETE
+    assert picked.delete.isEnabled() is True
+    assert "公式文件" in picked.delete.toolTip()
+    # 触发删除项**不会**顺手动配置（老那条用例正是这么验的）
     before = page_cfg.source_path.read_text(encoding="utf-8")
-    picked.delete.trigger()                    # 置灰动作触发是空操作
     assert page_cfg.source_path.read_text(encoding="utf-8") == before
-    assert len(page.rows) == FIXED_ROWS        # 内置策略（与竞价那一行）还在列表里
+    assert len(page.rows) == page.table.rowCount() == FIXED_ROWS + 1
 
 
 def test_row_menu_toggle_matches_and_updates_the_row_state(page, page_cfg, qapp) -> None:
-    """菜单第一项**按当前状态只出现一个**，触发之后状态与配置同步变化。"""
-    picked = page.row_menu(page.row_of("LowPriceStrategy"))
-    assert picked.toggle.text() == "启用"      # 它现在是关的
+    """菜单第一项**按当前状态只出现一个**，触发之后状态与配置同步变化。
+
+    原来这条用的是内置策略行（触发后写 `enabled_groups`）；内置行没了之后同样的
+    规矩落在公式上：菜单文案跟着状态走、触发后写回 `enabled_formulas`、
+    勾选框也跟着变 —— 三处只要有一处不同步，用户就会看到与事实相反的界面。
+    """
+    _write_formula(page.directory, "放量上攻", "C>MA(C,5)")
+    page.reload()
+
+    picked = page.row_menu(page.row_of("放量上攻"))
+    assert picked.toggle.text() == "启用"          # 它现在是关的
 
     picked.toggle.trigger()
     qapp.processEvents()
 
-    assert page_cfg.enabled_groups == ["short", "swing"]
-    assert page._builtin_boxes["LowPriceStrategy"].isChecked() is True
+    assert page_cfg.enabled_formulas == ["放量上攻"]
+    assert page._row_boxes["放量上攻"].isChecked() is True
     # 状态变了 → 菜单文案必须跟着变（不跟着变就等于告诉用户相反的事实）
-    assert page.row_menu(page.row_of("LowPriceStrategy")).toggle.text() == "关闭"
-    assert "已参与选股" in page.hint_text
+    assert page.row_menu(page.row_of("放量上攻")).toggle.text() == "关闭"
+    assert "已加入选股" in page.hint_text
 
-    page.row_menu(page.row_of("LowPriceStrategy")).toggle.trigger()
+    page.row_menu(page.row_of("放量上攻")).toggle.trigger()
     qapp.processEvents()
-    assert page_cfg.enabled_groups == ["short"]
-    assert page._builtin_boxes["LowPriceStrategy"].isChecked() is False
+    assert page_cfg.enabled_formulas == []
+    assert page._row_boxes["放量上攻"].isChecked() is False
 
 
 # ══════════════════════════════════════════════════════════════════════════
 # 9.5) 「竞价策略」那一行（用户 2026-09-18："不是公式，是把「竞价扫描」做成策略"）
 #
-# 它排在 5 条内置策略之后、公式之前；勾它开关的是**盘中竞价扫描**（`intraday_auction`），
+# 它是列表的**第一行**（2026-09-18 之前排在 5 条内置策略之后；内置策略改成随包公式后，
+# 前面那 5 行没了，它就成了第一行）；勾它开关的是**盘中竞价扫描**（`intraday_auction`），
 # 而**不是**"参与选股" —— 这几条用例里最要紧的就是把这条界线钉死：
 # 勾完以后 `enabled_groups` / `enabled_strategies` / `enabled_formulas` 一个都不许变。
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_auction_row_sits_between_builtins_and_formulas(page) -> None:
-    """位置：5 条内置之后、公式之前；备注列写的是**现读配置**的口径。"""
+def test_auction_row_is_the_only_fixed_row_and_reads_config(page) -> None:
+    """位置与口径：竞价行是**唯一一行固定行**（在最上面），说明列是**现读配置**的口径。
+
+    老版本这条叫 `test_auction_row_sits_between_builtins_and_formulas`：那时它排在
+    5 条内置策略**之后**、公式**之前**。内置策略改成随包公式之后，前面那 5 行没了，
+    于是它成了列表的**第一行** —— 位置变了，但"数字来自 config、不参与选股写在最前面"
+    这两条口径一个字都没变。
+    """
     _write_formula(page.directory, "我的公式", "C>MA(C,5)")
     page.reload()
 
     names = [page.table.item(row, 0).text() for row in range(page.table.rowCount())]
-    assert names[:5] == ["连板回踩低吸", "短期反转", "地量后放量变盘", "首板缩量整理", "低价股"]
-    assert names[5] == fp.AUCTION_NAME
-    assert names[6] == "我的公式"
-    # 备注列的数字来自 config（不是界面编的）：改一个数，备注跟着变
-    note = page.table.item(5, 1).text()
+    assert names == [fp.AUCTION_NAME, "我的公式"]
+    # 说明列的数字来自 config（不是界面编的）：改一个数，说明跟着变
+    note = page.table.item(0, 1).text()
     assert "涨幅 2.0~9.0%" in note
-    # 「不参与选股」必须在**最前面**：备注列会被省略号截断，结论不能被截掉
+    # 「不参与选股」必须在**最前面**：说明列会被省略号截断，结论不能被截掉
     assert note.startswith("只做盘中提示、不参与选股")
     page.cfg.auction_min_pct = 5.0
     page.reload()
-    assert "涨幅 5.0~9.0%" in page.table.item(5, 1).text()
+    assert "涨幅 5.0~9.0%" in page.table.item(0, 1).text()
 
 
 def test_auction_row_toggle_writes_intraday_auction_only(page, page_cfg, qapp) -> None:

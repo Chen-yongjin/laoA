@@ -17,14 +17,16 @@
 
 为什么要有"池"
 --------------
-策略每天各推 30 只、五条策略加起来 150 只，**盯不过来也没法执行**。
-这里把候选收敛成一个 10 只左右的小池子：
+候选一次能出一百多只，**盯不过来也没法执行**。这里把候选收敛成一个 10 只左右的小池子：
 
-1. 只取**通过 10 年样本检验**的 5 条超短策略（见 `strategy/rules.py`）；
-2. 按"证据强度"给权重（t 值越高、样本越长，权重越大）：
-   低价股 3 / 连板回踩 2 / 短期反转 2 / 地量放量 2 / 首板缩量 1；
-3. 每条策略先按自己的因子排序，再按权重折算成分数，**同一策略最多进 3 只**；
-4. 只保留**热门行业**的候选（当日行业涨停密度 + 近 5 日行业成分等权涨幅，归一化后取前 12）；
+1. **候选只来自"勾选的公式"**（2026-09-18 用户要求）：原来这里并的是 5 条写在代码里的
+   Python 策略（`strategy/rules.py`），用户把它们整体改成了**随包公式**（可改可删），
+   于是公式成了唯一来源 —— 随包的那几条与用户自己写的一条待遇完全相同：勾上才跑；
+2. 每条公式先按自己的因子/条件排好，再按权重折算成分数，**同一条公式最多进 3 只**
+   （`formula_group.MAX_PER_FORMULA` / `FORMULA_WEIGHT`）；
+3. 只保留**热门行业**的候选（当日行业涨停密度 + 近 5 日行业成分等权涨幅，归一化后取前 12）；
+   **公式标的不过这道收敛**（条件是用户自己写明的，再被他没看见的行业过滤删掉最莫名其妙）；
+4. 自选股独立并入（**不占公式名额、不受热门行业过滤**）；
 5. 结果落库 `stock_pool`，盘中提醒直接盯这个池子。
 
 > 这些策略的 α 都只有 0.1~0.5%，**远小于盘中波动**，所以池子只是"值得盯的清单"。
@@ -95,9 +97,12 @@ def build_pool(
             **自定义公式不参与这道收敛**（条件本身就是用户写明的，见下面的说明）。
         save: 是否落库 `stock_pool`。
         day: 池子日期，默认按库里最新行情日期。
-        picks: 已算好的候选（`{策略类名: [...]}`）。**日更流程传它以避免重复跑策略** ——
-            每条策略都要扫全市场面板，跑两遍会白白多花一倍时间。
-        selection: 启用的组/策略；只从其中的候选合成池子（自选策略组的落点）。
+        picks: 已算好的候选（`{"公式·X": [...]}`）。调用方已经算过就直接传，
+            免得再跑一遍（`run_enabled_formulas` 要扫全库，跑两遍纯浪费）。
+        selection: **2026-09-18 起不再用于选股，只为兼容老调用方保留这个参数**。
+            用户把"内置策略"整体改成了随包公式（可改可删），"跑哪些策略"这件事
+            现在只有一个答案：`config.toml` 里 `enabled_formulas` 勾了哪几条公式 ——
+            它由 `formula_group.run_enabled_formulas()` 自己读，不需要外面传选择。
         watchlist: 自选股行（`{symbol,name,note,enabled}`）；None 时按配置从库里读
             （`watchlist_in_pool=false` 表示"只记录不监控"，此时会跳过）。
         report: 可选的可变字典，用来接收"自选股超上限被截掉几只"之类的提示
@@ -108,14 +113,12 @@ def build_pool(
         池子行列表（见 `build_pool_from_picks`）。
     """
     if picks is None:
-        # 建池时把候选放宽：策略默认只取前 30，再叠加"仅热门行业"会剩不下几只，
-        # 因此这里临时把 top_n 拉大到 200（只影响建池，不影响主流程的信号与推送）。
-        run_kwargs: dict = {"top_n": 200, "names": engine.get_stock_names()}
-        if selection is not None:
-            run_kwargs["selection"] = selection
-        picks_by_strategy, errors = rules.run_all(engine, settings, **run_kwargs)
-        for msg in errors:
-            logger.warning(f"池子策略执行失败：{msg}")
+        # ⚠️ 2026-09-18（用户要求）：候选**只来自"勾选的公式"**，不再是"跑内置策略"。
+        # 原来这里调 `rules.run_all()` 跑那 5 条写在代码里的 Python 策略；用户把它们
+        # 整体改成了随包公式（可改可删），于是 5 条策略退出选股链路 ——
+        # 下面那段 `formula_group.run_enabled_formulas()` 成了**唯一**的候选来源，
+        # 随包公式与用户自己写的一条待遇完全相同（勾上才跑）。
+        picks_by_strategy = {}
     else:
         picks_by_strategy = picks
 
@@ -144,22 +147,21 @@ def build_pool(
             "ran": list(formula_run.ran),
             "picks": {k: len(v) for k, v in formula_run.picks.items()},
             "status": dict(formula_run.status),
+            # **完整候选行也要留一份**：`scheduler.run_daily()` 从这里取候选写 `signal`
+            # 表（盘中风控观察池用）。只留计数的话那边就没东西可写 —— 而 `signal`
+            # 表的口径没变（每条公式最多取 SIGNAL_TOP_N 只，由调用方截断）。
+            "rows": {k: [dict(r) for r in v] for k, v in formula_run.picks.items()},
         }
 
-    # 双保险：即使调用方传进来的候选里混了未启用的策略，也不让它进池子。
-    # **自定义公式例外**：它归 `enabled_formulas` 管（勾了就该跑），
-    # 不该被 `enabled_groups = ["short"]` 这种内置组的选择顺手剔掉。
-    if selection is not None and not selection.empty:
-        allowed = set(selection.strategies)
-        dropped_strategies = [
-            k for k in picks_by_strategy
-            if k not in allowed and not groups.is_formula_strategy(k)
-        ]
-        if dropped_strategies:
-            logger.info(f"按选择过滤候选：剔除未启用策略 {dropped_strategies}")
+    # 兜底：调用方可能传进来"不是公式"的候选（老代码、老配置留下的策略类名）。
+    # 2026-09-18 起那 5 条内置策略退出选股链路，所以这类键一律丢掉 ——
+    # 让它进池子只会让「来源」列出现"策略·X"这种界面上已经选不出来的东西，
+    # 用户看着它却找不到对应的策略行（那是最难解释的一种现象）。
+    stale = [k for k in picks_by_strategy if not groups.is_formula_strategy(k)]
+    if stale:
+        logger.info(f"丢弃非公式候选（内置策略已改成随包公式）：{stale}")
         picks_by_strategy = {
-            k: v for k, v in picks_by_strategy.items()
-            if k in allowed or groups.is_formula_strategy(k)
+            k: v for k, v in picks_by_strategy.items() if groups.is_formula_strategy(k)
         }
 
     # 只保留热门行业的候选

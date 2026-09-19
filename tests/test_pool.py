@@ -15,6 +15,27 @@ def _picks(*symbols: str, name: str = "") -> list[dict]:
     return [{"symbol": s, "name": name or s, "reason": "测试"} for s in symbols]
 
 
+def _enable_formulas(monkeypatch, tmp_path, cfg, formulas: dict[str, str]) -> None:
+    """把公式目录指到临时目录、写好几条公式、并在配置里**勾上**它们。
+
+    2026-09-18（用户要求）起**候选只来自勾选的公式** —— 5 条写在代码里的 Python 策略
+    退出了选股链路，所以"池子里要有票"这件事在测试里也必须走同一条路：
+    写公式文件 → 勾上 → 建池。这里用价格条件选票（小库价格是确定的）：
+
+        600001 ≈ 1.85 元、600002 ≈ 12.5 元、600003 ≈ 18.7 元、300001 ≈ 26 元
+
+    所以 `C<3` 只选 600001、`C>12 AND C<13` 只选 600002，断言仍然精确。
+    """
+    folder = tmp_path / "formulas"
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, body in formulas.items():
+        (folder / f"{name}.txt").write_text(
+            f"# 名称: {name}\n# 说明: 测试用（{name}）\n{body}\n", encoding="utf-8"
+        )
+    monkeypatch.setenv("LAOA_TRADER_FORMULAS", str(folder))
+    cfg.enabled_formulas = list(formulas)
+
+
 def test_weights_match_server() -> None:
     """权重表必须与服务器版一致（不是拍脑袋，按 10 年样本 t 值定的）。"""
     assert pool.POOL_STRATEGIES == {
@@ -143,40 +164,45 @@ def test_hot_industries_respects_day(db) -> None:
     assert all(v["limit_up"] == 0 for v in hot.values())
 
 
-def test_build_pool_filters_non_hot_industries(engine, cfg, monkeypatch) -> None:
-    """只保留热门行业的候选，并给理由打上"热门行业X"标记。"""
-    def fake_run_all(engine_, settings=None, *, top_n=None, names=None):
-        return {
-            "LowPriceStrategy": _picks("600002", "600001"),      # 半导体（热门）、银行
-        }, []
+def test_formula_rows_skip_the_hot_industry_filter(
+        engine, cfg, tmp_path, monkeypatch) -> None:
+    """公式候选**不过**热门行业收敛（理由里也不会出现"热门行业X"标记）。
 
+    2026-09-18 起候选只可能来自公式，而公式标的从来就豁免这道过滤 ——
+    条件是用户自己写明的，再被他没看见的行业过滤删掉一半，表现就是"我勾了公式
+    却几乎看不到票"，而且完全猜不到原因。这条把新口径钉住（老口径"策略标的会被
+    过滤掉"已经没有对应的代码路径了）。
+    """
+    # 勾两条公式：600002（半导体，热门）与 600001（银行，**不**热门）
+    _enable_formulas(monkeypatch, tmp_path, cfg,
+                     {"半导体甲": "C>12 AND C<13", "便宜货": "C<3"})
     # 固定"热门行业"= 半导体（真实数据里只有 4 个行业，取前 12 会把它们全算热门）
     monkeypatch.setattr(
         pool, "hot_industries",
         lambda db_path, **kwargs: {"半导体": {"score": 1.0, "limit_up": 2,
                                             "density": 1.0, "mom": 0.05}},
     )
-    monkeypatch.setattr(pool.rules, "run_all", fake_run_all)
     built = pool.build_pool(engine, cfg, hot_only=True, save=False)
-    assert [row["symbol"] for row in built] == ["600002"]
-    assert "热门行业半导体" in built[0]["reason"]
+    assert {row["symbol"] for row in built} == {"600001", "600002"}
+    assert all("热门行业" not in row["reason"] for row in built)
 
 
-def test_build_pool_without_hot_filter_keeps_all(engine, cfg, monkeypatch) -> None:
-    def fake_run_all(engine_, settings=None, *, top_n=None, names=None):
-        return {"LowPriceStrategy": _picks("600002", "600001")}, []
-
-    monkeypatch.setattr(pool.rules, "run_all", fake_run_all)
+def test_build_pool_without_hot_filter_keeps_all(engine, cfg, tmp_path, monkeypatch) -> None:
+    """`hot_only=False`：勾上两条公式选出来的票全部进池。"""
+    _enable_formulas(monkeypatch, tmp_path, cfg,
+                     {"半导体甲": "C>12 AND C<13", "便宜货": "C<3"})
     built = pool.build_pool(engine, cfg, hot_only=False, save=False)
-    assert {row["symbol"] for row in built} == {"600002", "600001"}
+    assert {row["symbol"] for row in built} == {"600001", "600002"}
+    assert all(row["strategy"].startswith("公式·") for row in built)
 
 
-def test_build_pool_saves_and_loads(engine, cfg, monkeypatch) -> None:
-    """建池后应落库 `stock_pool`，`load_pool` 能读回来（界面与盘中提醒都靠它）。"""
-    def fake_run_all(engine_, settings=None, *, top_n=None, names=None):
-        return {"LowPriceStrategy": _picks("600002")}, []
+def test_build_pool_saves_and_loads(engine, cfg, tmp_path, monkeypatch) -> None:
+    """建池后应落库 `stock_pool`，`load_pool` 能读回来（界面与盘中提醒都靠它）。
 
-    monkeypatch.setattr(pool.rules, "run_all", fake_run_all)
+    候选来自一条真公式（`C>12 AND C<13` → 600002），所以这条同时验证了
+    "勾上的公式 → 候选 → 落库 → 读回"这条完整链路。
+    """
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"半导体甲": "C>12 AND C<13"})
     built = pool.build_pool(engine, cfg, hot_only=False, save=True, day="2026-09-11")
     rows = pool.load_pool(cfg.db_path)
     assert len(built) == 1
@@ -186,28 +212,31 @@ def test_build_pool_saves_and_loads(engine, cfg, monkeypatch) -> None:
     assert pool.pool_changed(cfg.db_path, _picks("600099"), "2026-09-11") is True
 
 
-def test_pool_table_rows_adds_industry_and_label(engine, cfg, monkeypatch) -> None:
-    def fake_run_all(engine_, settings=None, *, top_n=None, names=None):
-        return {"LowPriceStrategy": _picks("600002", name="半导体甲")}, []
-
-    monkeypatch.setattr(pool.rules, "run_all", fake_run_all)
+def test_pool_table_rows_adds_industry_and_label(
+        engine, cfg, tmp_path, monkeypatch) -> None:
+    """表格行要带行业与「来源」标签；2026-09-18 起标签是 `公式·<公式名>`。"""
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"半导体甲": "C>12 AND C<13"})
     pool.build_pool(engine, cfg, hot_only=False, save=True, day="2026-09-11")
     rows = pool.pool_table_rows(cfg.db_path)
+    assert rows[0]["symbol"] == "600002"
     assert rows[0]["industry"] == "半导体"
-    assert rows[0]["label"] == "低价股"
+    assert rows[0]["label"] == "公式·半导体甲"
 
 
-def test_build_pool_bumps_top_n_for_wide_candidates(engine, cfg, monkeypatch) -> None:
-    """建池时把候选放宽到 200（叠加热门行业过滤后还能剩够 10 只）。"""
-    seen: dict = {}
+def test_build_pool_never_runs_the_python_strategies(engine, cfg, monkeypatch) -> None:
+    """**建池绝不再跑那 5 条 Python 策略**（2026-09-18 用户要求：内置策略改成随包公式）。
 
-    def fake_run_all(engine_, settings=None, *, top_n=None, names=None):
-        seen["top_n"] = top_n
-        return {}, []
+    做法是哨兵：把 `rules.run_all()` 换成一个"被调用就炸"的实现 —— 只要还有哪条路
+    顺手把内置策略接回来，这条立刻红。这比"断言 top_n==200"更有意义：
+    那个参数已经不存在了（没有 run_all 可传）。
+    """
+    def boom(*args, **kwargs):
+        raise AssertionError("建池又去跑 Python 内置策略了（候选只该来自勾选的公式）")
 
-    monkeypatch.setattr(pool.rules, "run_all", fake_run_all)
-    pool.build_pool(engine, cfg, save=False)
-    assert seen["top_n"] == 200
+    monkeypatch.setattr(pool.rules, "run_all", boom)
+    monkeypatch.setattr(pool.rules, "save_signals", boom)
+    built = pool.build_pool(engine, cfg, save=False)     # 没勾公式 → 池子为空，但**不许炸**
+    assert built == []
 
 
 def test_save_pool_is_idempotent(db) -> None:
@@ -314,19 +343,21 @@ def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> 
 # 对"策略选中的票"真的有效 —— 界面怎么改都不至于连后端语义都变了。
 
 
-def _saved_pool_with_one_pick(engine, cfg, monkeypatch) -> None:
-    """建一个只有一只策略标的的池子并落库（600002 半导体甲）。"""
-    def fake_run_all(engine_, settings=None, *, top_n=None, names=None):
-        return {"ReversalStrategy": _picks("600002", name="半导体甲")}, []
+def _saved_pool_with_one_pick(engine, cfg, tmp_path, monkeypatch) -> None:
+    """建一个只有一只**公式标的**的池子并落库（600002 半导体甲）。
 
-    monkeypatch.setattr(pool.rules, "run_all", fake_run_all)
+    2026-09-18 起候选只来自勾选的公式：这里勾一条 `C>12 AND C<13`
+    （小库里只有 600002 落在 12~13 元之间），所以池子里就是它。
+    """
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"半导体甲": "C>12 AND C<13"})
     built = pool.build_pool(engine, cfg, hot_only=False, save=True, day="2026-09-11")
     assert [row["symbol"] for row in built] == ["600002"]
 
 
-def test_a_picked_symbol_can_be_deleted_from_the_pool_page(engine, cfg, monkeypatch) -> None:
+def test_a_picked_symbol_can_be_deleted_from_the_pool_page(
+        engine, cfg, tmp_path, monkeypatch) -> None:
     """右键【删除】的后端：`delete_pool_symbol` 之后「自选股池」不再显示这只票。"""
-    _saved_pool_with_one_pick(engine, cfg, monkeypatch)
+    _saved_pool_with_one_pick(engine, cfg, tmp_path, monkeypatch)
     assert [row["symbol"] for row in pool.pool_page_rows(cfg.db_path)] == ["600002"]
 
     with storage.connect(cfg.db_path) as conn:
@@ -337,14 +368,14 @@ def test_a_picked_symbol_can_be_deleted_from_the_pool_page(engine, cfg, monkeypa
     assert pool.pool_symbols(cfg.db_path) == []
 
 
-def test_a_manually_added_symbol_comes_back_into_the_pool_page(engine, cfg,
+def test_a_manually_added_symbol_comes_back_into_the_pool_page(engine, cfg, tmp_path,
                                                                monkeypatch) -> None:
     """手工再加：`upsert_watchlist` 之后那只票**立刻**能在这张表里看见。
 
     为什么这条重要：池子按行情日重算，删掉一只策略标的之后用户想自己把它加回来
     （或加一只完全手工挑的票），界面上必须马上就有一行 —— 而不是"等今晚重新建池"。
     """
-    _saved_pool_with_one_pick(engine, cfg, monkeypatch)
+    _saved_pool_with_one_pick(engine, cfg, tmp_path, monkeypatch)
     with storage.connect(cfg.db_path) as conn:
         storage.delete_pool_symbol(conn, "600002")        # 先删掉（上一个用例的动作）
         storage.upsert_watchlist(conn, "600002", name="半导体甲", note="手工加的")

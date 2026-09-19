@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -124,6 +125,19 @@ def bundled_formula_dir() -> Path | None:
 #: 只有记下"播过哪些"，才分得清"还没给他"与"他不要"。
 SEED_STATE_NAME = ".laoa-seeded.json"
 
+#: **退役的随包公式**：文件名 → 老版本随包内容的 sha256。
+#:
+#: 为什么需要它（2026-09-18）：用户要求删掉「连板回踩低吸」这条策略，而它在老版本里是
+#: 随包公式 `涨停回踩低吸.txt` —— 只从仓库里删文件的话，**已经装过老版本的用户目录里
+#: 那一份还在**，他升级后列表里照样留着这条，等于没删。所以启动时顺手清一次。
+#:
+#: 判据是**哈希逐字节一致**，不是"文件名一样就删"：用户可能把这条公式改成了自己的东西
+#: （改阈值、加条件），那是他的劳动成果，删掉等于替他做主 —— 改过的就留着，
+#: 同时记进 `SEED_STATE_NAME` 那份名单里（见 `_retire_bundled_formulas`）。
+RETIRED_BUNDLED_FORMULAS: dict[str, str] = {
+    "涨停回踩低吸.txt": "ca9f0533ce63c35cc62f05d035b7d51ace03fafd6de5bf9b0b58289b7c76cea6",
+}
+
 
 def _read_seed_state(target: Path) -> set[str]:
     """读播种记录（读不出来就当没播过 —— 宁可多复制一份，也别让新公式不出现）。"""
@@ -149,7 +163,47 @@ def _write_seed_state(target: Path, seeded: set[str]) -> None:
         logger.warning(f"写随包公式播种记录失败（不影响使用）：{exc}")
 
 
-def _seed_samples(target: Path) -> None:
+def _retire_bundled_formulas(target: Path, seeded: set[str]) -> None:
+    """清掉**退役的随包公式**（只删"用户没改过"的那些，见 `RETIRED_BUNDLED_FORMULAS`）。
+
+    两个判断，缺一不可：
+
+    1. **哈希与老版本随包的一致** → 那份文件是程序放进来的、用户一个字没动 → 删；
+       哈希不一致 → 他改过 → **留着**，并且把他这份"认下来的"记进名单，以后都不再管它
+       （否则下一个版本换了退役名单，又会拿旧哈希去比，比不中也不算错，但状态会乱）；
+    2. **删完必须记进 `seeded`** —— 这是这次最容易做错的一步：
+       `_seed_samples()` 的规则是"缺哪条补哪条"，只要那份文件**还在随包目录里**
+       （老版本的 `_internal/formulas` 在用户原地升级时有可能还在），
+       不记录就会被下一次启动**原样补回来** —— 表现就是"删了又长回来"，用户会以为程序坏了。
+       记进名单 = 明确告诉补齐逻辑"这条我处理过了"。
+    """
+    for name, digest in RETIRED_BUNDLED_FORMULAS.items():
+        if name in seeded:
+            continue                      # 上一轮已经处理过（删过或认过）
+        path = target / name
+        if not path.is_file():
+            seeded.add(name)              # 本来就没有：记下来，省得每轮都查一遍
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError as exc:            # 权限/占用：留着，下次启动再试
+            logger.warning(f"读退役公式 {name} 失败（这次不处理）：{exc}")
+            continue
+        if hashlib.sha256(data).hexdigest() != digest:
+            # 用户改过（或本来就是他自己写的同名文件）→ 那是他的东西，绝不删
+            logger.info(f"退役公式 {name} 与随包版本不一致，按用户自己的公式保留")
+            seeded.add(name)
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning(f"删退役公式 {name} 失败（下次启动再试）：{exc}")
+            continue
+        seeded.add(name)
+        logger.info(f"已清理退役的随包公式：{name}（它对应「连板回踩低吸」，用户要求删掉）")
+
+
+def _seed_samples(target: Path, seeded: set[str]) -> None:
     """把随包公式**逐条补齐**到用户目录（缺哪条补哪条，**绝不覆盖**已有的文件）。
 
     三条规矩：
@@ -163,6 +217,9 @@ def _seed_samples(target: Path) -> None:
     为什么需要复制这一步：打包后随包公式在 `_internal/formulas`（解包目录，用户看不到、
     也不该往里写），而用户的公式放在 exe 同级的 `formulas/`。第一版不带这一步时，
     新用户打开界面看到的是一个**空列表**，连"载入示例"都没得载 —— 小白第一步就走不下去。
+
+    `seeded` 由调用方（`_sync_bundled_formulas`）读进来、写完再落盘：退役清理与补齐
+    必须共用同一份名单，否则两边各写各的，会把对方的记录覆盖掉。
     """
     source = bundled_formula_dir()
     if source is None or source == target:
@@ -173,10 +230,10 @@ def _seed_samples(target: Path) -> None:
     ]
     if not bundled:
         return
-    seeded = _read_seed_state(target)
     copied = 0
     for path in bundled:
-        if path.name in seeded:
+        if path.name in seeded or path.name in RETIRED_BUNDLED_FORMULAS:
+            # 已播过种 / 已经退役（老解包目录里可能还留着这个文件）：都不复制
             continue
         if (target / path.name).exists():
             # 用户已经有一份同名的：认下来（记进名单），以后他删了也不补
@@ -189,9 +246,28 @@ def _seed_samples(target: Path) -> None:
             continue
         seeded.add(path.name)
         copied += 1
-    _write_seed_state(target, seeded)
     if copied:
         logger.info(f"已把 {copied} 条随包公式放进 {target}")
+
+
+def _sync_bundled_formulas(target: Path) -> None:
+    """随包公式的**一站式同步**：先退役旧的、再逐条补齐缺的，最后把名单落盘。
+
+    为什么合成一个入口：这两件事共用同一份状态文件（`.laoa-seeded.json`），
+    各自读一遍写一遍的话，后写的那次会把前一次刚记下的名字冲掉 ——
+    退役名单就会"每轮重新判断"，补齐逻辑也会把退役文件当"还没给过他"补回来。
+
+    源码运行 / 随包目录就是目标目录时**什么都不做**（`source == target`）：
+    那种情况下"用户的公式目录"就是随包目录本身（开发时是仓库里的 `formulas/`），
+    既没有"要补齐的随包公式"，也不该往仓库里写状态文件、更不该去删仓库里的文件。
+    """
+    source = bundled_formula_dir()
+    if source is None or source == target:
+        return
+    seeded = _read_seed_state(target)
+    _retire_bundled_formulas(target, seeded)
+    _seed_samples(target, seeded)
+    _write_seed_state(target, seeded)
 
 
 def formula_dir() -> Path:
@@ -204,8 +280,9 @@ def formula_dir() -> Path:
        备份、发给别人、用记事本改都最直观；
     3. **源码运行**：仓库根 `laoA/formulas/`（就是仓库里那份，随包分发的也是它）。
 
-    随包公式会**逐条补齐**进来：缺哪条补哪条、同名的绝不覆盖、用户删掉的不再补
-    （见 `_seed_samples`）—— 所以"内置公式"这件事就是"仓库里那个 `formulas/` 目录"。
+    随包公式会**逐条补齐**进来：缺哪条补哪条、同名的绝不覆盖、用户删掉的不再补，
+    退役的那几条（`RETIRED_BUNDLED_FORMULAS`）还会顺手清掉他没改过的那一份
+    （见 `_sync_bundled_formulas`）—— 所以"内置公式"这件事就是"仓库里那个 `formulas/` 目录"。
     """
     override = (os.environ.get(FORMULA_DIR_ENV) or "").strip()
     if override:
@@ -221,7 +298,7 @@ def formula_dir() -> Path:
         # 只读盘 / 权限不足：**不抛异常**（界面照开），保存时再给中文错误
         logger.warning(f"公式目录建不出来：{target}（{exc}）")
         return target
-    _seed_samples(target)
+    _sync_bundled_formulas(target)
     return target
 
 
@@ -830,6 +907,8 @@ __all__ = [
     "LIMIT_UP_HINT",
     "MAX_NAME_CHARS",
     "PREVIEW_LIMIT",
+    "RETIRED_BUNDLED_FORMULAS",
+    "SEED_STATE_NAME",
     "HOT_FIELDS",
     "HOT_WINDOW_DAYS",
     "SNAPSHOT_FIELDS",

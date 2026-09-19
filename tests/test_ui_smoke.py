@@ -2586,10 +2586,17 @@ def test_run_pipeline_button_runs_in_background_and_is_idempotent(window, qapp,
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
     monkeypatch.setattr("laoa_trader.notify.notify_all",
                         lambda *a, **k: {"tray": {"kind": "tray", "ok": True}})
-    # 这条测的是"按钮 → 后台 → 落库"的接线，不是默认策略集：小样本库（价格缓慢上涨）
-    # 只满足「低价股」的条件（它属于默认停用的 swing 组），所以这里显式把那一组打开。
-    # 「默认只开 short」本身由 settings 页与 config 的用例钉住。
-    seeded.enabled_groups = ["swing"]
+    # 这条测的是"按钮 → 后台 → 落库"的接线，不测候选从哪来。
+    # 2026-09-18（用户要求）起候选**只来自勾选的公式**（内置策略退出选股链路），
+    # 所以这里写一条最简单的公式（`C>0`，小库里两只票都命中）并勾上它 ——
+    # 老写法（`enabled_groups = ["swing"]`）已经不会让任何票进池了。
+    formula_dir = seeded.data_dir / "formulas"
+    formula_dir.mkdir(parents=True, exist_ok=True)
+    (formula_dir / "界面测试公式.txt").write_text(
+        "# 名称: 界面测试公式\n# 说明: 界面用例专用\nC>0\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LAOA_TRADER_FORMULAS", str(formula_dir))
+    seeded.enabled_formulas = ["界面测试公式"]
 
     window.on_run_pipeline()
     assert window._worker is not None

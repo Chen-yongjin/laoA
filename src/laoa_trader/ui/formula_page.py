@@ -11,13 +11,13 @@
 
 这一页就按这三块摆（`docs/改版方案.md` TAB 4）：
 
-1. **策略列表**（上半）：**内置 5 条策略与自定义公式合成同一张表**，列固定为
-   `名称 | 备注 | 状态`。内置在前、公式在后；备注列写的是**真实证据** ——
-   内置取自 `strategy/rules.py` 的 `evidence`/`evidence_note` 与 `strategy/groups.py`
-   的组结论 / `disabled_reason`，公式取自文件里的 `# 说明:` 注释头。
-   **界面自己一个数字都不编**（见 `builtin_strategy_note`：它只搬字段，不做加法）。
-   单击一行：内置 → 只读详情（条件说明 + 证据 + 当前状态，可复制）；
-   公式 → 载入编辑器（可改可存）。右键：启用/关闭、删除（内置不可删）。
+1. **策略列表**（上半）：**随包公式与你自己的公式合成同一张表**，列固定为
+   `策略名称 | 说明 | 策略选取`。最上面一行是「竞价策略」（唯一不是选股策略的行，
+   开关的是盘中竞价扫描），下面是公式；说明列取自公式文件里的 `# 说明:` 注释头。
+   单击一行：公式 → 载入编辑器（可改可存）；竞价策略 → 只读详情。
+   右键：启用/关闭、删除（公式可删，竞价策略那一行不可删）。
+   2026-09-18（用户要求）：老版本这里先摆 5 条**内置策略**（写在 `strategy/rules.py`
+   里的 Python 策略、只读不可删）；现在那 5 条改成了随包公式，列表里不再有内置行。
 2. **策略编辑器**（下半，点【策略编辑】或点列表里的公式行才展开）：左边框、
    右边"点一下就插入"的按钮面板（变量 / 函数 / 运算符 / 排除 —— 排除组在**最下面**）。
    每个按钮的字是中文（点一下插入的仍是引擎认的语法），中文 tooltip 第一步写着"插入 XX"，
@@ -77,7 +77,6 @@ CLI `--scorecard` 照旧（数据下到 ≥1 年时它才有意义）。
 
 from __future__ import annotations
 
-import inspect
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -86,10 +85,8 @@ from laoa_trader import formulas as formulas_lib
 from laoa_trader import pool as pool_mod
 from laoa_trader.config import get_config
 from laoa_trader.log import get_logger
-from laoa_trader.strategy import base as base_mod
 from laoa_trader.strategy import formula as fm
 from laoa_trader.strategy import formula_group, groups
-from laoa_trader.strategy import rules as rules_mod
 
 logger = get_logger(__name__)
 
@@ -175,16 +172,15 @@ HINT_MAX_LINES = 14
 #: 这时候放掉最后一个引用会让 QThread 在"线程还在跑"时析构 —— Qt 直接崩进程。
 THREAD_JOIN_MS = 3_000
 
-# ── 统一策略列表的三类行 ──
-ROW_BUILTIN = "builtin"      # 内置策略（写在 `strategy/rules.py` 里，只读、不可删）
-ROW_FORMULA = "formula"      # 自定义公式（`formulas/` 目录里的文件，可改可删）
+# ── 统一策略列表的两类行 ──
+ROW_FORMULA = "formula"      # 公式（`formulas/` 目录里的文件，可改可删；随包的那几条也是它）
 #: 「竞价策略」：**不是一个选股策略**，而是把设置页那个「竞价扫描」搬进这张表 ——
 #: 勾上 = 每个交易日 9:20 / 9:25 各扫一次全市场并把强势股推给你（写回 `intraday_auction`）。
 #: 用户 2026-09-18 的要求原话："不是公式，是把「竞价扫描」做成策略"。
 #: 为什么它必须与选股策略**分开一类**：勾它不会往池子里加票、也不改变选股结果，
 #: 混在一起会让"勾上 = 参与选股"这条规矩出现例外，而例外是用户最容易记错的东西。
 ROW_AUCTION = "auction"
-#: 这一行的 key（唯一；内置策略的 key 是类名，公式的 key 是公式名）
+#: 这一行的 key（唯一；公式行的 key 是公式名）
 AUCTION_KEY = "auction"
 AUCTION_NAME = "竞价策略"
 
@@ -197,16 +193,11 @@ LIST_COLUMNS: tuple[str, ...] = ("策略名称", "说明", "策略选取")
 MENU_ENABLE = "启用"
 MENU_DISABLE = "关闭"
 MENU_DELETE = "删除"
-#: 内置策略的「删除」是**置灰**而不是藏起来 —— 藏起来用户会以为"程序坏了"，
-#: 写上"不可删"他立刻明白为什么（见 `FormulaPage.row_menu`）。
-MENU_DELETE_BUILTIN = "删除（内置策略不可删）"
-#: 「竞价策略」那一行的删除项文案（它同样不可删，理由是"它是设置项，不是文件"）
+#: 「竞价策略」那一行的删除项文案（它不可删，理由是"它是设置项，不是文件"）。
+#: 注：老版本这里还有一条 `MENU_DELETE_BUILTIN`（内置策略不可删）——
+#: 2026-09-18 起内置策略改成了随包公式，列表里没有"不可删的行"了（剩一条竞价策略），
+#: 所以那条文案与 `OFF_GROUP_KEY`（"关掉全部策略"的写法）一起删掉。
 MENU_DELETE_AUCTION = "删除（竞价策略是内置设置，不可删）"
-
-#: `config.toml` 里"关掉全部策略"的写法（`groups.resolve()` 认得它 → `explicit_off`）。
-#: 为什么必须有一个明确值：**两个键都空 = 全选**是安全默认，
-#: 所以"所有勾都取消"不能用空列表表达，否则会反过来变成"全跑"。
-OFF_GROUP_KEY = "none"
 
 #: 备注（写进 `# 说明:` 注释头）的长度上限。为什么这里要拦：
 #: 注释头是**一行**，超长的说明会把文件第一屏占满，用户用记事本打开公式时
@@ -234,11 +225,13 @@ PAGE_HINT = (
     "结果同时也会进「自选股池」并自动导出一份到桌面。"
 )
 
-#: 策略列表上方那句灰字
+#: 策略列表上方那句灰字。
+#: 2026-09-18（用户要求）：这里原来写的是"内置 5 条固定在前（备注列是它的实测证据，只读）"；
+#: 那 5 条内置策略改成了随包公式，所以现在列表就是"竞价策略 + 公式"两段。
 LIST_HINT = (
-    "策略列表：内置 5 条固定在前（备注列是它的实测证据，只读）；"
-    "中间那条「竞价策略」开关的是盘中竞价扫描（只做提示、不参与选股）；"
-    "你自己的公式追加在后（备注来自公式文件的「# 说明:」）。"
+    "策略列表：最上面那条「竞价策略」开关的是盘中竞价扫描（只做提示、不参与选股）；"
+    "下面全是公式 —— 随包预置的那几条与你自己写的一条待遇相同（都能改、能删、能勾选），"
+    "「说明」列来自公式文件里的「# 说明:」。"
 )
 
 #: 编辑器里那行灰字说明（小白第一眼看的就是它）
@@ -374,34 +367,34 @@ _SPACED_OPERATORS = ("AND", "OR", "NOT")
 
 @dataclass(frozen=True)
 class StrategyRow:
-    """统一列表里的一行：内置策略与自定义公式**共用**同一个结构。
+    """统一列表里的一行：**公式**与「竞价策略」那一行共用同一个结构。
 
-    为什么要合成一种行：列表要"合成同一张表"（用户给定），而两类行的交互又不同
-    （内置只读、公式可改；内置不可删）。用 `kind` 区分、把差别写进数据里，
-    表格与右键菜单就都只认这一种结构，不用到处 `isinstance`。
+    为什么要合成一种行：列表是同一张表（用户给定），而两类行的交互不同
+    （公式可改可删、能载入编辑器；竞价策略只读、开关的是盘中扫描）。
+    用 `kind` 区分、把差别写进数据里，表格与右键菜单就都只认这一种结构。
+
+    注（2026-09-18）：老版本这里还有第三类 `ROW_BUILTIN`（写在 `strategy/rules.py`
+    里的 5 条 Python 策略）。用户要求把它们改成随包公式（可改可删）之后，
+    列表里不再有"只读的内置策略行"，那一整条路（含 `builtin_*` 那几个函数）随之删掉。
     """
 
-    #: `ROW_BUILTIN` / `ROW_FORMULA`
+    #: `ROW_FORMULA` / `ROW_AUCTION`
     kind: str
-    #: 内置 = 策略类名（`LowPriceStrategy`）；公式 = 公式名（= 文件名）
+    #: 公式 = 公式名（= 文件名）；竞价 = `AUCTION_KEY`
     key: str
-    #: 展示名（内置 = 中文名）
+    #: 展示名（公式 = 公式名）
     name: str
     #: 「说明」列的文本
     note: str
-    #: 「说明」列的 tooltip（完整证据/错误全文）
+    #: 「说明」列的 tooltip（完整说明/错误全文）
     note_tip: str
-    #: 是否参与选股（内置查 `enabled_groups`/`enabled_strategies`，公式查 `enabled_formulas`；
-    #: 竞价策略查 `intraday_auction` —— 它不是选股策略，这条注释只说明"状态从哪来"）
+    #: 是否参与选股（公式查 `enabled_formulas`；竞价策略查 `intraday_auction` ——
+    #: 它不是选股策略，这条注释只说明"状态从哪来"）
     enabled: bool
-    #: 内置策略的只读详情（条件说明 + 证据 + 当前状态）；公式行为空串
+    #: 只读行的详情（只有竞价策略那一行用）
     detail: str = ""
-    #: 公式行对应的 `FormulaSpec`；内置行为 None
+    #: 公式行对应的 `FormulaSpec`；竞价行为 None
     spec: Any = None
-
-    @property
-    def is_builtin(self) -> bool:
-        return self.kind == ROW_BUILTIN
 
     @property
     def is_auction(self) -> bool:
@@ -410,147 +403,8 @@ class StrategyRow:
 
     @property
     def read_only(self) -> bool:
-        """不是公式文件（内置策略 / 竞价策略）：单击只展开只读详情、不能删、不能改。"""
-        return self.kind in (ROW_BUILTIN, ROW_AUCTION)
-
-
-def builtin_order() -> list[str]:
-    """内置策略的展示顺序：按组（超短 → 短线 → 波段），未归组的排在最后。
-
-    与 `rules.run_all()` 的遍历顺序同一口径 —— 界面上看到的先后，
-    就是"实际跑的先后 + 池子权重"的先后，用户不用记两套顺序。
-    """
-    order = list(groups.all_strategies())
-    order += [name for name in rules_mod.STRATEGIES if name not in order]
-    return order
-
-
-def builtin_enabled(cfg: Any) -> set[str]:
-    """当前**真正参与选股**的内置策略名。
-
-    直接问 `groups.resolve_from_config()`，**不另算一套**：
-    配置里 `enabled_groups` 与 `enabled_strategies` 谁空谁不空、两者取交集的规则，
-    只有 `resolve()` 一个地方说得清；界面自己推一遍必然漂移
-    （表现就是"列表里勾着、实际却没跑"，这种 bug 用户根本猜不到原因）。
-    """
-    return set(groups.resolve_from_config(cfg).strategies)
-
-
-def _group_of_builtin(class_name: str) -> Any:
-    key = groups.group_of(class_name)
-    return groups.GROUPS.get(key) if key else None
-
-
-def _group_note_tail(group: Any) -> str:
-    """取组结论里"数字那一段"（`…：T+2~T+3 t≈1.7~2.1` → `T+2~T+3 t≈1.7~2.1`）。
-
-    只做拆分、不做改写：组结论的写法是 `成员：结论`，逐条内置策略的备注里
-    重复一遍成员名没有意义（那一行本来就写着是哪条策略）。
-    """
-    note = str(getattr(group, "note", "") or "")
-    if not note:
-        return ""
-    for sep in ("：", ":"):
-        if sep in note:
-            return note.split(sep, 1)[1].strip()
-    return note.strip()
-
-
-def builtin_strategy_note(class_name: str) -> str:
-    """内置策略「说明」列的那句话 —— **只搬真实字段，一个字都不编**。
-
-    取材顺序（都是代码里已有的结论，界面不做任何"计算"）：
-
-    1. 组**默认关闭**且写了原因 → `⛔ 默认关闭：<disabled_reason>`
-       （例如"两套口径显著为负：B 口径 −1.21%(t=−5.36)…"）；
-    2. 策略自己写了 `evidence_note`（正 α 只在"开盘买"口径存在的那两条）→ `⚠️ <note>`
-       （含两套口径的真实数字）；
-    3. 其余 = `evidence == EVIDENCE_PROVEN`，也就是 `base.py` 里写明的
-       "两套执行口径（D+1 开盘买 / D+1 尾盘买）都为正" → 写 `两套口径都为正`，
-       再把**所属组**的实测区间跟在后面，并标明它是**组**的数字（不是这条策略自己的）：
-       `两套口径都为正 · 组实测 T+2~T+3 t≈1.7~2.1`。
-
-    为什么第 3 条要写"组实测"三个字：逐条策略的历史数字代码里**没有**
-    （只有组结论），把组的区间写成这条策略的成绩就是编数据。宁可多三个字。
-    """
-    cls = rules_mod.STRATEGIES.get(class_name)
-    if cls is None:
-        return ""
-    group = _group_of_builtin(class_name)
-
-    if group is not None and not group.enabled_by_default and group.disabled_reason:
-        return "⛔ 默认关闭：" + group.disabled_reason
-
-    note = str(getattr(cls, "evidence_note", "") or "").strip()
-    if note:
-        return "⚠️ " + note
-
-    if str(getattr(cls, "evidence", "") or "") == base_mod.EVIDENCE_PROVEN:
-        tail = _group_note_tail(group)
-        return "两套口径都为正" + (f" · 组实测 {tail}" if tail else "")
-    # 证据类型认不出来（将来新增取值）：**宁可什么都不说**，也不要猜
-    return ""
-
-
-def builtin_strategy_tip(class_name: str) -> str:
-    """内置策略「说明」列的 tooltip：把来源与出处写清楚（用户不用翻代码/文档）。"""
-    cls = rules_mod.STRATEGIES.get(class_name)
-    group = _group_of_builtin(class_name)
-    lines = [f"{rules_mod.strategy_label(class_name)}（{class_name}）"]
-    if group is not None:
-        weight = groups.STRATEGY_WEIGHTS.get(class_name, 0)
-        lines.append(f"所属组：{group.label}（{group.key}）· T+{group.horizon} · 池子权重 {weight}")
-        if group.note:
-            lines.append("组结论：" + group.note)
-        if group.disabled_reason:
-            lines.append("⛔ 默认关闭：" + group.disabled_reason)
-    note = str(getattr(cls, "evidence_note", "") or "") if cls is not None else ""
-    if note:
-        lines.append("证据：" + note)
-    lines.append(
-        "备注来自 strategy/rules.py 与 strategy/groups.py 里的字段（界面不另算数字）；"
-        "内置策略只能启用/关闭，不能改也不能删"
-    )
-    return "\n".join(lines)
-
-
-def builtin_strategy_detail(class_name: str, cfg: Any) -> str:
-    """内置策略的**只读详情**（单击一行时展开）：条件说明 + 证据 + 当前状态。
-
-    条件说明直接用策略类自己的 docstring（`strategy/rules.py` 里那份"规则：…"），
-    **不在界面里重写一遍** —— 重写就会与代码漂移，而漂移之后的说明比没有说明更糟。
-    """
-    cls = rules_mod.STRATEGIES.get(class_name)
-    group = _group_of_builtin(class_name)
-    weight = groups.STRATEGY_WEIGHTS.get(class_name, 0)
-    enabled = class_name in builtin_enabled(cfg)
-    lines = [f"{rules_mod.strategy_label(class_name)}（{class_name}）"]
-    if group is not None:
-        lines.append(
-            f"所属组：{group.label}（{group.key}）· 目标持有期 T+{group.horizon} · 池子权重 {weight}"
-        )
-    lines.append("当前状态：" + ("✅ 参与选股" if enabled else "☐ 未参与选股"))
-    lines.append(
-        "状态由 config.toml 的 enabled_groups / enabled_strategies 决定"
-        f"（现在：enabled_groups={_cfg_list(cfg, 'enabled_groups')}、"
-        f"enabled_strategies={_cfg_list(cfg, 'enabled_strategies')}）"
-    )
-    lines.append("")
-    lines.append("── 条件说明（写在 strategy/rules.py 里，只读）──")
-    doc = inspect.getdoc(cls) if cls is not None else None
-    lines.append(doc or "（这条策略没有写说明）")
-    lines.append("")
-    lines.append("── 证据 ──")
-    note = builtin_strategy_note(class_name)
-    lines.append(note or "（这条策略没有写证据字段）")
-    if group is not None and group.note:
-        # 组结论单独一行：它是**这一组**的实测数字，与上面那条策略自己的证据不是一回事
-        # （停用理由已经包含在 `builtin_strategy_note()` 里，这里不重复贴第二遍）
-        lines.append("组结论：" + group.note)
-    lines.append("")
-    lines.append("内置策略写在代码里：只能启用/关闭，不能修改、也不能删除。")
-    lines.append("想按自己的条件来，就照它写一条公式：【策略编辑】→ 写 →【保存】。")
-    return "\n".join(lines)
+        """不是公式文件（只剩竞价策略那一行）：单击只展开只读详情、不能删、不能改。"""
+        return self.kind == ROW_AUCTION
 
 
 def _cfg_list(cfg: Any, key: str) -> str:
@@ -683,7 +537,7 @@ def auction_detail(cfg: Any) -> str:
         "  9:25 那一枪拿到的是**竞价终态**，命中直接推到浮窗/托盘（点详情看全部命中）。",
         "· 不是：**选股策略**。它**不参与选股** —— 勾上不会往「自选股池」加票，"
         "也不会改变【开始选股】的结果；",
-        "  要按自己的条件选股，用上面那 5 条内置策略或你自己写的公式。",
+        "  要按自己的条件选股，就勾上列表里那几条公式（随包的也在里面），或自己写一条。",
         "",
         "── 两条硬限制 ──",
         "1. 竞价数据**没有历史**（接口只给当天 stage=live/final，不接受日期）→ **无法回测**，",
@@ -697,7 +551,7 @@ def auction_detail(cfg: Any) -> str:
 
 
 def auction_row(cfg: Any) -> StrategyRow:
-    """「竞价策略」那一行的数据（内置在前、公式在后，它排在两者之间）。"""
+    """「竞价策略」那一行的数据（它是列表的**第一行**，其余全是公式）。"""
     return StrategyRow(
         kind=ROW_AUCTION,
         key=AUCTION_KEY,
@@ -737,31 +591,19 @@ def formula_row_note(spec: Any, runtime_error: str = "") -> tuple[str, str]:
 def build_strategy_rows(
     cfg: Any, specs: Sequence[Any], runtime: dict[str, str] | None = None
 ) -> list[StrategyRow]:
-    """把「内置 5 条 + 目录里的公式」拼成统一列表的数据（内置在前，公式在后）。
+    """把「竞价策略那一行 + 目录里的公式」拼成统一列表的数据。
 
-    读取的**全是已有来源**：状态来自 `groups.resolve_from_config()` 与
-    `cfg.enabled_formulas`，备注来自 `rules`/`groups` 的字段与公式文件的注释头。
+    读取的**全是已有来源**：状态来自 `cfg.enabled_formulas` 与 `cfg.intraday_auction`，
+    说明来自公式文件的注释头与竞价的配置数值。
+
+    为什么第一行是竞价策略（2026-09-18）：老版本这里先是 5 条内置策略、再是公式；
+    用户把内置策略改成了随包公式，于是公式成了列表的主体，而「竞价策略」被放在**最前面
+    一行**（它是唯一"不是选股策略"的行，放最上面一眼就能看见，不会混进公式里）。
     """
     runtime = runtime or {}
-    enabled_builtin = builtin_enabled(cfg)
     known_formulas = set(str(n) for n in (getattr(cfg, "enabled_formulas", None) or []))
 
-    rows: list[StrategyRow] = []
-    for class_name in builtin_order():
-        rows.append(
-            StrategyRow(
-                kind=ROW_BUILTIN,
-                key=class_name,
-                name=rules_mod.strategy_label(class_name),
-                note=builtin_strategy_note(class_name) or "—",
-                note_tip=builtin_strategy_tip(class_name),
-                enabled=class_name in enabled_builtin,
-                detail=builtin_strategy_detail(class_name, cfg),
-            )
-        )
-    # 「竞价策略」排在**内置策略之后、公式之前**：它不是选股策略（勾它不往池子加票），
-    # 但它是内置的（不可改不可删），所以不该混进"你自己的公式"那一段里（用户 2026-09-18 要求）。
-    rows.append(auction_row(cfg))
+    rows: list[StrategyRow] = [auction_row(cfg)]
     for spec in specs:
         note, tip = formula_row_note(spec, runtime.get(spec.name, ""))
         rows.append(
@@ -876,7 +718,7 @@ if QT_AVAILABLE:
 
             #: 目录里的公式（`FormulaSpec` 列表，顺序 = 文件名顺序）
             self.specs: list[Any] = []
-            #: 统一列表的行（内置 + 公式，与表格行号一一对应）
+            #: 统一列表的行（竞价策略那一行 + 公式，与表格行号一一对应）
             self.rows: list[StrategyRow] = []
             #: 右侧面板按钮：{token: QPushButton}（测试按 token 点，不爬布局）
             self.palette_buttons: dict[str, Any] = {}
@@ -895,10 +737,8 @@ if QT_AVAILABLE:
             #: 每次开始新一轮【运行】时先清空它：**绝不导出上一轮的陈结果**。
             self.last_run: dict | None = None
             self.hint_text: str = ""
-            #: 内置策略行的勾选框（键 = 类名）与公式行的勾选框（键 = 公式名）。
-            #: **两个字典**而不是一个：公式名与类名理论上可能撞（用户可以把公式
-            #: 命名成 `LowPriceStrategy`），撞了之后"写失败要退回哪个勾"就会错。
-            self._builtin_boxes: dict[str, Any] = {}
+            #: 公式行的勾选框（键 = 公式名）。竞价那一行单独存在 `_auction_box`
+            #: （只有一行，不值当再开一个字典）。
             self._row_boxes: dict[str, Any] = {}
             #: 「竞价策略」那一行的勾选框（只有一行，所以不放进上面两个字典）
             self._auction_box: Any = None
@@ -909,7 +749,7 @@ if QT_AVAILABLE:
             self.result_date: Any = None
             #: 载入行时别把"选中变化"当成用户点击，也别让刷列表打开编辑器
             self._loading = False
-            #: 当前展开的内置策略详情（刷列表后要跟着更新）
+            #: 当前展开的**只读详情**（现在只有竞价那一行；刷列表后要跟着更新）
             self._detail_key = ""
 
             self._build_ui()
@@ -977,7 +817,7 @@ if QT_AVAILABLE:
             self.hint_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
             layout.addWidget(self.hint_label)
 
-            # 编辑器 / 内置详情默认都收起来：用户给定的是"点击打开策略编辑器"
+            # 编辑器 / 只读详情默认都收起来：用户给定的是"点击打开策略编辑器"
             self.bottom_stack.setVisible(False)
 
         def _build_list_side(self) -> Any:
@@ -1026,9 +866,8 @@ if QT_AVAILABLE:
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-            self._set_header_tooltip(0, "策略/公式的名字。内置策略的中文名来自 strategy/rules.py")
-            self._set_header_tooltip(1, "证据或说明：内置策略写它的实测证据（代码里的字段，界面不编数字）；"
-                                        "自定义公式写公式文件里的「# 说明:」")
+            self._set_header_tooltip(0, "策略/公式的名字（就是公式文件的名字）")
+            self._set_header_tooltip(1, "说明：来自公式文件里的「# 说明:」，或者在编辑器里填的备注")
             self._set_header_tooltip(2, "勾上 = 参与选股。内置策略写回 config.toml 的 "
                                         "enabled_groups + enabled_strategies；公式写回 enabled_formulas")
             self.table.itemSelectionChanged.connect(self.on_row_selected)
@@ -1467,15 +1306,12 @@ if QT_AVAILABLE:
 
         def _fill_table(self) -> None:
             """按 `self.rows` 铺表格（勾选框**先 setChecked 再接信号**）。"""
-            self._builtin_boxes = {}
             self._row_boxes = {}
             self._auction_box = None
             self.table.setRowCount(len(self.rows))
             for index, row in enumerate(self.rows):
                 name_item = QTableWidgetItem(row.name)
-                if row.is_builtin:
-                    name_item.setToolTip(f"内置策略（{row.key}）——只能启用/关闭")
-                elif row.is_auction:
+                if row.is_auction:
                     name_item.setToolTip(
                         "内置的「竞价扫描」开关（不是选股策略）——勾上 = 每个交易日到点"
                         "自动扫全市场并推送，写回 config.toml 的 intraday_auction"
@@ -1507,22 +1343,19 @@ if QT_AVAILABLE:
                 holder_layout.addWidget(box)
                 self.table.setCellWidget(index, 2, holder)
 
-                if row.is_builtin:
-                    self._builtin_boxes[row.key] = box
-                elif row.is_auction:
+                if row.is_auction:
                     self._auction_box = box
                 else:
                     self._row_boxes[row.key] = box
 
         @staticmethod
         def _box_tooltip(row: StrategyRow) -> str:
-            """勾选框的 tooltip：**勾上会发生什么、写回哪个键**，逐类说清。"""
-            if row.is_builtin:
-                return (
-                    "勾上 = 这条内置策略参与选股（写回 config.toml 的 "
-                    "enabled_groups 与 enabled_strategies 两个键）；取消 = 退出\n"
-                    "内置策略只能启用/关闭，不能修改或删除"
-                )
+            """勾选框的 tooltip：**勾上会发生什么、写回哪个键**，逐类说清。
+
+            2026-09-18 起只剩两类：公式（写 `enabled_formulas`）与竞价策略
+            （写 `intraday_auction`）—— 老版本那条"内置策略写 enabled_groups +
+            enabled_strategies"随内置行一起删掉了。
+            """
             if row.is_auction:
                 return (
                     "勾上 = 开启竞价扫描（写回 config.toml 的 intraday_auction）："
@@ -1617,39 +1450,27 @@ if QT_AVAILABLE:
             if row.read_only:
                 # 内置策略与竞价策略都是**只读**的：单击展开详情，绝不载入编辑器
                 # （竞价那一行没有公式可编辑 —— 它的"参数"在设置页）
-                self.show_builtin_detail(row)
+                self.show_auction_detail(row)
             else:
                 self.on_open_editor(row.spec)
 
-        def show_builtin_detail(self, row: StrategyRow) -> None:
-            """展开某条**只读行**的详情（内置策略：条件 + 证据；竞价策略：口径 + 限制）。
+        def show_auction_detail(self, row: StrategyRow) -> None:
+            """展开**只读行**的详情 —— 现在只有「竞价策略」那一行会走到这里。
 
-            两类行共用这一个入口：它们都是"只能启用/关闭、不能改不能删"的行，
-            差别只在文案与详情文本的来源（内置读 `rules.py`，竞价读设置里那几个数字）。
+            （2026-09-18 之前这个方法叫 `show_builtin_detail`，还要负责内置策略的
+            "条件 + 证据"；内置策略改成随包公式之后，那种行不存在了。）
             """
             self._detail_key = row.key
-            if row.is_auction:
-                self.detail_title.setText(f"{row.name}（{row.key}）—— 内置的竞价扫描开关，只读")
-                self.detail_text = row.detail or auction_detail(self.cfg)
-                self.detail_view.setPlainText(self.detail_text)
-                self.bottom_stack.setCurrentWidget(self.detail_page)
-                self.bottom_stack.setVisible(True)
-                self._set_hint(
-                    f"「{row.name}」不是选股策略，是盘中提示的开关：勾「策略选取」列（或右键"
-                    "【启用】）就开启竞价扫描，每个交易日到点自动扫全市场。\n"
-                    "它不会往「自选股池」加票、也不改变选股结果；"
-                    "涨幅 / 量比 / 成交额那些参数在「系统设置 → 竞价扫描」里改。"
-                )
-                return
-            self.detail_title.setText(f"{row.name}（{row.key}）—— 内置策略，只读")
-            self.detail_text = row.detail or builtin_strategy_detail(row.key, self.cfg)
+            self.detail_title.setText(f"{row.name}（{row.key}）—— 内置的竞价扫描开关，只读")
+            self.detail_text = row.detail or auction_detail(self.cfg)
             self.detail_view.setPlainText(self.detail_text)
             self.bottom_stack.setCurrentWidget(self.detail_page)
             self.bottom_stack.setVisible(True)
             self._set_hint(
-                f"「{row.name}」是内置策略：只能启用/关闭（勾「策略选取」列，或右键【启用】/【关闭】），"
-                "不能改也不能删。\n"
-                "想按自己的条件来：点【策略编辑】照它写一条公式，保存后勾上「参与选股」。"
+                f"「{row.name}」不是选股策略，是盘中提示的开关：勾「策略选取」列（或右键"
+                "【启用】）就开启竞价扫描，每个交易日到点自动扫全市场。\n"
+                "它不会往「自选股池」加票、也不改变选股结果；"
+                "涨幅 / 量比 / 成交额那些参数在「系统设置 → 竞价扫描」里改。"
             )
 
         def on_context_menu(self, pos: Any) -> None:
@@ -1729,13 +1550,6 @@ if QT_AVAILABLE:
                     "竞价策略是内置的开关（参数在「系统设置 → 竞价扫描」那一组）："
                     "只能启用/关闭，不能删除"
                 )
-            elif row.is_builtin:
-                delete.setText(MENU_DELETE_BUILTIN)
-                delete.setEnabled(False)
-                delete.setToolTip(
-                    "内置策略写在代码里（strategy/rules.py）：只能启用/关闭，不能删除。"
-                    "想按自己的条件来，就照它写一条公式"
-                )
             else:
                 delete.setToolTip(f"删掉公式文件「{row.key}」（会先问一句）")
                 delete.triggered.connect(
@@ -1747,104 +1561,10 @@ if QT_AVAILABLE:
 
         def set_row_enabled(self, kind: str, key: str, checked: bool) -> None:
             """统一的"启用/关闭"入口（勾选框与右键菜单都走这里 → 行为必然一致）。"""
-            if kind == ROW_BUILTIN:
-                self.on_toggle_builtin(key, checked)
-            elif kind == ROW_AUCTION:
+            if kind == ROW_AUCTION:
                 self.on_toggle_auction(checked)
             else:
                 self.on_toggle_enabled(key, checked)
-
-        def on_toggle_builtin(self, class_name: str, checked: bool) -> None:
-            """内置策略的「参与选股」 → 写回 `enabled_groups` + `enabled_strategies`。
-
-            **为什么两个键都写**（这一页最容易踩的坑，实测过一次）：
-            `groups.resolve()` 的规则是"两个键同时非空时取**交集**"，而
-            `enabled_groups` 的出厂值是 `["short"]`。于是：
-
-            * **只写 `enabled_strategies`**：用户勾上「低价股」（swing 组）时，
-              交集 = `["LowPriceStrategy"] ∩ short 的成员` = **空** →
-              `selection.empty` → 整轮选股被跳过。表现是"我明明勾了它，点选股却什么都没选"，
-              而提示只说"没有可跑的策略"，用户根本猜不到是自己勾的那一下写法的问题；
-            * **只写 `enabled_groups`**：勾一条就把**整组**带进来（`short` 组三条没法单独关掉一条），
-              而用户给定的界面是按**条**勾选的。
-
-            所以这里按"用户勾了哪些策略"**同时**算出两个键：
-            组 = 勾上的策略所在的组，策略 = 勾上的那些 —— 交集恒等于用户勾的那一组。
-            全部取消勾选时写 `enabled_groups = ["none"]`：那是 `resolve()` 里明确定义的
-            "只盯自选股"（`explicit_off`）。**不能用空列表** —— 两个键都空在 `resolve()` 里
-            是"全选"这个安全默认，写空会反过来变成"全部策略一起跑"。
-            """
-            from laoa_trader.config import save_settings
-
-            wanted = builtin_enabled(self.cfg)
-            if checked:
-                wanted.add(class_name)
-            else:
-                wanted.discard(class_name)
-
-            order = builtin_order()
-            strategies = [name for name in order if name in wanted]
-            # 认不出来的策略名（用户手写的、或将来新增的）**原样保留**：
-            # 界面这一下改动的是"这 5 条内置策略"，不该顺手把用户写的东西删掉
-            extras = [
-                str(name) for name in (getattr(self.cfg, "enabled_strategies", None) or [])
-                if str(name) not in order
-            ]
-
-            if strategies or extras:
-                group_keys = [
-                    key for key in groups.GROUP_ORDER
-                    if any(groups.group_of(name) == key for name in strategies)
-                ]
-                selection = groups.resolve(group_keys, strategies + extras)
-                if selection.empty:
-                    self._sync_box(ROW_BUILTIN, class_name, not checked)
-                    self._set_hint(
-                        "❌ 这样勾完一条策略都不会跑：" + "；".join(selection.warnings)
-                        + "\n（至少留一条勾着；一条都不想跑就把它们全取消 —— 那时只盯自选股）"
-                    )
-                    return
-                updates: dict[str, Any] = {
-                    "enabled_groups": group_keys,
-                    "enabled_strategies": strategies + extras,
-                }
-            else:
-                updates = {"enabled_groups": [OFF_GROUP_KEY], "enabled_strategies": []}
-
-            try:
-                path, self.cfg = save_settings(self.cfg, updates)
-            except OSError as exc:
-                # 写不进去（只读盘）：把勾选状态**退回去**，免得界面显示的与实际生效的不一致
-                self._sync_box(ROW_BUILTIN, class_name, not checked)
-                self._set_hint(
-                    f"❌ 保存失败：{exc}（可手改 config.toml 的 enabled_groups / enabled_strategies）"
-                )
-                return
-
-            self._sync_box(ROW_BUILTIN, class_name, checked)
-            self._refresh_row_states()
-            name = rules_mod.strategy_label(class_name)
-            if checked:
-                self._set_hint(
-                    f"✅ 内置策略「{name}」已参与选股（写回 {path.name}）。\n"
-                    f"enabled_groups={_cfg_list(self.cfg, 'enabled_groups')}　"
-                    f"enabled_strategies={_cfg_list(self.cfg, 'enabled_strategies')}\n"
-                    "两个键必须一起写：`groups.resolve()` 在两者都非空时取交集，"
-                    "只写一个会出现「勾了却不跑」或「关不掉组里的一条」。"
-                )
-                self._toast(f"内置策略「{name}」已参与选股")
-            elif not updates["enabled_strategies"]:
-                self._set_hint(
-                    "已把内置策略**全部关闭**（config.toml 写成 enabled_groups=[\"none\"]）。\n"
-                    "下次【开始选股】只盯自选股 —— 想恢复就把某一条再勾上。"
-                )
-                self._toast("已关闭全部内置策略（只盯自选股）")
-            else:
-                self._set_hint(
-                    f"内置策略「{name}」已退出选股（{path.name} 已更新："
-                    f"enabled_groups={_cfg_list(self.cfg, 'enabled_groups')}）。"
-                )
-                self._toast(f"内置策略「{name}」已退出选股")
 
         def on_toggle_enabled(self, name: str, checked: bool) -> None:
             """公式的「参与选股」 → 写回 `enabled_formulas`（保留注释与未知键）。"""
@@ -1914,8 +1634,7 @@ if QT_AVAILABLE:
         def _row_box(self, kind: str, key: str) -> Any:
             if kind == ROW_AUCTION:
                 return self._auction_box
-            folder = self._builtin_boxes if kind == ROW_BUILTIN else self._row_boxes
-            return folder.get(key)
+            return self._row_boxes.get(key)
 
         def _sync_box(self, kind: str, key: str, checked: bool) -> None:
             """把某一行的勾选框同步成 `checked`（**屏蔽信号**，避免再触发一次写回）。"""
@@ -1934,26 +1653,21 @@ if QT_AVAILABLE:
             （PySide 之后再访问它直接抛 `RuntimeError: Internal C++ object already deleted`）。
             这里只换行数据 + 刷新正在显示的那份详情。
 
-            内置与公式**都要刷**：右键菜单的文案是"按当前状态只出现【启用】或【关闭】"，
+            公式与竞价那一行**都要刷**：右键菜单的文案是"按当前状态只出现【启用】或【关闭】"，
             行数据不跟着配置走的话，用户右键会看到与事实相反的菜单项
             （刚勾上它，菜单却说【启用】）。
             """
-            enabled_builtin = builtin_enabled(self.cfg)
             enabled_formulas = set(
                 str(n) for n in (getattr(self.cfg, "enabled_formulas", None) or [])
             )
             auction_on = auction_enabled(self.cfg)
 
             def _enabled(row: StrategyRow) -> bool:
-                if row.is_builtin:
-                    return row.key in enabled_builtin
                 if row.is_auction:
                     return auction_on
                 return row.key in enabled_formulas
 
             def _detail(row: StrategyRow) -> str:
-                if row.is_builtin:
-                    return builtin_strategy_detail(row.key, self.cfg)
                 if row.is_auction:
                     return auction_detail(self.cfg)
                 return row.detail
@@ -1983,7 +1697,7 @@ if QT_AVAILABLE:
             self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
 
         def on_close_panel(self) -> None:
-            """收起下半块（编辑器 / 内置详情）。公式已经保存的不会丢。"""
+            """收起下半块（编辑器 / 只读详情）。公式已经保存的不会丢。"""
             self.bottom_stack.setVisible(False)
 
         def _load_spec(self, spec: Any) -> None:
@@ -2735,10 +2449,8 @@ __all__ = [
     "LIST_HINT",
     "MAX_NOTE_CHARS",
     "MENU_DELETE",
-    "MENU_DELETE_BUILTIN",
     "MENU_DISABLE",
     "MENU_ENABLE",
-    "OFF_GROUP_KEY",
     "EXCLUDES",
     "OPERATORS",
     "PAGE_HINT",
@@ -2751,7 +2463,6 @@ __all__ = [
     "AUCTION_KEY",
     "AUCTION_NAME",
     "ROW_AUCTION",
-    "ROW_BUILTIN",
     "ROW_FORMULA",
     "RowMenu",
     "SAMPLE_NAME",
@@ -2766,10 +2477,5 @@ __all__ = [
     "auction_note_tip",
     "auction_row",
     "build_strategy_rows",
-    "builtin_enabled",
-    "builtin_order",
-    "builtin_strategy_detail",
-    "builtin_strategy_note",
-    "builtin_strategy_tip",
     "formula_row_note",
 ]

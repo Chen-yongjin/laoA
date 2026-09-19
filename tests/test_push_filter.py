@@ -196,89 +196,124 @@ def daily_setup(cfg, db, monkeypatch):
     return captured
 
 
-def _fake_picks(*class_names: str):
-    """让 `run_all` 按给定的策略名各返回一只（symbol 与策略一一对应）。"""
+def _fake_formulas(*class_names: str):
+    """让「公式」组按给定名字各返回一只（symbol 与名字一一对应）。
+
+    2026-09-18（用户要求）：候选只来自**勾选的公式** —— `run_daily` 里已经没有
+    "跑内置策略"这一步了，所以桩要打在 `formula_group.run_enabled_formulas` 上，
+    返回的键是合成名 `公式·X`（传类名会被建池当"老策略类名"丢掉）。
+
+    ⚠️ 顺带一个**口径后果**（本文件下面几条用例因此改了口径）：
+    「依赖开盘」那个证据标记来自 `rules.STRATEGIES[类名].evidence`，而公式候选没有类名 ——
+    所以 `strategy_evidence("公式·X")` 认不出它、按 `proven` 处理，
+    `push_only_proven` 这个开关**对公式候选不再生效**。机制本身没坏：
+    单元级用例（`test_row_is_proven_rules` / `test_split_push_rows_*` /
+    `test_pool_table_rows_mark_open_only`）照旧守着它。
+    """
     mapping = {OPEN_ONLY: ("600002", "半导体甲"), OPEN_ONLY_2: ("600003", "半导体乙"),
                PROVEN: ("600001", "浦发样本")}
 
-    def fake_run_all(engine, settings=None, **kwargs):
-        picks = {}
+    def fake_run(*_args, **_kwargs):
+        from laoa_trader.strategy import formula_group, groups as groups_mod
+
+        run = formula_group.FormulaRun()
         for name in class_names:
             symbol, label = mapping[name]
-            picks[name] = [{"symbol": symbol, "name": label, "reason": name}]
-        return picks, []
+            run.picks[groups_mod.formula_strategy_name(name)] = [
+                {"symbol": symbol, "name": label, "reason": name},
+            ]
+        run.ran = list(class_names)
+        return run
 
-    return fake_run_all
+    return fake_run
 
 
 def test_run_daily_pushes_everything_by_default(cfg, db, daily_setup, monkeypatch) -> None:
-    """**默认全推**：'依赖开盘'的标的与其它策略一样进池、进推送（用户拍板）。"""
+    """**默认全推**：勾上的公式选出来的票都进池、都进推送（用户拍板）。"""
     assert cfg.push_only_proven is False
-    monkeypatch.setattr("laoa_trader.strategy.rules.run_all",
-                        _fake_picks(PROVEN, OPEN_ONLY))
+    monkeypatch.setattr("laoa_trader.strategy.formula_group.run_enabled_formulas",
+                        _fake_formulas(PROVEN, OPEN_ONLY))
     report = scheduler.run_daily(cfg, DataEngine(db), notify=True)
     numbered = [line for line in daily_setup["lines"] if line[:1].isdigit()]
     assert any("600001" in line for line in numbered)
-    assert any("600002" in line for line in numbered)          # 依赖开盘的也在推送里
+    assert any("600002" in line for line in numbered)          # 另一条公式的也在推送里
     assert report["pushed"] is True
     assert report["push_skipped_rows"] == []
     assert "依赖开盘" not in "\n".join(daily_setup["lines"])   # 不作过滤，也就没有那句说明
 
 
-def test_run_daily_filter_skips_open_only_with_visible_reason(cfg, db, daily_setup,
-                                                             monkeypatch, caplog) -> None:
-    """**打开** `push_only_proven` 时：'依赖开盘'的标的进池但不进推送，且原因可查。"""
+def test_push_only_proven_is_inert_for_formula_picks(cfg, db, daily_setup,
+                                                    monkeypatch, caplog) -> None:
+    """打开 `push_only_proven` 也**照推**：公式候选没有「依赖开盘」标记（2026-09-18 口径）。
+
+    ⚠️ 这条是**口径变了**，不是把断言放松：那个标记存在
+    `rules.STRATEGIES[类名].evidence` 里，而候选现在只来自公式（没有类名）→
+    `strategy_evidence()` 按 `proven` 处理，于是这只票不再被过滤。
+    想恢复"按证据收窄推送"，得先给公式一种能带标记的写法（例如公式文件的说明里写
+    `# 依赖开盘`）—— 那是一件独立的事，见本轮报告。机制本身仍有单元级用例守着
+    （`test_row_is_proven_rules` / `test_split_push_rows_filters_only_when_switched_on`）。
+    """
     cfg.push_only_proven = True
-    monkeypatch.setattr("laoa_trader.strategy.rules.run_all",
-                        _fake_picks(PROVEN, OPEN_ONLY))
+    monkeypatch.setattr("laoa_trader.strategy.formula_group.run_enabled_formulas",
+                        _fake_formulas(PROVEN, OPEN_ONLY))
     with caplog.at_level(logging.INFO, logger="laoa_trader.scheduler"):
         report = scheduler.run_daily(cfg, DataEngine(db), notify=True)
 
     pooled = {row["symbol"] for row in report["pool"]}
     assert {"600001", "600002"} <= pooled                      # 两只都进池了
-    body = "\n".join(daily_setup["lines"])
-    # 正文里**作为池子条目**（`1. 名称（代码）…`）列出来的只有"有边际"的那只
     numbered = [line for line in daily_setup["lines"] if line[:1].isdigit()]
     assert any("600001" in line for line in numbered)
-    assert all("600002" not in line for line in numbered)
-    assert "依赖开盘" in body                                  # 但正文里说清了为什么
+    assert any("600002" in line for line in numbered)          # ← 不再被过滤掉
     assert report["pushed"] is True
-    assert [r["symbol"] for r in report["push_skipped_rows"]] == ["600002"]
-    assert "依赖开盘" in (report["push_note"] or "")
-    # 原因要能从**日志**里看到（用户报障时第一眼看的就是日志）
-    assert any("推送过滤" in r.message and "依赖开盘" in r.message for r in caplog.records)
-
-
-def test_run_daily_switch_off_after_turning_on_pushes_everything(cfg, db, daily_setup,
-                                                                monkeypatch) -> None:
-    """开关从 true 改回 false → 立刻恢复"全推"（不是"设过一次就永久收窄"）。"""
-    cfg.push_only_proven = True
-    monkeypatch.setattr("laoa_trader.strategy.rules.run_all",
-                        _fake_picks(PROVEN, OPEN_ONLY))
-    scheduler.run_daily(cfg, DataEngine(db), notify=True)
-    assert all("600002" not in line for line in daily_setup["lines"] if line[:1].isdigit())
-
-    daily_setup.clear()
-    cfg.push_only_proven = False
-    report = scheduler.run_daily(cfg, DataEngine(db), notify=True)
-    body = "\n".join(daily_setup["lines"])
-    assert "600001" in body and "600002" in body
     assert report["push_skipped_rows"] == []
+    assert not [r for r in caplog.records if "推送过滤" in r.message]
 
 
-def test_run_daily_all_open_only_skips_push_with_reason(cfg, db, daily_setup,
-                                                       monkeypatch, caplog) -> None:
-    """打开开关且今天命中的**全是**"依赖开盘"的 → 不推，但状态/日志里要写明原因。"""
+def test_push_only_proven_switch_does_not_change_formula_pushes(cfg, db, daily_setup,
+                                                               monkeypatch) -> None:
+    """开关 true → false 对公式候选没有区别（都全推）：它俩都不走"按证据过滤"那条路。
+
+    老口径下 true 会收窄、false 会放开（`test_split_push_rows_*` 仍然守着那套规则）；
+    公式候选没有证据标记，所以两种取值下推送内容一致 —— 这条把差别钉清楚。
+    """
+    monkeypatch.setattr("laoa_trader.strategy.formula_group.run_enabled_formulas",
+                        _fake_formulas(PROVEN, OPEN_ONLY))
+
     cfg.push_only_proven = True
-    monkeypatch.setattr("laoa_trader.strategy.rules.run_all", _fake_picks(OPEN_ONLY))
+    report_on = scheduler.run_daily(cfg, DataEngine(db), notify=True)
+    body_on = "\n".join(daily_setup["lines"])
+    assert "600001" in body_on and "600002" in body_on
+    assert report_on["push_skipped_rows"] == []
+
+    # 再改成 false 跑一次：**内容没变**，所以被"同一天同一批内容只推一次"的指纹挡住 ——
+    # 这与证据过滤无关（`push_skipped_rows` 仍然是空的），正好把两件事分开：
+    # "开关不影响公式候选的推送内容"（上面那条）+ "同一批内容不会推两遍"（这条）。
+    cfg.push_only_proven = False
+    report_off = scheduler.run_daily(cfg, DataEngine(db), notify=True)
+    assert report_off["pushed"] is False
+    assert "已推送过" in (report_off["push_skipped"] or "")
+    assert report_off["push_skipped_rows"] == []
+
+
+def test_all_formula_picks_are_still_pushed(cfg, db, daily_setup,
+                                            monkeypatch, caplog) -> None:
+    """一批候选"全带某个标记"的极端情形：新口径下照推（`push_skipped_kind` 保持 None）。
+
+    老口径：整批都被判成"依赖开盘" → 一条都不推、`push_skipped_kind == "filtered"`。
+    新口径：公式候选没有标记 → 没有可过滤的东西，推送照发。
+    真正的过滤逻辑（`split_push_rows`）仍由单元用例守着；这条只钉"run_daily 这一步"。
+    """
+    cfg.push_only_proven = True
+    monkeypatch.setattr("laoa_trader.strategy.formula_group.run_enabled_formulas",
+                        _fake_formulas(OPEN_ONLY))
     with caplog.at_level(logging.INFO, logger="laoa_trader.scheduler"):
         report = scheduler.run_daily(cfg, DataEngine(db), notify=True)
+
     assert report["pool"]                                       # 池子照常有内容
-    assert report["pushed"] is False
-    assert daily_setup.get("lines") is None                     # 压根没推
-    assert report["push_skipped_kind"] == "filtered"
-    assert "依赖开盘" in report["push_skipped"]
-    assert any("跳过推送" in r.message and "依赖开盘" in r.message for r in caplog.records)
+    assert report["pushed"] is True
+    assert report["push_skipped_kind"] is None
+    assert daily_setup.get("lines")                             # 真的推了
+    assert not [r for r in caplog.records if "跳过推送" in r.message]
 
 
 def test_list_groups_shows_the_disabled_reasons() -> None:

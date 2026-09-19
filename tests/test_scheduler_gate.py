@@ -480,25 +480,26 @@ def test_stale_helper_produces_expected_lag(cfg) -> None:
 # （`pool.desktop_dir()` → `~/Desktop`），跑一次测试就往人桌面上丢一个文件。
 
 
-def _fake_picks(*_args, **_kwargs):
-    """一条固定的候选：跑策略那一步换成它，用例就与行情走势无关（不联网、不依赖库）。
+def _patch_formulas(monkeypatch) -> None:
+    """把「公式」组换成固定候选（**2026-09-18 起这是唯一的候选来源**）。
 
-    用 `ReversalStrategy`（属于默认启用的 `short` 组）：换成其它组的策略会被
-    `build_pool` 的"按选择过滤候选"剔掉，池子就是空的 —— 那不是这个用例要测的事。
+    挂的是 `strategy.formula_group.run_enabled_formulas`：`pool.build_pool()`
+    里就是调它算候选的，所以按模块属性替换就能生效。
+
+    为什么这里用桩而不是写一条真公式：这些用例测的是**导出/闸门**（文件写没写出去、
+    失败会不会影响建池），候选是谁不影响结论 —— 真链路那部分由
+    `tests/test_pool.py` / `tests/test_pipeline.py` 用真公式文件覆盖。
+    候选键必须是合成名 `公式·X`（否则建池会把它当"老策略类名"丢掉）。
     """
-    return ({"ReversalStrategy": [{"symbol": "600001", "name": "反转样本",
-                                   "reason": "缩量回踩"}]}, [])
+    from laoa_trader.strategy import formula_group
+    from laoa_trader.strategy import groups as groups_mod
 
-
-def _patch_run_all(monkeypatch) -> None:
-    """把"跑策略"换成固定候选。
-
-    挂的是 `strategy.rules.run_all`：`run_daily` 里是**函数内** `import rules` 再调它，
-    所以按模块属性替换就能生效 —— 与 `tests/test_pool.py` 同一套做法。
-    """
-    from laoa_trader.strategy import rules as rules_mod
-
-    monkeypatch.setattr(rules_mod, "run_all", _fake_picks)
+    run = formula_group.FormulaRun()
+    run.picks = {groups_mod.formula_strategy_name("反转样本"): [
+        {"symbol": "600001", "name": "反转样本", "reason": "缩量回踩"},
+    ]}
+    run.ran = ["反转样本"]
+    monkeypatch.setattr(formula_group, "run_enabled_formulas", lambda *a, **k: run)
 
 
 def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_path) -> None:
@@ -508,7 +509,7 @@ def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_pa
     状态栏（`stage_cb`）还要收到那句"结果已导出到 <路径>"（用户明确要求写了就说）。
     """
     _ready_db(cfg)
-    _patch_run_all(monkeypatch)
+    _patch_formulas(monkeypatch)
     desk = tmp_path / "桌面"
     stages: list[str] = []
 
@@ -547,7 +548,7 @@ def test_export_failure_does_not_break_the_pipeline(cfg, monkeypatch, tmp_path,
     就没选股。"记日志 + 说出来"是这一条的完整要求，只记日志不说也不行。
     """
     _ready_db(cfg)
-    _patch_run_all(monkeypatch)
+    _patch_formulas(monkeypatch)
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("桌面写不出去（模拟）")

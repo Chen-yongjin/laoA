@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -160,6 +161,97 @@ def test_formula_dir_never_resurrects_a_deleted_bundled_formula(
     lib.formula_dir()                      # 再启动一次
 
     assert not gone.exists(), "删掉的随包公式又长回来了"
+
+
+def _retired_bytes() -> bytes:
+    """老版本随包那份「涨停回踩低吸」的**原始字节**（退役清理的判据就是它）。
+
+    从 git 历史里取（`24b1b96` 是它还随包的最后一次提交）：测试要验的是
+    "内容一致才删"，所以必须拿到真那份文件，不能自己现编一个。
+    """
+    import subprocess
+
+    return subprocess.run(
+        ["git", "show", "24b1b96:formulas/涨停回踩低吸.txt"],
+        cwd=lib.repo_root(), capture_output=True, check=True,
+    ).stdout
+
+
+def test_retired_bundled_formula_is_removed_for_existing_installs(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**退役清理**：老用户目录里那份没改过的 `涨停回踩低吸.txt` 会被清掉。
+
+    为什么必须有这一步（用户 2026-09-18 要求删掉「连板回踩低吸」这条策略）：
+    只把文件从仓库里删掉的话，**已经装过老版本的人**升级后目录里那份还在，
+    列表里照样留着这条 —— 等于没删。
+    """
+    target = tmp_path / "formulas"
+    target.mkdir(parents=True)
+    retired = target / "涨停回踩低吸.txt"
+    retired.write_bytes(_retired_bytes())          # 模拟：老版本播种进来的那一份
+    mine = target / "我的.txt"
+    mine.write_text("# 名称: 我的\nC>MA(C,5)\n", encoding="utf-8")
+    monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(target))
+
+    lib.formula_dir()
+
+    assert not retired.exists(), "退役的随包公式没有被清掉"
+    assert mine.exists(), "用户自己的公式被误删了"
+    # 记录进状态文件 = 明确告诉补齐逻辑"这条处理过了"
+    seeded = json.loads((target / lib.SEED_STATE_NAME).read_text(encoding="utf-8"))
+    assert "涨停回踩低吸.txt" in seeded
+
+
+def test_retired_bundled_formula_is_kept_when_the_user_edited_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """用户**改过**的那份绝不删：他改阈值/加条件之后，那就是他自己的公式了。
+
+    判据是哈希逐字节一致，所以"同名但内容不同"必须原样留着 ——
+    替用户做主删掉他的劳动成果，比"退役公式没清干净"糟糕得多。
+    """
+    target = tmp_path / "formulas"
+    target.mkdir(parents=True)
+    edited = target / "涨停回踩低吸.txt"
+    edited.write_text(
+        "# 名称: 涨停回踩低吸\n# 说明: 我自己改过的条件\nC>MA(C,5)\n", encoding="utf-8"
+    )
+    monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(target))
+
+    lib.formula_dir()
+
+    assert edited.exists(), "用户改过的公式被删了"
+    assert "我自己改过的条件" in edited.read_text(encoding="utf-8")
+    # 它还在列表里（随包的那几条也会照常补进来，所以只断言"这一条还在"）
+    assert "涨停回踩低吸" in {spec.name for spec in lib.formula_files(target)}
+
+
+def test_retired_bundled_formula_never_comes_back_from_the_bundled_copy(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """退役的公式**不会被"缺哪条补哪条"再补回来**（哪怕随包目录里还留着老文件）。
+
+    这条是退役清理最容易做错的地方：老版本解包目录（`_internal/formulas`）在用户
+    原地升级时可能还在，而 `_seed_samples()` 的规则是"缺哪条补哪条" ——
+    只要退役文件**还在随包目录里**、又没被记进名单，下一次启动就会把它原样复制回去。
+    所以这里造一个"随包目录里仍留着退役文件"的场景，断言它不会被补回。
+    """
+    target = tmp_path / "formulas"
+    target.mkdir(parents=True)
+    (target / "涨停回踩低吸.txt").write_bytes(_retired_bytes())
+    fake_bundled = tmp_path / "老解包目录" / "formulas"
+    fake_bundled.mkdir(parents=True)
+    (fake_bundled / "涨停回踩低吸.txt").write_bytes(_retired_bytes())   # 老版本还带着它
+    (fake_bundled / "放量上攻.txt").write_text("# 名称: 放量上攻\nC>MA(C,5)\n", encoding="utf-8")
+    monkeypatch.setattr(lib, "bundled_formula_dir", lambda: fake_bundled)
+    monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(target))
+
+    lib.formula_dir()                      # 第一次：清掉退役文件 + 记录
+    assert not (target / "涨停回踩低吸.txt").exists()
+    assert (target / "放量上攻.txt").exists()          # 别的随包公式照常补齐
+
+    lib.formula_dir()                      # 再启动一次：绝不能把它补回来
+
+    assert not (target / "涨停回踩低吸.txt").exists(), "退役公式被补齐逻辑复活了"
+    assert {spec.name for spec in lib.formula_files(target)} == {"放量上攻"}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -422,15 +514,19 @@ def test_run_enabled_formulas_reports_missing_db(formulas_cfg: Config, tmp_path:
     assert "本地数据库不存在" in run.status["随便"]
 
 
-def test_bad_formula_is_isolated_from_builtin_strategies(engine, formulas_cfg: Config,
-                                                         tmp_path: Path,
-                                                         monkeypatch: pytest.MonkeyPatch) -> None:
-    """**失败隔离**：公式在运行期抛错 → 好公式照常进池、内置策略照常出票、建池不失败。
+def test_bad_formula_is_isolated_from_the_rest_of_the_pool(engine, formulas_cfg: Config,
+                                                          tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """**失败隔离**：一条公式在运行期抛错 → 好公式照常进池、建池不失败。
 
     做法：让两条公式在求值时分别抛 `FormulaError` 与 `FormulaDataError`
     （真实场景就是"连板() 用的本地涨停池还没攒够历史""某只票的字段长度对不上"）。
     如果没有 `formula_group` 里那层逐票兜住，异常会一路冒到 `build_pool` ——
-    用户自己写坏的一条公式，会把整轮选股连同 5 条内置策略一起带走。
+    用户自己写坏的一条公式会把整轮选股带走。
+
+    2026-09-18 起这条用例少了一半内容：它原来还要验"内置 5 条策略照常出票"，
+    而内置策略已经改成随包公式、不再由 `rules.run_all()` 产出候选，
+    所以现在验的是"**好公式照常进池、坏公式只留下原因**"。
     """
     folder = tmp_path / "formulas"
     _write_formula(folder, "好公式", "C>MA(C,5)")
@@ -450,18 +546,13 @@ def test_bad_formula_is_isolated_from_builtin_strategies(engine, formulas_cfg: C
 
     monkeypatch.setattr(fm.Formula, "eval", fake_eval)
 
-    selection = groups.resolve_from_config(formulas_cfg)
-    picks, errors = rules.run_all(engine, formulas_cfg, top_n=200, selection=selection)
     report: dict = {}
-    rows = pool.build_pool(engine, formulas_cfg, size=10, hot_only=False, picks=picks,
-                           selection=selection, report=report)
+    rows = pool.build_pool(engine, formulas_cfg, size=10, hot_only=False, report=report)
 
-    assert rows, "内置策略必须照常出票"
-    assert any(not groups.is_formula_strategy(row["strategy"]) for row in rows)
-    # 好公式照常进池，两条坏公式不进池但**都有原因**
-    assert "公式·好公式" in {row["strategy"] for row in rows}
-    assert "公式·坏公式甲" not in {row["strategy"] for row in rows}
-    assert "公式·坏公式乙" not in {row["strategy"] for row in rows}
+    # 候选只剩公式（随包的那几条 + 这几条），所以"照常出票"这句话现在只对公式成立
+    assert rows, "好公式必须照常出票（一条坏公式不能把整轮选股带走）"
+    assert {row["strategy"] for row in rows} == {"公式·好公式"}
+    # 两条坏公式不进池，但**都有原因**（状态栏/日志/报告三处都能看到）
     status = report["formulas"]["status"]
     assert "坏公式甲" in status and "坏公式乙" in status
     assert any("坏公式甲" in msg for msg in report["errors"])
@@ -698,75 +789,73 @@ def test_scorecard_library_capability_survives_the_ui_removal(tmp_path: Path) ->
 # 公式的备注只能来自文件的 `# 说明:` —— 界面一个数字都不许编。
 
 
-def test_builtin_note_comes_from_evidence_fields_only() -> None:
-    """内置 5 条的备注：逐条对得上源字段（不是界面自己写的文案）。"""
+def test_builtin_row_helpers_are_gone() -> None:
+    """内置策略那套「说明/顺序」函数**整体删掉**了（防止老路径回流）。
+
+    2026-09-18：用户把 5 条内置策略改成了随包公式（可改可删），于是
+    `builtin_order()` / `builtin_enabled()` / `builtin_strategy_note()` /
+    `builtin_strategy_tip()` / `builtin_strategy_detail()` 都没有调用方了 ——
+    它们原来只服务"列表里那 5 行只读的内置策略"，那 5 行已经不存在。
+    这条用例的价值就是：谁哪天顺手把内置策略行加回来，这里立刻红。
+    """
     from laoa_trader.ui import formula_page as fp
 
-    ultra = groups.GROUPS["ultra"]
-    swing = groups.GROUPS["swing"]
-    short = groups.GROUPS["short"]
-
-    assert fp.builtin_strategy_note("LadderPullbackStrategy") == (
-        "⛔ 默认关闭：" + ultra.disabled_reason
-    )
-    assert fp.builtin_strategy_note("LowPriceStrategy") == (
-        "⛔ 默认关闭：" + swing.disabled_reason
-    )
-    assert fp.builtin_strategy_note("DryUpExpansionStrategy") == (
-        "⚠️ " + rules.STRATEGIES["DryUpExpansionStrategy"].evidence_note
-    )
-    assert fp.builtin_strategy_note("FirstLimitUpStrategy") == (
-        "⚠️ " + rules.STRATEGIES["FirstLimitUpStrategy"].evidence_note
-    )
-    # evidence == proven 的那条：字段的语义（base.py）+ 组的实测区间，且标明是"组"的数字
-    assert fp.builtin_strategy_note("ReversalStrategy") == (
-        "两套口径都为正 · 组实测 " + short.note.split("：", 1)[1]
-    )
-    # 认不出来的策略名 → 空串（宁可什么都不说，也不猜）
-    assert fp.builtin_strategy_note("根本没有这条策略") == ""
+    for name in ("builtin_order", "builtin_enabled", "builtin_strategy_note",
+                 "builtin_strategy_tip", "builtin_strategy_detail",
+                 "ROW_BUILTIN", "MENU_DELETE_BUILTIN", "OFF_GROUP_KEY"):
+        assert not hasattr(fp, name), f"{name} 应该已经随内置策略行一起删掉"
+    # 行类型只剩两种
+    assert fp.ROW_FORMULA and fp.ROW_AUCTION
 
 
-def test_builtin_order_matches_the_group_order_and_weights() -> None:
-    """列表顺序 = 组顺序（超短 → 短线 → 波段），与 `rules.run_all()` 的遍历口径一致。"""
-    from laoa_trader.ui import formula_page as fp
+def test_build_strategy_rows_marks_auction_and_formula_rows(formulas_cfg: Config,
+                                                           tmp_path: Path) -> None:
+    """一次建表：**竞价策略那一行在最前面**，公式在后（说明来自文件）。
 
-    assert fp.builtin_order() == list(groups.all_strategies())
-    assert set(fp.builtin_order()) == set(rules.STRATEGIES)
-    for class_name in fp.builtin_order():
-        assert groups.STRATEGY_WEIGHTS[class_name] > 0
-
-
-def test_build_strategy_rows_marks_builtin_and_formula_rows(formulas_cfg: Config,
-                                                            tmp_path: Path) -> None:
-    """一次建表：内置 5 条在前（只读），公式追加在后（备注来自文件）。"""
+    2026-09-18（用户要求）：内置策略改成了随包公式，所以列表里不再有那种
+    "只读的内置策略行"—— 固定行只剩竞价策略一条，其余全是公式（随包的几条也在里面）。
+    """
     from laoa_trader.ui import formula_page as fp
 
     _write_formula(tmp_path, "放量上攻", "C>MA(C,5)", "站上5日线")
     formulas_cfg.enabled_formulas = ["放量上攻"]
-    formulas_cfg.enabled_groups = ["short"]
-    formulas_cfg.enabled_strategies = []
 
     rows = fp.build_strategy_rows(formulas_cfg, lib.formula_files(tmp_path), {})
 
-    # 5 条内置策略 → 竞价策略那一行 → 你自己的公式（用户 2026-09-18 要求把竞价扫描做成策略）
-    assert [row.kind for row in rows] == (
-        [fp.ROW_BUILTIN] * 5 + [fp.ROW_AUCTION] + [fp.ROW_FORMULA]
-    )
-    assert [row.key for row in rows][:5] == fp.builtin_order()
-    builtin = rows[0]
-    assert builtin.is_builtin and builtin.detail and "条件说明" in builtin.detail
-    assert builtin.name == rules.strategy_label(builtin.key)
-    auction = rows[5]
-    assert auction.is_auction and auction.read_only and not auction.is_builtin
-    assert auction.name == fp.AUCTION_NAME and auction.enabled is False   # 默认关
+    assert [row.kind for row in rows] == [fp.ROW_AUCTION, fp.ROW_FORMULA]
+    auction = rows[0]
+    assert auction.is_auction and auction.read_only
+    assert auction.key == fp.AUCTION_KEY and auction.name == fp.AUCTION_NAME
+    assert auction.enabled is False                    # 竞价默认关（intraday_auction=false）
     assert "不参与选股" in auction.note_tip and "无法回测" in auction.note_tip
     formula = rows[-1]
     assert formula.key == "放量上攻" and formula.note == "站上5日线"
-    assert formula.enabled is True                    # 勾了才为真（写回 enabled_formulas）
-    # 勾选状态来自 `groups.resolve_from_config()`（出厂只开 short 那三条）
-    assert {row.key for row in rows[:5] if row.enabled} == {
-        "ReversalStrategy", "DryUpExpansionStrategy", "FirstLimitUpStrategy",
-    }
+    assert formula.enabled is True                     # 勾了才为真（写回 enabled_formulas）
+    assert formula.spec is not None and formula.detail == ""
+
+
+def test_build_strategy_rows_keeps_bundled_formulas_in_the_same_list(
+        formulas_cfg: Config, tmp_path: Path) -> None:
+    """随包公式与用户自己写的公式**同一条待遇**（都在公式那一段里，可改可删）。
+
+    这是"内置策略改成随包公式"这件事的验收点：用户在列表里看到的随包公式
+    （例如 `短期反转`）与他自己存的公式没有区别 —— 都是 `ROW_FORMULA`、
+    都能载入编辑器、都能删。所以这条用例把两类公式放一起建表，断言行类型完全一致。
+    """
+    from laoa_trader.ui import formula_page as fp
+
+    _write_formula(tmp_path, "短期反转", "C>MA(C,5)", "随包的那条")
+    _write_formula(tmp_path, "我的公式", "C<MA(C,5)", "我自己写的")
+
+    rows = fp.build_strategy_rows(formulas_cfg, lib.formula_files(tmp_path), {})
+
+    assert [row.kind for row in rows] == [fp.ROW_AUCTION, fp.ROW_FORMULA, fp.ROW_FORMULA]
+    bundled, mine = rows[1], rows[2]
+    assert {bundled.kind, mine.kind} == {fp.ROW_FORMULA}
+    assert bundled.spec is not None and mine.spec is not None
+    for row in (bundled, mine):
+        assert row.read_only is False                  # 不是只读行 → 可删可改
+        assert not row.is_auction
 
 
 def test_build_strategy_rows_shows_broken_and_runtime_errors(formulas_cfg: Config,
