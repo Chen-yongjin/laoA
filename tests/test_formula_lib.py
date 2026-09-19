@@ -163,18 +163,44 @@ def test_formula_dir_never_resurrects_a_deleted_bundled_formula(
     assert not gone.exists(), "删掉的随包公式又长回来了"
 
 
+#: 老版本随包那份「涨停回踩低吸」的**原始内容**（退役清理的判据就是它的哈希）。
+#:
+#: 为什么把内容直接抄进测试、而不是运行时 `git show 24b1b96:...` 去取：
+#: CI 是**浅克隆**，那个提交在 runner 上根本不存在 —— 第一次提交后 CI 立刻红在
+#: `git ... returned non-zero exit status 128`。测试不该依赖 git 历史。
+#: 这段内容与 `formulas.RETIRED_BUNDLED_FORMULAS` 里那个哈希一一对应（改了这里就会红）。
+_RETIRED_TEXT = (
+    "# 名称: 涨停回踩低吸\n"
+    "# 说明: 近 10 日内出现过涨停或连板（用本地涨停池数据），今日缩量回踩 5 日线不破。\n"
+    "#       涨停数据来自每天同步的 limit_up_pool，没下载到涨停池时这几条公式不会出信号。\n"
+    "#       ⚠️ 这条只是写法示例，不是推荐：同样的条件跑过 10 年成绩单（1029 万行），\n"
+    "#         开盘买 −0.19%（t=−0.10）、尾盘买 −1.21%（t=−5.36），两套口径都是负的。\n"
+    "#         留着它是为了演示\"怎么用 涨停天数() / 连板() 写条件\"，别照抄去实盘。\n"
+    "#       （内置策略里的「连板回踩低吸」就是它，证据见 README 的策略证据表。）\n"
+    "ZT10:=涨停天数(10)\n"
+    "LB:=连板()\n"
+    "M5:=MA(C,5)\n"
+    "V5:=MA(V,5)\n"
+    "HAS_ZT:=ZT10>=1 OR LB>=1\n"
+    "SHRINK:=V<V5*0.9\n"
+    "PULLBACK:=C>=M5*0.98 AND C<REF(C,1)\n"
+    "HAS_ZT AND SHRINK AND PULLBACK\n"
+)
+
+
 def _retired_bytes() -> bytes:
     """老版本随包那份「涨停回踩低吸」的**原始字节**（退役清理的判据就是它）。
 
-    从 git 历史里取（`24b1b96` 是它还随包的最后一次提交）：测试要验的是
-    "内容一致才删"，所以必须拿到真那份文件，不能自己现编一个。
+    退役清理是"内容一致才删"，所以测试必须拿到真那份内容，不能自己现编一个 ——
+    这里用的是抄进来的常量（见上面那段注释：CI 浅克隆里没有那个提交）。
+    先断言它与 `formulas.RETIRED_BUNDLED_FORMULAS` 记的哈希对得上，两边不会各自漂移。
     """
-    import subprocess
+    raw = _RETIRED_TEXT.encode("utf-8")
+    import hashlib
 
-    return subprocess.run(
-        ["git", "show", "24b1b96:formulas/涨停回踩低吸.txt"],
-        cwd=lib.repo_root(), capture_output=True, check=True,
-    ).stdout
+    recorded = lib.RETIRED_BUNDLED_FORMULAS["涨停回踩低吸.txt"]
+    assert hashlib.sha256(raw).hexdigest() == recorded, "测试里的老内容与退役名单的哈希不一致"
+    return raw
 
 
 def test_retired_bundled_formula_is_removed_for_existing_installs(
