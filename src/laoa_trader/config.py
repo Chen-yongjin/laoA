@@ -114,10 +114,9 @@ DEFAULT_NOTIFY_FLASH_SECONDS = 6
 #: 成立的前提是**该键的默认为 true**：写错→回到默认 与 写错→按 False 才有差别。
 #: `intraday_t` 因此退出了这一群：它的默认已改成 **false**（用户拍板：T策略默认关），
 #: 两条路都落在"关"上，留在群里只会让读代码的人以为它默认还开着。
-#: （`push_only_proven` 等其它项一律不动 —— 本次只改默认值，不顺手改别人的语义。）
+#: （`intraday_auction` 等其它项一律不动 —— 本次只改默认值，不顺手改别人的语义。）
 _STRICT_BOOL_FIELDS = frozenset(
-    {"market_overview", "market_breadth", "notify_popup", "notify_sound",
-     "push_only_proven"}
+    {"market_overview", "market_breadth", "notify_popup", "notify_sound"}
 )
 
 #: 严格的真值 / 假值（与 `_as_bool` 的真值表保持一致）
@@ -354,34 +353,17 @@ class Config:
     data_sources: list[str] = field(default_factory=lambda: ["hithink", "public"])
     data_dir: Path = field(default_factory=default_data_dir)
 
-    # ── 策略组（跑哪几组 / 哪几条策略）──
-    #: 启用的策略组：ultra（超短·隔日 T+2）/ short（短线·T+3）/ swing（波段·T+10）。
-    #: **默认只开 `short`**（用户拍板后的默认策略集，与 `groups.default_group_keys()`
-    #: 一致，有测试钉住）：
-    #:   - ultra 连板回踩低吸：两套口径显著为负（B −1.21% t=−5.36、T+10 −4.24% t=−8.87，
-    #:     6 年 0 年为正）→ 停用；
-    #:   - swing 低价股是 T+10 波段，与本版「最多持有到 T+3」的定位不符 → 停用。
-    #: 两组的**代码都还在**（想自己开就把键写回 `enabled_groups`，见 groups.py）。
-    enabled_groups: list[str] = field(default_factory=lambda: ["short"])
-    #: 只跑列出的策略（类名或中文名都认）；**留空 = 该组全选**。
-    #: 与 enabled_groups 同时非空时取交集；两者都空 = 全选（安全默认）。
-    enabled_strategies: list[str] = field(default_factory=list)
-    #: 参与选股的**自定义公式**（`formulas/` 目录里的公式名，见 `formula_dir()`）。
-    #: 「公式」是一个与 ultra/short/swing 并列的组，但成员是用户自己在
-    #: 「公式选股」页勾的，所以**默认空 = 公式组不参与**（不会因为你用过一次
-    #: 示例公式就改变内置策略的结果）。界面上勾选「参与选股」时写回这个键。
-    #: 名字找不到文件 / 公式语法错 → 忽略并记日志（`formulas.enabled_names()`）。
+    # ── 参与选股的东西（2026-09-18 起只剩"勾选的公式"）──
+    #: 参与选股的**公式**（`formulas/` 目录里的公式名，见 `formula_dir()`）。
+    #: 随包预置的那几条公式与用户自己写的一条**待遇完全相同**：勾上才跑。
+    #: **默认空 = 只盯自选股**（不会因为你用过一次示例公式就改变选股结果）。
+    #: 界面上勾「策略选取」列时写回这个键；名字找不到文件 / 语法错 → 忽略并记日志
+    #: （`formulas.enabled_names()`）。
     enabled_formulas: list[str] = field(default_factory=list)
-    #: 推送是否**只推"有边际"的策略标的**（**默认 false = 启用的策略都推送**）。
-    #:
-    #: 为什么默认关（用户拍板）：`short` 组里有两条策略（地量后放量变盘、首板缩量整理）
-    #: 的正 α 只存在于"开盘买"口径 —— 换成尾盘买就转负（−0.15% / −0.01%，见
-    #: `strategy/rules.py` 的 `evidence_note`）。但**要不要为这个放弃它们，是用户的判断**：
-    #: 程序的职责是把数据摆在眼前（策略勾选框旁边就写着两套口径的数字 + 标的上的
-    #: 「（依赖开盘）」标记），**而不是替用户静默过滤掉**。所以默认全推。
-    #: 想收紧就把这一项改成 true：那时只推"两套口径都为正"的策略标的，
-    #: 被跳过的会在推送正文/日志/状态栏里说明原因（绝不会静默少推）。
-    push_only_proven: bool = False
+    #: 已退役的三个键（`enabled_groups` / `enabled_strategies` / `push_only_proven`）：
+    #: 老用户的 config.toml 里可能还写着它们，`load_config()` 按"未知键"直接忽略
+    #: （**不报错、不丢用户文件里的其它内容**，见 `_load_toml` / `update_config_file`），
+    #: 回写设置时也原样留着那几行 —— 它们已经不影响任何行为。
 
     # ── 运行时自检（本地数据够不够用，三态判定；见 data/preflight.py）──
     #: 缺数据时是否自动下载：**增量自动**（1 次请求）；全量始终需要明确同意
@@ -392,8 +374,9 @@ class Config:
     #: 改版前是 3 年（约 300 万行）；6 个月只有约 120 个交易日、约 50 万行，
     #: 库更小、首次导入更快，而 `short` 组的持有期是 T+3、看的是最近几周的形态 ——
     #: 长历史对这类超短策略没有增量信息。
-    #: ⚠️ 代价（说清楚，别让用户以为"没影响"）：`--scorecard` 的成绩单门槛是
-    #: 250 个交易日，6 个月的库**必然判"样本不足"**（它本来也只在做长样本回测时才有意义）。
+    #: ⚠️ 代价（说清楚，别让用户以为"没影响"）：长样本回测（`--scorecard`，2026-09-18
+    #: 已随策略引擎一起删除）当年的门槛是 250 个交易日，6 个月的库必然判"样本不足"；
+    #: 现在超短策略的实现已是公式，历史长度只影响公式里滚动窗口能不能算出来。
     #: 注意 dump 本身**没法只下 6 个月**（端点固定 10 年数据集），只是导入时按这个值过滤。
     #: 想要长样本（自己跑成绩单/回测）把它改成 10：下载文件一样，只是导入更多行。
     history_years: float = 0.5
@@ -936,8 +919,6 @@ def _apply_env(cfg: Config) -> Config:
             setattr(cfg, attr, raw)
 
     env_list = (
-        ("LAOA_ENABLED_GROUPS", "enabled_groups"),
-        ("LAOA_ENABLED_STRATEGIES", "enabled_strategies"),
         ("LAOA_ENABLED_FORMULAS", "enabled_formulas"),
         ("NOTIFY_CHANNELS", "notify_channels"),
         ("DATA_SOURCES", "data_sources"),       # 数据来源（默认主源=同花顺，需 Key；公开源为兜底）
@@ -970,7 +951,6 @@ def _apply_env(cfg: Config) -> Config:
         ("NOTIFY_POPUP", "notify_popup"),
         ("NOTIFY_SOUND", "notify_sound"),
         # 推送过滤：写错（"maybe"）→ 回到默认（**全推**，与新默认一致）
-        ("PUSH_ONLY_PROVEN", "push_only_proven"),
         # 持仓做T近似提示：写错（"maybe"）→ 回到默认（**关着**，与 `intraday_t` 新默认一致）
         ("INTRADAY_T", "intraday_t"),
     ):

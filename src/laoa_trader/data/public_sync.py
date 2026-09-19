@@ -336,7 +336,7 @@ def limit_pool_from_snapshot(
 
     ⚠️ 同花顺池子里那些**公开源拿不到**的字段（封板时间、封单额、涨停原因、
     换手率、是否回封）一律留空 —— 不是 0，是 NULL。策略只依赖
-    `date/symbol/high_days`（见 `strategy/rules.py` 的连板回踩与 `formula.连板()`），
+    `date/symbol/high_days`（`formula.连板()` / `涨停天数()` 读它），
     所以留空不影响选股；编一个 0 出来才会出问题（`连板()>=2` 会把这些票判成不合格，
     而"没这个数"和"封单额为 0"是两件事）。
     """

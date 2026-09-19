@@ -31,7 +31,6 @@ from laoa_trader.data import storage  # noqa: E402
 from laoa_trader.intraday import now_shanghai  # noqa: E402
 from laoa_trader.data.engine import DataEngine  # noqa: E402
 from laoa_trader.notify import KINDS  # noqa: E402
-from laoa_trader.strategy import rules as rules_mod  # noqa: E402
 from laoa_trader.ui import app as ui_app  # noqa: E402
 from tests._toml import p  # noqa: E402
 
@@ -1011,7 +1010,7 @@ def test_watch_table_headers_and_source_column(window) -> None:
     # 组别与持有期挪进了行 tooltip（列数被用户定死，不能加列）
     tip = window.pool_table.item(0, 0).toolTip()
     assert "来源：策略·低价股" in tip
-    assert "组别：波段·T+10（T+10）" in tip
+    assert "组别：" not in tip        # 2026-09-18 起没有"策略组"这个概念了
     # 「备注」不再单独占一列（列数被用户定死）：它进了**整行的 tooltip**
     assert "备注" not in "".join(_header_texts(window.pool_table))
 
@@ -1600,9 +1599,7 @@ def test_pool_source_column_shows_primary_strategy_and_tooltip_the_rest(
         "strategies": "ReversalStrategy,DryUpExpansionStrategy",
         "score": 2.0, "reason": "缩量回踩",
         "label": "短期反转", "source_label": "策略·短期反转",
-        "group": "short", "group_label": "短线·T+3", "horizon": 3,
         "industry": "半导体", "note": "", "source": "策略",
-        "evidence": "open_only", "evidence_text": "（依赖开盘）",
         "is_limit_up": False, "continue_day_text": "", "limit_up_reason": "",
     }]
     monkeypatch.setattr(pool_mod, "pool_page_rows", lambda db_path, day=None: rows)
@@ -1611,15 +1608,15 @@ def test_pool_source_column_shows_primary_strategy_and_tooltip_the_rest(
     window._refresh_pool_table()
     qapp.processEvents()
 
-    # 来源 = 主策略（这一列的宽度只放得下它 + 组别等明细进 tooltip）
+    # 来源 = 主策略；同批选中的其它策略进 tooltip（列宽只放得下一条）
     source_column = ui_app.WATCH_HEADERS.index("来源")
     assert window.pool_table.item(0, source_column).text() == "策略·短期反转"
     tip = window.pool_table.item(0, 0).toolTip()
-    assert "来源：策略·短期反转（依赖开盘）" in tip
-    assert "组别：短线·T+3（T+3）" in tip
+    assert "来源：策略·短期反转" in tip
     assert "同批选中：地量后放量变盘" in tip        # 第二条策略没有从界面上消失
-    assert "策略照常推送" in tip                    # 证据解释也在
-    # 组别那一份不再塞进「来源」列（列里只有"哪条策略"）
+    # 2026-09-18 起没有"组别 / 持有期"（策略组机制删掉），也没有证据标记
+    assert "组别：" not in tip and "T+3" not in tip
+    assert "（依赖开盘）" not in tip
     assert "T+3" not in window.pool_table.item(0, source_column).text()
 
 
@@ -2015,42 +2012,6 @@ def test_window_opens_without_icon_assets(seeded, qapp, monkeypatch) -> None:
         win.deleteLater()
         qapp.processEvents()
 
-
-def test_save_group_selection_writes_config_keeps_comments(window, seeded, qapp) -> None:
-    """写回策略组：只跑 swing（默认是只勾 short）→ 写回 config.toml，注释与未知键不能丢。
-
-    界面上没有这组勾选框了（按规格移到「策略选股」的列表里），但**写回能力**还在：
-    `save_group_selection()` 就是那个入口（列表那边勾完调的也是它）。
-    """
-    assert window.save_group_selection(["swing"], []) is True
-    qapp.processEvents()
-
-    text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
-    assert 'enabled_groups = ["swing"]' in text
-    assert "# 用户自己的注释（保存设置后必须还在）" in text
-    assert 'my_own_key = "别动我"' in text
-    assert "已写入 config.toml" in window.status_label.fullText()
-    # 内存里的配置同步更新
-    assert window.cfg.enabled_groups == ["swing"]
-
-def test_save_group_selection_keeps_strategy_choices(window, seeded, qapp) -> None:
-    """勾了策略但没勾它的组 → 自动把组也带上（避免"选了却不跑"）。"""
-    assert window.save_group_selection(["swing"], ["LowPriceStrategy"]) is True
-    qapp.processEvents()
-    text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
-    assert 'enabled_strategies = ["LowPriceStrategy"]' in text
-    assert window.cfg.enabled_strategies == ["LowPriceStrategy"]
-    # LowPriceStrategy 属于 swing 组：两个键要么都写、要么都不写
-    assert window.cfg.enabled_groups == ["swing"]
-    assert "swing" in text
-
-def test_save_group_selection_requires_at_least_one_group(window, seeded) -> None:
-    """一个组都不给 → **明确拒绝**（不许写出"哪一组都不跑"的配置）。"""
-    assert window.save_group_selection([], []) is False
-    assert "至少要勾一个策略组" in window.status_label.fullText()
-    # 没有写坏配置文件（`seeded` 里写的就是默认策略集：只开 short）
-    assert 'enabled_groups = ["short"]' in (
-        seeded.data_dir / "config.toml").read_text(encoding="utf-8")
 
 def test_save_notify_writes_channels_and_params(window, seeded, qapp) -> None:
     """通知那一组的保存：四个勾选框 + 声音/闪烁/浮窗参数一次写回。"""
@@ -4533,11 +4494,12 @@ def test_market_entry_columns_shrink_with_the_window(screen_window, qapp) -> Non
     finally:
         market.clear_cache()
 
-def test_pool_row_tooltip_marks_open_only_strategy(pool_window, qapp, monkeypatch) -> None:
-    """「依赖开盘」的标的：行的 tooltip 里带 `（依赖开盘）` 与那段解释（不是只写在文档里）。
+def test_pool_row_tooltip_has_no_evidence_marker(pool_window, qapp, monkeypatch) -> None:
+    """行的 tooltip 里**不再有**「（依赖开盘）」或"策略照常推送"那段解释。
 
-    这个标记原来画在「来源策略」列与卡片上；新表的「来源」列给的是**组名**，
-    所以具体策略名与证据标记一起收进 tooltip —— 证据不能从界面上消失。
+    那个标记来自 `rules.STRATEGIES[类名].evidence`（2026-09-18 随策略引擎删掉）。
+    老库里的历史行（带着类名）照旧显示中文名与来源，但不再有证据标记 ——
+    它现在是"我们自己的策略有没有边际"的旧说法，公式标的本来就不该被贴我们的结论。
     """
     from laoa_trader import pool as pool_mod
 
@@ -4545,15 +4507,7 @@ def test_pool_row_tooltip_marks_open_only_strategy(pool_window, qapp, monkeypatc
         {"symbol": "600002", "name": "半导体甲", "strategy": "DryUpExpansionStrategy",
          "strategies": "DryUpExpansionStrategy", "score": 2.0, "reason": "地量后放量",
          "label": "地量后放量变盘", "source_label": "策略·地量后放量变盘",
-         "industry": "半导体", "note": "", "group": "short", "group_label": "短线·T+3",
-         "horizon": 3, "source": "策略", "evidence": "open_only",
-         "evidence_text": "（依赖开盘）",
-         "is_limit_up": False, "continue_day_text": "", "limit_up_reason": ""},
-        {"symbol": "600001", "name": "浦发样本", "strategy": "ReversalStrategy",
-         "strategies": "ReversalStrategy", "score": 1.0, "reason": "短期反转",
-         "label": "短期反转", "source_label": "策略·短期反转", "industry": "银行",
-         "note": "", "group": "short", "group_label": "短线·T+3",
-         "horizon": 3, "source": "策略", "evidence": "proven", "evidence_text": "",
+         "industry": "半导体", "note": "", "source": "策略",
          "is_limit_up": False, "continue_day_text": "", "limit_up_reason": ""},
     ]
     monkeypatch.setattr(pool_mod, "pool_page_rows", lambda db_path, day=None: rows)
@@ -4562,16 +4516,11 @@ def test_pool_row_tooltip_marks_open_only_strategy(pool_window, qapp, monkeypatc
     window._refresh_pool_table()
     qapp.processEvents()
 
-    rows_by_symbol = {_symbols_of(window.pool_table)[i]: i
-                      for i in range(window.pool_table.rowCount())}
-    tip = window.pool_table.item(rows_by_symbol["600002"], 0).toolTip()
-    assert "来源：策略·地量后放量变盘（依赖开盘）" in tip
-    assert "组别：短线·T+3（T+3）" in tip
-    assert "策略照常推送" in tip and "push_only_proven" in tip   # 提示是"可以收紧"，不是"已经收紧"
-    # 有边际证据的那只**不带**标记（tip 里仍然写策略名，供用户核对是哪条策略选的）
-    plain = window.pool_table.item(rows_by_symbol["600001"], 0).toolTip()
-    assert "来源：策略·短期反转" in plain
-    assert "依赖开盘" not in plain
+    tip = window.pool_table.item(0, 0).toolTip()
+    assert "来源：策略·地量后放量变盘" in tip      # 历史行的中文名照旧
+    for gone in ("依赖开盘", "push_only_proven", "策略照常推送", "组别："):
+        assert gone not in tip, f"tooltip 里还留着「{gone}」"
+
 
 
 # ── 两张表「提醒」列的数据源（`intraday.alerts_today_by_symbol`）──
@@ -4927,25 +4876,31 @@ def test_set_position_monitor_toggles_and_filters_t_observation(cfg) -> None:
     assert set(storage.load_positions(storage.connect(cfg.db_path))) == {"600001"}
 
 
-def test_pipeline_status_explains_the_push_filter(window, qapp) -> None:
-    """状态栏要能说明"跳过几只、为什么"（用户不该以为策略今天没选到票）。"""
+def test_pipeline_status_explains_why_nothing_was_pushed(window, qapp) -> None:
+    """状态栏要能说明"为什么没推"—— 现在只有一种原因：**同一批内容今天已经推过**。
+
+    （2026-09-18 之前还有"命中的全是依赖开盘的策略 → 一条都不推"那一路，
+    它随 Python 策略引擎一起删掉了；老报告里带着 `push_skipped_kind="filtered"`
+    也不该让界面出错 —— 那种报告只可能来自老版本，这里顺手钉住容错。）
+    """
     window._on_pipeline_done("开始选股", {
-        "picked": 3, "data_date": "2026-09-11",
+        "data_date": "2026-09-11",
         "pool": [{"symbol": "600001"}], "picks": 2, "signals": 2,
-        "pushed": True, "notify": {"tray": {"kind": "tray", "ok": True}},
-        "push_note": "另有 2 只只由「依赖开盘」的策略选出（正 α 只在开盘买口径下存在）",
-        "push_skipped_rows": [{"symbol": "600002"}, {"symbol": "600003"}],
+        "pushed": False,
+        "push_skipped": "2026-09-11 已推送过相同内容的池子（指纹 abc）",
+        "push_skipped_kind": "duplicate",
     })
     qapp.processEvents()
     text = window.status_label.fullText()
-    assert "已跳过 2 只依赖开盘的标的" in text
+    assert "未重复推送" in text
 
-    # 全部被过滤（压根没推）：状态栏要直接给出原因，而不是那句"未重复推送"
+    # 老版本报告里的 filtered 原因：界面照旧把它显示出来（不崩、不吞）
     window._on_pipeline_done("开始选股", {
         "pool": [{"symbol": "600002"}], "picks": 1, "signals": 1, "pushed": False,
-        "push_skipped": "另有 1 只只由「依赖开盘」的策略选出（正 α 只在开盘买口径下存在）",
-        "push_skipped_kind": "filtered", "push_skipped_rows": [{"symbol": "600002"}],
+        "push_skipped": "（老版本）另有 1 只只由「依赖开盘」的策略选出",
+        "push_skipped_kind": "filtered",
     })
     qapp.processEvents()
-    assert "依赖开盘" in window.status_label.fullText()
-    assert "未重复推送" not in window.status_label.fullText()
+    # `filtered` 这个 kind 已经不会产生（策略引擎删了），界面把它当"未重复推送"显示 ——
+    # 关键是**不许崩、不许静默**，真正的原因那句还在 push_skipped 里
+    assert "未重复推送" in window.status_label.fullText()

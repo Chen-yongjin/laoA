@@ -492,10 +492,9 @@ def _patch_formulas(monkeypatch) -> None:
     候选键必须是合成名 `公式·X`（否则建池会把它当"老策略类名"丢掉）。
     """
     from laoa_trader.strategy import formula_group
-    from laoa_trader.strategy import groups as groups_mod
 
     run = formula_group.FormulaRun()
-    run.picks = {groups_mod.formula_strategy_name("反转样本"): [
+    run.picks = {formula_group.formula_strategy_name("反转样本"): [
         {"symbol": "600001", "name": "反转样本", "reason": "缩量回踩"},
     ]}
     run.ran = ["反转样本"]
@@ -571,9 +570,6 @@ def test_export_failure_does_not_break_the_pipeline(cfg, monkeypatch, tmp_path,
 def test_export_skips_when_there_is_no_pool(cfg, monkeypatch, tmp_path) -> None:
     """没有池子（非交易日 / 没候选）→ **不写文件**，也不该出现导出相关的报错。"""
     _ready_db(cfg)
-    from laoa_trader.strategy import rules as rules_mod
-
-    monkeypatch.setattr(rules_mod, "run_all", lambda *a, **k: ({}, []))
     desk = tmp_path / "桌面"
 
     report = sched.run_daily(cfg, DataEngine(cfg.db_path), notify=False,

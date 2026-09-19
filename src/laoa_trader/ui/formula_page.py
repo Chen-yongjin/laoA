@@ -86,7 +86,7 @@ from laoa_trader import pool as pool_mod
 from laoa_trader.config import get_config
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import formula as fm
-from laoa_trader.strategy import formula_group, groups
+from laoa_trader.strategy import formula_group
 
 logger = get_logger(__name__)
 
@@ -423,7 +423,7 @@ def _cfg_list(cfg: Any, key: str) -> str:
 # 用户 2026-09-18 的要求："不是公式，是把「竞价扫描」做成策略"。
 # 所以这一行**不是一个选股策略**：勾上它 = 开启竞价扫描（9:20 / 09:25 各扫一次全市场、
 # 按下面这套口径打分推送），写回的是 `config.toml` 的 `intraday_auction`，
-# 与 `enabled_groups` / `enabled_strategies` / `enabled_formulas` 都不相干。
+# 与 `enabled_formulas` 不相干（公式那一列写的是它）。
 #
 # 口径里的数字**全部现读 `cfg`**（设置页那几个框写进去的就是它们），界面自己一个都不编：
 # 下面那几个默认值只在 `cfg` 是测试替身、没有这些字段时兜底，与 `config.py` 的出厂值一致。
@@ -868,8 +868,8 @@ if QT_AVAILABLE:
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
             self._set_header_tooltip(0, "策略/公式的名字（就是公式文件的名字）")
             self._set_header_tooltip(1, "说明：来自公式文件里的「# 说明:」，或者在编辑器里填的备注")
-            self._set_header_tooltip(2, "勾上 = 参与选股。内置策略写回 config.toml 的 "
-                                        "enabled_groups + enabled_strategies；公式写回 enabled_formulas")
+            self._set_header_tooltip(2, "勾上 = 参与选股（写回 config.toml 的 enabled_formulas）；"
+                                        "竞价策略那一行例外：它开关的是盘中竞价扫描")
             self.table.itemSelectionChanged.connect(self.on_row_selected)
             layout.addWidget(self.table, 1)
 
@@ -1369,17 +1369,21 @@ if QT_AVAILABLE:
             )
 
         def _update_list_hint(self) -> None:
-            """列表上方那句灰字：默认文案；配置里的策略名写错时**把原因说出来**。
+            """列表上方那句灰字：默认文案；勾了但**找不到文件/语法错**的公式在这里点名。
 
-            为什么要单独盯这一条：`enabled_groups` 与 `enabled_strategies` 同时非空时
-            取的是**交集**，用户手改 config.toml 时很容易配出"交集为空"——
+            为什么这条值得单独盯：`enabled_formulas` 里写了一个目录里没有的公式名
+            （用户手改了 config.toml、或者把公式文件删了/改名了），
             表现是"列表里一个勾都没有、点选股什么都没跑"，而日志在他看不见的地方。
+            （老版本这里盯的是 `enabled_groups` / `enabled_strategies` 的"交集为空"；
+            那两个键 2026-09-18 已退役，`formulas.enabled_names()` 会跳过认不出的名字。）
             """
-            selection = groups.resolve_from_config(self.cfg)
-            if selection.warnings:
+            known = set(str(n) for n in (getattr(self.cfg, "enabled_formulas", None) or []))
+            files = {spec.name for spec in self.specs}
+            missing = sorted(name for name in known if name not in files)
+            if missing:
                 self.list_hint.setText(
-                    "⚠️ config.toml 里的策略设置有认不出来的名字（这会让勾选与实跑不一致）："
-                    + "；".join(selection.warnings)
+                    "⚠️ config.toml 里勾了这几条公式，但公式目录里找不到（这会让勾选与实跑"
+                    "不一致）：" + "、".join(missing)
                     + "　改完点【开始选股】前先看一眼勾选是否与预期一致。"
                 )
                 return
@@ -1913,7 +1917,9 @@ if QT_AVAILABLE:
                     "symbol": str(hit["symbol"]),
                     "name": str(hit.get("name") or ""),
                     # 「来源」列与「自选股池」同一个词：公式选中 → `公式·<公式名>`
-                    "strategy": groups.formula_strategy_name(str(run.get("name") or "")),
+                    "strategy": formula_group.formula_strategy_name(
+                        str(run.get("name") or "")
+                    ),
                 }
                 for hit in hits
             ]

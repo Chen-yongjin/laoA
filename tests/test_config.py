@@ -707,19 +707,17 @@ def test_example_config_documents_position_t() -> None:
 # ── 用户拍板后的默认策略集与 6 个月导入窗口 ──
 
 
-def test_default_strategy_set_is_short_only() -> None:
-    """默认只跑 `short`（T+3 定位）：ultra 两套口径显著为负、swing 是 T+10 波段。"""
-    from laoa_trader.strategy import groups as groups_mod
+def test_default_strategy_set_is_no_formula() -> None:
+    """选股相关只剩一个键：`enabled_formulas`，**默认空 = 只盯自选股**。
 
+    2026-09-18 之前这里断言的是"默认只开 short 组"（`enabled_groups`）；
+    内置策略改成随包公式、策略组机制删掉之后，那两个键连字段都不存在了 ——
+    所以"默认跑什么"这个问题现在只有一个答案：**什么都不跑，等用户勾公式**。
+    """
     cfg = load_config(use_env=False)
-    assert cfg.enabled_groups == ["short"]
-    # 与 groups.py 的"默认启用"保持同一份事实（两处漂移是最容易出的事）
-    assert list(cfg.enabled_groups) == groups_mod.default_group_keys()
-    assert groups_mod.GROUPS["short"].enabled_by_default is True
-    assert groups_mod.GROUPS["ultra"].enabled_by_default is False
-    assert groups_mod.GROUPS["swing"].enabled_by_default is False
-    # 停用的组**代码仍在**（用户以后可能自己开）
-    assert set(groups_mod.GROUPS) == {"ultra", "short", "swing"}
+    assert cfg.enabled_formulas == []
+    assert not hasattr(cfg, "enabled_groups")
+    assert not hasattr(cfg, "enabled_strategies")
 
 
 def test_default_history_window_is_six_months() -> None:
@@ -828,7 +826,11 @@ def test_default_history_window_is_pinned_in_example_config() -> None:
     assert data["notify_channels"] == cfg.notify_channels == []
 
 
-def test_push_only_proven_defaults_to_off() -> None:
-    """推送过滤**默认关**：启用的策略都推送（要不要跟"依赖开盘"的策略由用户判断）。"""
+def test_push_only_proven_key_is_gone() -> None:
+    """`push_only_proven`（"只推有边际的策略标的"）已随策略引擎删掉 —— 字段不存在。
+
+    老配置里写着它也不会报错：`load_config()` 按未知键忽略（见
+    `test_config_writeback.py` 里那份样例配置，那两行退役键现在还在文件里）。
+    """
     cfg = load_config(use_env=False)
-    assert cfg.push_only_proven is False
+    assert not hasattr(cfg, "push_only_proven")

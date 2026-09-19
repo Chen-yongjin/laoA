@@ -1,6 +1,15 @@
-"""策略层：入选策略（低价股 / 连板回踩 / 短期反转 / 地量放量 / 首板缩量）与因子函数。"""
+"""策略层：**公式引擎**（通达信风格子集）+ 把勾选的公式跑成候选。
 
-from laoa_trader.strategy import factors, rules
-from laoa_trader.strategy.base import BaseStrategy
+2026-09-18 之前这里还有一套 Python 策略（`rules.py` / `base.py` / `factors.py`）
+与"策略组"机制；用户把内置策略整体改成**随包公式**（可改可删）之后，那三样东西
+连同 `research/scorecard.py` 里给它们做回测的部分一起删掉了。
 
-__all__ = ["BaseStrategy", "factors", "rules"]
+现在这一层只有两件事：
+
+* `formula.py` —— 引擎（文本 → 数组），Qt 无关、只依赖 numpy；
+* `formula_group.py` —— 跑用户在界面上勾选的公式，产出池子认的候选。
+
+想加一条自己的选股逻辑：**写公式文件**，不要往这里加 Python（见 `formulas.py`）。
+"""
+
+__all__: list[str] = []

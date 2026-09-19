@@ -9,15 +9,15 @@
 
 两条硬规矩
 ----------
-1. **默认不参与**：`config.toml` 里 `enabled_formulas` 为空时，本方**一次库都不读**，
-   内置策略的行为与以前完全一致（有测试钉住）。
+1. **默认不参与**：`config.toml` 里 `enabled_formulas` 为空时，本方**一次库都不读**
+   （此时选股只剩自选股，有测试钉住）。
 2. **失败隔离**：某条公式在运行时抛 `FormulaError` / `FormulaDataError`
    （典型例子：用了历史不完整的 `连板()`、或那只票的序列长度对不上），
    只做三件事 —— 记日志、把它记进 `status`（界面上标红给原因）、
-   把它从本批候选里去掉。**其余公式与内置策略照常出票，建池也不会失败。**
+   把它从本批候选里去掉。**其余公式照常出票，建池也不会失败。**
 
    为什么非要隔离：公式是**用户自己写的**，写错是常态而不是异常。一条写坏的公式
-   让整轮选股（连同 5 条内置策略）一起失败，等于"用户越敢试错，程序越不能用" ——
+   让整轮选股一起失败，等于"用户越敢试错，程序越不能用" ——
    与 `formula.py` 里"逐文件报错、坏的不会拖垮好的"是同一条思路，只是这次
    发生在**运行期**而不是解析期。
 """
@@ -32,14 +32,13 @@ from typing import Any
 from laoa_trader import formulas as lib
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import formula as fm
-from laoa_trader.strategy import groups
 
 logger = get_logger(__name__)
 
-#: 公式候选在池子里的权重（`pool.POOL_STRATEGIES` 查不到时用的兜底值就是 1，
-#: 这里显式给 2）。为什么是 2：用户**自己勾的**公式要是权重 1，很容易被内置策略
-#: 按分数挤到 10 只之外（表现为"我勾了公式，池子里却没有"）；给到与"短期反转"
-#: 同档的 2 既看得见，又不会盖过内置策略。
+#: 公式候选在池子里的权重。为什么是 2（而不是 1）：候选合成是按"策略内排名 × 权重"
+#: 打分的，权重越高越不容易被别的公式挤到池子 10 只之外
+#: （表现就是"我勾了公式，池子里却没有"）。给 2 是当年与「短期反转」同档的取值，
+#: 现在所有候选都是公式，权重一视同仁 —— 但**不改它**：改了会让同一批候选的排序变化。
 FORMULA_WEIGHT = 2
 
 #: 同一条公式最多进池几只（与 `pool.MAX_PER_STRATEGY` 同一个口径，单独写一份是
@@ -53,6 +52,35 @@ MAX_PER_FORMULA = 3
 # 与 `state.py` 的"下载中"旗子是同一个思路：**跨线程可见的少量运行态**，只此一处。
 _lock = threading.Lock()
 _last_status: dict[str, str] = {}
+
+
+# ── 公式合成名（`放量上攻` → `公式·放量上攻`）──
+#
+# 这四个 helper 原先住在 `strategy/groups.py` 里（借"策略组"的地盘）：池子里的候选是
+# 按"策略名"组织的，公式于是被合成成一个带前缀的策略名，来源列/排序/推送全都能复用
+# 现有逻辑。2026-09-18 策略组机制整体删掉之后，它们**语义上的家**就是这里
+# （跑公式的模块），所以搬了过来；`pool.py` / `intraday.py` / `scheduler.py` 都从这里 import。
+FORMULA_PREFIX = "公式·"
+
+
+def formula_strategy_name(formula_name: str) -> str:
+    """公式名 → 池子/推送里的**合成策略名**（`放量上攻` → `公式·放量上攻`）。
+
+    为什么不直接用公式名当策略名：来源列里出现一个裸名字，用户分不清"这是我写的公式"
+    还是别的什么东西。带上 `公式·` 前缀，推送与卡片上一眼就能看出来源。
+    """
+    return f"{FORMULA_PREFIX}{str(formula_name or '').strip()}"
+
+
+def is_formula_strategy(class_name: str) -> bool:
+    """这个策略名是不是"自定义公式"（合成名以 `公式·` 开头）。"""
+    return str(class_name or "").startswith(FORMULA_PREFIX)
+
+
+def formula_name_of(class_name: str) -> str:
+    """合成策略名 → 公式名（不是公式时原样返回）。"""
+    name = str(class_name or "")
+    return name[len(FORMULA_PREFIX):] if name.startswith(FORMULA_PREFIX) else name
 
 
 def last_status() -> dict[str, str]:
@@ -200,13 +228,13 @@ def run_enabled_formulas(
         # 公式内按代码排序（`load_series` 本身就是代码升序，这里显式排一次，
         # 免得以后换了数据源顺序，池子里的"公式内排名"跟着乱）
         picks.sort(key=lambda pick: pick["symbol"])
-        result.picks[groups.formula_strategy_name(label)] = picks[: MAX_PER_FORMULA * 3]
+        result.picks[formula_strategy_name(label)] = picks[: MAX_PER_FORMULA * 3]
 
     _remember(result.status)
     if result.picks:
         logger.info(
             "公式选股：" + "、".join(
-                f"{groups.formula_name_of(key)} {len(value)} 只"
+                f"{formula_name_of(key)} {len(value)} 只"
                 for key, value in result.picks.items()
             )
         )
@@ -220,9 +248,13 @@ def _remember(status: dict[str, str]) -> None:
 
 
 __all__ = [
+    "FORMULA_PREFIX",
     "FORMULA_WEIGHT",
     "MAX_PER_FORMULA",
     "FormulaRun",
+    "formula_name_of",
+    "formula_strategy_name",
+    "is_formula_strategy",
     "last_status",
     "reset_status",
     "run_enabled_formulas",

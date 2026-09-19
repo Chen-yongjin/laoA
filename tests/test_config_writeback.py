@@ -62,8 +62,7 @@ def test_render_keeps_comments_and_unknown_keys(tmp_path: Path) -> None:
     out = render_config_updates(text, {
         "notify_channels": ["windows"],
         "notify_windows_sound": False,
-        "enabled_groups": ["swing"],
-        "enabled_strategies": ["低价股"],
+        "enabled_formulas": ["尾盘选股策略"],
     })
     # 注释全在
     assert "# 老A选股助手配置（这些注释必须活下来）" in out
@@ -127,14 +126,19 @@ def test_quotes_and_backslashes_are_escaped(tmp_path: Path) -> None:
 def test_update_config_file_roundtrip(sample_file: Path) -> None:
     """写回后必须仍然是**合法 TOML**，且新值能被 load_config 读到。"""
     update_config_file(sample_file, {
-        "enabled_groups": ["ultra"],
+        "enabled_formulas": ["尾盘选股策略"],
         "notify_channels": ["tray"],
         "notify_tray_duration_ms": 3000,
         "feishu_on": False,
     })
     cfg = load_config(sample_file, use_env=False)
-    assert cfg.enabled_groups == ["ultra"]
+    assert cfg.enabled_formulas == ["尾盘选股策略"]
     assert cfg.notify_channels == ["tray"]
+    # 文件里那两行**退役键**（enabled_groups / enabled_strategies）原样留着：
+    # 既不报错、也不被删掉（用户手写过的配置不该被程序悄悄改）
+    text = sample_file.read_text(encoding="utf-8")
+    assert 'enabled_groups = ["ultra", "short", "swing"]' in text
+    assert "enabled_strategies = []" in text
     assert cfg.notify_tray_duration_ms == 3000
     assert cfg.feishu_on is False
     # 未被更新的键仍然读得到原值
@@ -148,7 +152,7 @@ def test_update_config_file_roundtrip(sample_file: Path) -> None:
 
 def test_update_is_idempotent(sample_file: Path) -> None:
     """连续保存两次，第二次不该产生任何差异（否则每次保存都在堆注释）。"""
-    updates = {"notify_channels": ["windows"], "enabled_groups": ["short"]}
+    updates = {"notify_channels": ["windows"], "enabled_formulas": ["尾盘选股策略"]}
     update_config_file(sample_file, updates)
     first = sample_file.read_text(encoding="utf-8")
     update_config_file(sample_file, updates)
@@ -157,11 +161,11 @@ def test_update_is_idempotent(sample_file: Path) -> None:
 
 def test_update_creates_file_when_missing(tmp_path: Path) -> None:
     target = tmp_path / "new" / "config.toml"
-    update_config_file(target, {"run_at": "20:00", "enabled_groups": ["ultra"]})
+    update_config_file(target, {"run_at": "20:00", "enabled_formulas": ["尾盘选股策略"]})
     assert target.is_file()
     cfg = load_config(target, use_env=False)
     assert cfg.run_at == "20:00"
-    assert cfg.enabled_groups == ["ultra"]
+    assert cfg.enabled_formulas == ["尾盘选股策略"]
 
 
 def test_update_does_not_leave_temp_file(sample_file: Path) -> None:

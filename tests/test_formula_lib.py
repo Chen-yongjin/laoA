@@ -27,7 +27,7 @@ from laoa_trader import intraday, pool
 from laoa_trader.config import Config, save_settings
 from laoa_trader.data import storage
 from laoa_trader.strategy import formula as fm
-from laoa_trader.strategy import formula_group, groups, rules
+from laoa_trader.strategy import formula_group
 from tests.conftest import messages, workdays_ending
 
 #: 小库里的三只票：甲/丙 一路上涨、乙 一路下跌 —— 于是"今天高于 5 日均价"
@@ -617,10 +617,8 @@ def test_enabled_formula_enters_pool_with_formula_source(engine, formulas_cfg: C
     monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(folder))
     formulas_cfg.enabled_formulas = ["收盘在5日线上"]
 
-    selection = groups.resolve_from_config(formulas_cfg)
-    picks, _errors = rules.run_all(engine, formulas_cfg, top_n=200, selection=selection)
-    rows = pool.build_pool(engine, formulas_cfg, size=10, hot_only=False, picks=picks,
-                           selection=selection)
+    # 走**真实链路**：不给 picks（2026-09-18 起候选只来自勾选的公式，建池自己去跑）
+    rows = pool.build_pool(engine, formulas_cfg, size=10, hot_only=False)
 
     formula_rows = [row for row in rows if row["strategy"] == "公式·收盘在5日线上"]
     assert formula_rows, "勾了公式就必须能进池"
@@ -636,11 +634,6 @@ def test_enabled_formula_enters_pool_with_formula_source(engine, formulas_cfg: C
 
     lines = "\n".join(pool.format_pool_lines(rows))
     assert "公式·收盘在5日线上" in lines
-    # 推送范围：公式标的照常推送（不是 open_only，不会因为 push_only_proven 被丢）
-    formulas_cfg.push_only_proven = True
-    keep, skipped = pool.split_push_rows(pool.pool_table_rows(formulas_cfg.db_path),
-                                         formulas_cfg)
-    assert any(row["strategy"] == "公式·收盘在5日线上" for row in keep)
 
 
 def test_not_enabled_formula_does_not_change_pool(engine, formulas_cfg: Config, tmp_path: Path,
@@ -651,12 +644,11 @@ def test_not_enabled_formula_does_not_change_pool(engine, formulas_cfg: Config, 
     monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(folder))
     assert formulas_cfg.enabled_formulas == []
 
-    selection = groups.resolve_from_config(formulas_cfg)
-    picks, _errors = rules.run_all(engine, formulas_cfg, top_n=200, selection=selection)
-    rows = pool.build_pool(engine, formulas_cfg, size=10, hot_only=False, picks=picks,
-                           selection=selection)
+    rows = pool.build_pool(engine, formulas_cfg, size=10, hot_only=False)
 
-    assert all(not groups.is_formula_strategy(row["strategy"]) for row in rows)
+    assert all(
+        not formula_group.is_formula_strategy(row["strategy"]) for row in rows
+    ), "没勾公式就不该有公式标的进池"
 
 
 def test_formula_pool_row_is_also_monitored_intraday(engine, formulas_cfg: Config,
@@ -673,14 +665,10 @@ def test_formula_pool_row_is_also_monitored_intraday(engine, formulas_cfg: Confi
     monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(folder))
     formulas_cfg.enabled_formulas = ["收盘在5日线上"]
 
-    selection = groups.resolve_from_config(formulas_cfg)
-    picks, _errors = rules.run_all(engine, formulas_cfg, top_n=200, selection=selection)
-    rows = pool.build_pool(engine, formulas_cfg, size=10, hot_only=False, picks=picks,
-                           selection=selection)
+    rows = pool.build_pool(engine, formulas_cfg, size=10, hot_only=False)
     symbol = next(row["symbol"] for row in rows if row["strategy"] == "公式·收盘在5日线上")
 
-    targets, symbols = intraday.watch_targets(formulas_cfg.db_path, selection=selection,
-                                              cfg=formulas_cfg)
+    targets, symbols = intraday.watch_targets(formulas_cfg.db_path, cfg=formulas_cfg)
 
     assert symbol in symbols
     assert targets[symbol]["strategy"] == "公式·收盘在5日线上"
@@ -732,22 +720,26 @@ def test_formula_opt_in_writes_config_and_keeps_comments(formulas_cfg: Config,
     assert 'enabled_formulas = ["放量上攻"]' in text
     assert "# 我自己写的注释，别动" in text
     assert 'my_own_key = "别动我"' in text
+    # 老配置里的退役键（`enabled_groups`）**原样留着**：不报错、不丢内容、也不复活
+    assert 'enabled_groups = ["short"]' in text
     assert formulas_cfg.enabled_formulas == ["放量上攻"]
 
 
-def test_groups_place_formula_in_its_own_group() -> None:
-    """公式是一个**独立的组**（与 short 等并列），但不进 `GROUPS` 那张静态表。"""
-    assert groups.group_of("公式·放量上攻") == groups.FORMULA_GROUP_KEY
-    assert groups.group_label(groups.FORMULA_GROUP_KEY) == "公式"
-    assert groups.group_horizon(groups.FORMULA_GROUP_KEY) == 0
-    assert groups.formula_name_of("公式·放量上攻") == "放量上攻"
-    assert groups.is_formula_strategy("LowPriceStrategy") is False
-    assert groups.is_formula_strategy("公式·x") is True
-    # 三张老表一个都没被改：内置策略的组顺序与权重保持不变（有既有用例钉住）
-    assert groups.GROUP_ORDER == ("ultra", "short", "swing")
-    assert "formula" not in groups.GROUPS
-    assert pool.weight_of("公式·x") == formula_group.FORMULA_WEIGHT
-    assert pool.weight_of("LowPriceStrategy") == groups.STRATEGY_WEIGHTS["LowPriceStrategy"]
+def test_formula_name_helpers_live_in_formula_group() -> None:
+    """公式合成名的三个 helper 住在 `formula_group`（策略组机制删掉之后搬过来的）。
+
+    为什么它们必须留着：池子里的候选是按"策略名"组织的，公式靠 `公式·` 前缀
+    借这个结构（来源列、排序、推送全都能复用）；老库里的行也还带着类名，
+    靠 `legacy.strategy_label` 显示中文名。
+    """
+    assert formula_group.formula_strategy_name("放量上攻") == "公式·放量上攻"
+    assert formula_group.formula_name_of("公式·放量上攻") == "放量上攻"
+    assert formula_group.is_formula_strategy("公式·x") is True
+    # 老策略类名**不是**公式（它们只会出现在历史数据里）
+    assert formula_group.is_formula_strategy("LowPriceStrategy") is False
+    assert formula_group.formula_name_of("LowPriceStrategy") == "LowPriceStrategy"
+    assert pool.weight_of("公式·x") == formula_group.FORMULA_WEIGHT == 2
+    assert pool.weight_of("LowPriceStrategy") == 1        # 非公式一律 1（老数据）
 
 
 # ══════════════════════════════════════════════════════════════════════════

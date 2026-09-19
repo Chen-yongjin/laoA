@@ -21,7 +21,6 @@ from laoa_trader.intraday import now_shanghai  # noqa: E402
 from laoa_trader import scheduler as sched
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
-from laoa_trader.strategy import groups
 
 
 @pytest.fixture()
@@ -207,8 +206,13 @@ def test_enabled_formula_flows_to_pool_signals_and_watch(
     assert set(targets) == {"600003"}
 
 
-def test_watch_targets_filters_stale_pool_rows(cfg, monkeypatch) -> None:
-    """库里存着上一轮（含被禁用组）的池子时，观察池也要按选择过滤掉。"""
+def test_watch_targets_watches_every_stored_pool_row(cfg, monkeypatch) -> None:
+    """库里存着上一轮的池子时，**每一行都盯**（不再有"按策略组过滤"这一层）。
+
+    2026-09-18 之前这里会按"启用的策略组"把被停用组的标的剔掉；策略组机制删掉之后，
+    进池的只可能是勾选的公式标的与自选股 —— 没有"该不该盯"的第二套判断。
+    （老库里的行还带着 `LowPriceStrategy` 这种历史类名，照旧一视同仁。）
+    """
     storage.init_db(cfg.db_path)
     with storage.connect(cfg.db_path) as conn:
         storage.save_pool(conn, [
@@ -217,39 +221,34 @@ def test_watch_targets_filters_stale_pool_rows(cfg, monkeypatch) -> None:
             {"symbol": "600003", "name": "反转样本", "strategy": "ReversalStrategy",
              "strategies": "ReversalStrategy", "score": 2.0},
         ], "2026-09-11")
-    targets, pool_symbols = intraday.watch_targets(
-        cfg.db_path, selection=groups.resolve(["short"], [])
-    )
-    assert pool_symbols == {"600003"}
-    assert set(targets) == {"600003"}
+    targets, pool_symbols = intraday.watch_targets(cfg.db_path)
+    assert pool_symbols == {"600001", "600003"}
+    assert set(targets) == {"600001", "600003"}
 
 
-def test_watch_targets_keeps_symbol_picked_by_both_groups(cfg) -> None:
-    """一只股票被两条策略同时选中（跨组）时，只要有一条在启用范围内就保留。"""
+def test_watch_targets_keeps_symbol_picked_by_many_formulas(cfg) -> None:
+    """一只股票被多条公式同时选中时，只出现一次（目标表按代码去重）。"""
     storage.init_db(cfg.db_path)
     with storage.connect(cfg.db_path) as conn:
         storage.save_pool(conn, [
             {"symbol": "600009", "name": "双策略", "strategy": "LowPriceStrategy",
              "strategies": "LowPriceStrategy,ReversalStrategy", "score": 5.0},
         ], "2026-09-11")
-    targets, pool_symbols = intraday.watch_targets(
-        cfg.db_path, selection=groups.resolve(["short"], [])
-    )
+    targets, pool_symbols = intraday.watch_targets(cfg.db_path)
     assert pool_symbols == {"600009"}
 
 
-def test_watch_targets_filters_recent_signals(cfg) -> None:
+def test_watch_targets_falls_back_to_recent_signals(cfg) -> None:
+    """没有池子时退回"最近推送过的信号"（`signal` 表）—— 现在**不按策略过滤**了。"""
     storage.init_db(cfg.db_path)
     with storage.connect(cfg.db_path) as conn:
         storage.write_signals(conn, [
             ("2026-09-11", "LowPriceStrategy", "600001", "甲", 3.0, None, "低价股"),
             ("2026-09-11", "ReversalStrategy", "600003", "乙", 12.0, None, "短期反转"),
         ])
-    targets, pool_symbols = intraday.watch_targets(
-        cfg.db_path, selection=groups.resolve(["short"], [])
-    )
+    targets, pool_symbols = intraday.watch_targets(cfg.db_path)
     assert pool_symbols == set()             # 没有池子
-    assert set(targets) == {"600003"}        # 信号兜底也要按选择过滤
+    assert set(targets) == {"600001", "600003"}   # 信号兜底：库里有的都盯
 
 
 def test_run_daily_without_any_formula_is_normal_not_an_error(

@@ -315,7 +315,7 @@ def test_pool_output_shows_source_and_note(capsys, watch_db, tmp_path) -> None:
     # 改版后「来源」回答的是**哪条策略**（`策略·低价股`），组别与持有期单独一栏 ——
     # 界面「来源」列也是这个口径，两处说的是同一件事
     assert "来源 策略·低价股" in out
-    assert "组别 波段·T+10（T+10）" in out
+    assert "组别 —" in out            # 2026-09-18 起没有"策略组"了（公式没有组别）
     assert "来源 自选" in out                        # 纯自选
     assert "组别 —" in out                           # 自选没有组别（不留空、写 `—`）
     assert "备注 龙头" in out                        # 备注

@@ -1,15 +1,15 @@
-"""CLI 自选与覆盖：`--groups` / `--strategies` / `--once` / `--pool` / `--list-groups`。
+"""公式驱动的 CLI：`--once` / `--pool` + 老配置里的退役键不再影响选股。
 
-覆盖需求「一、4」与「二、1」的命令行部分：
-- 临时覆盖**不改配置文件**（文件字节不变）；
-- 两个都错时明确提示并且**不静默跑全量**；
-- `--once` 会写 signal/stock_pool 且与定时跑口径一致（幂等）。
+⚠️ 2026-09-18（用户要求）**口径变过，入口也变过**：候选只来自勾选的公式，
+`enabled_groups` / `enabled_strategies` 两个配置键**删除**（老的 config.toml 里那两行
+由 `load_config()` 当未知键忽略、回写时原样留着），
+`--groups` / `--strategies` / `--list-groups` / `--scorecard` 四个命令行入口
+**也一起删掉了**（它们服务的策略组机制与策略引擎已经不存在）。
 
-⚠️ 2026-09-18（用户要求）**口径变过**：候选只来自勾选的公式，
-`enabled_groups` / `enabled_strategies`（以及 `--groups` / `--strategies` 这两个覆盖参数）
-**不再影响选股结果** —— 它们只对 `--list-groups` / `--scorecard` 这些研究用入口有意义。
-所以下面"只跑某组/某策略"的用例都改成了"勾一条公式 → 它决定选谁"，
-并顺手钉住"覆盖参数不再把公式候选剔掉"。
+所以这个文件现在只守三件事：
+1. **勾一条公式 → 它决定选谁**（信号表与池子的来源都是 `公式·<名字>`）；
+2. **老配置里的退役键不拦路、不被改坏**（文件字节不变）；
+3. `--once` 幂等、`--pool` 能打出「来源」列。
 """
 
 from __future__ import annotations
@@ -109,28 +109,17 @@ def _enable_formulas(monkeypatch, tmp_path, cfg, config_path, formulas: dict[str
     assert toml_path(folder).endswith("formulas")      # 顺手确认路径助手没被改坏
 
 
-def test_list_groups_output(capsys) -> None:
-    assert cli(["--cli", "--list-groups"]) == 0
-    out = capsys.readouterr().out
-    for key in ("ultra", "short", "swing"):
-        assert key in out
-    assert "T+2" in out and "T+3" in out and "T+10" in out
-    assert "连板回踩低吸" in out and "低价股" in out
-    assert "--groups" in out
+def test_formula_decides_the_picks(capsys, seeded, tmp_path, monkeypatch) -> None:
+    """候选由**勾选的公式**决定；配置里那两行退役键（`enabled_groups` 等）不参与。
 
-
-def test_formula_decides_the_picks_and_group_override_is_inert(capsys, seeded,
-                                                              tmp_path, monkeypatch) -> None:
-    """候选由**勾选的公式**决定；`--groups` 覆盖不再把公式候选剔掉（2026-09-18 口径）。
-
-    勾一条 `C>10`（小库里只有 600003 在 10 元以上），再传一个跟它毫无关系的
-    `--groups swing`：票照旧进池、来源写 `公式·反转` —— 覆盖参数只对研究用入口有意义。
+    勾一条 `C>10`（小库里只有 600003 在 10 元以上）：票进池、来源写 `公式·反转`，
+    信号表里也正是这一轮跑的公式。
     """
     _enable_formulas(monkeypatch, tmp_path, seeded["cfg"], seeded["config"], {"反转": "C>10"})
     args = ["--cli", "--once", "--no-notify", "--config", str(seeded["config"])]
     before = seeded["config"].read_text(encoding="utf-8")
 
-    assert cli(args + ["--groups", "swing"]) == 0
+    assert cli(args) == 0
     out = capsys.readouterr().out
     assert "反转样本(600003)" in out
     with storage.connect(seeded["cfg"].db_path) as conn:
@@ -139,64 +128,8 @@ def test_formula_decides_the_picks_and_group_override_is_inert(capsys, seeded,
             "SELECT DISTINCT strategy FROM stock_pool")}
     assert strategies == {"公式·反转"}            # 信号表里就是这一轮跑的公式
     assert pool_strategies == {"公式·反转"}
-    # CLI 覆盖是"临时的"：配置文件字节不变（`--groups` 只改内存里的 cfg）
+    # 老配置里的退役键**原样留着**（用户文件不被改坏），文件字节不变
     assert seeded["config"].read_text(encoding="utf-8") == before
-
-
-def test_strategies_override_accepts_chinese_names(capsys, seeded,
-                                                   tmp_path, monkeypatch) -> None:
-    """`--strategies 短期反转` 中文名仍能解析（不报错），但**不再决定选谁**。
-
-    2026-09-18 起候选只来自勾选的公式：这里勾的是 `C<5`（只有 600001），
-    所以就算覆盖参数写着"短期反转"，选出来的也还是公式那一只。
-    """
-    _enable_formulas(monkeypatch, tmp_path, seeded["cfg"], seeded["config"], {"低价": "C<5"})
-    assert cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"]),
-                "--strategies", "短期反转"]) == 0
-    out = capsys.readouterr().out
-    assert "低价样本(600001)" in out
-    assert "认不出" not in out
-    with storage.connect(seeded["cfg"].db_path) as conn:
-        strategies = {r[0] for r in conn.execute("SELECT DISTINCT strategy FROM signal")}
-    assert strategies == {"公式·低价"}
-
-
-def test_strategies_override_accepts_class_names(capsys, seeded,
-                                                 tmp_path, monkeypatch) -> None:
-    """类名写法同样能解析（不报错）；选谁仍由勾选的公式决定。"""
-    _enable_formulas(monkeypatch, tmp_path, seeded["cfg"], seeded["config"], {"低价": "C<5"})
-    assert cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"]),
-                "--strategies", "LowPriceStrategy"]) == 0
-    out = capsys.readouterr().out
-    assert "认不出" not in out
-    with storage.connect(seeded["cfg"].db_path) as conn:
-        strategies = {r[0] for r in conn.execute("SELECT DISTINCT strategy FROM signal")}
-    assert strategies == {"公式·低价"}
-
-
-def test_groups_and_strategies_intersect_on_cli(capsys, seeded) -> None:
-    """`--groups short --strategies 低价股` 交集为空：**不再拒绝运行**（2026-09-18 口径）。
-
-    老口径下"交集为空"会让整轮选股被跳过（还报错退出 1）；新口径下这两个参数
-    只管研究用入口，选股看的是 `enabled_formulas`，所以这里照常跑完 ——
-    只是没有任何公式被勾上，于是"没有候选"（退出码 0，与"只盯自选股"同一件事）。
-    """
-    code = cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"]),
-                "--groups", "short", "--strategies", "低价股"])
-    out = capsys.readouterr().out
-    assert code == 0
-    assert "没有勾选任何公式" in out
-    with storage.connect(seeded["cfg"].db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0] == 0
-
-
-def test_unknown_group_name_warns(capsys, seeded) -> None:
-    """组名拼错仍然当场拦住（覆盖参数的**解析**没变，变的只是"它不再决定选谁"）。"""
-    code = cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"]),
-                "--groups", "nope"])
-    out = capsys.readouterr().out
-    assert code == 1
-    assert "未知策略组" in out
 
 
 def test_config_groups_no_longer_decide_the_picks(capsys, seeded,

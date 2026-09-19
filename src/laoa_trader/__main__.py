@@ -5,7 +5,7 @@
     python -m laoa_trader --cli --download     # 下载 10 年历史数据（含进度）
     python -m laoa_trader --cli --once         # 跑一次：数据增量 + 选股 + 建池
     python -m laoa_trader --cli --pool         # 只看当前股票池
-    python -m laoa_trader --cli --scorecard    # 策略成绩单：5 条策略的 α / 胜率 / t 值 / 逐年稳定性
+    python -m laoa_trader --cli --market       # 打印大盘概览那几行
     python -m laoa_trader --cli --market       # 只看大盘概览（与页面同一份：家数/成交额/涨跌家数/三组指数）
     python -m laoa_trader --cli --serve        # 常驻：定时日更 + 盘中提醒
 
@@ -177,51 +177,6 @@ def _split_list(text: str | None) -> list[str]:
     return [item.strip() for item in text.replace("，", ",").split(",") if item.strip()]
 
 
-def _apply_selection_override(cfg, args) -> int | None:
-    """把 `--groups/--strategies` 临时写进**内存里的** cfg（配置文件不动）。
-
-    语义（尽量不让人意外）：
-        - 都不给 → 完全按 config.toml；
-        - 只给 `--groups` → 这些组的全部成员（忽略配置里的 enabled_strategies）；
-        - 只给 `--strategies` → 就这几条策略（组范围放宽成全组，否则会被配置里
-          关掉的组"二次过滤"，用户会觉得"我明明指定了却不跑"）；
-        - 两个都给 → 组定范围、策略定取舍（取交集）。
-
-    ⚠️ 2026-09-18（用户要求）：这两个参数**不再影响选股结果** —— 候选只来自
-    `enabled_formulas` 勾选的公式，内置策略退出了选股链路。它们现在只对
-    `--list-groups` / `--scorecard` 这些**研究用**入口有意义。
-    但**拼错仍然当场拦住**：用户明确敲了参数却写错名字，沉默地跑下去最糟糕
-    （他会以为"我指定的那组跑了"）。
-
-    Returns:
-        None = 继续；整数 = 直接返回的退出码（参数写错）。
-    """
-    from laoa_trader.strategy import groups as groups_mod
-    from laoa_trader.strategy import rules as rules_mod
-
-    cli_groups = _split_list(args.groups)
-    cli_strategies = _split_list(args.strategies)
-    if not cli_groups and not cli_strategies:
-        return None
-
-    unknown_groups = [key for key in cli_groups if key not in groups_mod.GROUPS]
-    if unknown_groups:
-        print(f"❌ 未知策略组：{'、'.join(unknown_groups)}"
-              f"（可用：{' / '.join(groups_mod.GROUP_ORDER)}；用 --list-groups 看全部）")
-        return 1
-    known_names = set(rules_mod.STRATEGIES)
-    known_names |= {rules_mod.strategy_label(n) for n in rules_mod.STRATEGIES}
-    unknown_strategies = [name for name in cli_strategies if name not in known_names]
-    if unknown_strategies:
-        print(f"❌ 未知策略：{'、'.join(unknown_strategies)}"
-              "（写中文名或类名都行；用 --list-groups 看全部）")
-        return 1
-
-    cfg.enabled_groups = cli_groups or list(groups_mod.GROUP_ORDER)
-    cfg.enabled_strategies = cli_strategies
-    return None
-
-
 def _preflight_gate(cfg, auto_download: bool) -> int | None:
     """跑自检并按需补数据。
 
@@ -381,142 +336,6 @@ def _apply_run_time_override(cfg, args) -> None:
         print("（临时）每天自动运行已关闭：只在你手动点按钮/命令行跑时执行")
 
 
-def _print_groups() -> None:
-    """打印策略组说明（怎么选、有哪些成员）。"""
-    from laoa_trader.strategy import groups as groups_mod
-    from laoa_trader.strategy import rules as rules_mod
-
-    print("策略组（config.toml 的 enabled_groups 里填 key）：")
-    for line in groups_mod.describe_groups():
-        print(line)
-    print()
-    print("成员策略的中文名（enabled_strategies 里可以填中文名或类名）：")
-    for key in groups_mod.GROUP_ORDER:
-        group = groups_mod.GROUPS[key]
-        names = "、".join(
-            f"{rules_mod.strategy_label(n)}（权重{w}）" for n, w in group.members
-        )
-        print(f"  {group.label}：{names}")
-        print(f"      依据：{group.note}")
-    print()
-    print("例：python -m laoa_trader --cli --groups ultra,short")
-    print("    python -m laoa_trader --cli --strategies 低价股,连板回踩低吸 --once")
-
-
-def _scorecard_command(cfg, args) -> int:
-    """`--scorecard`：跑策略成绩单（回测），打印表格并落盘 CSV + Markdown。
-
-    为什么单独给一个命令：用户投诉"策略选出来的股票很垃圾"，而界面上只有
-    "今天选了哪几只"，没有任何"这条策略历史上到底行不行"的证据。这个命令
-    就是那份证据，顺带也是将来"自定义策略公式"的评估底座（同一套口径）。
-
-    **默认并列跑多套执行口径**（开盘买 A / 尾盘买 B / 隔夜 C + 对照档）：
-    同一个策略"开盘买"与"尾盘买"的成绩可能完全不同 —— 只给一套口径，等于把
-    一个执行假设偷偷写进结论里。结论看 A 与 B 是否都为正。
-
-    退出码：0 = 至少有一条策略给出结论；1 = 样本不足/库不可用（并说明原因）；
-    2 = 用法错误（例如口径写了"当天买当天卖"= T+0，在 A 股不可执行）。
-    """
-    from laoa_trader.research import scorecard as scorecard_mod
-
-    db_path = Path(args.db) if args.db else Path(cfg.db_path)
-    # 不传 --horizons → 跑默认的多口径；传了 → 跑旧口径家族（D+1 开盘买那一套，
-    # 便于与 NAS 的历史结论对齐）
-    try:
-        conventions = (
-            scorecard_mod.as_conventions(
-                scorecard_mod.check_horizons(
-                    [int(x) for x in args.horizons.replace("，", ",").split(",") if x.strip()]
-                )
-            )
-            if args.horizons
-            else scorecard_mod.CONVENTIONS
-        )
-    except (ValueError, scorecard_mod.IllegalHorizonError,
-            scorecard_mod.IllegalConventionError) as exc:
-        print(f"❌ 口径不合法：{exc}")
-        print("   合法示例：--horizons 1,3,5,10（1 = 隔日超短，持仓 1 个交易日）；"
-              "不带 --horizons 时默认跑 A/B/C + 对照档")
-        return 2
-
-    out_dir = Path(args.out) if args.out else Path.cwd() / "策略成绩单"
-    specs = list(scorecard_mod.BUILTIN_SPECS)
-    # 范围：**默认评全部策略**，只有显式给了 `--groups` / `--strategies` 才收窄。
-    #
-    # 为什么不跟着选股开关（`enabled_groups`）走：成绩单本来就是"决定谁该留"的依据 ——
-    # 默认策略集收窄成只开 `short` 之后，再跟着它走就会**只评 3 条**，
-    # 被停用的那两组连数字都看不到，等于把做判断需要的证据藏起来了。
-    from laoa_trader.strategy import groups as groups_mod
-
-    if _split_list(args.groups) or _split_list(args.strategies):
-        selection = groups_mod.resolve_from_config(cfg)
-        if not selection.empty and not selection.default_all:
-            wanted = set(selection.strategies)
-            filtered = [spec for spec in specs if spec.key in wanted]
-            if filtered and len(filtered) != len(specs):
-                specs = filtered
-                print(f"只评估：{selection.describe()}")
-    else:
-        print("评估范围：全部策略（含已停用的组——成绩单不受选股开关限制，"
-              "用 --groups/--strategies 可以收窄）")
-
-    print(f"正在评估 {len(specs)} 条策略（库：{db_path}）")
-    print("  执行口径：" + "；".join(
-        f"{conv.key}={conv.description}" for conv in conventions
-    ))
-    print("  一字板买不进（开盘口径）与收盘涨停买不进（尾盘口径）分别剔除并计数；"
-          "α 用同口径的全市场等权基准；t 值按信号日聚合")
-    try:
-        results = scorecard_mod.evaluate_all(
-            db_path, specs, conventions=conventions, top_n=args.top
-        )
-    except scorecard_mod.ScorecardError as exc:
-        print(f"❌ 无法评估：{exc}")
-        return 1
-    except (scorecard_mod.IllegalHorizonError,
-            scorecard_mod.IllegalConventionError) as exc:  # pragma: no cover - 上面已校验
-        print(f"❌ 口径不合法：{exc}")
-        return 2
-
-    print()
-    print(scorecard_mod.format_table(results, conventions=conventions))
-
-    stamp = datetime.now().strftime("%Y-%m-%d")
-    try:
-        main_csv = scorecard_mod.write_csv(
-            scorecard_mod.result_rows_for_export(results),
-            out_dir / f"策略成绩单_{stamp}.csv",
-            fields=scorecard_mod.RESULT_FIELDS,
-        )
-        verdict_csv = scorecard_mod.write_csv(
-            scorecard_mod.verdict_rows_for_export(results),
-            out_dir / f"策略成绩单_{stamp}_结论.csv",
-            fields=scorecard_mod.VERDICT_FIELDS,
-        )
-        year_csv = scorecard_mod.write_csv(
-            scorecard_mod.by_year_rows_for_export(results),
-            out_dir / f"策略成绩单_{stamp}_逐年明细.csv",
-            fields=scorecard_mod.BY_YEAR_FIELDS,
-        )
-        markdown = scorecard_mod.write_markdown(
-            results, out_dir / f"策略成绩单_{stamp}.md",
-            title=f"策略成绩单（{stamp}）",
-        )
-    except OSError as exc:
-        print(f"⚠️ 成绩单落盘失败（不影响上面的结论）：{exc}")
-        return 0 if any(result["sufficient"] for result in results) else 1
-    print(f"\n已写出：\n  {main_csv}\n  {verdict_csv}\n  {year_csv}\n  {markdown}")
-
-    if not any(result["sufficient"] for result in results):
-        print("\n❌ 样本不足，未给出任何结论（原因见上）—— "
-              "先 `python -m laoa_trader --cli --download` 把数据下够（至少几年）再跑。")
-        return 1
-    print("\n提示：α 在 0.1% 级别的策略，扣掉往返成本（约 0.15%）后基本就没了；"
-          "只有 A（开盘买）与 B（尾盘买）两套口径都为正、且 t 值 ≥2、逐年大多为正，"
-          "才算这个策略真有边际。")
-    return 0
-
-
 def _fmt_amount(value: int) -> str:
     """进度数值的显示：超过 1MB 就按 MB 显示（dump 下载是几百 MB，字节数没人看得懂）。"""
     if value >= 1_000_000:
@@ -628,41 +447,11 @@ def cli(argv: list[str] | None = None) -> int:
         help="只看大盘概览：打印概览页那几行（涨跌停家数 + 沪深北成交额、涨跌家数、宽基/情绪/板块三组指数）后退出；"
              "取不到数据时退出码非 0 并说明原因",
     )
-    parser.add_argument(
-        "--groups",
-        help="临时只跑这些策略组（逗号分隔，覆盖 config.toml 的 enabled_groups）："
-             "ultra,short,swing",
-    )
-    parser.add_argument(
-        "--strategies",
-        help="临时只跑这些策略（逗号分隔，中文名或类名都认，覆盖配置）："
-             "低价股,连板回踩低吸",
-    )
-    parser.add_argument("--list-groups", action="store_true",
-                        help="列出策略组与成员策略（含持有期与权重），然后退出")
-    parser.add_argument(
-        "--scorecard", action="store_true",
-        help="策略成绩单（回测）：给每条策略算 α/胜率/t 值/逐年稳定性，打印表格并写出 CSV+Markdown。"
-             "入场=信号日次日开盘、出场=买入日后第 N 个交易日收盘（T+1 合法），"
-             "一字板剔除、α 扣掉同期全市场等权收益、t 值按信号日聚合；样本不足时退出码 1",
-    )
-    parser.add_argument(
-        "--horizons", metavar="1,3,5,10",
-        help="配合 --scorecard：只跑旧口径（D+1 开盘买，持有 N 个交易日）的持有期列表，逗号分隔。"
-             "不带这个参数时默认跑多套口径：A 开盘买 / B 尾盘买 / C 隔夜 + 对照档；"
-             "0 是 T+0（当天买当天卖），在 A 股不可执行，会被拒绝",
-    )
-    parser.add_argument(
-        "--out", metavar="目录",
-        help="配合 --scorecard：成绩单落盘目录（默认 ./策略成绩单），"
-             "写出 CSV（主表 + 逐年明细）与 Markdown 报告",
-    )
-    parser.add_argument(
-        "--db", metavar="库路径",
-        help="配合 --scorecard：要评估的库（默认用本机库）。也可指向别的资料库**只读**评估，"
-             "例如服务器版的库；不会写入",
-    )
-    parser.add_argument("--top", type=int, help="配合 --scorecard：每个信号日取前 N 只（默认 30）")
+    # 2026-09-18：`--groups` / `--strategies` / `--list-groups` / `--scorecard`
+    # （连同配套的 `--horizons` / `--out` / `--db` / `--top`）**整体删掉了** ——
+    # 它们服务的对象是写在 `strategy/rules.py` 里的那 5 条 Python 策略与策略组机制，
+    # 那两样东西随"内置策略改成随包公式"一起删除（见 legacy.py 的模块注释）。
+    # 想按条件选股就在界面上勾公式（或直接改 `formulas/` 里的公式文件）。
     parser.add_argument(
         "--watchlist", nargs="+", metavar=("动作", "代码"),
         help="自选股管理：add 600519 / list / remove 600519 / enable 600519 / disable 600519"
@@ -690,19 +479,7 @@ def cli(argv: list[str] | None = None) -> int:
     _PROGRESS_LAST.clear()          # 每轮重新计数：同一阶段第二次跑也要有进度输出
 
     cfg = load_config(args.config) if args.config else get_config()
-    override_code = _apply_selection_override(cfg, args)
-    if override_code is not None:
-        return override_code          # 参数写错：当场退出（别沉默地跑下去）
     _apply_run_time_override(cfg, args)
-
-    if args.list_groups:
-        _print_groups()
-        return 0
-
-    # 成绩单是**只读**评估：数据目录不可写也要能跑（用户可能只想拿一份证据），
-    # 因此放在目录/自检那两道闸门之前
-    if args.scorecard:
-        return _scorecard_command(cfg, args)
 
     if cfg.config_warning():
         print(f"⚠️ {cfg.config_warning()}")
@@ -757,8 +534,9 @@ def cli(argv: list[str] | None = None) -> int:
             print(f"  {i:>2}. {row['name']}({row['symbol']})｜"
                   f"来源 {row.get('source_label') or '—'}｜组别 {group_text}｜"
                   f"{row.get('industry') or '—'}｜{row.get('reason') or ''}{note}")
-        print("来源说明：策略·xxx=哪条内置策略选出来的；公式·xxx=你自己写的公式；"
-              "自选=手工加的；带 +自选 = 两者都有（只出现一行）")
+        print("来源说明：公式·xxx=你勾选参与选股的公式（随包公式与自写的都在这里）；"
+              "自选=手工加的；带 +自选 = 两者都有（只出现一行）；"
+              "策略·xxx=老版本（2026-09-18 之前）内置策略留下的历史行")
         return 0
 
     # 只有"要写数据"的命令才因为目录不可用而终止；
@@ -795,10 +573,9 @@ def cli(argv: list[str] | None = None) -> int:
             print(f"❌ {gate['message']}")
             return 1
 
-        # ⚠️ 2026-09-18（用户要求）：**候选只来自勾选的公式** —— 5 条写在代码里的
-        # Python 策略退出了选股链路，`enabled_groups` / `enabled_strategies` 不再影响
-        # 选股结果（`--groups` / `--strategies` 这两个覆盖参数仍然接受、也仍写进配置，
-        # 但只对 `--list-groups` / `--scorecard` 这些**研究用**入口有意义）。
+        # ⚠️ 2026-09-18（用户要求）：**候选只来自勾选的公式** —— 那 5 条写在代码里的
+        # Python 策略连同策略组机制一起删掉了（`--groups` / `--strategies` /
+        # `--list-groups` / `--scorecard` 这些入口也随之删除）。
         # 所以这里不再因为"没有启用任何策略"而拒绝运行：一条公式都没勾 = 只盯自选股，
         # 那是**默认的正常状态**。
         enabled = [str(n) for n in (getattr(cfg, "enabled_formulas", None) or [])]
@@ -816,10 +593,8 @@ def cli(argv: list[str] | None = None) -> int:
         for err in report["errors"]:
             print(f"  ⚠️ {err}")
         if report.get("push_skipped"):
+            # "没推"现在只有一种原因：同一天同一批内容已经推过（幂等）
             print(f"未推送：{report['push_skipped']}")
-        if report.get("push_note"):
-            # 推送过滤（`push_only_proven`）：把"跳过哪些、为什么"直接打出来
-            print(f"推送过滤：{report['push_note']}")
         if report.get("notify"):
             from laoa_trader.notify import summarize
 
@@ -845,10 +620,9 @@ def main(argv: list[str] | None = None) -> int:
     wants_cli = "--cli" in argv or any(
         a in argv
         for a in ("--download", "--once", "--pool", "--serve", "--doctor",
-                  "--groups", "--strategies", "--list-groups", "--watchlist",
-                  "--note", "--config", "--auto-download", "--force-download",
-                  "--run-at", "--run-at-fallback", "--no-auto-run",
-                  "--market", "--scorecard", "--horizons", "--out", "--db", "--top",
+                  "--watchlist", "--note", "--config", "--auto-download",
+                  "--force-download", "--run-at", "--run-at-fallback",
+                  "--no-auto-run", "--market",
                   "--help", "-h")
     )
     if wants_cli:

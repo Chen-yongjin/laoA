@@ -342,7 +342,8 @@ def run_daily(
         "pushed": False, "push_skipped": None,
         # 桌面导出：成功时是文件路径，失败/跳过时是 None（失败原因进 errors，不静默）
         "export_path": None,
-        # 推送过滤（`push_only_proven`）：被跳过的标的与中文原因 —— 状态栏/日志/报告都从这里取
+        # 推送过滤的遗留键：**2026-09-18 起恒为空**（那道过滤随策略引擎一起删掉了）。
+        # 键保留是因为状态栏、CLI 与老调用方都在读它们（读不到会 KeyError）。
         "push_skipped_rows": [], "push_note": None, "push_skipped_kind": None,
     }
 
@@ -387,9 +388,9 @@ def run_daily(
         if picks_all:
             # `save_signals()` 只是"把候选写进 signal 表"的写库函数（与策略实现无关），
             # 所以继续借它用；`rules` 这个模块本身已经不参与选股了。
-            from laoa_trader.strategy import rules as rules_mod
+            from laoa_trader import legacy
 
-            report["signals"] = rules_mod.save_signals(
+            report["signals"] = legacy.save_signals(
                 engine, {k: v[:SIGNAL_TOP_N] for k, v in picks_all.items()}
             )
     except Exception as exc:  # noqa: BLE001
@@ -441,25 +442,12 @@ def run_daily(
         from laoa_trader.data import storage
         from laoa_trader.notify import notify_all, summarize
 
-        # 推送范围：**默认全推**；只有用户主动打开 `push_only_proven` 才收窄成
-        # "只推有边际的策略标的"。那时 `open_only` 那两条策略（地量后放量变盘 /
-        # 首板缩量整理：正 α 只在"开盘买"口径下存在，尾盘买就转负）的标的会被跳过 ——
-        # 但它们**照常进池、照常显示在表格/卡片上**，而且跳过的原因会写进推送/日志/状态栏。
-        push_rows, skipped_rows = pool.split_push_rows(pool_rows, cfg)
-        report["push_skipped_rows"] = [
-            {"symbol": r.get("symbol"), "name": r.get("name"),
-             "strategies": r.get("strategies") or r.get("strategy") or ""}
-            for r in skipped_rows
-        ]
-        if skipped_rows:
-            report["push_note"] = pool.skipped_push_note(skipped_rows)
-            logger.info("推送过滤：" + report["push_note"])
-        if not push_rows:
-            # 今天命中的全是"依赖开盘"的标的 → **不推**，但要把原因说清楚
-            report["push_skipped"] = report["push_note"] or "今天没有可推送的标的"
-            report["push_skipped_kind"] = "filtered"
-            logger.info("跳过推送：" + report["push_skipped"])
-            return report
+        # 推送范围：**池子里有什么就推什么**。
+        # 2026-09-18 之前这里还有一道"只推有边际的策略标的"（`push_only_proven`）——
+        # 它过滤的对象是那两条 `open_only` 的 Python 策略（正 α 只在"开盘买"口径下
+        # 存在）。内置策略改成随包公式之后，这批"我们自己的策略证据"连同引擎一起删了，
+        # 这道过滤也就没了可过滤的东西，所以整段拿掉。
+        push_rows = list(pool_rows)
 
         title = f"📈 老A选股助手-选股池 | {report['data_date']}"
         # 「公式」组：用户自己的公式选出来的票，**标题里点一下名** ——
@@ -468,20 +456,15 @@ def run_daily(
         # 标题不该比正文还长。
         picked_formulas = list((report.get("formulas") or {}).get("picks") or {})
         if picked_formulas:
-            # 懒加载：`groups` 只在"标题里给公式点名"这一处用得到（把合成名
-            # `公式·放量上攻` 还原成用户起的名字），没必要为它拖慢模块导入。
-            from laoa_trader.strategy import groups as groups_mod
+            # 懒加载：`formula_group` 只在"标题里给公式点名"这一处用得到
+            # （把合成名 `公式·放量上攻` 还原成用户起的名字），没必要为它拖慢模块导入。
+            from laoa_trader.strategy.formula_group import formula_name_of
 
-            names = "、".join(
-                groups_mod.formula_name_of(key) for key in picked_formulas[:2]
-            )
+            names = "、".join(formula_name_of(key) for key in picked_formulas[:2])
             more = f" 等 {len(picked_formulas)} 条" if len(picked_formulas) > 2 else ""
             title += f"｜公式：{names}{more}"
         lines = pool.format_pool_lines(push_rows)
         lines.extend(_pool_plan_lines(push_rows, cfg))
-        if skipped_rows:
-            # 正文里也留一句：用户收到推送时就知道"今天还有几只没推、为什么"
-            lines.append(report["push_note"])
         day = report["data_date"] or intraday.now_shanghai().strftime("%Y-%m-%d")
         fingerprint = pool_fingerprint(title, lines)
         try:

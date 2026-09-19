@@ -1435,33 +1435,38 @@ def test_enable_write_failure_reverts_checkbox(page, page_cfg, qapp,
 
 
 def test_no_row_writes_the_legacy_group_keys(page, page_cfg, qapp) -> None:
-    """列表里**没有任何一行**再会去写 `enabled_groups` / `enabled_strategies`。
+    """列表里**没有任何一行**会去写 `enabled_groups` / `enabled_strategies`。
 
-    老版本这条用例（`test_builtin_check_writes_both_group_and_strategy_keys`）钉的是
-    "勾内置策略必须同时写组与策略两个键"—— 那是内置策略时代最坑的一处
-    （`groups.resolve()` 在两者都非空时取交集，只写一个会"勾了却不跑"）。
-    2026-09-18 内置策略改成随包公式之后，那两个键不再由这一页维护，
-    于是这条用例反过来钉：**勾公式、勾竞价，都别去动它们** ——
-    用户 config.toml 里留着的老值要原样保留（他手写过的配置不该被界面悄悄改掉）。
+    老版本这条用例钉的是"勾内置策略必须同时写组与策略两个键"—— 那是内置策略时代
+    最坑的一处（`groups.resolve()` 在两者都非空时取交集，只写一个会"勾了却不跑"）。
+    2026-09-18 内置策略改成随包公式、策略组机制删掉之后，那两个键**连字段都没了**：
+
+    * 配置对象上不该再有这两个属性（`Config` 里已删除）；
+    * 勾公式只写 `enabled_formulas`；勾竞价只写 `intraday_auction`；
+    * 用户 config.toml 里留着的老值原样保留（`load_config` 按未知键忽略、回写不动它）。
     """
+    from laoa_trader.config import Config
+
+    assert not hasattr(Config(), "enabled_groups")
+    assert not hasattr(Config(), "enabled_strategies")
+
     _write_formula(page.directory, "放量上攻", "C>MA(C,5)")
     page.reload()
-    before_groups = list(page_cfg.enabled_groups)
-    before_strategies = list(page_cfg.enabled_strategies)
+    before = page_cfg.source_path.read_text(encoding="utf-8")
 
     page._row_boxes["放量上攻"].setChecked(True)
     qapp.processEvents()
     page._auction_box.setChecked(True)
     qapp.processEvents()
 
-    assert page_cfg.enabled_groups == before_groups
-    assert page_cfg.enabled_strategies == before_strategies
     assert page_cfg.enabled_formulas == ["放量上攻"]
     assert page_cfg.intraday_auction is True
-    # 配置里那两个键的**原文**也还在（保存设置时不认识的键要保留）
-    text = page_cfg.source_path.read_text(encoding="utf-8")
-    assert "# 用户自己的注释（保存设置后必须还在）" in text
-    assert 'my_own_key = "别动我"' in text
+    # 老配置里那行退役键（`enabled_groups = ["short"]`）原样留着：
+    # 用户手写过的配置不该被界面悄悄改掉 / 删掉（`load_config` 当未知键忽略它）
+    after = page_cfg.source_path.read_text(encoding="utf-8")
+    assert 'enabled_groups = ["short"]' in before
+    assert 'enabled_groups = ["short"]' in after, "界面把老配置里那行弄丢了"
+    assert "# 用户自己的注释（保存设置后必须还在）" in after
 
 
 def test_uncheck_one_formula_keeps_the_others(page, page_cfg, qapp) -> None:
@@ -1654,22 +1659,20 @@ def test_auction_row_is_the_only_fixed_row_and_reads_config(page) -> None:
 
 
 def test_auction_row_toggle_writes_intraday_auction_only(page, page_cfg, qapp) -> None:
-    """勾上它 → 只写 `intraday_auction`；**选股那三个键一个字都不动**。"""
-    groups_before = list(page_cfg.enabled_groups)
-    strategies_before = list(page_cfg.enabled_strategies)
+    """勾上它 → 只写 `intraday_auction`；**勾选公式的那个键一个字都不动**。"""
     formulas_before = list(page_cfg.enabled_formulas)
 
     page._auction_box.setChecked(True)
     qapp.processEvents()
 
     assert page_cfg.intraday_auction is True
-    assert page_cfg.enabled_groups == groups_before          # 不参与选股 = 这三个键不变
-    assert page_cfg.enabled_strategies == strategies_before
-    assert page_cfg.enabled_formulas == formulas_before
+    assert page_cfg.enabled_formulas == formulas_before      # 不参与选股 = 这个键不变
     assert "竞价策略已开启" in page.hint_text
     assert "不参与选股" in page.hint_text
-    # 写进 config.toml 的就是那个键
-    assert "intraday_auction" in page_cfg.source_path.read_text(encoding="utf-8")
+    # 写进 config.toml 的就是那个键，而且**不写**任何已退役的键
+    text = page_cfg.source_path.read_text(encoding="utf-8")
+    assert "intraday_auction" in text
+    assert "enabled_groups =" not in text.split("intraday_auction")[1]
 
     page._auction_box.setChecked(False)
     qapp.processEvents()

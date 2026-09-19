@@ -70,7 +70,7 @@
 ----
     from laoa_trader.research import scorecard
 
-    result = scorecard.evaluate("trader.db", scorecard.BUILTIN_SPECS[0])
+    result = scorecard.evaluate("trader.db", scorecard.spec_from_signal("我的信号", "我的信号", fn))
     print(result["rows"][0]["avg_alpha_pct"], result["rows"][0]["t_stat"])
 
 命令行走 `python -m laoa_trader --cli --scorecard`。
@@ -637,33 +637,13 @@ def _empty() -> pd.DataFrame:
     return pd.DataFrame(columns=["date", "symbol", "factor"])
 
 
-def _out(panel: pd.DataFrame, mask: pd.Series, factor: pd.Series) -> pd.DataFrame:
-    """把条件掩码 + 因子整理成候选表（只保留命中的行）。"""
-    mask = mask.fillna(False).astype(bool)
-    out = panel.loc[mask, ["date", "symbol"]].copy()
-    out["factor"] = factor[mask]
-    return out.dropna(subset=["factor"])
-
-
 def _grouped(panel: pd.DataFrame):
+    """按股票分组（每只票的滚动窗口/位移都必须**独立**算，不能跨票）。
+
+    这个 helper 原来与 5 条内置策略的候选函数放在一起；那些函数删掉之后它仍然是
+    `attach_ladder()` 的依赖（把当日连板数按股票下移一行），所以留在原地。
+    """
     return panel.groupby("symbol", sort=False)
-
-
-def _prepare(panel: pd.DataFrame) -> pd.DataFrame:
-    """补齐内置策略要用的派生列（每只股票独立计算，与实盘口径一致）。"""
-    work = panel.copy()
-    grouped = _grouped(work)
-    work["ret1"] = grouped["close"].transform(lambda s: s.pct_change())
-    work["prev_close"] = grouped["close"].shift(1)
-    work["prev_volume"] = grouped["volume"].shift(1)
-    work["ma5"] = grouped["close"].transform(lambda s: s.rolling(5).mean())
-    work["avg_turnover20"] = grouped["turnover"].transform(lambda s: s.rolling(20).mean())
-    work["vol_ma20_prev"] = grouped["volume"].transform(
-        lambda s: s.shift(1).rolling(20).mean()
-    )
-    for lag in (1, 2, 3):
-        work[f"vol_lag{lag}"] = grouped["volume"].shift(lag)
-    return work
 
 
 def attach_ladder(panel: pd.DataFrame, ladder: dict[tuple[str, str], int]) -> pd.DataFrame:
@@ -681,100 +661,6 @@ def attach_ladder(panel: pd.DataFrame, ladder: dict[tuple[str, str], int]) -> pd
         work["lu_days_today"] = 0
     work["prev_lu_days"] = _grouped(work)["lu_days_today"].shift(1)
     return work
-
-
-# ── 内置的 5 条策略：条件、窗口、阈值逐条对齐 `strategy/rules.py` ──
-#
-# 为什么要在回测里**重写一遍**而不是直接调策略类：策略类是"取每只股票最后一根K线"
-# 的实盘写法（`factors.latest_snapshot`），拿到历史某一天要改取数层；
-# 这里把它改写成面板向量化形式，条件一字不改（与服务器版 `research/backtest.py`
-# 的做法相同）。改条件就会让成绩单与实盘脱节 —— 那比没有成绩单更糟。
-
-
-def _cand_low_price(panel: pd.DataFrame) -> pd.DataFrame:
-    """低价股：绝对股价最低（≥2 元、日均成交额 ≥3000 万、非跌停）。"""
-    work = _prepare(panel)
-    mask = (
-        (work["close"] >= 2.0)
-        & (work["avg_turnover20"] >= 3e7)
-        & (work["ret1"] > -0.095)
-    )
-    return _out(work, mask, work["close"])  # 升序：越便宜越优先
-
-
-def _cand_ladder_pullback(panel: pd.DataFrame) -> pd.DataFrame:
-    """连板回踩低吸：昨日连板 ≥2 + 今日缩量收阴 + 不破 5 日线。"""
-    work = _prepare(panel)
-    mask = (
-        (work["prev_lu_days"] >= 2)
-        & (work["close"] < work["prev_close"])
-        & (work["volume"] < work["prev_volume"] * 0.9)
-        & (work["close"] >= work["ma5"] * 0.98)
-        & (work["avg_turnover20"] >= 3e7)
-    )
-    return _out(work, mask, work["prev_lu_days"])  # 降序：连板越高越优先
-
-
-def _cand_reversal(panel: pd.DataFrame) -> pd.DataFrame:
-    """短期反转：20 日跌幅 ≥10% + 流动性 + 排除当日跌停。"""
-    work = _prepare(panel)
-    work["mom20"] = _grouped(work)["close"].transform(lambda s: s / s.shift(20) - 1)
-    mask = (
-        (work["mom20"] <= -0.10)
-        & (work["avg_turnover20"] >= 3e7)
-        & (work["ret1"] > -0.095)
-    )
-    return _out(work, mask, work["mom20"])  # 升序：跌得越多越优先
-
-
-def _cand_dryup_expansion(panel: pd.DataFrame) -> pd.DataFrame:
-    """地量后放量变盘：前 3 日地量（<20 日均量 ×0.7）+ 今日放量 ≥×1.5 + 收阳涨 0~9%。"""
-    work = _prepare(panel)
-    base = (work["vol_lag1"] + work["vol_lag2"] + work["vol_lag3"]) / 3
-    work["factor"] = work["volume"] / base.replace(0, float("nan"))
-    mask = (
-        (work["vol_lag1"] < work["vol_ma20_prev"] * 0.7)
-        & (work["vol_lag2"] < work["vol_ma20_prev"] * 0.7)
-        & (work["vol_lag3"] < work["vol_ma20_prev"] * 0.7)
-        & (work["volume"] >= work["vol_ma20_prev"] * 1.5)
-        & (work["close"] > work["open"])
-        & (work["ret1"] > 0)
-        & (work["ret1"] <= 0.09)
-        & (work["close"] >= 2.0)
-        & (work["avg_turnover20"] >= 3e7)
-    )
-    return _out(work, mask, work["factor"])  # 降序：放量越猛越优先
-
-
-def _cand_first_limit_up(panel: pd.DataFrame) -> pd.DataFrame:
-    """首板缩量整理：昨日**首次**涨停 + 今日缩量不破位。"""
-    work = _prepare(panel)
-    work["prev_ret1"] = _grouped(work)["ret1"].shift(1)
-    work["prev_ret2"] = _grouped(work)["ret1"].shift(2)
-    work["factor"] = work["volume"] / work["prev_volume"]
-    mask = (
-        (work["prev_ret1"] >= 0.095)
-        & (work["prev_ret2"] < 0.095)
-        & (work["ret1"] < 0.09)
-        & (work["factor"] < 1.0)
-        & (work["close"] >= work["prev_close"] * 0.95)
-    )
-    return _out(work, mask, work["factor"])  # 升序：缩量越明显越优先
-
-
-#: 内置策略（顺序 = 组顺序，与界面/推送一致）
-BUILTIN_SPECS: tuple[Spec, ...] = (
-    Spec("LadderPullbackStrategy", "连板回踩低吸", _cand_ladder_pullback, ascending=False,
-         group="ultra", note="T+1 隔日档唯一候选：昨日连板≥2 今日缩量回踩不破 5 日线"),
-    Spec("ReversalStrategy", "短期反转", _cand_reversal, ascending=True,
-         group="short", note="20 日跌幅≥10% 且非跌停"),
-    Spec("DryUpExpansionStrategy", "地量后放量变盘", _cand_dryup_expansion, ascending=False,
-         group="short", note="前 3 日地量后今日放量收阳"),
-    Spec("FirstLimitUpStrategy", "首板缩量整理", _cand_first_limit_up, ascending=True,
-         group="short", note="昨日首板 + 今日缩量不破位"),
-    Spec("LowPriceStrategy", "低价股", _cand_low_price, ascending=True,
-         group="swing", note="绝对股价最低（≥2 元且流动性达标）"),
-)
 
 
 def _coerce_spec(spec) -> Spec:
@@ -1264,7 +1150,14 @@ def evaluate_all(
     **kwargs,
 ) -> list[dict]:
     """对多条策略跑成绩单（面板/基准/风险名单只算一次，摊销到每条策略）。"""
-    definitions = list(specs if specs is not None else BUILTIN_SPECS)
+    definitions = list(specs or [])
+    if not definitions:
+        # 2026-09-18：内置的 5 条策略（那批 `BUILTIN_SPECS`）随策略引擎一起删掉了 ——
+        # 现在只有"调用方明确给出策略定义"这一条路（自定义公式的评估底座）。
+        raise ScorecardError(
+            "没有给出要评估的策略定义（内置策略已在 2026-09-18 删除，"
+            "请传入 specs）"
+        )
     # 口径：显式给 conventions 就用它，否则按旧参数 horizons 推（D+1 开盘买那一套）
     given = kwargs.pop("conventions", None)
     convs = as_conventions(given if given is not None

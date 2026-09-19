@@ -53,7 +53,6 @@ from laoa_trader.log import get_logger, log_file_path
 from laoa_trader.notify import KINDS, sound, summarize
 from laoa_trader.notify.windows import xueqiu_url
 from laoa_trader.scheduler import Scheduler, data_gate, refresh_data, run_daily
-from laoa_trader.strategy import rules as rules_mod
 from laoa_trader.ui import quotes as quotes_mod
 from laoa_trader.ui import theme as theme_mod
 
@@ -4037,9 +4036,9 @@ if QT_AVAILABLE:
         def _quote_symbols(self) -> list[str]:
             """现在要盯的代码：池子 + 自选 + 持仓（实时快照只取这些）。
 
-            为什么**不**用 `intraday.watch_targets()`：那个函数会解析策略组、查近期信号，
-            是"盘中盯盘"那一轮的完整口径；而这里每 5 秒被问一次（限流判断用），
-            只需要"有哪些代码"，三条轻查询就够了。
+            为什么**不**用 `intraday.watch_targets()`：那个函数还会查近期信号、读持仓、
+            过滤"已关闭监控"的票，是"盘中盯盘"那一轮的完整口径；
+            而这里每 5 秒被问一次（限流判断用），只需要"有哪些代码"，三条轻查询就够了。
 
             取不到就返回空列表 —— 空列表 = 一次请求都不发（见 `QuoteService.should_request`），
             这正是我们要的降级：库还没建好时不该去外呼。
@@ -5397,17 +5396,10 @@ if QT_AVAILABLE:
 
                 bits.append("通知：" + _sum(report.get("notify") or {}))
             elif report.get("push_skipped"):
-                # 两种"没推"要分清：① 同一天同一批内容已经推过（幂等，正常现象）；
-                # ② 今天命中的全是「依赖开盘」的策略（默认不推）—— 后者必须把原因说出来，
-                #    否则用户会以为"策略今天没选到票"
-                if report.get("push_skipped_kind") == "filtered":
-                    bits.append("未推送：" + str(report["push_skipped"]))
-                else:
-                    bits.append("未重复推送")
-            if report.get("push_note"):
-                skipped = report.get("push_skipped_rows") or []
-                bits.append(f"已跳过 {len(skipped)} 只依赖开盘的标的（进池但没推送，"
-                            "因为 push_only_proven 开着）")
+                # "没推"现在只剩一种：同一天同一批内容已经推过（幂等，正常现象）。
+                # （2026-09-18 之前还有"命中的全是依赖开盘的策略"那一路 —— 它随
+                #  Python 策略引擎一起删掉了，见 scheduler.run_daily 里那段注释。）
+                bits.append("未重复推送")
             errors = report.get("errors") or []
             text = f"{label}完成：" + "，".join(bits)
             if errors:
@@ -5803,55 +5795,11 @@ if QT_AVAILABLE:
             self._refresh_auction_hint()
             return path
 
-        def save_group_selection(self, groups: list[str], strategies: list[str]) -> bool:
-            """写回"跑哪些策略组/哪几条策略"（`enabled_groups` + `enabled_strategies`）。
-
-            为什么界面上**没有**这个入口了：用户给定的布局把"策略组/策略的启停"
-            从设置页移到了「策略选股」的列表里（一处只管一件事）—— 那个列表由
-            `FormulaPage` 提供，用户在那里右键【启用】/【关闭】。
-            这个方法保留成**一个明确的能力入口**（`config.toml` 的这两个键仍要有人写）：
-            校验（至少要有一组、组与策略不能互相矛盾）与写回都还在这里，
-            不然"选了却不跑"这种毛病会重新冒出来。
-
-            ⚠️ 2026-09-18（用户要求）：这两个键**不再影响选股结果** —— 那 5 条内置策略
-            整体改成了随包公式（可改可删），候选只来自 `config.toml` 的
-            `enabled_formulas`（在「策略选股」页勾公式就是它）。这里照旧写回、照旧校验，
-            是为了老脚本/老配置不至于报错，以及 `--list-groups` / `--scorecard`
-            这些**研究用**入口还能用；界面上"参与选股"由公式那一列的勾控制。
-
-            Returns:
-                真的写回了 → True；被拒绝（没有可跑的策略）→ False。
-            """
-            from laoa_trader.strategy import groups as groups_mod
-
-            chosen_groups = list(groups)
-            # 勾了策略但没勾它的组：自动把组也勾上，避免出现"选了却不跑"
-            for name in strategies:
-                key = groups_mod.group_of(name)
-                if key and key not in chosen_groups:
-                    chosen_groups.append(key)
-            if not chosen_groups:
-                self._toast("至少要勾一个策略组（或全部勾上 = 全跑）")
-                return False
-            selection = groups_mod.resolve(chosen_groups, strategies)
-            if selection.empty:
-                self._toast("没有可跑的策略：" + "；".join(selection.warnings))
-                return False
-            return bool(self._save_updates(
-                {"enabled_groups": chosen_groups, "enabled_strategies": list(strategies)},
-                f"策略组已保存：{selection.describe()}",
-            ))
-
-        def on_save_groups(self) -> None:
-            """兼容旧入口：按**当前配置**里的策略组原样再写一遍（等价于"没改动"）。
-
-            改版后设置页里不再有策略组勾选框（入口在「策略选股」的列表里，
-            见 `save_group_selection`）。这个方法留着是为了让老的调用点
-            （脚本/测试/将来可能的快捷键）不会因为找不到方法而炸：
-            它做的是**幂等**的重写，不改变任何选择。
-            """
-            self.save_group_selection(list(self.cfg.enabled_groups or []),
-                                      list(self.cfg.enabled_strategies or []))
+        # 2026-09-18：`save_group_selection()` / `on_save_groups()` **删掉了** ——
+        # 它们写的是 `enabled_groups` / `enabled_strategies`，而那两个键已经退役
+        # （内置策略改成随包公式，选股只跑 `enabled_formulas` 里勾的公式）。
+        # 老配置里的这两行由 `load_config()` 当未知键忽略、回写时也原样留着，
+        # 不会报错也不会丢内容（见 config.py 里那段注释）。
 
         def _panel_notify_updates(self) -> dict:
             """把通知设置面板的**当前**状态收集成 {键: 值}（一键保存与测试提醒共用）。"""

@@ -363,74 +363,78 @@ def test_describe_db_reports_range_and_rows(six_day_db):
 # ── 6) 内置策略的 Spec（与实盘条件对齐） ──
 
 
-def test_builtin_specs_match_the_live_strategies():
-    """成绩单评估的必须是**实盘那 5 条**（键与实盘策略表一致，组归属一致）。"""
-    from laoa_trader.strategy import groups as groups_mod
-    from laoa_trader.strategy import rules
+def test_builtin_strategy_specs_are_gone():
+    """内置 5 条策略的 spec 已随策略引擎删掉（2026-09-18），评估对象必须显式给。
 
-    assert {spec.key for spec in sc.BUILTIN_SPECS} == set(rules.STRATEGIES)
-    assert {spec.group for spec in sc.BUILTIN_SPECS} <= set(groups_mod.GROUP_ORDER)
-    for spec in sc.BUILTIN_SPECS:
-        assert spec.key in groups_mod.STRATEGY_WEIGHTS
-        assert spec.group == groups_mod.group_of(spec.key)
+    这一点值得钉住：`evaluate_all()` 以前有个"不给 specs 就评内置 5 条"的默认值，
+    内置策略删掉之后那个默认值会让"什么都没评却报成功"这种事发生 ——
+    所以现在不给 specs 直接报错。
+    """
+    assert not hasattr(sc, "BUILTIN_SPECS")
+    with pytest.raises(sc.ScorecardError, match="没有给出要评估的策略定义"):
+        sc.evaluate_all("不存在的库.db")
 
 
-def test_low_price_spec_filters_and_ranks_by_price(tmp_path: Path):
-    """低价股 Spec：≥2 元、日均成交额 ≥3000 万、非跌停，按股价升序取前 N。"""
+def test_custom_spec_filters_and_ranks(tmp_path: Path):
+    """自定义 spec 的老路照旧能用：`spec_from_signal` + 排序 + 取前 N。
+
+    （原来这条测的是内置「低价股」spec，它随策略引擎删掉了；这里改成自己写一个
+    等价的信号函数 —— 恰恰就是"用户想评估自己的选股逻辑"时走的那条路。）
+    """
     days = workdays("2024-09-02", 25)          # 需要 20 日均额
-    # 三只票：2 元、5 元、1.5 元（低于 2 元门槛）；另有一只跌停（-9.6%）
     series = {
         "600001": {"open": [2.0] * 25, "close": [2.0] * 25},
         "600002": {"open": [5.0] * 25, "close": [5.0] * 25},
-        "600003": {"open": [1.5] * 25, "close": [1.5] * 25},
-        "600004": {"open": [3.0] * 25, "close": [3.0] * 24 + [2.7]},
+        "600003": {"open": [1.5] * 25, "close": [1.5] * 25},      # 低于 2 元门槛
+        "600004": {"open": [3.0] * 25, "close": [3.0] * 24 + [2.7]},   # 当日跌停
     }
     db = build_db(tmp_path / "lowprice.db", days, series)
+
+    def cheap_after_liquidity(day_panel: pd.DataFrame):
+        """当日收盘截面：≥2 元、且当日没跌停（>−9.5%），按价格升序（最便宜的在前）。"""
+        work = day_panel.sort_values(["symbol", "date"])
+        work["prev_close"] = work.groupby("symbol", sort=False)["close"].shift(1)
+        today = work.groupby("symbol", sort=False).tail(1)
+        picked = today[(today["close"] >= 2.0)
+                       & (today["close"] / today["prev_close"] > 0.905)]
+        picked = picked.sort_values("close")
+        return [(row.symbol, float(row.close)) for row in picked.itertuples()]
+
+    # 候选顺序即优先级（`spec_from_signal` 把位置当 factor、升序取前 N）
+    spec = sc.spec_from_signal("低价近似", "低价近似", cheap_after_liquidity, top_n=30)
     panel = sc.load_panel(db)
-    spec = next(item for item in sc.BUILTIN_SPECS if item.key == "LowPriceStrategy")
     picks = sc.build_picks(panel, spec, top_n=30, risk_symbols=set())
     last_day = picks[picks["date"] == days[-1]]
-    assert list(last_day["symbol"]) == ["600001", "600002"]     # 1.5 元被门槛挡掉、跌停被排除
-    # 前 20 天没有均额，选不出来
-    assert picks["date"].min() == days[19]
+    assert list(last_day["symbol"]) == ["600001", "600002"]      # 1.5 元被门槛挡掉
 
 
-def test_ladder_pullback_uses_previous_day_limit_up_only(tmp_path: Path):
-    """连板回踩必须用**昨日**连板数：当日才进涨停池的票不能被选中（否则是未来函数）。"""
-    days = workdays("2024-10-08", 25)
-    series = {
-        "600001": {"open": [10.0] * 25,
-                   "close": [10.0] * 24 + [9.8]},     # 今日缩量收阴（配合昨日连板）
-        "600002": {"open": [10.0] * 25, "close": [10.0] * 25},
-    }
-    series["600001"]["volume"] = [1e6] * 25
-    series["600001"]["volume"][-1] = 5e5              # 今日缩量
-    series["600002"]["volume"] = [1e6] * 25
+def test_attach_ladder_shifts_limit_up_to_the_previous_day(tmp_path: Path):
+    """`attach_ladder()` 必须把涨停池数据挂到**前一行**（= 昨日状态），否则是未来函数。
+
+    原来这条用例借"连板回踩"那个 spec 来验它；spec 删掉之后直接验这个函数本身，
+    反而更准：它现在只服务**自定义公式的回测**（公式里写 `连板()`/`涨停天数()` 时，
+    时点关系一样不能错）。
+    """
+    days = workdays("2024-10-08", 5)
+    series = {"600001": {"open": [10.0] * 5, "close": [10.0] * 5}}
     db = build_db(tmp_path / "ladder.db", days, series)
     with storage.connect(db) as conn:
-        # 只有"今天"这一行进了涨停池（high_days=3）→ 昨日并没有连板
         storage.write_limit_up_pool(conn, [
             (days[-1], "600001", "样本600001", 3, "连板", "09:31:00", "09:35:00",
              8e7, 0, "测试", 5.0, 10.0, 1e9, 1, 0, "3连板", 9e7, 9.8, 0, "test", "t"),
         ])
-    panel = sc.load_panel(db)
-    ladder = sc.load_ladder(db)
-    work = sc.attach_ladder(panel, ladder)
-    spec = next(item for item in sc.BUILTIN_SPECS if item.key == "LadderPullbackStrategy")
-    picks = sc.build_picks(work, spec, top_n=30, risk_symbols=set())
-    assert picks.empty, "当日涨停数据被当成了昨日连板 → 未来函数"
 
-    # 把涨停池挪到前一交易日，同一天就应该选出来（证明条件本身是对的）
-    with storage.connect(db) as conn:
-        conn.execute("DELETE FROM limit_up_pool")
-        storage.write_limit_up_pool(conn, [
-            (days[-2], "600001", "样本600001", 3, "连板", "09:31:00", "09:35:00",
-             8e7, 0, "测试", 5.0, 10.0, 1e9, 1, 0, "3连板", 9e7, 9.8, 0, "test", "t"),
-        ])
-    panel = sc.load_panel(db)
-    picks = sc.build_picks(sc.attach_ladder(panel, sc.load_ladder(db)), spec,
-                           top_n=30, risk_symbols=set())
-    assert list(picks[picks["date"] == days[-1]]["symbol"]) == ["600001"]
+    work = sc.attach_ladder(sc.load_panel(db), sc.load_ladder(db))
+
+    today = work[work["date"] == days[-1]].iloc[0]
+    yesterday = work[work["date"] == days[-2]].iloc[0]
+    assert today["lu_days_today"] == 3          # 当日原始值
+    assert today["prev_lu_days"] == 0           # 但"昨日连板"仍是 0（不能用当日数据）
+    assert yesterday["prev_lu_days"] == 0       # 再往前一天也没有
+
+    # 涨停池只有一天数据时，唯一会被"看到"的是它的**下一行**
+    shifted = work[work["date"] > days[-1]]
+    assert shifted.empty or shifted.iloc[0]["prev_lu_days"] == 0
 
 
 def test_risk_symbols_are_excluded(tmp_path: Path):
@@ -443,9 +447,9 @@ def test_risk_symbols_are_excluded(tmp_path: Path):
         storage.write_stock_basic(conn, [("600002", "*ST样本", "测试行业")])
     assert sc.load_risk_symbols(db) == {"600002"}
     panel = sc.load_panel(db)
-    spec = next(item for item in sc.BUILTIN_SPECS if item.key == "LowPriceStrategy")
+    spec = sc.spec_from_signal("全选", "全选", fixed_signal("600001", "600002"), top_n=30)
     picks = sc.build_picks(panel, spec, top_n=30, risk_symbols=sc.load_risk_symbols(db))
-    assert set(picks["symbol"]) == {"600001"}
+    assert set(picks["symbol"]) == {"600001"}          # *ST 那只被剔除
 
 
 def test_callable_spec_is_accepted(six_day_db):

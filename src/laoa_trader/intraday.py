@@ -362,7 +362,12 @@ def _display_name(base: str, info: dict) -> str:
 def recent_signal_symbols(
     db_path: str, days: int = LOOKBACK_DAYS, allowed_strategies: set[str] | None = None
 ) -> dict[str, dict]:
-    """取最近 N 个交易日推送过的信号（作为卖出/风控观察池）。"""
+    """取最近 N 个交易日推送过的信号（作为卖出/风控观察池）。
+
+    `allowed_strategies` 是**老调用方**留下的窄化参数（当年按启用的策略组过滤）；
+    2026-09-18 策略组机制删掉之后，选股只产出公式标的，所以现在一律传 None ——
+    参数保留只为兼容，传进来也照旧转给 storage（那是 SQL 层的过滤，没有副作用）。
+    """
     with storage.connect(db_path) as conn:
         return storage.recent_signal_symbols(conn, days, allowed_strategies)
 
@@ -376,8 +381,8 @@ def watch_targets(
     """盘中观察目标：**精选股票池优先**，近期推送信号兜底。
 
     Args:
-        selection: 启用的组/策略；只盯**它们产生的**标的
-            （自选策略组之后，盘中提醒不该再提示被关掉那组的股票）。
+        selection: **2026-09-18 起不再使用**（原来按启用的策略组窄化观察面）。
+            策略组机制已删；池子里的标的现在一律来自勾选的公式与自选股。
             None 时按配置解析（配置里两组都空 = 全选）。
         cfg: 配置（解析 selection 用）。
 
@@ -385,40 +390,17 @@ def watch_targets(
         ({symbol: {...}}, 池内符号集合)
     """
     from laoa_trader import pool as pool_mod
-    from laoa_trader.strategy import groups as groups_mod
 
-    if selection is None:
-        selection = groups_mod.resolve_from_config(cfg or get_config())
-    allowed = set(selection.strategies) if selection is not None else None
-
-    def _kept(strategies_text: str) -> bool:
-        """池子/信号里的策略串（逗号分隔）里**有任意一条在启用范围内**就保留。
-
-        为什么看全部而不是只看主策略：一只股票可能同时被"低价股"和"首板缩量整理"
-        选中，主策略字段只存了第一个 —— 只看主策略会把启用组里的标的误判成不可用。
-
-        自定义公式（`公式·xxx`）**一律保留**：它归 `enabled_formulas` 管
-        （用户在「公式选股」页勾了才进池），不该被 `enabled_groups = ["short"]`
-        这种内置组的选择剔掉 —— 否则会出现"池子里有它、盘中却永远不提醒它"。
-        """
-        if allowed is None:
-            return True
-        names = [x for x in str(strategies_text or "").split(",") if x]
-        if not names:
-            return True
-        if any(groups_mod.is_formula_strategy(name) for name in names):
-            return True
-        return any(name in allowed for name in names)
+    allowed = None          # 见函数 docstring：按策略组窄化这条逻辑已经删掉
 
     cfg = cfg or get_config()
     targets: dict[str, dict] = {}
     # 已关闭监控的持仓：**从观察面里整体剔掉**，不管它是不是池内标的/自选
     # （优先级见 `monitor_off_symbols` 的说明）
     off = monitor_off_symbols(db_path)
-    pool_rows = [
-        row for row in pool_mod.load_pool(db_path)
-        if _kept(row.get("strategies") or row.get("strategy") or "")
-    ]
+    # 池子里的每一行都盯：当年这里按"启用的策略组"过滤，而策略组机制已经删掉，
+    # 现在进池的只可能是勾选的公式标的与自选股 —— 没有"该不该盯"这一层了。
+    pool_rows = list(pool_mod.load_pool(db_path))
     pool_symbols = {row["symbol"] for row in pool_rows}
     for row in pool_rows:
         targets[row["symbol"]] = {
@@ -428,7 +410,7 @@ def watch_targets(
 
     # ── 自选股：**无论策略池是否为空都要盯** ──
     # 为什么直接从 watchlist 表读、而不是只依赖池子：用户刚加的自选要立刻生效，
-    # 不必等到今晚重新建池；策略被关掉（enabled_groups=["none"]）时也一样盯。
+    # 不必等到今晚重新建池；一条公式都没勾（池子只剩自选）时也一样盯。
     if getattr(cfg, "watchlist_in_pool", True):
         with storage.connect(db_path) as conn:
             watch_entries = storage.load_watchlist(conn, enabled_only=True)

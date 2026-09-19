@@ -36,60 +36,64 @@ def _enable_formulas(monkeypatch, tmp_path, cfg, formulas: dict[str, str]) -> No
     cfg.enabled_formulas = list(formulas)
 
 
-def test_weights_match_server() -> None:
-    """权重表必须与服务器版一致（不是拍脑袋，按 10 年样本 t 值定的）。"""
-    assert pool.POOL_STRATEGIES == {
-        "LowPriceStrategy": 3,
-        "LadderPullbackStrategy": 2,
-        "ReversalStrategy": 2,
-        "DryUpExpansionStrategy": 2,
-        "FirstLimitUpStrategy": 1,
-    }
+def test_weight_of_formula_and_unknown() -> None:
+    """权重：公式用 `FORMULA_WEIGHT`，其它名字一律 1。
+
+    2026-09-18 之前这里断言的是"5 条内置策略各自的权重表"（`pool.POOL_STRATEGIES`）；
+    那批策略改成随包公式之后，**权重表连同策略引擎一起删掉了** ——
+    现在池子里只可能有公式标的，所以"按名字查权重"只剩一条规则（公式 2、其它 1）。
+    """
+    from laoa_trader.strategy.formula_group import FORMULA_WEIGHT
+
+    assert not hasattr(pool, "POOL_STRATEGIES"), "权重表应该已经删掉"
+    assert pool.weight_of("公式·尾盘选股策略") == FORMULA_WEIGHT == 2
+    assert pool.weight_of("SomeNewStrategy") == 1
+    assert pool.weight_of("") == 1
     assert pool.MAX_PER_STRATEGY == 3
     assert pool.DEFAULT_SIZE == 10
 
 
 def test_score_is_weight_over_rank() -> None:
-    """分数 = 策略权重 × (1/策略内排名)，与服务器版同款公式。"""
+    """分数 = 公式权重 × (1/公式内排名)（两条公式权重一样，所以只看排名）。"""
     built = pool.build_pool_from_picks({
-        "LowPriceStrategy": _picks("A", "B"),
-        "ReversalStrategy": _picks("C"),
+        "公式·甲": _picks("A", "B"),
+        "公式·乙": _picks("C"),
     })
     scores = {row["symbol"]: row["score"] for row in built}
-    assert scores["A"] == pytest.approx(3.0)      # 权重 3 × 1/1
-    assert scores["B"] == pytest.approx(1.5)      # 权重 3 × 1/2
+    assert scores["A"] == pytest.approx(2.0)      # 权重 2 × 1/1
+    assert scores["B"] == pytest.approx(1.0)      # 权重 2 × 1/2
     assert scores["C"] == pytest.approx(2.0)      # 权重 2 × 1/1
     assert [row["symbol"] for row in built] == ["A", "C", "B"]   # 按分数降序
 
 
 def test_max_per_strategy_is_enforced() -> None:
-    """同一策略最多 3 只（避免一个策略占满 10 只）。"""
+    """同一条公式最多 3 只（避免一条公式占满 10 只）。"""
     built = pool.build_pool_from_picks({
-        "LowPriceStrategy": _picks("A", "B", "C", "D", "E"),
+        "公式·甲": _picks("A", "B", "C", "D", "E"),
     })
     assert [row["symbol"] for row in built] == ["A", "B", "C"]
 
 
 def test_size_limit() -> None:
     built = pool.build_pool_from_picks({
-        "LowPriceStrategy": _picks("A", "B", "C"),
-        "ReversalStrategy": _picks("D", "E", "F"),
-        "FirstLimitUpStrategy": _picks("G", "H", "I"),
+        "公式·甲": _picks("A", "B", "C"),
+        "公式·乙": _picks("D", "E", "F"),
+        "公式·丙": _picks("G", "H", "I"),
     }, size=5)
     assert len(built) == 5
 
 
 def test_symbol_picked_by_two_strategies_merges_and_scores_add_up() -> None:
-    """多策略同时选中：分数相加、策略名合并、取第一个策略作为主策略。"""
+    """多条公式同时选中：分数相加、公式名合并、取第一条作为主来源。"""
     built = pool.build_pool_from_picks({
-        "LowPriceStrategy": _picks("A"),
-        "FirstLimitUpStrategy": _picks("A"),
+        "公式·甲": _picks("A"),
+        "公式·乙": _picks("A"),
     })
     assert len(built) == 1
     row = built[0]
-    assert row["score"] == pytest.approx(4.0)                  # 3 + 1
-    assert row["strategies"] == "LowPriceStrategy,FirstLimitUpStrategy"
-    assert row["strategy"] == "LowPriceStrategy"
+    assert row["score"] == pytest.approx(4.0)                  # 2 + 2
+    assert row["strategies"] == "公式·甲,公式·乙"
+    assert row["strategy"] == "公式·甲"
 
 
 def test_unknown_strategy_gets_weight_one() -> None:
@@ -101,7 +105,7 @@ def test_unknown_strategy_gets_weight_one() -> None:
 def test_reason_is_truncated_to_200_chars() -> None:
     long = "很长的理由" * 100
     built = pool.build_pool_from_picks({
-        "LowPriceStrategy": [{"symbol": "A", "name": "A", "reason": long}],
+        "公式·甲": [{"symbol": "A", "name": "A", "reason": long}],
     })
     assert len(built[0]["reason"]) <= 200
 
@@ -223,18 +227,21 @@ def test_pool_table_rows_adds_industry_and_label(
     assert rows[0]["label"] == "公式·半导体甲"
 
 
-def test_build_pool_never_runs_the_python_strategies(engine, cfg, monkeypatch) -> None:
-    """**建池绝不再跑那 5 条 Python 策略**（2026-09-18 用户要求：内置策略改成随包公式）。
+def test_build_pool_never_runs_the_python_strategies(engine, cfg, tmp_path, monkeypatch) -> None:
+    """**那套 Python 策略引擎已经整体删掉**（2026-09-18 用户要求：内置策略改成随包公式）。
 
-    做法是哨兵：把 `rules.run_all()` 换成一个"被调用就炸"的实现 —— 只要还有哪条路
-    顺手把内置策略接回来，这条立刻红。这比"断言 top_n==200"更有意义：
-    那个参数已经不存在了（没有 run_all 可传）。
+    这条用两种方式钉住：
+    ① 那些模块**导入不进来**（`strategy.rules` / `strategy.groups` / `strategy.base` /
+       `strategy.factors` 全删了）—— 只要有人把它们加回来，这条立刻红；
+    ② 建池在"没勾公式"时给出空池、而且**不许炸**（不再有 run_all 这条路）。
     """
-    def boom(*args, **kwargs):
-        raise AssertionError("建池又去跑 Python 内置策略了（候选只该来自勾选的公式）")
+    import importlib
 
-    monkeypatch.setattr(pool.rules, "run_all", boom)
-    monkeypatch.setattr(pool.rules, "save_signals", boom)
+    for name in ("laoa_trader.strategy.rules", "laoa_trader.strategy.groups",
+                 "laoa_trader.strategy.base", "laoa_trader.strategy.factors"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(name)
+
     built = pool.build_pool(engine, cfg, save=False)     # 没勾公式 → 池子为空，但**不许炸**
     assert built == []
 
@@ -288,28 +295,30 @@ def test_strategy_names_falls_back_to_the_primary_column() -> None:
     assert lines == ["1. 甲(600001)短期反转｜短期反转"]
 
 
-def test_source_detail_lines_list_group_and_other_strategies() -> None:
-    """tooltip 的来源明细：来源（含证据标记）/ 组别（含持有期）/ 同批选中的其它策略。"""
+def test_source_detail_lines_show_source_and_the_other_formulas() -> None:
+    """tooltip 的来源明细：`来源：…` + `同批选中：…`（多条公式同时选中时）。
+
+    2026-09-18 起没有"组别 / 持有期 / 证据标记"这三样了 —— 它们都属于已删掉的
+    策略引擎（策略组、`（依赖开盘）` 那套边际证据），公式标的本来也不带它们。
+    """
     row = {
-        "strategy": "ReversalStrategy",
-        "strategies": "ReversalStrategy,DryUpExpansionStrategy",
-        "source_label": "策略·短期反转",
-        "group_label": "短线·T+3", "horizon": 3,
-        "evidence": "open_only", "evidence_text": "（依赖开盘）",
+        "strategy": "公式·短期反转",
+        "strategies": "公式·短期反转,公式·地量后放量变盘",
+        "source_label": "公式·短期反转",
     }
     lines = pool.source_detail_lines(row)
-    assert lines[0] == "来源：策略·短期反转（依赖开盘）"
-    assert "组别：短线·T+3（T+3）" in lines
-    # 主策略之外的那条策略名进 tooltip（列里写不下，但不能丢）
-    assert "同批选中：地量后放量变盘" in lines
-    # 「依赖开盘」的解释在最后一行，前缀是**主策略**的中文名（不是整串来源文本）
-    assert lines[-1].startswith("策略·短期反转：正 α 只存在于")
+    assert lines[0] == "来源：公式·短期反转"
+    assert "同批选中：公式·地量后放量变盘" in lines
+    assert not any(line.startswith("组别：") for line in lines)
 
-    # 单策略 + 没有组别的行：只出"来源"一行（不留空壳）
-    plain = {"strategy": "VolatilitySqueeze", "strategies": "VolatilitySqueeze",
-             "source_label": "策略·VolatilitySqueeze", "group_label": "—", "horizon": 0,
-             "evidence": "proven", "evidence_text": ""}
-    assert pool.source_detail_lines(plain) == ["来源：策略·VolatilitySqueeze"]
+    # 只有一条公式的行：只出"来源"一行（不留空壳）
+    plain = {"strategy": "公式·甲", "strategies": "公式·甲", "source_label": "公式·甲"}
+    assert pool.source_detail_lines(plain) == ["来源：公式·甲"]
+
+    # 老库里的内置策略行照旧显示中文名（历史数据的显示口径）
+    old = {"strategy": "ReversalStrategy", "strategies": "ReversalStrategy",
+           "source_label": "策略·短期反转"}
+    assert pool.source_detail_lines(old) == ["来源：策略·短期反转"]
 
 
 def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> None:
@@ -326,9 +335,11 @@ def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> 
     line = pool.format_pool_lines([row])[0]
     assert line == "1. 半导体甲(600002)短期反转、地量后放量变盘｜缩量回踩"
     # 推送标签里的每个中文名，都能在「策略选股」列表里找到（同一份翻译表）
+    from laoa_trader import legacy
+
     for name in pool.strategy_names(row):
-        assert name in (pool.rules.strategy_label("ReversalStrategy"),
-                        pool.rules.strategy_label("DryUpExpansionStrategy"))
+        assert name in (legacy.strategy_label("ReversalStrategy"),
+                        legacy.strategy_label("DryUpExpansionStrategy"))
 
 
 # ── 选出来的票在「自选股池」里能删、能手工再加（用户要求）──
@@ -394,3 +405,66 @@ def test_deleting_a_symbol_that_is_not_in_the_pool_is_a_no_op(cfg) -> None:
     with storage.connect(cfg.db_path) as conn:
         assert storage.delete_pool_symbol(conn, "600002") == 0
     assert pool.pool_page_rows(cfg.db_path) == []
+
+
+# ── 「选股候选只来自公式」这条口径的兜底（2026-09-18 从 test_groups.py 搬过来）──
+#
+# 原来这三条住在 `tests/test_groups.py`（那个文件随策略组机制一起删了）。
+# 它们的断言对象其实是 **pool.py 的行为**，与"策略组"无关，所以搬到这里继续守着。
+
+
+def test_selection_argument_does_not_filter_candidates(engine, cfg, monkeypatch) -> None:
+    """`selection` 参数**已经不起作用**：池子只看勾了哪些公式。
+
+    2026-09-18 之前"禁用 swing 组 → 低价股的标的被剔出池子"；策略组机制删掉之后，
+    这个参数只剩签名兼容（老调用方可能还在传），传什么都不能影响结果。
+    """
+    from laoa_trader.strategy import formula_group
+
+    run = formula_group.FormulaRun()
+    run.picks = {formula_group.formula_strategy_name("测试公式"): [
+        {"symbol": "600001", "name": "低价样本", "reason": "测试"},
+    ]}
+    run.ran = ["测试公式"]
+    monkeypatch.setattr(formula_group, "run_enabled_formulas", lambda *a, **k: run)
+
+    for selection in (None, object()):
+        built = pool.build_pool(engine, cfg, hot_only=False, save=False,
+                                selection=selection)
+        assert [row["symbol"] for row in built] == ["600001"]
+        assert built[0]["strategy"] == "公式·测试公式"
+
+
+def test_pool_drops_candidates_that_are_not_formulas(engine, cfg) -> None:
+    """调用方传进来的**非公式候选**（老策略类名）一律丢掉。
+
+    那 5 条内置策略已经退出选股链路，界面上再也选不出它们 —— 让这种键进池子
+    只会让「来源」列出现一个用户找不到对应行的"策略·X"。公式候选照常保留。
+    """
+    picks = {
+        "LowPriceStrategy": [{"symbol": "600001", "name": "甲", "reason": "低价股"}],
+        "公式·我的公式": [{"symbol": "600003", "name": "乙", "reason": "短期反转"}],
+    }
+    built = pool.build_pool(engine, cfg, hot_only=False, save=False, picks=picks)
+
+    assert [row["symbol"] for row in built] == ["600003"]
+    assert built[0]["strategy"] == "公式·我的公式"
+
+
+def test_pool_rows_carry_no_group(engine, cfg, tmp_path, monkeypatch) -> None:
+    """表格行**没有组别/持有期**（`group_label` 是「—」、`horizon` 是 0）。
+
+    "组别 / T+N" 是已删掉的策略组机制的概念（公式没有组）——
+    这两栏如实写"没有"，而不是借一个相近的组名糊上去。
+    """
+    _enable_formulas(monkeypatch, tmp_path, cfg, {"半导体甲": "C>12 AND C<13"})
+    pool.build_pool(engine, cfg, hot_only=False, save=True, day="2026-09-11")
+
+    rows = pool.pool_table_rows(cfg.db_path)
+    assert rows
+    for row in rows:
+        assert row["group"] == ""
+        assert row["group_label"] == "—"
+        assert row["horizon"] == 0
+        # 「来源」列照旧回答问题："是哪条公式选出来的"
+        assert row["source_label"] == "公式·半导体甲"

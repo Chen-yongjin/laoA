@@ -172,10 +172,10 @@ def test_run_daily_notifies_pool_with_plan_params(cfg, db, monkeypatch) -> None:
     def fake_formulas(*_args, **_kwargs):
         # 2026-09-18（用户要求）：候选只来自**勾选的公式**，所以这里给的是
         # `公式·X` 这种合成键（不是策略类名）。键写错的话建池会把它当"老策略类名"丢掉。
-        from laoa_trader.strategy import formula_group, groups as groups_mod
+        from laoa_trader.strategy import formula_group
 
         run = formula_group.FormulaRun()
-        run.picks = {groups_mod.formula_strategy_name("短期反转"): [
+        run.picks = {formula_group.formula_strategy_name("短期反转"): [
             {"symbol": "600001", "name": "低价样本", "reason": "短期反转"},
         ]}
         run.ran = ["短期反转"]

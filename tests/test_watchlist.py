@@ -20,7 +20,6 @@ import pytest
 from laoa_trader import intraday, pool
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
-from laoa_trader.strategy import groups
 
 from tests._toml import p
 from tests.conftest import READY_THRESHOLDS
@@ -381,17 +380,19 @@ def test_monitor_off_read_failure_does_not_silence_everything(wl_db, monkeypatch
 
 
 def test_run_daily_with_strategies_off_still_pools_watchlist(wl_db, monkeypatch) -> None:
-    """`enabled_groups = ["none"]`（策略全关）→ 池子里只有自选股，且不报配置错误。"""
+    """一条公式都没勾（选股只剩自选股）→ 池子里只有自选股，且不报错。
+
+    老口径是 `enabled_groups = ["none"]`（策略全关）；那两个键 2026-09-18 已退役，
+    现在决定"有没有公式标的"的只有 `enabled_formulas`（这里故意留空）。
+    """
     import laoa_trader.scheduler as sched
 
     _add(wl_db, "600100", name="冷门样本", note="龙头")
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
     monkeypatch.setattr("laoa_trader.notify.notify_all",
                         lambda *a, **k: {"tray": {"kind": "tray", "ok": True}})
-    selection = groups.resolve(["none"], [])
-    assert selection.explicit_off is True
     report = sched.run_daily(wl_db, DataEngine(wl_db.db_path), notify=True,
-                             with_data=False, selection=selection)
+                             with_data=False)
     assert [r["symbol"] for r in report["pool"]] == ["600100"]
     assert report["picks"] == 0                       # 没跑策略
     assert report["errors"] == []                     # 这是正常用法，不是配置错误
@@ -413,8 +414,7 @@ def test_run_daily_watchlist_only_mode_pushes_note(wl_db, monkeypatch) -> None:
         return {"tray": {"ok": True}}
 
     monkeypatch.setattr("laoa_trader.notify.notify_all", fake_notify)
-    sched.run_daily(wl_db, DataEngine(wl_db.db_path), notify=True, with_data=False,
-                    selection=groups.resolve(["none"], []))
+    sched.run_daily(wl_db, DataEngine(wl_db.db_path), notify=True, with_data=False)
     body = "\n".join(captured["lines"])
     assert "冷门样本(600100)自选（龙头）" in body
 
@@ -598,27 +598,26 @@ def test_watchlist_alerts_use_same_notify_channels(wl_db, monkeypatch) -> None:
 # ── 与策略选择的关系 ──
 
 
-def test_watchlist_kept_even_when_all_groups_disabled(wl_db) -> None:
-    """策略组全关（选择为空）时，池子里仍要有自选股。"""
+def test_watchlist_kept_even_when_no_formula_is_enabled(wl_db) -> None:
+    """一条公式都没勾（候选为空）时，池子里仍要有自选股。"""
     _add(wl_db, "600100", name="冷门样本")
-    selection = groups.resolve(["none"], [])
     rows = pool.build_pool(DataEngine(wl_db.db_path), wl_db, hot_only=True,
-                           save=False, picks={}, selection=selection)
+                           save=False, picks={})
     assert [r["symbol"] for r in rows] == ["600100"]
 
 
 def test_selection_argument_no_longer_filters_anything(
         wl_db, tmp_path, monkeypatch) -> None:
-    """`selection` 参数**不再过滤候选**（2026-09-18）：选股只看勾了哪些公式。
+    """`selection` 参数**已经不起作用**（2026-09-18）：选股只看勾了哪些公式。
 
     用户把内置策略整体改成随包公式之后，"跑哪些策略"没有第二套答案了 ——
-    老调用方还在传 `selection`，但它不该再把公式候选剔掉（那会变成
-    "我勾了公式，池子里却没有"这种最难查的现象）。这条把新口径钉住。
+    老调用方可能还在传 `selection`（签名里保留了它），但它不该把公式候选剔掉
+    （那会变成"我勾了公式，池子里却没有"这种最难查的现象）。这条把新口径钉住。
     """
     _enable_formulas(monkeypatch, tmp_path, wl_db, {"低价": "C<5"})   # 600001
     _add(wl_db, "600100", name="冷门样本")
     rows = pool.build_pool(DataEngine(wl_db.db_path), wl_db, hot_only=False,
-                           save=False, selection=groups.resolve(["ultra"], []))
+                           save=False, selection=object())
     symbols = [r["symbol"] for r in rows]
     assert "600100" in symbols          # 自选股照旧不受影响
     assert "600001" in symbols          # 公式候选**也不会**被 selection 剔掉
@@ -655,12 +654,12 @@ def test_cli_once_without_formulas_pools_watchlist(wl_db, tmp_path, capsys, monk
 
 def test_cli_once_ignores_a_typo_in_the_config_groups(wl_db, tmp_path, capsys,
                                                      monkeypatch) -> None:
-    """配置里组名拼错**不再拦路**（那些键已经不参与选股），但 CLI 参数写错仍然当场报错。
+    """老配置里的退役键（组名拼错也一样）**不再拦路** —— 选股只看勾了哪些公式。
 
-    2026-09-18 口径：`enabled_groups` / `enabled_strategies` 只对研究用入口有意义，
-    选股看 `enabled_formulas`；所以配置文件里写了个不存在的组名，这轮选股照跑
-    （只盯自选股），不该像老口径那样直接退出 1 —— 那会让人以为"选股坏了"。
-    命令行参数写错的情况由 `test_unknown_group_name_warns` 守着（当场退出 1）。
+    2026-09-18 口径：`enabled_groups` / `enabled_strategies` 已经从配置里删掉，
+    `load_config()` 把它们当**未知键**忽略（用户文件里的其它内容一字不动）。
+    所以配置文件里写了个不存在的组名，这轮选股照跑（只盯自选股），
+    不该像老口径那样直接退出 1 —— 那会让人以为"选股坏了"。
     """
     import laoa_trader.scheduler as sched
     from laoa_trader.__main__ import cli
@@ -679,12 +678,16 @@ def test_cli_once_ignores_a_typo_in_the_config_groups(wl_db, tmp_path, capsys,
 
 
 def test_push_lines_mark_strategy_plus_watchlist(wl_db) -> None:
-    """推送正文：纯自选带「自选（备注）」，策略+自选带「+自选（备注）」。"""
+    """推送正文：纯自选带「自选（备注）」，公式+自选带「+自选（备注）」。
+
+    用公式合成名当策略名（2026-09-18 起池子里只有公式标的与自选），
+    中文名走 `legacy.strategy_label`：认不出的合成名原样显示 —— 正是要的。
+    """
     both = pool.format_pool_lines([{
-        "name": "低价样本", "symbol": "600001", "strategies": "LowPriceStrategy",
-        "source": "策略+自选", "note": "老朋友", "reason": "低价股",
+        "name": "低价样本", "symbol": "600001", "strategies": "公式·低价",
+        "source": "公式+自选", "note": "老朋友", "reason": "低价",
     }])
-    assert both == ["1. 低价样本(600001)低价股+自选（老朋友）｜低价股"]
+    assert both == ["1. 低价样本(600001)公式·低价+自选（老朋友）｜低价"]
 
     only_watch = pool.format_pool_lines([{
         "name": "冷门样本", "symbol": "600100", "strategies": "",
