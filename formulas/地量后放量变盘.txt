@@ -1,0 +1,10 @@
+# 名称: 地量后放量变盘
+# 说明: 逐条对应 rules.py 的 DryUpExpansionStrategy：①前 3 日量 <不含今日的 20 日均量×0.7 ②今日量 ≥ 该均量×1.5 ③今日收阳且涨幅 0~9% ④收盘 ≥2 元 ⑤20 日均额 ≥3000 万。ST=0 对应 exclude_risk，想保留 ST 就删掉它。Python 另按放量倍数取前 30；公式无排名函数，这层做不到（进池每条公式最多 3 只）。
+VOLMA:=MA(REF(V,1),20)
+AMT20:=MA(AMOUNT,20)
+RET1:=C/REF(C,1)-1
+BASE:=REF(V,1)+REF(V,2)+REF(V,3)
+QUIET:=REF(V,1)<VOLMA*0.7 AND REF(V,2)<VOLMA*0.7 AND REF(V,3)<VOLMA*0.7
+SURGE:=V>=VOLMA*1.5
+UP:=C>O AND RET1>0 AND RET1<=0.09
+QUIET AND SURGE AND UP AND BASE>0 AND C>=2 AND AMT20>=30000000 AND ST=0
