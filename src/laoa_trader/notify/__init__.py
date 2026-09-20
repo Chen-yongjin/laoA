@@ -1,11 +1,15 @@
-"""多频道并行通知：Windows 原生弹窗 / 飞书 / 托盘气泡（可任选组合）。
+"""多频道并行通知：飞书 / 托盘气泡（可任选组合）。
+
+2026-09-18：**Windows 原生通知整路删除**（用户原话："windows系统通知删除，太骚扰了，
+影响体验"）—— 它的点击行为本来就不受我们控制，删掉之后提醒走"图标闪烁 + 「消息」列表"。
 
 设计要点
 --------
-- **频道由配置决定**：`config.toml` 的 `notify_channels = ["windows","feishu","tray"]`，
+- **频道由配置决定**：`config.toml` 的 `notify_channels = ["feishu","tray"]`，
   **空列表 = 只入库不推送**。每个频道还有自己的开关与参数
-  （`feishu_on`、`notify_windows_sound`、`notify_windows_open_url`、
-  `notify_tray_duration_ms`），老的 `notify_feishu/windows/tray` 单频道开关继续生效。
+  （`feishu_on`、`notify_tray_duration_ms`），老的 `notify_feishu/tray` 单频道开关继续生效。
+  老配置里写着 `"windows"` 也不报错：`channels` 会把它当"不认识的频道"忽略掉，
+  `channel_states()` 里显示成「该频道已删除」。
 - **互相独立、互不影响**：用线程池并发发送，逐路收集结果。
   任一路抛异常（或超时）都不影响其它路 —— 飞书挂了弹窗照出，反之亦然。
 - **缺凭证不算失败**：没配飞书凭证时该路返回 `skipped` 并给出中文原因
@@ -16,9 +20,8 @@
 返回格式（每个被"考虑过"的频道都有一条，便于界面说明"为什么没收到"）：
 
     {
-        "feishu":  {"kind": "feishu",  "ok": True,  "skipped": True, "detail": "未配置飞书凭证，已跳过"},
-        "windows": {"kind": "windows", "ok": True,  "detail": "已弹出通知"},
-        "tray":    {"kind": "tray",    "ok": True,  "detail": "已投递到托盘"},
+        "feishu": {"kind": "feishu", "ok": True, "skipped": True, "detail": "未配置飞书凭证，已跳过"},
+        "tray":   {"kind": "tray",   "ok": True, "detail": "已投递到托盘"},
     }
 """
 
@@ -28,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 from laoa_trader.config import CHANNELS, Config, get_config
 from laoa_trader.log import get_logger
-from laoa_trader.notify import feishu, tray, windows
+from laoa_trader.notify import feishu, tray
 
 logger = get_logger(__name__)
 
@@ -62,8 +65,6 @@ def _send_one(kind: str, title: str, lines: list[str], cfg: Config) -> dict:
             return {"kind": kind, "ok": True, "skipped": True, "detail": reason}
         if kind == "feishu":
             return feishu.notify(title, lines, cfg)
-        if kind == "windows":
-            return windows.notify(title, lines, cfg)
         if kind == "tray":
             return tray.notify(title, lines, cfg)
         return {"kind": kind, "ok": True, "skipped": True,
@@ -140,7 +141,7 @@ def summarizes_channels(cfg: Config | None = None) -> str:
 
 def summarize(results: dict[str, dict]) -> str:
     """把结果整理成一行中文摘要（状态栏提示用）。"""
-    labels = {"feishu": "飞书", "windows": "弹窗", "tray": "托盘"}
+    labels = {"feishu": "飞书", "tray": "托盘"}
     parts = []
     for kind, res in results.items():
         name = labels.get(kind, kind)
@@ -154,4 +155,4 @@ def summarize(results: dict[str, dict]) -> str:
 
 
 __all__ = ["KINDS", "notify_all", "summarize", "summarizes_channels",
-           "feishu", "tray", "windows"]
+           "feishu", "tray"]

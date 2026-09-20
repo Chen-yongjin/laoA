@@ -664,7 +664,9 @@ def test_save_auction_writes_config_and_takes_effect(settings_window) -> None:
     assert cfg.auction_min_amount == 3e6
     assert cfg.auction_boards == ["chinext", "star"]
     assert cfg.auction_scan_at == ["09:19", "09:26"]
-    assert "竞价设置已保存" in window.status_label.fullText()
+    # 保存成功**不再弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）：
+    # 回显改在设置页那行小字与竞价说明行里，标题区不再闪一句"已保存"
+    assert "竞价设置已保存" in window.save_settings_hint.text()
     assert "上次扫描" in window.auction_hint.text() or "还没有扫描结果" in window.auction_hint.text()
 
 
@@ -696,7 +698,8 @@ def test_save_auction_ignores_bad_scan_times(settings_window) -> None:
     window.auction_scan_at_edit.setText("09:20, 25:99")
     window.on_save_auction()
     assert 'auction_scan_at = ["09:20"]' in config_file.read_text(encoding="utf-8")
-    assert "认不出的时刻已忽略" in window.status_label.fullText()
+    # 这句回显仍在（只是不再"弹"到标题区）：它写在竞价说明行里
+    assert "认不出的时刻已忽略" in window.auction_hint.text()
     assert cfg.auction_scan_at == ["09:20"]
 
 

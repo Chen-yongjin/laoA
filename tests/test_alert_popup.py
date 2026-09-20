@@ -358,8 +358,13 @@ def test_sound_failure_never_raises(monkeypatch) -> None:
 # ── 主窗口接线 ──
 
 
-def test_new_alert_sounds_flashes_and_pops_up(win, cfg, qapp, traces, monkeypatch) -> None:
-    """一条新提醒 → 响一声 + 图标开始闪 + 浮窗弹出（行文本是 `名称（代码）`）。"""
+def test_new_alert_sounds_flashes_and_lands_in_the_message_list(
+        win, cfg, qapp, traces, monkeypatch) -> None:
+    """一条新提醒 → 响一声 + 图标开始闪 + **进「消息」列表**（浮窗默认不弹）。
+
+    2026-09-18 用户改的口径（原话："通知仿照 QQ 桌面端，有消息软件图标闪烁，
+    可以点开查看消息列表"）：消息**不再自己蹦出来**，而是闪图标 + 躺进列表里等他点开。
+    """
     alerts: list[list] = []
     monkeypatch.setattr(win, "_start_alert_flash", lambda: alerts.append(["flash"]))
     _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
@@ -368,6 +373,30 @@ def test_new_alert_sounds_flashes_and_pops_up(win, cfg, qapp, traces, monkeypatc
     qapp.processEvents()
     assert traces["sound"] == [sound.DEFAULT_ALIAS]
     assert alerts == [["flash"]]
+    # 浮窗默认关 → 一条都没建
+    assert win.alert_popup is None
+    # 但消息进了列表，并且算**未读**（还没打开看）
+    center = win.message_center
+    assert center is not None and center.table.rowCount() >= 1
+    assert center.unread_count() == 1
+    row = center.messages()[0]
+    assert row["target"] == "样本股(600000)"
+    assert "🚀 放量突破20日高" in row["kind_label"]
+    # 托盘菜单上的未读数也跟着变（QQ 的"消息(n)"）
+    assert "（1）" in win.act_messages.text()
+
+
+def test_popup_still_available_when_explicitly_switched_on(
+        win, cfg, qapp, traces) -> None:
+    """勾上 `notify_popup`（默认关）→ 浮窗照旧滑出来，消息**同时也进列表**。
+
+    两条路互不影响：浮窗是"消息自己蹦出来给你看"，消息列表是"你自己点开看"。
+    """
+    cfg.notify_popup = True
+    _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
+                       "detail": "现价 12.34 突破 20 日高点"}])
+    win._tick()
+    qapp.processEvents()
     assert win.alert_popup is not None and win.alert_popup.isVisible()
     # 名称+代码在**行文本**里（省略是从中间挖的，开头一定保得住）；
     # 类型那一段改看 **tooltip（全文）**：`text()` 是按可用宽度做中间省略后的结果，
@@ -407,27 +436,36 @@ def test_alerts_already_in_db_do_not_popup_on_startup(cfg, qapp, monkeypatch, tr
     qapp.processEvents()
 
 
-def test_popup_off_means_silent_and_no_popup(win, cfg, qapp, traces) -> None:
-    """`notify_popup = false` = 别打扰我：不弹浮窗、不响声、也不闪图标（提醒照常入库）。"""
+def test_popup_off_only_means_no_popup(win, cfg, qapp, traces) -> None:
+    """`notify_popup = false`（新默认）**只表示不弹浮窗**：响声、闪图标、消息列表照常。
+
+    这条口径 2026-09-18 变过：以前"关浮窗"等于"别打扰我"（连声音和闪烁一起免了）。
+    现在关浮窗只是"别自己蹦出来"，提醒本身仍然要让你知道 —— 闪图标 + 消息列表。
+    """
     cfg.notify_popup = False
     _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
                        "detail": "现价 12.34 突破 20 日高点"}])
     win._tick()
     qapp.processEvents()
-    assert win.alert_popup is None
-    assert traces["sound"] == []
-    assert win._flashing is False
+    assert win.alert_popup is None                       # 不弹窗
+    assert traces["sound"] == [sound.DEFAULT_ALIAS]      # 但响了一声
+    assert win._flashing is True                         # 也闪了
+    assert win.message_center.unread_count() == 1        # 消息躺在列表里等人点开
+    win._stop_alert_flash()
 
 
-def test_sound_off_still_shows_the_popup(win, cfg, qapp, traces) -> None:
-    """`notify_sound = false` 只关声音：浮窗照弹（静音开会场景）。"""
+def test_sound_off_only_mutes_the_sound(win, cfg, qapp, traces) -> None:
+    """`notify_sound = false` 只关声音：闪图标与消息列表照常（静音开会场景）。"""
     cfg.notify_sound = False
+    cfg.notify_popup = True                     # 浮窗这一路单独验（默认它是关的）
     _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
                        "detail": "现价 12.34 突破 20 日高点"}])
     win._tick()
     qapp.processEvents()
     assert traces["sound"] == []
     assert win.alert_popup is not None and win.alert_popup.isVisible()
+    assert win._flashing is True
+    assert win.message_center.unread_count() == 1
 
 
 def test_flash_starts_and_stops_with_icon_restored(win, cfg) -> None:
@@ -442,6 +480,27 @@ def test_flash_starts_and_stops_with_icon_restored(win, cfg) -> None:
     assert win._flashing is False
     assert win._flash_timer.isActive() is False
     assert win.tray.icon().cacheKey() == normal          # 原图标回来了
+
+
+def test_taskbar_alert_is_bounded_not_infinite(win, cfg, monkeypatch) -> None:
+    """任务栏闪烁用**有限的毫秒数**（= 闪烁秒数），不是 `alert(w, 0)` 那种"闪到被激活"。
+
+    为什么：QQ 式交互里用户点的是**消息窗口**，主窗口并不会被激活 ——
+    用 `0` 的话任务栏会一直闪下去，而 Qt 没暴露 Win32 的 `FLASHW_STOP`，我们没法主动取消。
+    所以闪一个有限的时长，到点自己停（托盘图标那边的闪烁照旧由 QTimer 管）。
+    """
+    calls: list[tuple] = []
+    from PySide6.QtWidgets import QApplication
+
+    monkeypatch.setattr(QApplication, "alert", staticmethod(
+        lambda widget, duration=0: calls.append((widget, duration))
+    ))
+    cfg.notify_flash_seconds = 7
+
+    win._start_alert_flash()
+
+    assert calls and calls[0][1] == 7000          # 7 秒，不是 0
+    win._stop_alert_flash()
 
 
 def test_flash_seconds_zero_does_not_flash(win, cfg) -> None:
@@ -472,6 +531,7 @@ def test_alert_icon_is_red_dotted_and_written_to_cache(win, cfg) -> None:
 
 def test_row_click_opens_detail_with_push_text(win, cfg, qapp) -> None:
     """点浮窗里的某一条 → 弹详情（推送原文：原因 + 时间 + L2 条件单参数）。"""
+    cfg.notify_popup = True                     # 浮窗默认关，这条专测浮窗那一路
     _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
                        "detail": "现价 12.34 突破 20 日高点"}])
     win._tick()
@@ -492,6 +552,7 @@ def test_view_all_switches_to_the_watch_pool_tab(win, cfg, qapp) -> None:
     「盘中提醒」那一页已按用户要求取消，提醒现在住在两张表的「提醒」列里 ——
     而「自选股池」是池子的唯一入口（"哪几只票出了什么事"一眼一行）。
     """
+    cfg.notify_popup = True                     # 浮窗默认关，这条专测浮窗那一路
     _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
                        "detail": "现价 12.34 突破 20 日高点"}])
     win._tick()
@@ -503,36 +564,65 @@ def test_view_all_switches_to_the_watch_pool_tab(win, cfg, qapp) -> None:
     assert win.tabs.tabText(win.tabs.currentIndex()) == "自选股池"
 
 
-def test_tray_menu_has_recent_alerts_item(win, cfg, qapp) -> None:
-    """托盘右键有【最近提醒】，点了就把最近几条再弹一次（浮窗关掉也照弹）。"""
+def test_tray_menu_has_messages_item(win, cfg, qapp) -> None:
+    """托盘右键有【消息（N）】，点了打开消息列表（QQ 那样）。
+
+    2026-09-18 之前这一项是【最近提醒】——它弹的是那扇滑出浮窗；现在改成开消息窗口，
+    标题里的数字就是未读数。
+    """
     menu = win.tray.contextMenu()
     texts = [action.text() for action in menu.actions()]
-    assert "最近提醒" in texts
-    cfg.notify_popup = False                    # 用户自己点名要看 → 不再受开关限制
+    assert "消息" in texts
     _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
                        "detail": "现价 12.34 突破 20 日高点"}])
-    next(a for a in menu.actions() if a.text() == "最近提醒").trigger()
+    win._tick()
     qapp.processEvents()
-    assert win.alert_popup is not None and win.alert_popup.isVisible()
-    assert "样本股(600000)" in win.alert_popup.rows[0].text()
+    assert win.act_messages.text() == "消息（1）"        # 未读数写在菜单项上
+    win.act_messages.trigger()
+    qapp.processEvents()
+    assert win.message_center.isVisible()
+    assert win.message_center.table.rowCount() == 1
+    assert "样本股(600000)" in win.message_center.table.item(0, 1).text()
+    # 打开即已读：未读数清零、图标停闪
+    assert win.message_center.unread_count() == 0
+    assert win.act_messages.text() == "消息"
 
 
-def test_tray_left_click_raises_popup_or_shows_window(win, cfg, qapp) -> None:
-    """左键单击：浮窗挂着就抬浮窗；没有浮窗就开主窗口。双击直接开主窗口。"""
+def test_tray_left_click_opens_the_message_list(win, cfg, qapp) -> None:
+    """左键单击托盘图标 → **打开「消息」窗口**（QQ 行为）；双击开主窗口。
+
+    用户 2026-09-18 的要求就是这条交互："有消息软件图标闪烁，可以点开查看消息列表"。
+    浮窗开着的人仍然先抬浮窗（他眼前已经有东西可看了）。
+    """
     reason = QSystemTrayIcon.ActivationReason
     win.hide()
-    win._on_tray_activated(reason.Trigger)
-    assert win.isVisible()                      # 没有浮窗 → 开主窗口
     _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
                        "detail": "现价 12.34 突破 20 日高点"}])
     win._tick()
     qapp.processEvents()
     win.hide()
     win._on_tray_activated(reason.Trigger)
-    assert win.alert_popup.isVisible()          # 有浮窗 → 抬浮窗，不抢主窗口
-    assert not win.isVisible()
+    assert win.message_center is not None and win.message_center.isVisible()
+    assert not win.isVisible()                  # 不抢主窗口
+    win.message_center.close()
+    # 双击 → 主窗口（老行为不变）
     win._on_tray_activated(reason.DoubleClick)
     assert win.isVisible()
+
+
+def test_tray_left_click_still_raises_an_open_popup(win, cfg, qapp) -> None:
+    """浮窗开着时（`notify_popup`）左键先抬浮窗 —— 眼前已有东西可看，不该再开一扇窗。"""
+    from PySide6.QtWidgets import QSystemTrayIcon as _Tray
+
+    cfg.notify_popup = True
+    _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
+                       "detail": "现价 12.34 突破 20 日高点"}])
+    win._tick()
+    qapp.processEvents()
+    win.hide()
+    win._on_tray_activated(_Tray.ActivationReason.Trigger)
+    assert win.alert_popup.isVisible()
+    assert win.message_center is None or not win.message_center.isVisible()
 
 
 def test_recent_alerts_popup_lists_recent_rows(win, cfg, qapp) -> None:
@@ -554,10 +644,10 @@ def test_popup_shows_nothing_when_there_are_no_alerts(win, qapp) -> None:
 
 
 def test_flash_and_sound_still_work_with_no_notify_channels(win, cfg, qapp, traces) -> None:
-    """`notify_channels == []`（改版后的默认）+ 浮窗开 = **响声 + 闪图标 + 浮窗照旧**。
+    """`notify_channels == []`（出厂默认）= **响声 + 闪图标 + 进消息列表**。
 
-    用户拍板的新默认是"平时躺在任务栏，有消息就给声音提醒和图标闪烁"：
-    空频道列表只表示"不走系统弹窗/托盘气泡/飞书"，与自绘浮窗那一套**互不相干** ——
+    用户拍板的新默认是"平时躺在任务栏，有消息就闪图标、点开看列表"：
+    空频道列表只表示"不走系统弹窗/托盘气泡/飞书"，与本地这一套**互不相干** ——
     这条用例就是为了防止将来有人把"没勾任何频道"顺手写成"什么都不提醒"。
     """
     cfg.notify_channels = []
@@ -569,7 +659,7 @@ def test_flash_and_sound_still_work_with_no_notify_channels(win, cfg, qapp, trac
     assert traces["sound"] == [sound.DEFAULT_ALIAS]          # 响了
     assert win._flashing is True                             # 闪了
     assert win._flash_timer.isActive() is True
-    assert win.alert_popup is not None and win.alert_popup.isVisible()   # 也弹了
+    assert win.message_center.unread_count() == 1            # 消息进了列表
     win._stop_alert_flash()
 
 
@@ -578,7 +668,8 @@ def test_tray_menu_has_pause_intraday_item(win, qapp) -> None:
     from laoa_trader.ui import app as ui_app
 
     texts = [a.text() for a in win.tray_menu.actions()]
-    assert "显示主窗口" in texts and "最近提醒" in texts and "退出" in texts
+    # 2026-09-18 起这一项叫【消息】（打开消息列表），不再是【最近提醒】（弹浮窗）
+    assert "显示主窗口" in texts and "消息" in texts and "退出" in texts
     assert ui_app.BTN_START_TEXT in texts                    # 【开始选股】也在托盘上
     act = next(a for a in win.tray_menu.actions() if a.text() == "暂停提醒")
     assert act.isCheckable() is True

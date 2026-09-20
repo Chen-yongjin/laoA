@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 import sqlite3
@@ -437,6 +438,11 @@ def run_daily(
             # 没写出来就必须让他知道，而不是只写进他自己不会去看的日志。
             report["errors"].append("导出桌面文件：没有写成功（原因见日志）")
 
+    # 2.6) 选股完成 → 进「消息」列表（用户 2026-09-18：通知仿 QQ，盘中提醒与选股推送
+    #      都进同一个列表）。放在这里（建池成功、导出之后）而不是推送那一段里：
+    #      用户要的是"选完股消息列表里就有一条"，与他勾没勾推送频道无关。
+    _record_pool_message(cfg, report.get("data_date"), pool_rows)
+
     # 3) 推送（多频道并行；同一天同一批内容只推一次）
     if notify:
         from laoa_trader.data import storage
@@ -511,6 +517,47 @@ def refresh_data(
         logger.exception("数据刷新失败")
         return [sync.SyncResult(stage="数据刷新", ok=False,
                                 error=f"{type(exc).__name__}: {exc}")]
+
+
+def _record_pool_message(cfg: Config, day: str | None, pool_rows: list[dict]) -> None:
+    """把"这一轮选出了几只"写进 `intraday_alert`（`kind="pool"`），供「消息」列表显示。
+
+    用户 2026-09-18 的原话："通知仿照 QQ 桌面端，有消息软件图标闪烁，可以点开查看消息列表。"
+    —— 盘中提醒与**选股完成**要进同一个列表，所以选股这边也记一条。
+
+    三条口径：
+
+    * **复用 `intraday_alert`，不另造表**：它已经是"提醒类消息"的唯一去处
+      （界面按它对账、「消息」列表按它渲染、两张表的「提醒」列也读它），
+      多一张表就多一处口径；
+    * **去重键用内容指纹**：`kind="pool"` + `symbol="pool-<指纹>"`，而主键是
+      `(date, symbol, kind)` —— 于是"同一天内容没变的重复建池"只留一条
+      （与 `push_log` 对推送的去重口径一致），内容变了才会有第二条；
+    * **失败只记日志**：消息落库失败绝不能把选股/导出/推送带走。
+    """
+    if not pool_rows or not day:
+        return
+    try:
+        from laoa_trader.data import storage
+
+        marks = "|".join(sorted(str(r.get("symbol") or "") for r in pool_rows))
+        # sha256 只当"这批内容是谁"的标记用（不是安全用途），取前 10 位足够区分
+        stamp = hashlib.sha256(f"{day}|{marks}".encode("utf-8")).hexdigest()[:10]
+        names = "、".join(
+            f"{r.get('name') or ''}({r.get('symbol')})".strip() for r in pool_rows[:5]
+        )
+        more = f" 等 {len(pool_rows)} 只" if len(pool_rows) > 5 else ""
+        with storage.connect(cfg.db_path) as conn:
+            fresh = storage.record_alerts(conn, [{
+                "kind": intraday.KIND_POOL,
+                "symbol": f"pool-{stamp}",
+                "detail": f"共 {len(pool_rows)} 只：{names}{more}",
+                "price": None,
+            }], day)
+        if fresh:
+            logger.info(f"选股完成已记入「消息」列表（{day}，{len(pool_rows)} 只）")
+    except Exception as exc:  # noqa: BLE001 - 消息落库失败不影响选股结果
+        logger.warning(f"记录「选股完成」消息失败（不影响选股）：{exc}")
 
 
 def _pool_plan_lines(pool_rows: list[dict], cfg: Config) -> list[str]:

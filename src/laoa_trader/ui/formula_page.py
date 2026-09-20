@@ -1595,10 +1595,10 @@ if QT_AVAILABLE:
                     "下次【开始选股】时它会作为「公式」组参与：进池的票来源会标成"
                     f"「公式·{name}」。"
                 )
-                self._toast(f"公式「{name}」已参与选股")
+                # 成功**不弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）；
+                # 列表里那个勾 + 提示区那句话本身就是反馈
             else:
                 self._set_hint(f"「{name}」已退出选股（{path.name} 里的 enabled_formulas 已更新）")
-                self._toast(f"公式「{name}」已退出选股")
 
         def on_toggle_auction(self, checked: bool) -> None:
             """「竞价策略」的启用/关闭 → 写回 `intraday_auction`（**不是**选股开关）。
@@ -1627,13 +1627,11 @@ if QT_AVAILABLE:
                     "竞价数据没有历史，所以它只能当盘中提示、无法回测。\n"
                     "参数在「系统设置 → 竞价扫描」里改。"
                 )
-                self._toast("竞价策略已开启（每天到点自动扫全市场）")
             else:
                 self._set_hint(
                     f"竞价策略已关闭（{path.name} 里的 intraday_auction=false）："
                     "开盘后不再自动扫描、不再推竞价提醒。"
                 )
-                self._toast("竞价策略已关闭")
 
         def _row_box(self, kind: str, key: str) -> Any:
             if kind == ROW_AUCTION:
@@ -1949,7 +1947,7 @@ if QT_AVAILABLE:
             message = (f"✅ 已导出选股结果：{path.name}（{len(rows)} 只，行情日 {day_text}）"
                        f"\n文件位置：{path}")
             self._set_hint(message)
-            self._toast(f"已导出选股结果：{path.name}")
+            self._set_hint(message)
 
         def _on_preview_failed(self, exc: Any) -> None:
             """运行失败：**数据问题**与**程序问题**分开说（下一步动作完全不同）。
@@ -2027,7 +2025,6 @@ if QT_AVAILABLE:
             if path.exists() and not self._confirm(f"公式「{name}」已存在，要覆盖它吗？\n"
                                                    f"（原来的内容会被替换，不可撤销）"):
                 self._set_hint(f"已取消保存：公式「{name}」保持原样（没有被改动）")
-                self._toast("已取消保存（原公式没有被改动）")
                 return
             self._write(name)
 
@@ -2049,7 +2046,6 @@ if QT_AVAILABLE:
             path = formulas_lib.formula_path(name, self.directory)
             if path.exists() and not self._confirm(f"公式「{name}」已存在，要覆盖它吗？"):
                 self._set_hint(f"已取消另存为：公式「{name}」保持原样")
-                self._toast("已取消另存为")
                 return
             self._write(name)
 
@@ -2087,7 +2083,6 @@ if QT_AVAILABLE:
                     self._loading = False
             self.reload()
             self._set_hint(f"🗑 已删除公式「{name}」（文件已从公式目录移除）")
-            self._toast(f"公式「{name}」已删除")
 
         def _write(self, name: str) -> None:
             """真正落盘（名称已安全化、覆盖已确认）。"""
@@ -2326,7 +2321,6 @@ if QT_AVAILABLE:
             lines.append("在「自选股池」页能看到它们（右键可删）。")
             text = "\n".join(lines)
             self._set_hint(text)
-            self._toast("已加入自选股池" if added else "这些票都已在自选里")
 
         def on_export_result(self) -> None:
             """【导出结果到桌面】：把结果表里的票写成桌面文本文件。
@@ -2361,7 +2355,7 @@ if QT_AVAILABLE:
             message = (f"✅ 已导出选股结果：{path.name}（{len(rows)} 只）"
                        f"\n文件位置：{path}")
             self._set_hint(message)
-            self._toast(f"已导出选股结果：{path.name}")
+            self._set_hint(message)
 
         # ── 小工具 ────────────────────────────────────────────────────
 
@@ -2420,12 +2414,11 @@ if QT_AVAILABLE:
         def on_copy_detail(self) -> None:
             """【复制】：把内置策略详情放进剪贴板（贴到记事本/群里都行）。"""
             if not self.detail_text:
-                self._toast("还没有可复制的详情：先在上面点一条内置策略")
+                self._toast("还没有可复制的详情：先在列表里点一行（公式或竞价策略）")
                 return
             clipboard = QApplication.clipboard()
             if clipboard is not None:
                 clipboard.setText(self.detail_text)
-            self._toast("详情已复制到剪贴板")
 
         def _confirm(self, question: str) -> bool:
             """二次确认（覆盖/删除）。**可被 monkeypatch**（测试里模拟点"是"）。"""

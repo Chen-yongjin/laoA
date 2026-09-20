@@ -136,7 +136,13 @@ ANOMALY_TAGS: dict[str, str] = {
 #: 异动原因文本截断长度：推送要一行看得完，完整原文交易所接口随时能再取
 ANOMALY_REASON_LIMIT = 120
 
+#: "选股完成"这一条消息的类型（**不是盘中提醒**：它由 `scheduler.run_daily()` 在
+#: 建池成功之后写入）。用户 2026-09-18 要求"通知仿 QQ：盘中提醒与选股推送都进同一个
+#: 消息列表"，所以它住在同一张表（`intraday_alert`）里、只是 kind 不同。
+KIND_POOL = "pool"
+
 KIND_LABELS = {
+    KIND_POOL: "📈 选股完成",
     "stop_loss": "🛑 触及止损",
     "take_profit": "🎯 触及止盈",
     "break_ma5": "📉 跌破 5 日线",

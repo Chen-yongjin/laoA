@@ -28,7 +28,10 @@ def test_defaults() -> None:
     assert cfg.take_profit == 0.10
     assert (cfg.trade_capital, cfg.trade_position_pct, cfg.trade_max_positions) == (
         100000.0, 0.2, 5)
-    assert cfg.notify_feishu is True and cfg.notify_windows is True and cfg.notify_tray is True
+    assert cfg.notify_feishu is True and cfg.notify_tray is True
+    # 2026-09-18：Windows 系统通知整路删除（用户："太骚扰了，影响体验"），
+    # 所以 `notify_windows` 这个属性**不存在了** —— 老配置里还写着它也不会报错（见下一条用例）
+    assert not hasattr(cfg, "notify_windows")
     assert cfg.hithink_api_key == ""
 
 
@@ -39,6 +42,8 @@ feishu_app_id = "app"
 feishu_app_secret = "secret"
 feishu_chat_id = "chat"
 notify_windows = false
+notify_windows_sound = true
+notify_windows_open_url = false
 trade_capital = 50000
 stop_loss = 0.08
 run_at = "20:30"
@@ -47,7 +52,8 @@ data_dir = "{p(tmp_path / 'mydata')}"
     cfg = load_config(path, use_env=False)
     assert cfg.hithink_api_key == "key-from-file"
     assert cfg.feishu_ready is True
-    assert cfg.notify_windows is False
+    # 老配置里那三个已删除的键**一律忽略**、不报错（老配置文件要能继续用）
+    assert not hasattr(cfg, "notify_windows")
     assert cfg.trade_capital == 50000.0
     assert cfg.stop_loss == 0.08
     assert cfg.run_at == "20:30"
@@ -204,7 +210,7 @@ def test_config_example_file_is_valid() -> None:
     data = tomllib.loads(example.read_text(encoding="utf-8"))
     for key in (
         "hithink_api_key", "feishu_app_id", "feishu_app_secret", "feishu_chat_id",
-        "notify_feishu", "notify_windows", "notify_tray", "trade_capital",
+        "notify_feishu", "notify_tray", "trade_capital",
         "trade_position_pct", "trade_max_positions", "intraday_interval",
         "stop_loss", "take_profit", "run_at",
     ):
@@ -430,9 +436,14 @@ def test_example_config_documents_market_overview() -> None:
 
 
 def test_notify_popup_defaults() -> None:
-    """默认：弹浮窗、8 秒、最多 5 条、响声、闪 6 秒。"""
+    """默认：**不弹浮窗**（用户 2026-09-18 改的口径）、浮窗参数仍是 8 秒/5 条、响声、闪 6 秒。
+
+    为什么默认关：用户要的通知是 QQ 那种 —— 图标闪一下，他自己点托盘图标看「消息」列表
+    （`ui/message_center.py`）；消息自己蹦出来反而不是他要的。
+    浮窗那三个参数（秒数/条数）留着，因为勾上 `notify_popup` 就照旧生效。
+    """
     cfg = load_config(use_env=False)
-    assert cfg.notify_popup is True
+    assert cfg.notify_popup is False
     assert cfg.notify_popup_seconds == 8
     assert cfg.notify_popup_max_items == 5
     assert cfg.notify_sound is True
@@ -466,10 +477,13 @@ notify_flash_seconds = 0
 
 
 def test_notify_popup_switches_written_wrong_stay_default(tmp_path: Path) -> None:
-    """两个开关写错（`"maybe"`）→ **回到默认开着**，不是把功能悄悄关掉。"""
+    """两个开关写错（`"maybe"`）→ **回到出厂值**（浮窗关、提示音开），不是把功能悄悄反过来。
+
+    `notify_sound` 的默认仍是 True；`notify_popup` 的出厂值是 False（2026-09-18 起）。
+    """
     path = _write(tmp_path, 'notify_popup = "maybe"\nnotify_sound = "maybe"\n')
     cfg = load_config(path, use_env=False)
-    assert cfg.notify_popup is True
+    assert cfg.notify_popup is False
     assert cfg.notify_sound is True
 
 
@@ -491,7 +505,7 @@ def test_notify_popup_env_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("NOTIFY_POPUP", "maybe")
     monkeypatch.setenv("NOTIFY_POPUP_SECONDS", "0")
     cfg2 = load_config(tmp_path / "none.toml")
-    assert cfg2.notify_popup is True
+    assert cfg2.notify_popup is False           # 写错 → 回出厂值（2026-09-18 起是关）
     assert cfg2.notify_popup_seconds == 8
 
 
@@ -503,13 +517,13 @@ def test_example_config_documents_notify_popup() -> None:
     example = P(__file__).resolve().parents[1] / "config.example.toml"
     text = example.read_text(encoding="utf-8")
     data = tomllib.loads(text)
-    assert data["notify_popup"] is True
+    assert data["notify_popup"] is False    # 默认关（2026-09-18：要的是 QQ 式"闪 + 消息列表"）
     assert data["notify_popup_seconds"] == 8
     assert data["notify_popup_max_items"] == 5
     assert data["notify_sound"] is True
     assert data["notify_flash_seconds"] == 6
     assert "点击行为不受" in text          # 为什么不走 Windows 系统通知
-    assert "别打扰我" in text              # notify_popup = false 的实际含义
+    assert "消息列表" in text               # 默认那条路是什么（点托盘图标看列表）
 
 
 # ── 竞价扫描（全市场扫描 + 过滤规则）的那一组 ──
@@ -743,16 +757,17 @@ def test_default_switches_are_off() -> None:
     assert cfg.intraday_anomaly is False
 
 
-def test_default_notify_goes_popup_only() -> None:
-    """默认只走 QQ 式浮窗：`notify_channels` 空、`notify_popup` 开。
+def test_default_notify_is_flash_plus_message_list() -> None:
+    """默认只走「图标闪烁 + 消息列表」：`notify_channels` 空、`notify_popup` 关。
 
-    为什么：系统弹窗/托盘气泡/飞书都由用户自己勾 —— 出厂状态不该有"还会弹系统窗口"，
-    但提醒本身要看得见（浮窗 + 声音 + 闪烁），所以这三项仍是默认开。
+    为什么：系统弹窗/托盘气泡/飞书都由用户自己勾（出厂状态不该有"还会弹系统窗口"），
+    而自绘浮窗也改成默认关了（用户 2026-09-18：他要的是 QQ 那种"图标闪、点开看列表"）。
+    提醒本身仍然看得见：**图标闪 + 消息窗口 + 响声**，所以这三项仍是默认开。
     """
     cfg = load_config(use_env=False)
     assert cfg.notify_channels == []
     assert cfg.channels == []                       # 空列表 = 这三路一个都不发
-    assert cfg.notify_popup is True
+    assert cfg.notify_popup is False
     assert cfg.notify_sound is True
     assert cfg.notify_flash_seconds == 6
 

@@ -40,7 +40,8 @@ notify_channels = [
   "feishu",
   "tray",
 ]                                # 多行数组，注释要留
-notify_windows_sound = true
+notify_windows = false           # 已删除的频道（2026-09-18）：回写时这一行要被抹掉
+notify_windows_sound = true      # 同上：一起抹掉
 notify_tray_duration_ms = 8000
 
 [my_own_section]                 # 用户自己的表
@@ -60,8 +61,8 @@ def sample_file(tmp_path: Path) -> Path:
 def test_render_keeps_comments_and_unknown_keys(tmp_path: Path) -> None:
     text = SAMPLE.format(data_dir=p(tmp_path / "data"))
     out = render_config_updates(text, {
-        "notify_channels": ["windows"],
-        "notify_windows_sound": False,
+        "notify_channels": ["feishu"],
+        "notify_popup": True,
         "enabled_formulas": ["尾盘选股策略"],
     })
     # 注释全在
@@ -74,9 +75,11 @@ def test_render_keeps_comments_and_unknown_keys(tmp_path: Path) -> None:
     assert "[my_own_section]" in out
     assert 'future_key = "keep me"' in out
     # 多行数组被整体替换成单行（注释保留在同一行）
-    assert 'notify_channels = ["windows"]' in out
+    assert 'notify_channels = ["feishu"]' in out
     assert "# 多行数组，注释要留" in out
-    assert '"feishu"' not in out.split("[my_own_section]")[0]
+    # 已经删掉的 Windows 频道三个键：**回写时连行一起抹掉**（用户 2026-09-18：
+    # "windows系统通知删除"）—— 留着它们只会让人以为那个开关还在
+    assert "notify_windows" not in out.split("[my_own_section]")[0]
     # 未被修改的键原样（含对齐的空格）
     assert 'hithink_api_key = "abc123"       # 同花顺 Key' in out
     assert "notify_tray_duration_ms = 8000" in out
@@ -84,8 +87,8 @@ def test_render_keeps_comments_and_unknown_keys(tmp_path: Path) -> None:
 
 def test_render_appends_missing_keys(tmp_path: Path) -> None:
     text = SAMPLE.format(data_dir=p(tmp_path / "data"))
-    out = render_config_updates(text, {"notify_windows_open_url": False, "feishu_on": True})
-    assert "notify_windows_open_url = false" in out
+    out = render_config_updates(text, {"notify_popup": False, "feishu_on": True})
+    assert "notify_popup = false" in out
     assert "feishu_on = true" in out
     assert "以下由「设置」面板写入" in out
     # 追加不会破坏原有内容
@@ -143,7 +146,9 @@ def test_update_config_file_roundtrip(sample_file: Path) -> None:
     assert cfg.feishu_on is False
     # 未被更新的键仍然读得到原值
     assert cfg.hithink_api_key == "abc123"
-    assert cfg.notify_windows_sound is True
+    # 已删除的 Windows 频道那几个键：读不到（属性没了），而且**那几行已经从文件里抹掉**
+    assert not hasattr(cfg, "notify_windows_sound")
+    assert "notify_windows" not in sample_file.read_text(encoding="utf-8")
     # 注释还在（逐字节再读一次原文）
     text = sample_file.read_text(encoding="utf-8")
     assert "# 老A选股助手配置（这些注释必须活下来）" in text
@@ -177,14 +182,16 @@ def test_update_does_not_leave_temp_file(sample_file: Path) -> None:
 def test_save_settings_updates_memory_config(sample_file: Path) -> None:
     """保存后内存里的 cfg 立刻是新值（避免界面还在用旧设置）。"""
     cfg = load_config(sample_file, use_env=False)
-    path, cfg = save_settings(cfg, {"notify_channels": ["windows"],
-                                    "notify_windows_sound": False})
+    path, cfg = save_settings(cfg, {"notify_channels": ["feishu", "tray"],
+                                    "notify_popup": True})
     assert path == sample_file
-    assert cfg.notify_channels == ["windows"]
-    assert cfg.notify_windows_sound is False
+    assert cfg.notify_channels == ["feishu", "tray"]
+    assert cfg.notify_popup is True
     assert cfg.source_path == sample_file
-    # 磁盘上也确实是新值
-    assert load_config(sample_file, use_env=False).notify_windows_sound is False
+    # 磁盘上也确实是新值；而且老配置里那三个已删除的 Windows 键**不会被写回去**
+    reread = load_config(sample_file, use_env=False)
+    assert reread.notify_channels == ["feishu", "tray"] and reread.notify_popup is True
+    assert "notify_windows" not in sample_file.read_text(encoding="utf-8")
 
 
 def test_save_settings_raises_oserror_on_unwritable(tmp_path: Path) -> None:

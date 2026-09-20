@@ -900,10 +900,11 @@ def test_export_after_run_writes_every_hit_to_the_desktop(
     assert "来源：公式·尾盘选股策略" in text
     assert "行情日 2026-09-11" in text
     assert "现价" in text                    # 库里有两个交易日 → 现价与涨跌幅都算得出来
-    # 成败都要看得见：提示区写清楚 + 标题区弹一句
+    # 导出是**成功操作**：按 2026-09-18 的新口径**不再弹提示**，
+    # 但文件位置必须写在提示区里（那是静态回显，不是一闪而过的提醒）
     assert "已导出选股结果" in page.hint_text and files[0].name in page.hint_text
     assert str(files[0]) in page.hint_text
-    assert any("已导出" in t for t in toasts), toasts
+    assert not any("已导出" in t for t in toasts), toasts
 
 
 def test_export_without_a_run_asks_to_run_first(page, tmp_path: Path) -> None:

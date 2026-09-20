@@ -51,7 +51,6 @@ from laoa_trader.hints import (
 )
 from laoa_trader.log import get_logger, log_file_path
 from laoa_trader.notify import KINDS, sound, summarize
-from laoa_trader.notify.windows import xueqiu_url
 from laoa_trader.scheduler import Scheduler, data_gate, refresh_data, run_daily
 from laoa_trader.ui import quotes as quotes_mod
 from laoa_trader.ui import theme as theme_mod
@@ -387,6 +386,7 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
     )
     # 提醒浮窗：自己画的窗口（Windows 原生 Toast 的点击行为不受我们控制，见该模块说明）
     from laoa_trader.ui.alert_popup import AlertPopup
+    from laoa_trader.ui.message_center import MessageCenter
     # 公式编辑器（「公式选股」页）：单独一个模块 —— 主窗口这边只负责把它挂成页签
     from laoa_trader.ui.formula_page import FormulaPage
 
@@ -1640,6 +1640,11 @@ if QT_AVAILABLE:
             self.about_icon: Any = None
             #: 提醒浮窗（QQ 式）与「提醒详情」对话框；都是**用一次建一次、之后复用**
             self.alert_popup: Any = None
+            #: 「消息」窗口（仿 QQ 的消息列表，用户 2026-09-18 要求）。
+            #: 懒建：只有真的来消息 / 用户点托盘图标时才创建 —— 没消息的人一辈子不需要它。
+            self.message_center: Any = None
+            #: 消息列表有没有灌过库里的历史（第一次对账时灌一次，且**不算未读**）
+            self._messages_seeded = False
             self.alert_detail_dialog: Any = None
             self.alert_detail_box: Any = None
             #: 已经提醒过的键 `(日期, 标的, 类型)`；None = 还没跟库对过账
@@ -2925,19 +2930,29 @@ if QT_AVAILABLE:
                 "四个勾选框可任选；都不勾 = 只入库不推送（消息照样进两张表的「提醒」列）。"
                 "飞书需先填凭证",
             )
-            self.popup_box = QCheckBox("QQ 浮动消息（右下角滑出，默认开）")
-            self.popup_box.setChecked(bool(getattr(self.cfg, "notify_popup", True)))
+            # 默认路径（2026-09-18 用户拍板）：**图标闪烁 + 「消息」列表** ——
+            # 闪一下让你知道有事，点托盘图标打开列表自己看。这一行说明它：
+            msg_hint = QLabel(
+                "默认：提醒来时闪托盘/任务栏图标，点托盘图标打开「消息」窗口看列表"
+                "（盘中提醒 + 选股完成都在里面，未读带圆点、打开即已读）。"
+                "下面那个浮窗是**另一种**呈现方式，默认不弹。"
+            )
+            msg_hint.setObjectName("statusTag")
+            msg_hint.setWordWrap(True)
+            body.addWidget(msg_hint)
+
+            self.popup_box = QCheckBox("右下角滑出浮窗（默认关）")
+            self.popup_box.setChecked(bool(getattr(self.cfg, "notify_popup", False)))
             self.popup_box.setToolTip(
-                "收到提醒时在右下角滑出一扇浮窗（可点开看详情、可拖走、鼠标停着不消失）。\n"
-                "它就是用户嘴里那种「QQ 消息」模式：响声 + 图标闪烁 + 浮窗三件事一起，"
-                "任一件关掉都不影响另外两件"
+                "勾上：收到提醒时在右下角滑出一扇浮窗（可点开看详情、可拖走、鼠标停着不消失）。\n"
+                "不勾（默认）：只闪图标 + 消息列表 —— 消息自己蹦出来容易打断别的事。\n"
+                "两种方式下的响声与图标闪烁都一样，消息始终会进「消息」列表"
             )
             body.addWidget(self.popup_box)
 
             chosen = {str(c).lower() for c in (self.cfg.notify_channels or [])}
             self.channel_boxes: dict[str, Any] = {}
-            labels = {"windows": "系统弹窗（Windows 原生）", "feishu": "飞书推送（卡片消息）",
-                      "tray": "托盘气泡（气泡提示）"}
+            labels = {"feishu": "飞书推送（卡片消息）", "tray": "托盘气泡（气泡提示）"}
             for name in KINDS:
                 box = QCheckBox(labels.get(name, name))
                 box.setChecked(name in chosen)
@@ -2949,7 +2964,7 @@ if QT_AVAILABLE:
             param_row.setSpacing(PAGE_SPACING)
             self.sound_box = QCheckBox("提示音")
             self.sound_box.setChecked(bool(getattr(self.cfg, "notify_sound", True)))
-            self.sound_box.setToolTip("收到提醒响一声（浮窗模式下同样生效）")
+            self.sound_box.setToolTip("收到提醒响一声（消息列表 / 浮窗两种方式都生效）")
             param_row.addWidget(self.sound_box)
             param_row.addWidget(QLabel("　图标闪烁："))
             self.flash_seconds_box = QSpinBox()
@@ -2980,14 +2995,6 @@ if QT_AVAILABLE:
             param_row.addWidget(self.popup_items_box)
             param_row.addStretch(1)
             body.addLayout(param_row)
-
-            # windows 参数
-            self.win_sound_box = QCheckBox("弹窗带提示音")
-            self.win_sound_box.setChecked(bool(self.cfg.notify_windows_sound))
-            self.win_url_box = QCheckBox("弹窗按钮点击打开雪球")
-            self.win_url_box.setChecked(bool(self.cfg.notify_windows_open_url))
-            body.addWidget(self.win_sound_box)
-            body.addWidget(self.win_url_box)
 
             # 托盘参数
             tray_row = QHBoxLayout()
@@ -3406,9 +3413,14 @@ if QT_AVAILABLE:
             menu = QMenu()
             act_show = QAction("显示主窗口", self)
             act_show.triggered.connect(self._restore_window)
-            act_recent = QAction("最近提醒", self)
-            act_recent.setToolTip("把最近几条提醒再弹一次（像 QQ 那样点开就能看）")
-            act_recent.triggered.connect(self.on_show_recent_alerts)
+            # 「消息（N）」= 仿 QQ 的消息列表（用户 2026-09-18 要求）：
+            # 左键点托盘图标、或点这一项，都打开它；标题里的数字就是未读数。
+            act_recent = QAction("消息", self)
+            act_recent.setToolTip(
+                "打开消息列表（盘中提醒 + 选股完成都在里面；未读的带圆点）"
+            )
+            act_recent.triggered.connect(self.on_open_messages)
+            self.act_messages = act_recent
             # 【开始选股】：与「策略选股」页那个按钮**同一个回调**（一处逻辑两处入口）
             act_pool = QAction(BTN_START_TEXT, self)
             act_pool.setToolTip("跑启用的策略与公式，结果直接进「自选股池」")
@@ -3435,6 +3447,7 @@ if QT_AVAILABLE:
             self.tray.show()
             # 这里**不再**用托盘图标去覆盖窗口图标：托盘那份是 32px，
             # 拿去当窗口图标在任务栏/Alt-Tab 上会明显发虚（窗口图标在 __init__ 里设过 256 的）
+            self._refresh_message_badge()      # 托盘菜单上的「消息（N）」
             try:
                 from laoa_trader.notify import tray as tray_mod
 
@@ -4468,7 +4481,7 @@ if QT_AVAILABLE:
                 return
             if column != 0:
                 return
-            url = xueqiu_url(symbol)
+            url = market.xueqiu_url(symbol)
             if not url:
                 return
             opened = QDesktopServices.openUrl(QUrl(url))
@@ -4540,14 +4553,14 @@ if QT_AVAILABLE:
             menu.addAction(act_toggle)
             menu.addSeparator()
             act_open = QAction("打开雪球", menu)
-            act_open.setEnabled(bool(xueqiu_url(symbol)))
+            act_open.setEnabled(bool(market.xueqiu_url(symbol)))
             act_open.triggered.connect(lambda _=False, s=symbol: self._open_xueqiu(s))
             menu.addAction(act_open)
             return menu
 
         def _open_xueqiu(self, symbol: str) -> None:
             """打开雪球个股页（右键菜单那一项；单击名称走 `_on_table_cell_clicked`）。"""
-            url = xueqiu_url(symbol)
+            url = market.xueqiu_url(symbol)
             if url:
                 QDesktopServices.openUrl(QUrl(url))
 
@@ -4598,11 +4611,9 @@ if QT_AVAILABLE:
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"删除失败：{type(exc).__name__}: {exc}")
                 return
-            if removed_watch:
-                self._toast(f"已删除自选 {symbol}")
-            elif removed_pool:
-                self._toast(f"已从今日池子移除 {symbol}（下次【开始选股】会重新评估）")
-            else:
+            # 删除成功**不弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）；
+            # "没找到"留着 —— 那是"你要删的东西不在这儿"，不说用户会以为删掉了
+            if not (removed_watch or removed_pool):
                 self._toast(f"没找到 {symbol} 的池子行")
             self._pool_signature = None
             self._tick()
@@ -4751,8 +4762,6 @@ if QT_AVAILABLE:
             if not changed:
                 self._toast(f"没找到持仓 {symbol}")
                 return
-            self._toast(f"{symbol} 已{'打开' if enabled else '关闭'}监控"
-                        + ("" if enabled else "（不再产生任何盘中提醒：止损/止盈/做T/竞价/异动）"))
             self._position_signature = None
             self._tick()
 
@@ -4778,7 +4787,11 @@ if QT_AVAILABLE:
                 if enabled_count > self.cfg.watchlist_max:
                     text += (f"；⚠️ 自选 {enabled_count} 只已超过上限 "
                              f"{self.cfg.watchlist_max}，盘中只监控前 {self.cfg.watchlist_max} 只")
-                self._toast(text)
+                # 成功**不弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）；
+                # 但两种情况必须说出来 —— 它们不是"确认成功"，而是"你要心里有数"：
+                #   ① 自选超过上限（后面几只不会被监控）；② 本地库没有它的名称（按代码加的）
+                if enabled_count > self.cfg.watchlist_max or not name:
+                    self._toast(text)
                 self.watch_symbol.clear()
                 self.watch_note.clear()
                 self._pool_signature = None
@@ -4825,7 +4838,8 @@ if QT_AVAILABLE:
                 return
             with self.engine.connect() as conn:
                 removed = storage.remove_watchlist(conn, symbol)
-            self._toast(f"已删除自选 {symbol}" if removed else f"未找到自选 {symbol}")
+            if not removed:
+                self._toast(f"未找到自选 {symbol}")
             self._pool_signature = None
             self._tick()
 
@@ -4843,8 +4857,6 @@ if QT_AVAILABLE:
             if not changed:
                 self._toast(f"未找到自选 {symbol}")
                 return
-            self._toast(f"已{'启用' if enabled else '停用'} {symbol}"
-                        + ("" if enabled else "（不进池、不监控）"))
             self._pool_signature = None
             self._tick()
 
@@ -4904,6 +4916,10 @@ if QT_AVAILABLE:
             **绝不显示 `（None）`**。
             """
             symbol = str(row.get("symbol") or "").strip()
+            if str(row.get("kind") or "") == intraday.KIND_POOL:
+                # "选股完成"不是某只票（`symbol` 是内容指纹，见 scheduler 里那条注释）：
+                # 消息列表里它该显示成「选股结果」，而不是 `pool-3f2a…` 这串。
+                return "选股结果"
             name = str(names.get(symbol) or "").strip()
             if symbol:
                 return f"{name}({symbol})" if name else symbol
@@ -4946,6 +4962,10 @@ if QT_AVAILABLE:
                 logger.debug(f"读提醒失败（本轮不弹浮窗）：{exc}")
                 return
             keys = [self._alert_key(row) for row in rows]
+            if not self._messages_seeded:
+                # 第一次对账：把库里的历史灌进「消息」列表（**不算未读、不闪图标**）——
+                # 用户点开消息窗口能看到今天早些时候的提醒，但不该一开机就看到一堆红点。
+                self._seed_message_history(rows)
             if self._alert_seen is None:
                 # 第一次只记账不弹：启动时把今天早上的提醒全弹一遍是骚扰
                 self._alert_seen = set(keys)
@@ -4960,17 +4980,26 @@ if QT_AVAILABLE:
                 self._notify_alerts(fresh)
 
         def _notify_alerts(self, alerts: list[dict]) -> None:
-            """新提醒到了：响声 → 图标闪烁 → 弹浮窗（三步各自独立，一步失败不影响其它）。"""
+            """新消息到了：进「消息」列表 → 响声 → 图标闪烁（+ 可选滑出浮窗）。
+
+            2026-09-18 用户要求"通知仿照 QQ 桌面端：图标闪烁 + 点开看消息列表"，所以默认
+            只有前两步：**图标闪给你看、消息躺在列表里等你点**，不再自己蹦一扇窗出来。
+            那扇右下角滑出的浮窗（`ui/alert_popup.py`）留着但**默认关**（`notify_popup`），
+            勾上就照旧弹 —— 两条路互不影响，消息始终都会进列表。
+
+            三件事各自独立：浮窗弹不出来不影响闪烁，闪不了不影响消息入库。
+            """
             if not alerts:
                 return
-            if not bool(getattr(self.cfg, "notify_popup", True)):
-                # 浮窗关掉 = 用户说"别打扰我"：连声音和闪烁一起免了，只入库
-                # （要看就去「盘中提醒」页 / 托盘【最近提醒】）
-                return
+            self._ensure_message_center().add_messages(
+                self._alert_items([dict(row) for row in alerts])
+            )
+            self._refresh_message_badge()
             if bool(getattr(self.cfg, "notify_sound", True)):
                 sound.play()
             self._start_alert_flash()
-            self.show_alert_popup(alerts)
+            if bool(getattr(self.cfg, "notify_popup", False)):
+                self.show_alert_popup(alerts)
 
         def _alert_items(self, rows: list[dict]) -> list[dict]:
             """把库里的提醒行转成浮窗要的展示条目（`名称(代码)` 在这里拼好）。"""
@@ -5042,6 +5071,81 @@ if QT_AVAILABLE:
                 seconds = 8
             self.alert_popup.seconds = max(1, seconds)
             return self.alert_popup
+
+        # ── 「消息」窗口（仿 QQ 的消息列表，用户 2026-09-18 要求）──
+
+        def _ensure_message_center(self) -> Any:
+            """懒建消息窗口（只建一次），并把它的信号接上。
+
+            三个信号的分工：
+            * `opened` → 停图标闪烁（**打开即已读**：用户已经在看了，再闪就是吵）；
+            * `item_clicked` → 弹现有那个「提醒详情」（条件单参数与推送同源）；
+            * `settings_requested` → 切到「系统设置」页找「通知方式」。
+            """
+            if self.message_center is None:
+                center = MessageCenter(self)
+                center.opened.connect(self._stop_alert_flash)
+                center.opened.connect(self._refresh_message_badge)
+                center.closed.connect(self._refresh_message_badge)
+                center.item_clicked.connect(self.show_alert_detail)
+                center.settings_requested.connect(self.on_open_notify_settings)
+                self.message_center = center
+            return self.message_center
+
+        def _seed_message_history(self, rows: list[dict]) -> None:
+            """把库里的历史灌进消息列表（**不算未读**），只灌一次。
+
+            为什么不算未读：那张表里存着今天早些时候（甚至昨天）的提醒，
+            一开机就摆一屏红点等于告诉用户"你错过了 40 条消息"，而其实他只是刚打开程序。
+            """
+            try:
+                self._ensure_message_center().set_messages(
+                    self._alert_items([dict(row) for row in rows]), unread=False
+                )
+                self._messages_seeded = True
+                self._refresh_message_badge()
+            except Exception as exc:  # noqa: BLE001 - 消息列表没灌上不影响盯盘
+                logger.debug(f"消息历史灌入失败：{exc}")
+
+        def _refresh_message_badge(self) -> None:
+            """把未读数写到托盘菜单与提示上（QQ 的"消息(n)"就是这个意思）。"""
+            try:
+                center = self.message_center
+                count = int(center.unread_count()) if center is not None else 0
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"取未读数失败：{exc}")
+                count = 0
+            action = getattr(self, "act_messages", None)
+            if action is not None:
+                action.setText(f"消息（{count}）" if count else "消息")
+            if self.tray is not None:
+                title = "老A选股助手"
+                if count:
+                    title += f" —— {count} 条新消息"
+                try:
+                    self.tray.setToolTip(title)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"托盘提示更新失败：{exc}")
+
+        def on_open_messages(self, _checked: bool = False) -> None:
+            """打开「消息」窗口（托盘左键 / 托盘菜单 / 主窗口入口都走这里）。
+
+            打开即已读：窗口自己的 `showEvent` 会清未读并发 `opened`，
+            这里只负责把它抬到前面来；顺带**停掉图标闪烁**（同一次动作两处生效，
+            因为 `opened` 也接了停闪）。
+            """
+            self._stop_alert_flash()
+            center = self._ensure_message_center()
+            center.show()
+            center.raise_()
+            center.activateWindow()
+            self._refresh_message_badge()
+
+        def on_open_notify_settings(self, _checked: bool = False) -> None:
+            """【通知设置】：切到「系统设置」页，让用户自己去改那一组。"""
+            self._restore_window()
+            self.tabs.setCurrentWidget(self.settings_page)
+            self._toast("通知方式在「系统设置 → 通知方式」这一组（提示音 / 闪烁秒数 / 飞书…）")
 
         def on_alert_item_clicked(self, item: dict) -> None:
             """点了浮窗里的某一条 → 停闪 + 弹这条的详情。"""
@@ -5158,7 +5262,7 @@ if QT_AVAILABLE:
                 self._toast("没有可复制的内容")
                 return
             QApplication.clipboard().setText(text)
-            self._toast("已复制提醒详情（含条件单参数）")
+            self._set_status("已复制提醒详情（含条件单参数）")
 
         # ── 图标闪烁 ──
 
@@ -5186,10 +5290,15 @@ if QT_AVAILABLE:
             # 代次放在闭包里：上一条提醒的"到点停闪"不能把这一条刚起的闪烁掐掉
             QTimer.singleShot(seconds * 1000, lambda: self._stop_alert_flash(token))
             try:
-                # 任务栏按钮闪烁（Windows 上就是任务栏图标闪）——0 = 一直闪到窗口被激活
-                QApplication.alert(self, 0)
+                # 任务栏按钮闪烁（Windows 上就是任务栏图标闪）。
+                # ⚠️ 这里给的是**有限的毫秒数**（= 上面那个闪烁秒数），不是 `0`：
+                # Qt 的 `alert(w, 0)` 是"一直闪到窗口被激活"，而 QQ 式交互里用户是去点
+                # **消息窗口**的 —— 主窗口没被激活，任务栏就会一直闪下去，
+                # 而 Qt 没暴露 Win32 的 `FLASHW_STOP`，我们**没法主动取消**它。
+                # 所以闪一个有限的时长（与托盘图标闪烁同步），到点自己停。
+                QApplication.alert(self, max(1, seconds) * 1000)
             except Exception as exc:  # noqa: BLE001
-                logger.debug(f"任务栏提醒失败（不影响浮窗与托盘闪烁）：{exc}")
+                logger.debug(f"任务栏提醒失败（不影响消息列表与托盘闪烁）：{exc}")
 
         def _flash_step(self) -> None:
             """一闪：正常图标 ↔ 红点图标交替。"""
@@ -5770,7 +5879,7 @@ if QT_AVAILABLE:
             """把数据目录与日志路径一起复制到剪贴板（报障时要贴的就是这两行）。"""
             text = f"数据目录：{self.data_dir_edit.text()}\n日志路径：{self.log_path_edit.text()}"
             QApplication.clipboard().setText(text)
-            self._toast("已复制数据目录与日志路径")
+            self._set_status("已复制数据目录与日志路径")
 
         def _save_updates(self, updates: dict, ok_text: str) -> Any:
             """统一的保存流程：写文件 → 同步内存配置 → 刷新界面提示。
@@ -5782,7 +5891,8 @@ if QT_AVAILABLE:
 
             try:
                 path, self.cfg = save_settings(self.cfg, updates)
-                self._toast(f"{ok_text}（已写入 {path.name}）")
+                # 保存成功**不弹提示**（回显在设置页那行小字里）；失败照旧弹
+                self._set_settings_hint(f"{ok_text}（已写入 {path.name}）")
             except OSError as exc:
                 # 只读盘/权限问题：给中文原因，不弹 traceback
                 self._toast(f"保存失败：{exc}（可手改 config.toml）")
@@ -5812,8 +5922,6 @@ if QT_AVAILABLE:
                 "notify_flash_seconds": int(self.flash_seconds_box.value()),
                 "notify_popup_seconds": int(self.popup_seconds_box.value()),
                 "notify_popup_max_items": int(self.popup_items_box.value()),
-                "notify_windows_sound": self.win_sound_box.isChecked(),
-                "notify_windows_open_url": self.win_url_box.isChecked(),
                 "notify_tray_duration_ms": int(self.tray_duration.value()),
                 "feishu_on": self.feishu_on_box.isChecked(),
                 "feishu_app_id": self.feishu_app_id.text().strip(),
@@ -5823,7 +5931,7 @@ if QT_AVAILABLE:
 
         def on_save_notify(self) -> None:
             """只保存通知那一组（一键保存里也走同一份收集函数）。"""
-            self._toast(self._save_settings(
+            self._toast_save_result(self._save_settings(
                 self._panel_notify_updates(), extra="；" + self._settings_effect_text()
             ))
 
@@ -5876,7 +5984,7 @@ if QT_AVAILABLE:
                 + (f"；⚠️ 认不出的时刻已忽略：{'、'.join(bad)}" if bad else "")
             )
             message = self._save_settings(updates, extra=extra)
-            self._toast(message)
+            self._toast_save_result(message)          # 成功不弹，失败才弹
             self._refresh_auction_hint(extra)
             self._refresh_status()
 
@@ -6008,6 +6116,17 @@ if QT_AVAILABLE:
             except Exception:  # noqa: BLE001 - 列表刷新失败不影响设置已写盘
                 logger.debug("策略列表刷新失败", exc_info=True)
 
+        def _toast_save_result(self, message: str) -> None:
+            """保存类操作的统一出口：**失败才弹提示**（用户 2026-09-18："软件操作的一些
+            提醒都不需要"）。
+
+            为什么不是"一律不弹"：保存失败（校验没过 / 只读盘）是必须让人看见的 ——
+            用户之前的明确口径就是"成功不需要提示，失败再提示"，而 `_save_settings`
+            正是用 `❌` 开头表示失败。成功时的回显仍然写在设置页那行小字里。
+            """
+            if str(message).startswith("❌"):
+                self._toast(message)
+
         def _set_settings_hint(self, text: str) -> None:
             """把保存结果回显在按钮下面（用户不必去翻运行状态那一行）。"""
             if getattr(self, "save_settings_hint", None) is not None:
@@ -6024,7 +6143,7 @@ if QT_AVAILABLE:
             """
             updates = self._collect_settings_updates()
             message = self._save_settings(updates, extra="；" + self._settings_effect_text())
-            self._toast(message)
+            self._toast_save_result(message)          # 成功不弹，失败才弹
             # 保存后按新值立刻重算界面：止损位/止盈位两列、竞价说明行、通知提示
             self._position_signature = None
             self._refresh_positions()
@@ -6314,7 +6433,7 @@ if QT_AVAILABLE:
                       f"止盈 +{updates['take_profit'] * 100:g}%；"
                       f"T策略{'开' if updates['intraday_t'] else '关'}",
             )
-            self._toast(message)
+            self._toast_save_result(message)          # 成功不弹，失败才弹
             # 「持仓监控」表的止损位/止盈位两列立刻按新比例重算（指纹清掉才会重画）
             self._position_signature = None
             self._refresh_positions()
@@ -6360,7 +6479,7 @@ if QT_AVAILABLE:
                         conn, symbol, name=name, quantity=0, avg_cost=cost,
                         note=note, reopen=True,
                     )
-                self._toast(f"已记录持仓 {symbol} {name or ''} @ {cost:.2f}")
+                self._set_status(f"已记录持仓 {symbol} {name or ''} @ {cost:.2f}")
                 self.pos_symbol.clear()
                 self.pos_cost.clear()
                 self.pos_note.clear()
@@ -6388,7 +6507,8 @@ if QT_AVAILABLE:
             try:
                 with self.engine.connect() as conn:
                     removed = storage.delete_position(conn, symbol)
-                self._toast(f"已删除持仓 {symbol}" if removed else f"未找到持仓 {symbol}")
+                if not removed:
+                    self._toast(f"未找到持仓 {symbol}")
                 self._position_signature = None
                 self._tick()
             except Exception as exc:  # noqa: BLE001
@@ -6482,7 +6602,7 @@ if QT_AVAILABLE:
         def on_copy_version_info(self) -> None:
             """把版本信息写进剪贴板（报障时粘贴，比自己照着对话框敲准得多）。"""
             QGuiApplication.clipboard().setText(self.version_info_text())
-            self._toast("已复制版本信息")
+            self._set_status("已复制版本信息")
 
         # ── 窗口/托盘 ──
 
@@ -6503,10 +6623,17 @@ if QT_AVAILABLE:
             double = QSystemTrayIcon.ActivationReason.DoubleClick.value
             if reason_value not in (trigger, double):
                 return
-            popup = self.alert_popup
-            if reason_value == trigger and popup is not None and popup.isVisible():
-                self._stop_alert_flash()
-                popup.raise_()
+            if reason_value == trigger:
+                # 左键单击 = **打开消息窗口**（用户 2026-09-18 要求："通知仿照 QQ 桌面端…
+                # 可以点开查看消息列表"）。QQ 就是这样：闪图标 → 你点一下 → 看消息。
+                # 以前这里是"先把还挂着的浮窗抬起来"，现在浮窗默认关，所以直接开消息列表；
+                # 浮窗开着的人（`notify_popup`）仍然先抬浮窗 —— 那时他眼前就有东西可看。
+                popup = self.alert_popup
+                if popup is not None and popup.isVisible():
+                    self._stop_alert_flash()
+                    popup.raise_()
+                    return
+                self.on_open_messages()
                 return
             self._stop_alert_flash()
             self._restore_window()

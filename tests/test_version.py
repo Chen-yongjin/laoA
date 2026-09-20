@@ -42,16 +42,17 @@ NEW_NAME = "老A选股助手"
 
 
 def test_user_visible_names_use_the_new_product_name() -> None:
-    """窗口标题 / 托盘 / Windows 通知 / 推送标题 / 命令行 banner 全部用新名。"""
+    """窗口标题 / 托盘 / 推送标题 / 命令行 banner 全部用新名。
+
+    （2026-09-18：Windows 系统通知那一整路删除，所以不再有 `windows.APP_ID`
+    这一项要核 —— 用户原话："windows系统通知删除，太骚扰了，影响体验。"）
+    """
     from laoa_trader import __main__ as cli
     from laoa_trader import scheduler
-    from laoa_trader.notify import windows
     from laoa_trader.ui import app as ui_app
 
     assert NEW_NAME in ui_app.APP_NAME
     assert LEGACY_NAME not in ui_app.APP_NAME
-    assert windows.APP_ID == ui_app.APP_NAME          # 通知里显示的应用名与界面标题同源
-    assert LEGACY_NAME not in windows.APP_ID
     assert NEW_NAME in cli.__doc__ or NEW_NAME in (cli.__doc__ or "")  # 帮助文本
     # 推送标题（飞书卡片 / 托盘 / 通知共用这一个标题）
     title = scheduler.pool_push_title("2026-09-14") if hasattr(scheduler, "pool_push_title") else None
@@ -71,7 +72,7 @@ def test_repo_text_files_do_not_mention_the_legacy_name() -> None:
     """
     targets = [
         "src/laoa_trader/ui/app.py",
-        "src/laoa_trader/notify/windows.py",
+        # （2026-09-18：`notify/windows.py` 随 Windows 系统通知整路删除，这里不再扫它）
         "src/laoa_trader/scheduler.py",
         "src/laoa_trader/__main__.py",
         "src/laoa_trader/__init__.py",

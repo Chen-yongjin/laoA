@@ -38,7 +38,15 @@ from typing import Any
 DEFAULT_APP_NAME = "LaoATrader"
 
 #: 支持的通知频道（顺序 = 界面与 --doctor 的展示顺序）
-CHANNELS: tuple[str, ...] = ("windows", "feishu", "tray")
+#: 支持的通知频道。**2026-09-18 起 `windows` 整路删除**（用户原话："windows系统通知删除，
+#: 太骚扰了，影响体验"）—— 老配置里还写着 `"windows"` 不报错，只是当它不存在
+#: （`channel_states()` 会显示成"该频道已删除"，见 `REMOVED_CHANNELS`）。
+CHANNELS: tuple[str, ...] = ("feishu", "tray")
+
+#: 已经删掉的频道名（老 `config.toml` 里可能还写着）。
+#: 为什么留一张表而不是不管：① 加载时不能报错（老配置要能继续用）；
+#: ② 设置页/`--doctor` 要把"你配的这个频道已经没有了"说出来，而不是让人以为它还在跑。
+REMOVED_CHANNELS: dict[str, str] = {"windows": "该频道已删除（Windows 系统通知太骚扰，2026-09-18 起移除）"}
 
 #: 股票池的两种视图（界面右上角【切换为卡片/表格】）；写错的值当 `cards`
 POOL_VIEWS: tuple[str, ...] = ("cards", "table")
@@ -402,23 +410,22 @@ class Config:
     feishu_chat_id: str = ""
     receive_id_type: str = "chat_id"
     #: 要用的通知频道（三选任意组合）。**默认空列表**（用户拍板）：默认只走
-    #: `notify_popup`（QQ 式浮窗：响一声 + 图标闪烁 + 右下角列表），
-    #: 系统弹窗（windows）/ 托盘气泡（tray）/ 飞书（feishu）都由用户自己去勾 ——
-    #: 出厂设置里不要有"还会弹系统窗口"这种行为，不然第一次跑就被打断。
-    #: 空列表 = 这三路都不发（**信号照常入库、浮窗照常弹**，见 `notify_popup`）。
+    #: 提醒渠道清单。默认空 = 这三路（现在只有飞书与托盘气泡两路）都不发：
+    #: 提醒本身走"图标闪烁 + 「消息」列表"（见 `notify_popup` 与 `ui/message_center.py`），
+    #: 推送渠道由用户自己去勾 —— 出厂设置里不要有"还会弹系统窗口"这种行为。
     notify_channels: list[str] = field(default_factory=list)
     #: 飞书频道总开关（与 notify_channels 同时生效；缺凭证时自动跳过）
     feishu_on: bool = True
-    #: Windows 弹窗是否带提示音
-    notify_windows_sound: bool = True
-    #: Windows 弹窗点击是否打开雪球页面
-    notify_windows_open_url: bool = True
     #: 托盘气泡显示时长（毫秒）
     notify_tray_duration_ms: int = 8000
-    # ── 自绘提醒浮窗（QQ 式：响声 + 图标闪烁 + 右下角弹出列表）──
-    #: 是否弹自绘浮窗。为什么不用 Windows 原生 Toast 兜底：它的**点击行为不受我们控制**
+    # ── 自绘提醒浮窗（右下角滑出来的那扇窗）──
+    #: 是否弹自绘浮窗。**默认关**（用户 2026-09-18 拍板）：
+    #: 他要的通知是 QQ 那种 —— "图标闪 + 点开看消息列表"（见 `ui/message_center.py`），
+    #: 消息自己蹦出来反而不是他想要的。勾上就照旧滑出来（两条路互不影响，
+    #: 消息**始终**会进消息列表）。
+    #: 不用 Windows 原生 Toast 兜底的原因没变：它的**点击行为不受我们控制**
     #: （点不开、看不到内容），等于没提醒 —— 详见 `ui/alert_popup.py` 的说明。
-    notify_popup: bool = True
+    notify_popup: bool = False
     #: 浮窗自动消失的秒数（鼠标停在浮窗上时不消失）；非法值回默认
     notify_popup_seconds: int = 8
     #: 浮窗最多列几条（1~10，与「竞价提醒条数」同一个上限口径）
@@ -427,9 +434,9 @@ class Config:
     notify_sound: bool = True
     #: 托盘 / 任务栏图标闪烁几秒（0 = 不闪）
     notify_flash_seconds: int = 6
-    # ── 以下三个是"单频道开关"（老配置沿用；与 notify_channels 同时生效）──
+    # ── 单频道开关（老配置沿用；与 notify_channels 同时生效）──
+    #: （`notify_windows` 已于 2026-09-18 随那一整路删除；老配置里还有它也不会报错）
     notify_feishu: bool = True
-    notify_windows: bool = True
     notify_tray: bool = True
 
     # ── 交易参数（只用于算条件单，不涉及任何下单） ──
@@ -670,7 +677,7 @@ class Config:
 
         判定顺序（三者同时生效，任一为否就不发）：
             1. 在 `notify_channels` 列表里（空列表 = 一个都不发）；
-            2. 该频道的单频道开关（`notify_feishu/windows/tray`）为真；
+            2. 该频道的单频道开关（`notify_feishu/tray`）为真；
             3. 飞书还要 `feishu_on` 为真（凭证是否配齐在发送时再判，缺则"跳过"）。
         """
         enabled: list[str] = []
@@ -694,6 +701,10 @@ class Config:
         """
         states: dict[str, str] = {}
         chosen = {str(c).strip().lower() for c in (self.notify_channels or [])}
+        for name, why in REMOVED_CHANNELS.items():
+            # 老配置里还写着已删掉的频道：**如实说一句**，别让人以为它还在发
+            if name in chosen:
+                states[name] = why
         for name in CHANNELS:
             if name not in chosen:
                 states[name] = "未在 notify_channels 中"
@@ -964,10 +975,7 @@ def _apply_env(cfg: Config) -> Config:
         ("AUTO_DOWNLOAD_ON_START", "auto_download_on_start"),
         ("AUTO_RUN", "auto_run"),
         ("AUTO_DOWNLOAD_ON_START", "auto_download_on_start"),
-        ("NOTIFY_WINDOWS_SOUND", "notify_windows_sound"),
-        ("NOTIFY_WINDOWS_OPEN_URL", "notify_windows_open_url"),
         ("NOTIFY_FEISHU", "notify_feishu"),
-        ("NOTIFY_WINDOWS", "notify_windows"),
         ("NOTIFY_TRAY", "notify_tray"),
     ):
         value = _env_bool(env_name)
@@ -1049,8 +1057,21 @@ def _array_end_line(lines: list[str], start: int) -> int:
     return len(lines) - 1
 
 
+#: 已经从程序里删掉、**回写时顺手抹掉**的配置键。
+#:
+#: 用户 2026-09-18："windows系统通知删除，太骚扰了，影响体验。" ——
+#: 删功能的同时要把配置里那几行也清掉：留着它们只会让人以为"这个开关还在"，
+#: 下次翻配置时又来找为什么没反应。只动**顶层**同名键（表里的同名键不碰）。
+REMOVED_CONFIG_KEYS: tuple[str, ...] = (
+    "notify_windows", "notify_windows_sound", "notify_windows_open_url",
+)
+
+
 def render_config_updates(text: str, updates: dict[str, Any]) -> str:
     """在配置文本里就地更新若干**顶层键**，其余内容（注释/未知键/表）原样保留。
+
+    例外：`REMOVED_CONFIG_KEYS` 里那几个键（已经随功能删掉）在写入时**直接抹掉** ——
+    老配置里的 `notify_windows = false` 不该被原样留着，更不该写回去。
 
     Args:
         text: 原 config.toml 内容。
@@ -1062,6 +1083,7 @@ def render_config_updates(text: str, updates: dict[str, Any]) -> str:
     lines = text.splitlines()
     remaining = dict(updates)
     out: list[str] = []
+    removed = 0
     #: 当前处在哪个表里（"" = 顶层）。TOML 里表一旦开始就一直到文件结束或下一个表头，
     #: 所以必须**跟踪状态**，不能只看当前行是不是以 `[` 开头。
     section = ""
@@ -1077,6 +1099,11 @@ def render_config_updates(text: str, updates: dict[str, Any]) -> str:
         # 表内的键与顶层同名时**绝不能**被我们的更新误伤
         match = None if section or stripped.startswith("#") else _KEY_LINE.match(line)
         key = match.group("key") if match else None
+        if key in REMOVED_CONFIG_KEYS:
+            # 已经删掉的功能：这一行**不再写回**（顶层才动，表里的同名键不碰）
+            removed += 1
+            i += 1
+            continue
         if key in remaining:
             value_text, comment = _split_value_and_comment(match.group("rest"))
             end = _array_end_line(lines, i) if "[" in value_text else i

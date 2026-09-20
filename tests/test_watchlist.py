@@ -575,13 +575,16 @@ def test_watchlist_gets_pool_buy_rules(wl_db) -> None:
 
 
 def test_watchlist_alerts_use_same_notify_channels(wl_db, monkeypatch) -> None:
-    """自选股提醒走同一套 notify_channels（不搞特殊分支）。"""
-    from laoa_trader.notify import feishu, notify_all, tray, windows
+    """自选股提醒走同一套 notify_channels（不搞特殊分支）。
+
+    2026-09-18：Windows 通知那一路删除，这里只剩飞书与托盘两路。
+    """
+    from laoa_trader.notify import feishu, notify_all, tray
 
     _add(wl_db, "600100")
     wl_db.notify_channels = ["tray"]
     called: list[str] = []
-    for name, module in (("windows", windows), ("feishu", feishu), ("tray", tray)):
+    for name, module in (("feishu", feishu), ("tray", tray)):
         monkeypatch.setattr(
             module, "notify",
             lambda title, lines, cfg=None, _n=name, **kw: (
@@ -590,8 +593,7 @@ def test_watchlist_alerts_use_same_notify_channels(wl_db, monkeypatch) -> None:
         )
     results = notify_all("⚡ 盘中提醒", ["自选（龙头）｜…"], cfg=wl_db)
     assert called == ["tray"]                     # 只有配置里的频道真的被调用
-    assert results["windows"]["skipped"] is True  # 其余显示"跳过"（不是失败）
-    assert results["feishu"]["skipped"] is True
+    assert results["feishu"]["skipped"] is True   # 其余显示"跳过"（不是失败）
     assert results["tray"]["ok"] is True
 
 

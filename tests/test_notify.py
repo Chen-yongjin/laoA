@@ -1,10 +1,15 @@
-"""三路通知：并行、互不影响、缺凭证优雅降级、配置可关。"""
+"""两路通知（飞书 / 托盘气泡）：并行、互不影响、缺凭证优雅降级、配置可关。
+
+2026-09-18：**Windows 系统通知整路删除**（用户原话："windows系统通知删除，太骚扰了，
+影响体验"），所以这个文件里原来那 3 条 Windows 专用用例与 `winotify` 相关断言一并删除；
+留下的断言一条都没放宽。提醒本身走"图标闪烁 + 「消息」列表"（见 `test_message_center.py`）。"""
 
 from __future__ import annotations
 
 import pytest
 
-from laoa_trader.notify import KINDS, feishu, notify_all, summarize, tray, windows
+from laoa_trader.market import to_xueqiu_code
+from laoa_trader.notify import KINDS, feishu, notify_all, summarize, tray
 from tests.conftest import FakeResponse, FakeSession
 
 
@@ -26,20 +31,8 @@ def test_notify_all_returns_per_channel_results(cfg) -> None:
     assert "未配置" in results["feishu"]["detail"]
 
 
-def test_notify_all_windows_degrades_on_non_windows(cfg) -> None:
-    """非 Windows 平台必须优雅降级为"不支持"，而不是抛 ImportError。"""
-    cfg.notify_channels = list(KINDS)      # 默认空 → 不显式打开就只会得到"未启用，已跳过"
-    results = notify_all("标题", ["正文"], kinds=("windows",), cfg=cfg)
-    if windows.SUPPORTED:  # pragma: no cover - 只在 Windows 上走这里
-        assert "ok" in results["windows"]
-    else:
-        assert results["windows"]["ok"] is False
-        assert results["windows"]["supported"] is False
-        assert "不支持" in results["windows"]["detail"]
-
-
 def test_notify_all_never_raises_when_channel_explodes(cfg, monkeypatch) -> None:
-    """任一路失败（甚至抛异常）都不影响其它两路。"""
+    """任一路失败（甚至抛异常）都不影响另一路。"""
     def boom(*args, **kwargs):
         raise RuntimeError("飞书炸了")
 
@@ -54,7 +47,6 @@ def test_notify_all_never_raises_when_channel_explodes(cfg, monkeypatch) -> None
 
 def test_notify_all_respects_enabled_switches(cfg) -> None:
     cfg.notify_feishu = False
-    cfg.notify_windows = False
     cfg.notify_tray = False
     results = notify_all("标题", ["正文"], cfg=cfg)
     assert all(res["skipped"] is True for res in results.values())
@@ -66,21 +58,20 @@ def test_notify_all_ignores_unknown_kinds(cfg) -> None:
 
 
 def test_notify_all_runs_channels_in_parallel(cfg, monkeypatch) -> None:
-    """三路是**并行**的：慢的一路不该拖住其它路（这里用 0.3s 的假延迟验证）。"""
+    """两路是**并行**的：慢的一路不该拖住另一路（这里用 0.4s 的假延迟验证）。"""
     import time
 
     def slow(*args, **kwargs):
-        time.sleep(0.3)
+        time.sleep(0.4)
         return {"kind": "feishu", "ok": True, "detail": "慢"}
 
     monkeypatch.setattr(feishu, "notify", slow)
-    monkeypatch.setattr(windows, "notify", slow)
     monkeypatch.setattr(tray, "notify", slow)
     start = time.monotonic()
     results = notify_all("标题", ["正文"], cfg=cfg)
     elapsed = time.monotonic() - start
-    assert len(results) == 3
-    assert elapsed < 0.85, f"三路并行应远快于串行的 0.9s，实际 {elapsed:.2f}s"
+    assert len(results) == 2
+    assert elapsed < 0.75, f"两路并行应远快于串行的 0.8s，实际 {elapsed:.2f}s"
 
 
 def test_summarize(cfg) -> None:
@@ -179,33 +170,16 @@ def test_feishu_discovers_chat_when_not_configured(cfg) -> None:
     assert session.calls[-1][1]["receive_id"] == "auto-chat"
 
 
-# ── Windows 通知 ──
-
-
-def test_windows_notify_returns_unsupported_off_platform() -> None:
-    result = windows.notify("标题", ["正文"])
-    if windows.SUPPORTED:  # pragma: no cover
-        assert "ok" in result
-    else:
-        assert result["supported"] is False
-        assert result["ok"] is False
-
-
-def test_windows_notify_respects_config_switch(cfg) -> None:
-    cfg.notify_windows = False
-    result = windows.notify("标题", ["正文"], cfg=cfg)
-    assert result["skipped"] is True
+# ── 雪球代码映射（**还在用**：界面右键"打开雪球"）──
+#
+# 它们原来住在通知模块里（因为 Windows Toast 的"打开雪球"按钮要用），
+# 那一整路删除后搬到了 `market.py` —— 用例跟着搬，**没有放宽**。
 
 
 def test_xueqiu_code_mapping() -> None:
-    assert windows.to_xueqiu_code("600519") == "SH600519"
-    assert windows.to_xueqiu_code("000001") == "SZ000001"
-    assert windows.to_xueqiu_code("830799") == "BJ830799"
-
-
-def test_first_symbol_picks_from_lines() -> None:
-    assert windows.first_symbol("标题", ["1. 甲（600519）低价股"]) == "600519"
-    assert windows.first_symbol("标题", ["没有代码"]) == ""
+    assert to_xueqiu_code("600519") == "SH600519"
+    assert to_xueqiu_code("000001") == "SZ000001"
+    assert to_xueqiu_code("830799") == "BJ830799"
 
 
 # ── 托盘 ──

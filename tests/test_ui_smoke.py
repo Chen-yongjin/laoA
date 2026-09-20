@@ -93,8 +93,9 @@ def seeded(cfg):
         'enabled_groups = ["short"]\n'      # 用户拍板后的默认策略集
         'enabled_strategies = []\n'
         'notify_channels = ["windows", "feishu", "tray"]\n'
+        # 老配置里仍写着已删除的 Windows 频道键：**加载不报错**，回写时会被抹掉
+        'notify_windows = false\n'
         'notify_windows_sound = true\n'
-        'notify_windows_open_url = true\n'
         'notify_tray_duration_ms = 8000\n'
         'feishu_on = true\n'
         'my_own_key = "别动我"      # 未知键\n',
@@ -614,8 +615,10 @@ def test_settings_theme_combo_switches_and_writes_back(window, qapp, seeded) -> 
     window._tick()
     qapp.processEvents()
     assert window.pool_table.rowCount() == 1              # 池子还在、刷新没出异常
-    # 状态栏给出"已切换"的瞬时消息（主状态一次只讲一件事）
-    assert "界面主题已切换为「银色（金属感）」" in window.status_label.fullText()
+    # 2026-09-18 起**不再**往标题区弹"已切换"（用户："软件操作的一些提醒都不需要"）：
+    # 这句回显现在写在设置页那行小字里
+    assert "界面主题已切换为「银色（金属感）」" in window.save_settings_hint.text()
+    assert "界面主题已切换" not in window.status_label.fullText()
 
 
 def test_window_builds_and_refreshes_in_every_theme(seeded, qapp) -> None:
@@ -809,9 +812,8 @@ def test_test_notify_button_reports_results(window, qapp, monkeypatch) -> None:
 
     monkeypatch.setattr(
         "laoa_trader.notify.notify_all",
-        lambda title, lines, kinds=("feishu", "windows", "tray"), cfg=None: {
+        lambda title, lines, kinds=("feishu", "tray"), cfg=None: {
             "feishu": {"kind": "feishu", "ok": True, "skipped": True, "detail": "未配置"},
-            "windows": {"kind": "windows", "ok": False, "detail": "不支持"},
             "tray": {"kind": "tray", "ok": True, "detail": "已投递"},
         },
     )
@@ -822,8 +824,8 @@ def test_test_notify_button_reports_results(window, qapp, monkeypatch) -> None:
     qapp.processEvents()
     text = window.status_label.fullText()
     assert "飞书已跳过" in text
-    assert "弹窗失败" in text
     assert "托盘成功" in text
+    assert "弹窗" not in text            # Windows 弹窗那一整路已删除（2026-09-18）
 
 
 def test_doctor_command_prints_report(cfg, capsys, tmp_path) -> None:
@@ -938,8 +940,6 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     assert window.flash_seconds_box.value() == int(window.cfg.notify_flash_seconds)
     assert window.popup_seconds_box.value() == int(window.cfg.notify_popup_seconds)
     assert window.popup_items_box.value() == int(window.cfg.notify_popup_max_items)
-    assert window.win_sound_box.isChecked() == bool(window.cfg.notify_windows_sound)
-    assert window.win_url_box.isChecked() == bool(window.cfg.notify_windows_open_url)
     assert window.tray_duration.value() == int(window.cfg.notify_tray_duration_ms)
     assert window.feishu_on_box.isChecked() == bool(window.cfg.feishu_on)
     assert window.feishu_app_id.text() == window.cfg.feishu_app_id
@@ -1138,8 +1138,8 @@ def test_pool_row_menu_actions(window, seeded, qapp, monkeypatch) -> None:
     qapp.processEvents()
     menu = window._row_menu(window.pool_table, _symbols_of(window.pool_table).index("600001"),
                             "pool")
-    assert any(a.text() == "打开监控" for a in menu.actions())
-    assert "监控" in window.status_label.fullText() or "停用" in window.status_label.fullText()
+    assert any(a.text() == "打开监控" for a in menu.actions())     # 状态确实变了
+    assert "监控" not in window.status_label.fullText()            # 但不再弹操作提示
 
 
 def test_pool_row_menu_delete_removes_watchlist_then_pool_row(window, seeded, qapp) -> None:
@@ -1148,17 +1148,18 @@ def test_pool_row_menu_delete_removes_watchlist_then_pool_row(window, seeded, qa
 
     window.on_pool_row_delete("600002")            # 纯策略行
     qapp.processEvents()
-    assert "已从今日池子移除 600002" in window.status_label.fullText()
-    assert "重新评估" in window.status_label.fullText()
+    # 事确实做了（这才是要断言的那一半）；成功提示不再弹
     assert pool_mod.pool_symbols(seeded.db_path) == []
+    assert "已从今日池子移除" not in window.status_label.fullText()
 
     with storage.connect(seeded.db_path) as conn:
         storage.upsert_watchlist(conn, "600001", name="低价样本")
     window.on_pool_row_delete("600001")            # 自选行
     qapp.processEvents()
-    assert "已删除自选 600001" in window.status_label.fullText()
+    # 真删掉了（这才是要断言的那一半）；成功提示不再弹（2026-09-18）
     with storage.connect(seeded.db_path) as conn:
         assert storage.watchlist_map(conn) == {}
+    assert "已删除自选" not in window.status_label.fullText()
 
 
 def test_pool_table_not_rebuilt_when_signature_unchanged(window, qapp) -> None:
@@ -1318,10 +1319,10 @@ def test_position_row_menu_toggle_monitor(window, seeded, qapp) -> None:
     assert texts == ["删除", "关闭监控", "打开雪球"]
     next(a for a in menu.actions() if a.text() == "关闭监控").trigger()
     qapp.processEvents()
-    assert "关闭监控" in window.status_label.fullText()
-
-    # `monitor = 0` → 做T的观察面里不再有它（这是"关闭监控"的**真实作用**）
+    # `monitor = 0` → 做T的观察面里不再有它（这是"关闭监控"的**真实作用**）；
+    # 操作提示不再弹（2026-09-18）
     assert list(intraday.held_positions(seeded.db_path)) == []
+    assert "关闭监控" not in window.status_label.fullText()
     # 再打开 → 回来
     menu = window._row_menu(window.position_table, 0, "position")
     next(a for a in menu.actions() if a.text() == "打开监控").trigger()
@@ -1334,8 +1335,8 @@ def test_position_row_right_click_delete(window, seeded, qapp) -> None:
     menu = window._row_menu(window.position_table, 0, "position")
     next(a for a in menu.actions() if a.text() == "删除").trigger()
     qapp.processEvents()
-    assert "已删除持仓 600001" in window.status_label.fullText()
-    assert window.position_table.rowCount() == 0
+    assert window.position_table.rowCount() == 0                # 行没了 = 真删了
+    assert "已删除持仓" not in window.status_label.fullText()   # 但不再弹提示
 
 
 def test_position_row_click_opens_xueqiu(window, qapp, monkeypatch) -> None:
@@ -1356,7 +1357,9 @@ def test_t_strategy_checkbox_is_bound_to_config(window, seeded, qapp) -> None:
     assert window.cfg.intraday_t is True
     # 设置页那一组与它是**同一个键**：保存「T策略」组也能改它
     assert window.intraday_t_box.isChecked() is False        # 面板自己的初值来自打开时那份配置
-    assert "T策略" in window.status_label.fullText()
+    # 回显进的是设置页那行小字（不再往标题区弹）
+    assert "T策略" in window.save_settings_hint.text()
+    assert "T策略" not in window.status_label.fullText()
 
 
 def test_t_group_single_save_writes_ratios(window, seeded, qapp) -> None:
@@ -1430,7 +1433,8 @@ def test_watch_symbol_enter_adds_to_watchlist(window, seeded, qapp) -> None:
     assert rows[0]["note"] == "回车加的"
     # 加完立刻出现在「自选股池」表里（**不用等今晚重新建池**）
     assert _symbols_of(window.pool_table) == ["600002", "600001"]
-    assert "已加自选：600001 低价样本" in window.status_label.fullText()
+    # 成功不再弹提示（有名字、没超上限 → 没有任何警告要说）
+    assert "已加自选" not in window.status_label.fullText()
 
 
 def test_pos_symbol_enter_adds_position(window, seeded, qapp) -> None:
@@ -2016,29 +2020,29 @@ def test_window_opens_without_icon_assets(seeded, qapp, monkeypatch) -> None:
 def test_save_notify_writes_channels_and_params(window, seeded, qapp) -> None:
     """通知那一组的保存：四个勾选框 + 声音/闪烁/浮窗参数一次写回。"""
     for name, box in window.channel_boxes.items():
-        box.setChecked(name in ("windows", "tray"))
+        box.setChecked(name == "tray")
     window.popup_box.setChecked(False)
     window.sound_box.setChecked(False)
     window.flash_seconds_box.setValue(12)
     window.popup_seconds_box.setValue(20)
     window.popup_items_box.setValue(8)
-    window.win_sound_box.setChecked(False)
     window.tray_duration.setValue(3000)
     window.on_save_notify()
     qapp.processEvents()
 
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
-    assert 'notify_channels = ["windows", "tray"]' in text
+    assert 'notify_channels = ["tray"]' in text
     assert "notify_popup = false" in text
     assert "notify_sound = false" in text
     assert "notify_flash_seconds = 12" in text
     assert "notify_popup_seconds = 20" in text
     assert "notify_popup_max_items = 8" in text
-    assert "notify_windows_sound = false" in text
     assert "notify_tray_duration_ms = 3000" in text
+    # 已删除的 Windows 频道那几行：老配置里本来有，保存后**必须被抹掉**
+    assert "notify_windows" not in text
     assert "# 用户自己的注释（保存设置后必须还在）" in text
     assert 'my_own_key = "别动我"' in text
-    assert window.cfg.notify_channels == ["windows", "tray"]
+    assert window.cfg.notify_channels == ["tray"]
     assert window.cfg.notify_popup is False
     assert window.cfg.notify_flash_seconds == 12
     assert window.cfg.notify_popup_seconds == 20
@@ -2050,8 +2054,10 @@ def test_save_notify_empty_channels_saves_and_says_so(window, seeded, qapp) -> N
         box.setChecked(False)
     window.on_save_notify()
     qapp.processEvents()
-    assert "只入库不推送" in window.status_label.fullText()
-    assert "✅ 已保存" in window.status_label.fullText()
+    # 成功保存**不再弹提示**：回显在设置页那行小字里（一句都不少）
+    assert "只入库不推送" in window.save_settings_hint.text()
+    assert "✅ 已保存" in window.save_settings_hint.text()
+    assert "✅ 已保存" not in window.status_label.fullText()
     assert 'notify_channels = []' in (seeded.data_dir / "config.toml").read_text(
         encoding="utf-8")
 
@@ -2064,8 +2070,8 @@ def test_save_notify_feishu_without_credentials_hints(window, seeded, qapp) -> N
     assert "未配置凭证" in window.feishu_hint.text()
     window.on_save_notify()
     qapp.processEvents()
-    assert "✅ 已保存" in window.status_label.fullText()
-    assert "winotify" not in window.status_label.fullText()   # 不是那句平台不支持的提示
+    assert "✅ 已保存" in window.save_settings_hint.text()     # 回显（不再弹到标题区）
+    assert "winotify" not in window.status_label.fullText()   # 也不是那句平台不支持的提示
 
 # ── 「系统设置」：底部【保存设置】**一键**写回本页所有设置 ──
 
@@ -2081,8 +2087,7 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
     "history_years",
     # 2) 通知方式
     "notify_popup", "notify_channels", "notify_sound", "notify_flash_seconds",
-    "notify_popup_seconds", "notify_popup_max_items", "notify_windows_sound",
-    "notify_windows_open_url", "notify_tray_duration_ms", "feishu_on",
+    "notify_popup_seconds", "notify_popup_max_items", "notify_tray_duration_ms", "feishu_on",
     "feishu_app_id", "feishu_app_secret", "feishu_chat_id",
     # 3) 竞价扫描
     "intraday_auction", "auction_min_pct", "auction_max_pct", "auction_min_amount",
@@ -2101,7 +2106,7 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
 def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None:
     """收集函数的键集合 = 五组控件的**全部**键（一键保存的"写哪些"就是它决定的）。
 
-    **35 是现在的个数**（2026-09-18：`hithink_api_key` 又回到了这份键集合里 ——
+    **33 是现在的个数**（2026-09-18：`hithink_api_key` 又回到了这份键集合里 ——
     用户澄清"不要配 KEY"指的是**程序里不许预置自己的 Key**，不是不给填，
     所以内置同花顺那一行重新有了输入框，一键保存也就该把它写回去；
     出厂包里这个值始终是空串，程序从不写死它）。
@@ -2122,8 +2127,9 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     } - SETTINGS_KEYS
     updates = window._collect_settings_updates()
     assert set(updates) == SETTINGS_KEYS | extra_key_fields
-    # 当前：35 个固定键（2026-09-18 起含 `hithink_api_key` —— 内置同花顺又有输入框了）
-    assert len(updates) == 35
+    # 当前：33 个固定键（原来 35 —— 2026-09-18 删掉 Windows 通知那一路时，
+    # `notify_windows_sound` / `notify_windows_open_url` 两个键随之取消）
+    assert len(updates) == 33
     # 2026-09-18 起**必须收**它：内置同花顺那一行有输入框，一键保存就该把它写回去
     # （出厂值是空串，程序从不预置；"填了没保存"才是要防的那件事）
     assert "hithink_api_key" in updates
@@ -2147,8 +2153,6 @@ def _change_every_settings_control(window) -> None:
     window.flash_seconds_box.setValue(9)
     window.popup_seconds_box.setValue(12)
     window.popup_items_box.setValue(3)
-    window.win_sound_box.setChecked(False)
-    window.win_url_box.setChecked(False)
     window.tray_duration.setValue(4000)
     window.feishu_on_box.setChecked(True)
     window.feishu_app_id.setText("cli_test")
@@ -2204,8 +2208,7 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
         "notify_flash_seconds = 9",
         "notify_popup_seconds = 12",
         "notify_popup_max_items = 3",
-        "notify_windows_sound = false",
-        "notify_windows_open_url = false",
+
         "notify_tray_duration_ms = 4000",
         "feishu_on = true",
         'feishu_app_id = "cli_test"',
@@ -2512,25 +2515,24 @@ def test_test_notify_uses_current_widgets_without_saving(window, qapp, monkeypat
 
     def fake_notify_all(title, lines, kinds=None, cfg=None):
         seen["channels"] = list(cfg.notify_channels)
-        seen["sound"] = cfg.notify_windows_sound
-        return {"windows": {"kind": "windows", "ok": True, "detail": "弹了"},
-                "feishu": {"kind": "feishu", "ok": True, "skipped": True,
+        seen["sound"] = cfg.notify_sound           # Windows 那条路删了，改成看提示音开关
+        return {"feishu": {"kind": "feishu", "ok": True, "skipped": True,
                            "detail": "未配置飞书凭证，已跳过"},
                 "tray": {"kind": "tray", "ok": True, "detail": "投递"}}
 
     monkeypatch.setattr("laoa_trader.notify.notify_all", fake_notify_all)
     before = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
 
-    # 面板当前勾选 = windows + tray（测试提醒用的是**面板当前值**，不用先保存）
+    # 面板当前勾选 = tray（测试提醒用的是**面板当前值**，不用先保存）
     for name, box in window.channel_boxes.items():
-        box.setChecked(name in ("windows", "tray"))
-    window.win_sound_box.setChecked(False)
+        box.setChecked(name == "tray")
+    window.sound_box.setChecked(False)
     window.on_test_notify()
     assert window._worker is not None
     window._worker.wait(10_000)
     qapp.processEvents()
 
-    assert seen["channels"] == ["windows", "tray"]
+    assert seen["channels"] == ["tray"]
     assert seen["sound"] is False
     assert "测试通知" in window.status_label.fullText()
     assert "飞书已跳过" in window.status_label.fullText()
@@ -2643,7 +2645,7 @@ def test_watch_panel_add_autofills_name_and_notes(window, seeded, qapp) -> None:
     # 加进来的自选默认在监控中 → 「监控开关」列是 `开启`
     assert window.pool_table.item(row, ui_app.WATCH_MONITOR_COLUMN).text() \
         == ui_app.MONITOR_ON_TEXT
-    assert "已加自选：600001 低价样本" in window.status_label.fullText()
+    assert "已加自选" not in window.status_label.fullText()     # 成功不弹提示
 
 
 def test_watch_panel_add_unknown_symbol_warns_but_adds(window, seeded, qapp) -> None:
@@ -2679,7 +2681,7 @@ def test_watch_panel_toggle_and_remove(window, seeded, qapp) -> None:
         row, ui_app.WATCH_HEADERS.index("来源")).text() == "自选（已停用）"
     assert window.pool_table.item(
         row, ui_app.WATCH_MONITOR_COLUMN).text() == ui_app.MONITOR_OFF_TEXT
-    assert "不进池、不监控" in window.status_label.fullText()
+    assert "不进池、不监控" not in window.status_label.fullText()   # 操作提示不再弹
 
     window.on_watch_toggle(True)
     qapp.processEvents()
@@ -3209,8 +3211,9 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     qapp.processEvents()
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
     assert f'{fake_key} = "token-abc"' in text
-    # 35 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 36 项
-    assert window.save_settings_hint.text().startswith("✅ 已保存 36 项")
+    # 33 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 34 项
+    # （原先是 35 + 1 = 36：2026-09-18 删掉 Windows 通知那一路，少了两个键）
+    assert window.save_settings_hint.text().startswith("✅ 已保存 34 项")
     # 内置同花顺的 Key 也在这份键集合里（它的输入框和替身来源的走同一条规则）
     assert "hithink_api_key" in window._collect_settings_updates()
 
@@ -4631,9 +4634,10 @@ def test_monitor_column_click_toggles_position_monitor(window, seeded, qapp) -> 
     assert table.item(0, column).text() == ui_app.MONITOR_OFF_TEXT
     with st.connect(seeded.db_path) as conn:
         assert int(st.load_positions(conn, open_only=False)["600001"]["monitor"]) == 0
-    # 真实作用：不再进做T/盘中提醒的观察面（与右键【关闭监控】完全一致）
+    # 真实作用：不再进做T/盘中提醒的观察面（与右键【关闭监控】完全一致）；
+    # 操作提示本身不再弹（2026-09-18）
     assert list(intraday.held_positions(seeded.db_path)) == []
-    assert "关闭监控" in window.status_label.fullText()
+    assert "关闭监控" not in window.status_label.fullText()
 
     window._on_table_cell_clicked(table, 0, column)          # 再点一次 → 打开
     qapp.processEvents()

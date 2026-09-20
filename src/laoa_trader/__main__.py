@@ -87,7 +87,8 @@ def _doctor(cfg, startup_problem: str = "") -> None:
     print(f"数据来源    : {source_text}")
     print(f"飞书凭证    : AppID {_mask(cfg.feishu_app_id)} / Secret {_mask(cfg.feishu_app_secret)}"
           f" / 会话 {cfg.feishu_chat_id or '（自动发现）'}")
-    print(f"通知开关    : 飞书 {cfg.notify_feishu}、Windows {cfg.notify_windows}、托盘 {cfg.notify_tray}")
+    # 2026-09-18：`notify_windows` 随"Windows 系统通知"整路删除，这行不再提它
+    print(f"通知开关    : 飞书 {cfg.notify_feishu}、托盘 {cfg.notify_tray}")
     # `notify_channels` 是"实际发哪几路"的**总闸**，默认空 = 三路都不发（只走自绘浮窗）。
     # 只打三个单频道开关会让人误以为"现在是发着的"（默认已经改成空列表了），所以两行都打。
     chosen = "、".join(cfg.channels) or (
