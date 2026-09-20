@@ -345,6 +345,12 @@ BTN_ABOUT_TEXT = "关于软件"
 #: 【选股】按钮现在的名字（在「策略选股」页里）—— 定义在 `hints.BTN_RUN_TEXT`
 BTN_START_TEXT = BTN_RUN_TEXT
 
+#: 托盘右键菜单里那一项【显示桌宠】的两种文案（用户 2026-09-20 要求加这一项）。
+#: 桌宠已经在桌面上时用第二句并**置灰**：让用户一眼看出"它已经在那儿了"，
+#: 而不是点了没反应、以为程序坏了。两个字符串放在这里，测试与将来改字都只碰一处。
+TRAY_SHOW_PET_TEXT = "显示桌宠"
+TRAY_PET_SHOWN_TEXT = "桌宠已显示"
+
 try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
     from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QThread, QTimer, QUrl, Signal
     from PySide6.QtGui import (
@@ -3486,6 +3492,18 @@ if QT_AVAILABLE:
             act_pause.setToolTip("暂停盘中提醒（选股照跑）；窗口收在托盘里时从这里开关最方便")
             act_pause.triggered.connect(self.on_toggle_intraday)
             self.act_pause = act_pause
+            # 【显示桌宠】（用户 2026-09-20 要求："加上显示桌宠"）：
+            # 桌宠右键那个【藏起来】**不是临时隐藏** —— 它写 `notify_pet=false`（能扛过重启）
+            # 并把设置页的勾选框取消勾选（见 `on_pet_hide`）。所以这一项是它的**反向操作**：
+            # 写回 `notify_pet=true` + 同步设置页勾选框 + 把桌宠叫回桌面。
+            # 文案与可用状态在菜单弹出前实时刷新（`aboutToShow` → `_refresh_tray_pet_action`）：
+            # 桌宠已经在桌面上时置灰并写「桌宠已显示」，免得用户点了没反应还以为坏了。
+            act_pet = QAction(TRAY_SHOW_PET_TEXT, self)
+            act_pet.setToolTip(
+                "把桌宠叫回桌面（它平时站在桌面上，有消息时冒气泡并用中文念出来）"
+            )
+            act_pet.triggered.connect(self.on_show_pet)
+            self.act_pet = act_pet
             act_quit = QAction("退出", self)
             act_quit.triggered.connect(self._quit)
             menu.addAction(act_show)
@@ -3493,11 +3511,14 @@ if QT_AVAILABLE:
             menu.addAction(act_pool)
             menu.addSeparator()
             menu.addAction(act_pause)
+            menu.addAction(act_pet)
             menu.addSeparator()
             menu.addAction(act_quit)
+            menu.aboutToShow.connect(self._refresh_tray_pet_action)
             self.tray_menu = menu
             self.tray.setContextMenu(menu)
             self.tray.activated.connect(self._on_tray_activated)
+            self._refresh_tray_pet_action()
             self.tray.show()
             # 这里**不再**用托盘图标去覆盖窗口图标：托盘那份是 32px，
             # 拿去当窗口图标在任务栏/Alt-Tab 上会明显发虚（窗口图标在 __init__ 里设过 256 的）
@@ -5369,6 +5390,67 @@ if QT_AVAILABLE:
                 except Exception as exc:  # noqa: BLE001 - 气泡失败不影响静音本身
                     logger.debug(f"静音气泡失败：{exc}")
 
+        def _refresh_tray_pet_action(self) -> None:
+            """把托盘那一项【显示桌宠】的文案与可用状态刷成**当前事实**。
+
+            为什么每次弹菜单都要刷（而不是建菜单时定一次）：用户可能刚在设置页取消勾选、
+            或者刚右键桌宠【藏起来】—— 菜单要反映"弹出来那一刻"的事实，
+            不刷就会出现"桌宠明明在桌面上，菜单却让你去显示它"。
+            """
+            action = getattr(self, "act_pet", None)
+            if action is None:
+                return
+            shown = self.pet is not None and self.pet.isVisible()
+            if shown:
+                action.setText(TRAY_PET_SHOWN_TEXT)
+                action.setEnabled(False)
+                action.setToolTip("桌宠已经在桌面上了（想让它消失：右键桌宠 →【藏起来】）")
+            else:
+                action.setText(TRAY_SHOW_PET_TEXT)
+                action.setEnabled(True)
+                action.setToolTip(
+                    "把桌宠叫回桌面（它平时站在桌面上，有消息时冒气泡并用中文念出来）"
+                )
+
+        def on_show_pet(self) -> None:
+            """托盘右键【显示桌宠】：把藏起来的桌宠叫回桌面（`on_pet_hide` 的反向操作）。
+
+            语义与【藏起来】**严格对齐**：那边写 `notify_pet=false` 并取消设置页勾选，
+            所以这边写 `notify_pet=true` 并勾上 —— 否则会出现"桌宠回来了、设置页却显示没勾"
+            这种两处对不上的状态（用户没法判断下次启动它到底会不会出来）。
+
+            写盘失败时（只读盘之类）：**内存里按用户点的那一下生效**（他点了就该看到桌宠），
+            同时把"没写进配置文件、下次启动还会藏起来"明确写在设置页那行提示上。
+            """
+            wrote = True
+            try:
+                from laoa_trader.config import save_settings
+
+                path, self.cfg = save_settings(self.cfg, {"notify_pet": True})
+                logger.info(f"桌宠已叫回桌面（写回 {path.name} 的 notify_pet=true）")
+            except Exception as exc:  # noqa: BLE001 - 配置写不进去也不该炸
+                wrote = False
+                # 让这一次点击**当场生效**：`_ensure_pet()` 是按 cfg 判断的，不先在内存里
+                # 改的话，写盘失败时用户点了会"什么都没发生"
+                self.cfg.notify_pet = True
+                logger.debug(f"写桌宠开关失败（本次只在内存里生效）：{exc}")
+            if getattr(self, "pet_box", None) is not None:
+                self.pet_box.setChecked(True)
+            self._ensure_pet()
+            self._refresh_tray_pet_action()
+            if wrote:
+                # 反馈用设置页那行**被动提示**（与【藏起来】同一处）：用户 2026-09-18 定的口径是
+                # "操作的确认类提示不再弹"，但"桌宠去哪了/怎么找回来"必须有地方写着
+                self._set_settings_hint(
+                    "桌宠已回到桌面（想再藏起来：右键桌宠 →【藏起来】，"
+                    "或取消勾选这一页的「桌宠」）"
+                )
+            else:
+                self._set_settings_hint(
+                    "❌ 桌宠开关没能写进 config.toml（这次先把它显示出来了；"
+                    "下次启动它还是藏着的，可手改 notify_pet = true）"
+                )
+
         def on_pet_hide(self) -> None:
             """桌宠右键【藏起来】：藏起来并把配置关掉（设置页那一栏会跟着显示未勾选）。"""
             if self.pet is not None:
@@ -5385,7 +5467,8 @@ if QT_AVAILABLE:
             # 反馈写在设置页那一行提示上（**被动文字**，不是弹窗）：用户把桌宠藏了之后
             # 要找回来，得有个地方明确告诉他去哪儿找 —— 否则桌宠就是"凭空消失了"。
             self._set_settings_hint(
-                "桌宠已藏起来（想叫回来：这一页勾上「桌宠」，或改 config.toml 的 notify_pet）"
+                "桌宠已藏起来（想叫回来：这一页勾上「桌宠」，或点托盘图标的右键菜单"
+                "【显示桌宠】，也可以改 config.toml 的 notify_pet）"
             )
 
         def on_pet_moved(self, x: int, y: int) -> None:

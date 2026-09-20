@@ -336,6 +336,63 @@ def test_hiding_the_pet_writes_the_config_and_can_be_undone(window, qapp) -> Non
     assert window.pet.isVisible() is True
 
 
+def test_tray_menu_has_show_pet_and_clicking_it_brings_the_pet_back(window, qapp) -> None:
+    """用户 2026-09-20 要求："加上显示桌宠" —— 托盘右键要能把藏起来的桌宠叫回来。
+
+    这条盯三件事，缺一不可：
+    ① 托盘菜单里有这一项（不然用户找不到）；
+    ② 点了之后桌宠**真的**回到桌面上；
+    ③ **语义与【藏起来】严格对齐** —— 那边写 `notify_pet=false` 并取消设置页勾选，
+       这边就要写回 `true` 并勾上，否则会出现"桌宠回来了、设置页却显示没勾"
+       这种两处对不上的状态（用户没法判断下次启动它会不会出来）。
+    """
+    from laoa_trader.ui import app as ui_app
+
+    # 先按用户会走的那条路把它藏起来（右键桌宠 →【藏起来】）
+    window.on_pet_hide()
+    qapp.processEvents()
+    assert window.pet.isVisible() is False
+    assert window.cfg.notify_pet is False
+    assert window.pet_box.isChecked() is False
+
+    # ① 托盘菜单里有这一项，而且现在是"可点"的状态
+    labels = [action.text() for action in window.tray_menu.actions()]
+    assert ui_app.TRAY_SHOW_PET_TEXT in labels, labels
+    assert window.act_pet.isEnabled() is True
+    assert "中文念" in window.act_pet.toolTip()          # tooltip 要说清桌宠是干什么的
+
+    # ② 点它
+    window.act_pet.trigger()
+    qapp.processEvents()
+
+    assert window.pet is not None and window.pet.isVisible() is True, "点了【显示桌宠】它没回来"
+    # ③ 三处状态必须一致：配置 / 设置页勾选框 / 托盘那一项
+    assert window.cfg.notify_pet is True
+    assert "notify_pet = true" in window.cfg.source_path.read_text(encoding="utf-8")
+    assert window.pet_box.isChecked() is True
+    assert "已回到桌面" in window.save_settings_hint.text()   # 被动提示告诉他能再藏起来
+
+
+def test_tray_show_pet_item_is_greyed_out_while_the_pet_is_up(window, qapp) -> None:
+    """桌宠已经在桌面上时，托盘那一项**置灰并改文案**（别让用户点了没反应以为坏了）。"""
+    from laoa_trader.ui import app as ui_app
+
+    assert window.pet.isVisible() is True                  # 启动就在桌面上
+    window._refresh_tray_pet_action()
+
+    assert window.act_pet.text() == ui_app.TRAY_PET_SHOWN_TEXT
+    assert window.act_pet.isEnabled() is False
+    assert "已经在桌面上了" in window.act_pet.toolTip()
+
+    # 藏起来之后又变回可点（菜单反映的是"弹出来那一刻"的事实）
+    window.on_pet_hide()
+    qapp.processEvents()
+    window._refresh_tray_pet_action()
+
+    assert window.act_pet.text() == ui_app.TRAY_SHOW_PET_TEXT
+    assert window.act_pet.isEnabled() is True
+
+
 def test_pet_position_is_saved_after_dragging(window, qapp) -> None:
     """拖动 → 位置写进配置（下次启动回到这里）。"""
     window.on_pet_moved(333, 222)
