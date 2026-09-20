@@ -61,10 +61,10 @@ def test_file_name_carries_the_date_and_content_is_the_agreed_layout(tmp_path) -
         quotes={"600519": (1266.98, 0.71)},     # 注入行情：用例不碰库、不联网
     )
 
-    assert path == tmp_path / "老A选股助手-选股结果-2026-09-18.txt"
+    assert path == tmp_path / "老牛选股助手-选股结果-2026-09-18.txt"
     assert path is not None and path.exists()
     assert path.read_text(encoding="utf-8-sig").splitlines() == [
-        "老A选股助手 · 选股结果 · 2026-09-18（行情日 2026-09-17）",
+        "老牛选股助手 · 选股结果 · 2026-09-18（行情日 2026-09-17）",
         # M = 有来源策略的行（内置 + 公式），K = 自选 —— 与「自选股池」表头同一口径
         "共 3 只（策略 2 · 自选 1）",
         "1. 贵州茅台(600519)  现价 1266.98 +0.71%  来源：策略·短期反转",
@@ -96,7 +96,7 @@ def test_file_name_defaults_to_today_in_beijing_time(tmp_path, monkeypatch) -> N
 
     path = pool.export_pick_file(_pool_rows(), dest_dir=tmp_path)
 
-    assert path is not None and path.name == "老A选股助手-选股结果-2026-09-18.txt"
+    assert path is not None and path.name == "老牛选股助手-选股结果-2026-09-18.txt"
 
 
 def test_no_tooltip_or_reason_noise_but_source_label_is_kept(tmp_path) -> None:
@@ -172,7 +172,7 @@ def test_desktop_directory_is_used_when_it_exists(tmp_path) -> None:
 
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  fallback_dir=fallback, day="2026-09-18")
-    assert path == home / "Desktop" / "老A选股助手-选股结果-2026-09-18.txt"
+    assert path == home / "Desktop" / "老牛选股助手-选股结果-2026-09-18.txt"
     assert not list(fallback.iterdir())                      # 没有重复写进数据目录
 
 
@@ -184,7 +184,7 @@ def test_chinese_desktop_name_is_found(tmp_path) -> None:
     assert pool.desktop_dir(home=home) == home / "桌面"
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  day="2026-09-18")
-    assert path == home / "桌面" / "老A选股助手-选股结果-2026-09-18.txt"
+    assert path == home / "桌面" / "老牛选股助手-选股结果-2026-09-18.txt"
 
 
 def test_onedrive_desktop_is_found(tmp_path) -> None:
@@ -204,7 +204,7 @@ def test_falls_back_to_the_data_dir_when_no_desktop_exists(tmp_path) -> None:
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  fallback_dir=fallback, day="2026-09-18")
 
-    assert path == fallback / "老A选股助手-选股结果-2026-09-18.txt"
+    assert path == fallback / "老牛选股助手-选股结果-2026-09-18.txt"
     assert path.exists()
 
 

@@ -131,8 +131,11 @@ def test_icon_files_exist() -> None:
 
 
 def test_ico_has_all_windows_sizes() -> None:
-    """ICO 里 16~256 七档齐全 —— 缺档时 Windows 会缩放凑合，任务栏图标就糊。
+    """ICO 里 16~128 六档齐全 —— 缺档时 Windows 会缩放凑合，任务栏图标就糊。
 
+    为什么不再要求 256（2026-09-20 换图标时改）：新图标是桌宠插画，256 那一档的
+    PNG 负载 40 多 KB，塞进 .ico 会顶破 100KB 的体积上限（实测 100.8KB）；
+    Windows 拿 128 放大到 256 够用，界面那条路本来就用 `icon.png`（256），不经 .ico。
     这里直接解 ICO 头（格式很简单，不值得为它装 Pillow）。
     """
     data = assets.icon_ico().read_bytes()
@@ -143,7 +146,8 @@ def test_ico_has_all_windows_sizes() -> None:
         entry = data[6 + i * 16 : 22 + i * 16]
         width, height = entry[0], entry[1]
         sizes.add((width or 256, height or 256))
-    assert {(s, s) for s in (16, 24, 32, 48, 64, 128, 256)} <= sizes, sizes
+    assert {(s, s) for s in (16, 24, 32, 48, 64, 128)} <= sizes, sizes
+    assert (256, 256) not in sizes, "256 不该进 ICO（体积原因，见 docstring）"
 
 
 def test_png_sizes_match_file_names() -> None:
@@ -222,23 +226,36 @@ def test_small_icon_is_not_blank() -> None:
     assert height >= px.height * 0.45, f"内容太矮（{height}/{px.height}）"
 
 
-def test_small_icon_drops_the_wordmark() -> None:
-    """小尺寸**只留图形、去掉下方文字**（四个汉字缩到 20px 以下就是一坨）。
+def test_icon_is_the_pet_artwork_at_every_size() -> None:
+    """图标就是用户给的桌宠图（2026-09-20 用户要求"图标也改为桌宠2.png同款"）。
 
-    判据用"内容包围盒的宽高比"当代理指标：设计稿里"图形+文字"是竖长的（高>宽），
-    单独图形则接近方形/略扁 —— 所以 16px 的 h/w 必须明显小于 256px。
+    这条**取代**了旧的"小尺寸要去掉下方文字"用例：旧图标是"图形 + 四个汉字"的设计稿，
+    所以当时靠"内容包围盒的宽高比"来判断小尺寸有没有去掉文字；现在整张图换成方形的
+    桌宠插画，那条判据不再成立。新判据按新口径钉三件事，比旧的那条更直接：
+      ① 每一档都是"有内容的"（不是空白图，也不是全透明）；
+      ② 每一档都是正方形、且内容居中（同一张图等比缩放的结果）；
+      ③ 小尺寸确实是从同一张图缩出来的 —— 16px 与 256px 的"不透明像素占比"接近，
+         不是另一张（旧设计的小图是另一个图形）。
     """
-    def aspect(px: Pixels) -> float:
+    def stats(px: Pixels) -> tuple[float, float, float]:
         pts = _opaque_pixels(px)
+        assert pts, "图标是空的（一个不透明像素都没有）"
         w = max(p[0] for p in pts) - min(p[0] for p in pts) + 1
         h = max(p[1] for p in pts) - min(p[1] for p in pts) + 1
-        return h / w
+        return h / w, len(pts) / float(px.width * px.height), (min(p[0] for p in pts) + max(p[0] for p in pts)) / 2
 
     big, small = Pixels(assets.icon_png()), Pixels(assets.assets_dir() / "icon-16.png")
-    assert aspect(big) > aspect(small), (
-        f"256px 应当含文字（更竖长，h/w={aspect(big):.2f}），"
-        f"16px 应当只留图形（h/w={aspect(small):.2f}）"
+    ratio_big, cover_big, cx_big = stats(big)
+    ratio_small, cover_small, cx_small = stats(small)
+    assert 0.8 < ratio_big < 1.25, f"主图标不是方形内容（h/w={ratio_big:.2f}）"
+    assert 0.8 < ratio_small < 1.25, f"16px 图标不是方形内容（h/w={ratio_small:.2f}）"
+    # 同一张图缩放出来的：不透明占比之差在 12 个百分点以内（不同图形会差很远）
+    assert abs(cover_big - cover_small) < 0.12, (
+        f"16px 与原图不像同一张画（覆盖率 {cover_big:.2f} vs {cover_small:.2f}）"
     )
+    # 水平居中（左留白 ≈ 右留白）
+    assert abs(cx_big - big.width / 2) <= big.width * 0.06
+    assert abs(cx_small - small.width / 2) <= small.width * 0.10
 
 
 # ── 3) 路径解析与优雅降级 ──
@@ -264,4 +281,5 @@ def test_icon_size_is_reasonable() -> None:
     for path in directory.glob("icon*"):
         assert path.stat().st_size < 100_000, f"{path.name} 太大"
     ico_size = assets.icon_ico().stat().st_size
-    assert 5_000 < ico_size < 100_000, f"ICO 体积不合理：{ico_size} B（应当含 7 档尺寸）"
+    # ICO 里是 16~128 六档（256 那一档的 PNG 负载太大，会顶破 100KB；见 build/make_app_icon.py）
+    assert 5_000 < ico_size < 100_000, f"ICO 体积不合理：{ico_size} B（应当含 6 档尺寸）"

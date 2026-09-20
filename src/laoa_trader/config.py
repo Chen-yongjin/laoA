@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import re
 import sys
 import tomllib
@@ -34,7 +35,7 @@ from typing import Any
 #: 默认数据目录（Windows 用 LOCALAPPDATA，其它平台退回 ~/.local/share）
 #: 数据/配置目录名（`%LOCALAPPDATA%\LaoATrader`）。**故意保持旧名**：它是老用户
 #: 已经下好的历史数据库所在目录，改成新名字会让程序去空目录里找、逼用户重下 180MB。
-#: 产品显示名是「老A选股助手」（见 `ui/app.py` 的 `APP_NAME`），两者不必一致。
+#: 产品显示名是「老牛选股助手」（见 `ui/app.py` 的 `APP_NAME`），两者不必一致。
 DEFAULT_APP_NAME = "LaoATrader"
 
 #: 支持的通知频道（顺序 = 界面与 --doctor 的展示顺序）
@@ -152,27 +153,75 @@ def default_data_dir() -> Path:
     return root / DEFAULT_APP_NAME / "data"
 
 
+def user_config_path() -> Path:
+    """**用户配置文件（持久位置）**：Windows `%APPDATA%\LaoATrader\config.toml`，
+    其它平台 `~/.config/laoa-trader/config.toml`。
+
+    为什么必须有一个"exe 之外"的位置（用户 2026-09-20 实报"更新软件后飞书设置消失"）：
+    老版本把 config.toml 写在 **exe 同级**目录，而更新软件就是"整包覆盖那个目录"——
+    用户的飞书 app_id/secret、自选、持仓全跟着没了。放到 `%APPDATA%`（每个用户独立、
+    不在安装目录里）之后，覆盖安装再也碰不到它。
+    """
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / DEFAULT_APP_NAME / "config.toml"
+    return Path.home() / ".config" / "laoa-trader" / "config.toml"
+
+
+def _legacy_config_candidates() -> list[Path]:
+    """老版本可能放着 config.toml 的位置（迁移的**来源**，只在用户位置还没有时才看）。"""
+    out: list[Path] = [Path.cwd() / "config.toml"]
+    if getattr(sys, "frozen", False):
+        out.append(Path(sys.executable).parent / "config.toml")
+    else:
+        out.append(Path(__file__).resolve().parents[2] / "config.toml")
+    return out
+
+
+def _migrate_legacy_config(target: Path) -> None:
+    """用户位置还没有配置时，把老位置那份**复制**过来（幂等；失败只记日志）。
+
+    三条规矩：
+    1. **复制而不是移动** —— 老文件留着当保险（万一新位置写不进去，用户还能手改它）；
+    2. 只在"新位置没有、老位置有"时做一次，所以第二次启动不会重复搬；
+    3. 失败绝不抛异常（只读盘/权限）：配置读不到会让界面起不来，而迁移只是锦上添花。
+    """
+    try:
+        if target.is_file():
+            return
+        for source in _legacy_config_candidates():
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                logger.info(f"已把老位置的配置复制到用户目录：{source} → {target}（原文件保留）")
+                return
+    except OSError as exc:
+        logger.warning(f"迁移老配置失败（不影响启动，可手工复制）：{exc}")
+
+
 def config_search_paths() -> list[Path]:
-    """按优先级返回 config.toml 的候选路径。"""
+    """按优先级返回 config.toml 的候选路径。
+
+    顺序（2026-09-20 起）：环境变量 → **用户目录（持久）** → 当前工作目录 →
+    exe 同级 / 仓库根（老位置，只为兼容与迁移）。用户目录排在最前，
+    是为了让"保存设置"永远写在一个更新软件不会覆盖的地方。
+    """
     paths: list[Path] = []
     explicit = os.environ.get("LAOA_TRADER_CONFIG")
     if explicit:
         paths.append(Path(explicit))
-    paths.append(Path.cwd() / "config.toml")
-    # 打包后 `sys.frozen` 为真，配置放在 exe 同级目录最直观
-    if getattr(sys, "frozen", False):
-        paths.append(Path(sys.executable).parent / "config.toml")
-    else:
-        paths.append(Path(__file__).resolve().parents[2] / "config.toml")
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        paths.append(Path(appdata) / DEFAULT_APP_NAME / "config.toml")
-    paths.append(Path.home() / ".config" / "laoa-trader" / "config.toml")
+    paths.append(user_config_path())
+    paths.extend(_legacy_config_candidates())
     return paths
 
 
 def find_config_file() -> Path | None:
-    """返回第一个存在的配置文件路径；都没有时返回 None（全部走默认值）。"""
+    """返回第一个存在的配置文件路径；都没有时返回 None（全部走默认值）。
+
+    找之前先补一次**老位置 → 用户目录**的迁移（见 `_migrate_legacy_config`）：
+    放在这里是因为所有入口（界面、CLI、测试）最终都会经过它，不会有哪条路漏掉。
+    """
+    _migrate_legacy_config(user_config_path())
     for path in config_search_paths():
         try:
             if path.is_file():
@@ -1199,7 +1248,9 @@ def update_config_file(
     """
     target = Path(path) if path is not None else find_config_file()
     if target is None:
-        target = Path.home() / ".config" / "laoa-trader" / "config.toml"
+        # 谁都没有配置过：落点必须是**持久位置**（不是 exe 同级），
+        # 否则用户第一次保存的设置会被下一次覆盖安装抹掉（见 user_config_path）
+        target = user_config_path()
 
     original = ""
     if target.is_file():

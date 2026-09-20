@@ -98,7 +98,7 @@ def test_formula_dir_source_run_is_repo_formulas(monkeypatch: pytest.MonkeyPatch
 def test_formula_dir_frozen_uses_exe_sibling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """打包后：公式目录在 **exe 同级**（用户双击 exe 就看得见、备份得到）。"""
     monkeypatch.delenv(lib.FORMULA_DIR_ENV, raising=False)
-    exe = tmp_path / "dist" / "老A选股助手" / "老A选股助手.exe"
+    exe = tmp_path / "dist" / "老牛选股助手" / "老牛选股助手.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"fake")
     monkeypatch.setattr(sys, "frozen", True, raising=False)

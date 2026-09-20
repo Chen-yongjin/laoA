@@ -65,7 +65,7 @@ data_dir = "{p(tmp_path / 'mydata')}"
 
 def test_supports_nested_section(tmp_path: Path) -> None:
     path = _write(tmp_path, """
-title = "老A选股助手"
+title = "老牛选股助手"
 
 [laoa_trader]
 hithink_api_key = "nested-key"

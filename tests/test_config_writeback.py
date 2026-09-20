@@ -24,7 +24,7 @@ from tests._toml import p, toml_str
 
 #: 模板：`{data_dir}` 处必须传**已转义**的路径（`tests._toml.p()`），
 #: 否则 Windows 的 `C:\Users\...` 会让 tomllib 解析失败、配置静默退回默认值。
-SAMPLE = '''# 老A选股助手配置（这些注释必须活下来）
+SAMPLE = '''# 老牛选股助手配置（这些注释必须活下来）
 # 第二行注释      # 行尾也有注释
 
 hithink_api_key = "abc123"       # 同花顺 Key
@@ -66,7 +66,7 @@ def test_render_keeps_comments_and_unknown_keys(tmp_path: Path) -> None:
         "enabled_formulas": ["尾盘选股策略"],
     })
     # 注释全在
-    assert "# 老A选股助手配置（这些注释必须活下来）" in out
+    assert "# 老牛选股助手配置（这些注释必须活下来）" in out
     assert "# 第二行注释      # 行尾也有注释" in out
     assert "# 同花顺 Key" in out
     assert "# ── 策略组 ──" in out
@@ -93,7 +93,7 @@ def test_render_appends_missing_keys(tmp_path: Path) -> None:
     assert "以下由「设置」面板写入" in out
     # 追加不会破坏原有内容
     assert "[my_own_section]" in out
-    assert out.startswith("# 老A选股助手配置")
+    assert out.startswith("# 老牛选股助手配置")
 
 
 def test_render_does_not_touch_keys_inside_tables(tmp_path: Path) -> None:
@@ -151,7 +151,7 @@ def test_update_config_file_roundtrip(sample_file: Path) -> None:
     assert "notify_windows" not in sample_file.read_text(encoding="utf-8")
     # 注释还在（逐字节再读一次原文）
     text = sample_file.read_text(encoding="utf-8")
-    assert "# 老A选股助手配置（这些注释必须活下来）" in text
+    assert "# 老牛选股助手配置（这些注释必须活下来）" in text
     assert 'future_key = "keep me"' in text
 
 
@@ -270,7 +270,7 @@ def test_update_config_file_roundtrips_windows_path(tmp_path: Path, win_path: st
     assert cfg.source_path == target
     # 注释与未知键照旧（写回没有因为转义而改坏文件结构）
     raw = target.read_text(encoding="utf-8")
-    assert "# 老A选股助手配置（这些注释必须活下来）" in raw
+    assert "# 老牛选股助手配置（这些注释必须活下来）" in raw
     assert "[my_own_section]" in raw
 
 

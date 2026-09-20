@@ -1,4 +1,4 @@
-"""老A选股助手（Windows 单机版）。
+"""老牛选股助手（Windows 单机版）。
 
 入口：`python -m laoa_trader`（无参数启动 GUI），或 `--cli` 走命令行：
 
@@ -55,7 +55,7 @@ def _doctor(cfg, startup_problem: str = "") -> None:
 
     import laoa_trader
 
-    print("老A选股助手 —— 自检")
+    print("老牛选股助手 —— 自检")
     print("=" * 56)
     print(f"程序版本    : {laoa_trader.__version__}")
     print(f"Python      : {sys.version.split()[0]}（{platform.system()} {platform.release()}）")
@@ -436,7 +436,7 @@ def _market_command(cfg) -> int:
 def cli(argv: list[str] | None = None) -> int:
     """命令行模式。"""
     parser = argparse.ArgumentParser(
-        prog="laoa_trader", description="老A选股助手（命令行）"
+        prog="laoa_trader", description="老牛选股助手（命令行）"
     )
     parser.add_argument("--cli", action="store_true", help="强制命令行模式")
     parser.add_argument("--config", help="config.toml 路径")

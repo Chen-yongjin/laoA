@@ -37,8 +37,8 @@ def test_pyproject_declares_author() -> None:
 #: 改名前的旧名：任何"用户看得见"的地方都不许再出现它。
 #: 为什么要钉住：改名最容易漏（窗口标题改了、托盘/通知没改，或者推送标题还是旧名），
 #: 而这种不一致只有用户自己发现得了。
-LEGACY_NAME = "老A法师"
-NEW_NAME = "老A选股助手"
+LEGACY_NAME = "老牛选股法师"
+NEW_NAME = "老牛选股助手"
 
 
 def test_user_visible_names_use_the_new_product_name() -> None:

@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-echo === 老A选股助手 打包 ===
+echo === 老牛选股助手 打包 ===
 echo.
 
 rem ── 先检查 Python 3.11 是否存在（打包必须有；只运行 exe 的用户不需要）──
@@ -35,7 +35,7 @@ echo [2/3] 安装依赖...
 echo [3/3] PyInstaller 打包...
 .venv\Scripts\pyinstaller --noconfirm --clean build\laoa_trader.spec || goto :err
 echo.
-echo 完成！产物在 dist\老A选股助手\老A选股助手.exe
+echo 完成！产物在 dist\老牛选股助手\老牛选股助手.exe
 pause
 exit /b 0
 :err

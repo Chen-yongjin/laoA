@@ -34,7 +34,7 @@
    看到 `preview` 就当"这条按钮"读。
 
    【导出选股结果】把**上一次【运行】的命中清单**（全量，不截断）写成桌面上的
-   `老A选股助手-选股结果-<日期>.txt` —— 与 `scheduler.run_daily()` 建池时导出的
+   `老牛选股助手-选股结果-<日期>.txt` —— 与 `scheduler.run_daily()` 建池时导出的
    是**同一个函数**（`pool.export_pick_file`），版式、来源列、现价列完全一致。
 3. **【开始选股】**（右上角）：本页**只 emit `start_pick_requested()`** ——
    增量数据 → 跑策略与公式 → 建池 → 推送这一整套在主窗口（`ui/app.py`）里，
@@ -53,7 +53,7 @@
   右键能【删除】、上面能【添加自选】—— 增删都在那一页做（用户原话"可以在股池再添加删除"）；
   这也是为什么这一页**不需要**再摆一张"结果表"：同一批票在一张表里看就够了。
 * **桌面文件**：`scheduler.run_daily()` 在建池成功后调 `pool.export_pick_file()`，
-  往桌面写一份 `老A选股助手-选股结果-<日期>.txt`（导出失败只记日志、不影响选股）。
+  往桌面写一份 `老牛选股助手-选股结果-<日期>.txt`（导出失败只记日志、不影响选股）。
 
 `show_pick_result()` 这个方法**保留**（主窗口还在调它）：它现在是空实现，
 只写日志、不画任何东西 —— 删掉它会让 `ui/app.py` 那边 `AttributeError`
@@ -926,7 +926,7 @@ if QT_AVAILABLE:
             self.btn_export_result = QPushButton("导出结果到桌面")
             self.btn_export_result.setToolTip(
                 "把这张表里的票写成一个文本文件放到桌面："
-                "老A选股助手-选股结果-<今天>.txt（与【开始选股】自动导出的那份同一个文件名，"
+                "老牛选股助手-选股结果-<今天>.txt（与【开始选股】自动导出的那份同一个文件名，"
                 "同一天会覆盖它）"
             )
             self.btn_export_result.clicked.connect(self.on_export_result)
@@ -1098,7 +1098,7 @@ if QT_AVAILABLE:
             self.btn_export = QPushButton("导出选股结果")
             self.btn_export.setToolTip(
                 "把上一次【运行】命中的全部股票写成一个文本文件，放在桌面上：\n"
-                "老A选股助手-选股结果-<今天>.txt（同一天再导出会覆盖这一个文件）"
+                "老牛选股助手-选股结果-<今天>.txt（同一天再导出会覆盖这一个文件）"
             )
             self.btn_export.clicked.connect(self.on_export)
             action_row.addWidget(self.btn_export)

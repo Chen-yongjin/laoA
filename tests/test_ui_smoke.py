@@ -836,7 +836,7 @@ def test_doctor_command_prints_report(cfg, capsys, tmp_path) -> None:
     config_file.write_text(f'data_dir = "{p(cfg.data_dir)}"', encoding="utf-8")
     assert cli(["--cli", "--doctor", "--config", str(config_file)]) == 0
     out = capsys.readouterr().out
-    assert "老A选股助手 —— 自检" in out
+    assert "老牛选股助手 —— 自检" in out
     assert "数据目录" in out and "数据库" in out
     assert "同花顺 Key" in out
     assert "行情行数" in out
@@ -1860,7 +1860,7 @@ def test_window_title_is_just_the_app_name(window, qapp) -> None:
     """
     import laoa_trader
 
-    assert window.windowTitle() == ui_app.APP_NAME == "老A选股助手"
+    assert window.windowTitle() == ui_app.APP_NAME == "老牛选股助手"
     assert "v" not in window.windowTitle()                 # 不再挂版本号
     assert window.app_title_label.text() == ui_app.APP_NAME
     assert window.btn_about.text() == ui_app.BTN_ABOUT_TEXT == "关于软件"
@@ -1888,7 +1888,7 @@ def test_about_dialog_shows_version_and_copyright(window, qapp) -> None:
     assert dialog.isVisible() is True
     texts = [label.text() for label in dialog.findChildren(QLabel)]
     blob = "\n".join(texts)
-    assert "老A选股助手" in blob
+    assert "老牛选股助手" in blob
     assert f"版本：{laoa_trader.__version__}（测试版）" in blob
     assert "作者 / 版权所有人：async-chen" in blob
     assert "版权所有 © 2026 async-chen，保留所有权利。" in blob
@@ -1919,7 +1919,7 @@ def test_about_copy_version_info_to_clipboard(window, qapp) -> None:
 
     lines = QApplication.clipboard().text().splitlines()
     assert lines == [
-        "老A选股助手",
+        "老牛选股助手",
         f"版本：{laoa_trader.__version__}（测试版）",
         "版权所有 © 2026 async-chen，保留所有权利。",
     ]

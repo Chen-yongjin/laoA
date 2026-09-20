@@ -2,7 +2,7 @@
 
 布局（改版后）：**一个标题区 + 五个页签**。
 
-    标题区：老A选股助手 · 运行状态：<现在在干什么>            [显示详情] [关于软件]
+    标题区：老牛选股助手 · 运行状态：<现在在干什么>            [显示详情] [关于软件]
             （下面是"没有数据"这一类**一句话提示**，以及只在任务运行时出现的细进度条）
     页签：大盘概览 / 自选股池 / 持仓监控 / 策略选股 / 系统设置
 
@@ -60,7 +60,7 @@ logger = get_logger(__name__)
 
 #: 程序名 / 版权行 / 数据来源：「窗口标题」「关于软件」对话框、复制到剪贴板的版本信息
 #: **共用这一份** —— 分发出去之后用户看到的版本信息必须处处一致，不能各写各的
-APP_NAME = "老A选股助手"
+APP_NAME = "老牛选股助手"
 COPYRIGHT_TEXT = "版权所有 © 2026 async-chen，保留所有权利。"
 #: 数据来源声明（「关于软件」里那一行）。
 #:
@@ -3467,7 +3467,7 @@ if QT_AVAILABLE:
                     self.style().StandardPixmap.SP_ComputerIcon
                 )
             self.tray = QSystemTrayIcon(icon, self)
-            self.tray.setToolTip("老A选股助手")
+            self.tray.setToolTip("老牛选股助手")
             # 闪烁要交替两张图，得先记住"正常的那张"（见 `_start_alert_flash`）
             self._normal_tray_icon = icon
             menu = QMenu()
@@ -5517,7 +5517,7 @@ if QT_AVAILABLE:
             if action is not None:
                 action.setText(f"消息（{count}）" if count else "消息")
             if self.tray is not None:
-                title = "老A选股助手"
+                title = "老牛选股助手"
                 if count:
                     title += f" —— {count} 条新消息"
                 try:
@@ -5772,7 +5772,7 @@ if QT_AVAILABLE:
             """轻提示：状态栏 + 托盘气泡（不用模态弹窗打断操作）。"""
             self._set_status(text)
             try:
-                self.tray.showMessage("老A选股助手", text)
+                self.tray.showMessage("老牛选股助手", text)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -6799,7 +6799,7 @@ if QT_AVAILABLE:
                 "频道与参数取自「设置」页当前勾选（无需先保存）。",
             ]
             self._run_worker(
-                lambda: notify_all("🧪 老A选股助手 · 测试提醒", lines, cfg=test_cfg),
+                lambda: notify_all("🧪 老牛选股助手 · 测试提醒", lines, cfg=test_cfg),
                 "测试通知",
             )
 

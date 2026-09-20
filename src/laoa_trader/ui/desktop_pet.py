@@ -121,7 +121,7 @@ if QT_AVAILABLE:
                 | Qt.WindowType.Tool
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-            self.setWindowTitle("老A的桌宠")
+            self.setWindowTitle("老牛选股的桌宠")
             self.size_ = int(size)
             self.setFixedSize(self.size_, self.size_ + BUBBLE_HEIGHT)
             #: 素材（没有素材时是 None → 手画降级，见 `_load_pet`）
@@ -141,7 +141,7 @@ if QT_AVAILABLE:
             self._bubble_timer.setSingleShot(True)
             self._bubble_timer.timeout.connect(self.hide_bubble)
             self._build_bubble()
-            self.setToolTip("老A的桌宠：双击看消息，右键有菜单")
+            self.setToolTip("老牛选股的桌宠：双击看消息，右键有菜单")
 
         # ── 素材 ─────────────────────────────────────────────────────
 
@@ -216,7 +216,7 @@ if QT_AVAILABLE:
         def set_unread(self, count: int) -> None:
             """未读数（tooltip 与右键菜单里那个 (N) 用）。"""
             self._unread = max(0, int(count))
-            base = "老A的桌宠：双击看消息，右键有菜单"
+            base = "老牛选股的桌宠：双击看消息，右键有菜单"
             self.setToolTip(base if not self._unread else f"{base}（未读 {self._unread} 条）")
 
         def unread_count(self) -> int:
