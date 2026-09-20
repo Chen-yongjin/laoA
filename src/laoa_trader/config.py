@@ -32,6 +32,10 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from laoa_trader.log import get_logger
+
+logger = get_logger(__name__)
+
 #: 默认数据目录（Windows 用 LOCALAPPDATA，其它平台退回 ~/.local/share）
 #: 数据/配置目录名（`%LOCALAPPDATA%\LaoATrader`）。**故意保持旧名**：它是老用户
 #: 已经下好的历史数据库所在目录，改成新名字会让程序去空目录里找、逼用户重下 180MB。
@@ -154,7 +158,7 @@ def default_data_dir() -> Path:
 
 
 def user_config_path() -> Path:
-    """**用户配置文件（持久位置）**：Windows `%APPDATA%\LaoATrader\config.toml`，
+    r"""**用户配置文件（持久位置）**：Windows `%APPDATA%\LaoATrader\config.toml`，
     其它平台 `~/.config/laoa-trader/config.toml`。
 
     为什么必须有一个"exe 之外"的位置（用户 2026-09-20 实报"更新软件后飞书设置消失"）：
@@ -195,7 +199,11 @@ def _migrate_legacy_config(target: Path) -> None:
                 shutil.copy2(source, target)
                 logger.info(f"已把老位置的配置复制到用户目录：{source} → {target}（原文件保留）")
                 return
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 - 迁移绝不能打断"读配置"（见上面的三条规矩）
+        # 为什么这里连 Exception 都要吞：`load_config()` 的承诺是"绝不抛异常"，
+        # 而它一路上会经过这里。上一版就是在这一步漏了 `logger` 的定义（NameError），
+        # 结果**启动时读不到任何配置** → 用户填过的同花顺 Key / 飞书配置全被判成"没配置"
+        # （2026-09-20 用户实报"配了还说没配"）。迁移只是锦上添花，绝不能拖垮主线。
         logger.warning(f"迁移老配置失败（不影响启动，可手工复制）：{exc}")
 
 
@@ -221,7 +229,10 @@ def find_config_file() -> Path | None:
     找之前先补一次**老位置 → 用户目录**的迁移（见 `_migrate_legacy_config`）：
     放在这里是因为所有入口（界面、CLI、测试）最终都会经过它，不会有哪条路漏掉。
     """
-    _migrate_legacy_config(user_config_path())
+    try:
+        _migrate_legacy_config(user_config_path())
+    except Exception as exc:  # noqa: BLE001 - 同上：找不到配置就退回默认值，绝不抛
+        logger.warning(f"检查老配置迁移时出错（忽略，继续按搜索顺序找）：{exc}")
     for path in config_search_paths():
         try:
             if path.is_file():

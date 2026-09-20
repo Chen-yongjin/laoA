@@ -38,7 +38,12 @@ def test_pyproject_declares_author() -> None:
 #: 为什么要钉住：改名最容易漏（窗口标题改了、托盘/通知没改，或者推送标题还是旧名），
 #: 而这种不一致只有用户自己发现得了。
 LEGACY_NAME = "老牛选股法师"
-NEW_NAME = "老牛选股助手"
+#: 用户 2026-09-20 定的口径：**软件名 = 老牛选股**（窗口标题 / 托盘 / 任务栏 / exe / 打包目录），
+#: 而通知、导出文件名、"助手"自称仍用 `ASSISTANT_NAME`（见 `ui/app.py`）。
+NEW_NAME = "老牛选股"
+ASSISTANT_NAME = "老牛选股助手"
+#: 打包产物用的 ASCII 名（dist 目录 / exe / artifact；用户 2026-09-20 定）
+ARTIFACT_NAME = "LaoniuTrader"
 
 
 def test_user_visible_names_use_the_new_product_name() -> None:
@@ -51,14 +56,16 @@ def test_user_visible_names_use_the_new_product_name() -> None:
     from laoa_trader import scheduler
     from laoa_trader.ui import app as ui_app
 
-    assert NEW_NAME in ui_app.APP_NAME
+    assert ui_app.APP_NAME == NEW_NAME
+    assert getattr(ui_app, "ASSISTANT_NAME", "") == ASSISTANT_NAME
     assert LEGACY_NAME not in ui_app.APP_NAME
     assert NEW_NAME in cli.__doc__ or NEW_NAME in (cli.__doc__ or "")  # 帮助文本
     # 推送标题（飞书卡片 / 托盘 / 通知共用这一个标题）
     title = scheduler.pool_push_title("2026-09-14") if hasattr(scheduler, "pool_push_title") else None
     if title is None:                                  # 没有抽成函数就直接读源码里的字面量
         source = (ROOT / "src" / "laoa_trader" / "scheduler.py").read_text(encoding="utf-8")
-        assert f"{NEW_NAME}-选股池" in source
+        # 推送标题属于"助手"语气那一类（用户 2026-09-20：通知/推送用「老牛选股助手」）
+        assert f"{ASSISTANT_NAME}-选股池" in source
         assert f"{LEGACY_NAME}-选股池" not in source
     else:
         assert NEW_NAME in title and LEGACY_NAME not in title
@@ -90,8 +97,18 @@ def test_repo_text_files_do_not_mention_the_legacy_name() -> None:
 
 
 def test_executable_is_named_after_the_product() -> None:
-    """exe/产物目录名也要跟着产品名走（用户双击的就是它）。"""
+    """产物名 = **LaoniuTrader**（用户 2026-09-20 定：文件夹/exe/压缩包都用 ASCII 名）。
+
+    与界面里的中文名分开是刻意的：
+    * **界面**（标题栏、托盘、关于页）用中文 `NEW_NAME` = 老牛选股 / 老牛选股助手；
+    * **产物**（dist 目录、exe、artifact）用 ASCII `ARTIFACT_NAME` = LaoniuTrader ——
+      ASCII 名在命令行、压缩包、别的机器上都不会有编码麻烦。
+    """
+    from laoa_trader.ui import app as ui_app
+
     spec = (ROOT / "build" / "laoa_trader.spec").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "build-windows.yml").read_text(encoding="utf-8")
-    assert f'name="{NEW_NAME}"' in spec
-    assert f"dist/{NEW_NAME}/{NEW_NAME}.exe" in workflow
+    assert f'name="{ARTIFACT_NAME}"' in spec
+    assert f"dist/{ARTIFACT_NAME}/{ARTIFACT_NAME}.exe" in workflow
+    # 界面里仍然是中文名（别为了改产物名把中文名一起换掉）
+    assert ui_app.APP_NAME == NEW_NAME

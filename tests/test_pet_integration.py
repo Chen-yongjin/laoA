@@ -119,6 +119,26 @@ def test_pet_appears_at_startup_and_survives_the_window_being_hidden(window, qap
     qapp.processEvents()
 
 
+def test_pet_survives_the_window_being_minimised(window, qapp) -> None:
+    """**最小化**主窗口 → 桌宠仍在（用户 2026-09-20 实报"主界面最小化后桌宠也消失"）。
+
+    根因：桌宠原来带主窗口当 parent，而 Qt 在父窗口 `showMinimized()` 时会把子窗口
+    一起藏起来。这条用例就是那个 bug 的看门人 —— 以后谁把 parent 传回去，它会立刻红。
+    """
+    assert window.pet is not None
+
+    window.showMinimized()
+    qapp.processEvents()
+
+    assert window.isMinimized() is True
+    assert window.pet.isVisible() is True, "主窗口最小化后桌宠跟着没了"
+    # 桌宠自己**不带父窗口**（带了就会被 Qt 连带隐藏）
+    assert window.pet.parent() is None
+
+    window.showNormal()
+    qapp.processEvents()
+
+
 def test_pet_is_not_created_when_switched_off(cfg, qapp, monkeypatch) -> None:
     """设置里关掉 `notify_pet` → 桌宠不出现（别在用户桌面上留个东西）。"""
     from laoa_trader.ui import app as ui_app

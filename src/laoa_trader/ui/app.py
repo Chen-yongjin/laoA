@@ -60,7 +60,12 @@ logger = get_logger(__name__)
 
 #: 程序名 / 版权行 / 数据来源：「窗口标题」「关于软件」对话框、复制到剪贴板的版本信息
 #: **共用这一份** —— 分发出去之后用户看到的版本信息必须处处一致，不能各写各的
-APP_NAME = "老牛选股助手"
+#: 软件名（标题栏 / 托盘 tooltip / 任务栏 / exe 与打包目录都取它）。
+#: 用户 2026-09-20 定：**软件名 = 老牛选股**；而"助手"语气的地方
+#: （导出文件名、推送标题、消息里自称）用 `ASSISTANT_NAME`。
+APP_NAME = "老牛选股"
+#: 带"助手"语气的自称（通知与导出的标题用）
+ASSISTANT_NAME = "老牛选股助手"
 COPYRIGHT_TEXT = "版权所有 © 2026 async-chen，保留所有权利。"
 #: 数据来源声明（「关于软件」里那一行）。
 #:
@@ -1517,7 +1522,26 @@ if QT_AVAILABLE:
         `size` 传了但那一档不存在时，`assets` 自己会退回主图（内部逻辑，见 assets.py）。
         """
         try:
-            path = assets.icon_png(size) if size else assets.icon_png()
+            if size:
+                path = assets.icon_png(size)
+                if not path:
+                    return QIcon()
+                return QIcon(str(path))
+            # **把各档都塞进同一个 QIcon**（用户 2026-09-20 实报"图标偏小、模糊"）：
+            # Windows 会按场景挑最合适的那一档（托盘 16/24、任务栏 32、Alt-Tab 48/64、
+            # 资源管理器大图标 256）。只给一张 256 的话，出 16×16 时是**临时缩**出来的，
+            # 而 16/32 那几档是**按角色头部裁过再缩**的（见 build/make_app_icon.py），
+            # 不把裁剪版塞进来就等于白做了。
+            icon = QIcon()
+            added = False
+            for candidate in (16, 24, 32, 48, 64, 128, 256):
+                file = assets.icon_png(candidate)
+                if file:
+                    icon.addFile(str(file))
+                    added = True
+            if added:
+                return icon
+            path = assets.icon_png()
         except Exception as exc:  # noqa: BLE001 - 资源层任何毛病都不该影响开窗口
             logger.debug(f"图标定位失败：{exc}")
             return QIcon()
@@ -5196,6 +5220,25 @@ if QT_AVAILABLE:
         #   3. 消息列表：本来就已经进了（上面那一步）。
         # 桌宠自己不知道"声音"这回事，语音也不知道"气泡"这回事 —— 主窗口是唯一接线的地方。
 
+        def _close_pet_safely(self, *_args: Any) -> None:
+            """主窗口销毁时收桌宠（**吞掉异常**：桌宠可能已经被 Qt 先一步销毁了）。
+
+            为什么不能直接 `self.pet.close()`：主窗口与桌宠都在 Qt 侧被销毁时，
+            谁先谁后不确定 —— 实测过"libshiboken: Internal C++ object already deleted"，
+            那会在解释器退出阶段抛出来、把 pytest 整跑带崩。
+            """
+            pet = self.pet
+            if pet is None:
+                return
+            try:
+                pet.shutdown()        # 先停定时器（见 DesktopPet.shutdown 的注释）
+                pet.close()
+            except RuntimeError:      # 底层对象已被 Qt 销毁
+                pass
+            except Exception:         # noqa: BLE001 - 收桌宠失败不该挡住主窗口销毁
+                logger.debug("收桌宠失败", exc_info=True)
+            self.pet = None
+
         def _ensure_pet(self) -> Any:
             """建（或取回）桌宠；`notify_pet` 关着时**不建**（省得在用户桌面上留个东西）。"""
             if not bool(getattr(self.cfg, "notify_pet", True)):
@@ -5206,12 +5249,19 @@ if QT_AVAILABLE:
                 try:
                     from laoa_trader.ui.desktop_pet import DesktopPet
 
-                    pet = DesktopPet(self)
+                    # 不传 parent：挂了父窗口的话，主窗口最小化/隐藏会把桌宠一起藏掉
+                    # （用户 2026-09-20 实报）。引用由 `self.pet` 持有。
+                    pet = DesktopPet()
                     pet.activated.connect(self.on_pet_activated)
                     pet.test_requested.connect(self.on_pet_test)
                     pet.mute_requested.connect(self.on_pet_mute)
                     pet.hide_requested.connect(self.on_pet_hide)
                     pet.moved.connect(self.on_pet_moved)
+                    # 桌宠**没有父窗口**（见 `DesktopPet.__init__`），所以主窗口被销毁时
+                    # Qt 不会顺手收掉它 —— 挂一条销毁钩子显式 close，否则退出（尤其测试
+                    # 一进程里反复建主窗口）会在桌面上/内存里留下孤儿窗口，
+                    # 实测过：不加这条，全量测试跑完进程会崩（Qt 在解释器退出时收尾失败）。
+                    self.destroyed.connect(self._close_pet_safely)
                     self.pet = pet
                 except Exception as exc:  # noqa: BLE001 - 桌宠建不起来不该拖垮主窗口
                     logger.warning(f"桌宠建不起来（已跳过）：{exc}")
@@ -7079,6 +7129,15 @@ if QT_AVAILABLE:
             # 浮窗是**没有父窗口的顶层窗口**，不主动收掉会在退出后留一张空壳在屏幕上
             if self.alert_popup is not None:
                 self.alert_popup.hide_popup()
+            # 桌宠同理（2026-09-20 起它也**没有父窗口**了，见 `_ensure_pet`）：
+            # 不显式收掉，退出后桌面上会留一只点不动的空壳
+            if self.pet is not None:
+                try:
+                    self.pet.shutdown()
+                    self.pet.close()
+                except Exception:  # noqa: BLE001 - 收桌宠失败不该挡住退出
+                    logger.debug("收桌宠失败", exc_info=True)
+                self.pet = None
             self.tray.hide()
             QApplication.quit()
 

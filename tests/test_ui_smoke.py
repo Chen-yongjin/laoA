@@ -1860,7 +1860,7 @@ def test_window_title_is_just_the_app_name(window, qapp) -> None:
     """
     import laoa_trader
 
-    assert window.windowTitle() == ui_app.APP_NAME == "老牛选股助手"
+    assert window.windowTitle() == ui_app.APP_NAME == "老牛选股"   # 软件名（2026-09-20 改名）
     assert "v" not in window.windowTitle()                 # 不再挂版本号
     assert window.app_title_label.text() == ui_app.APP_NAME
     assert window.btn_about.text() == ui_app.BTN_ABOUT_TEXT == "关于软件"
@@ -1888,7 +1888,7 @@ def test_about_dialog_shows_version_and_copyright(window, qapp) -> None:
     assert dialog.isVisible() is True
     texts = [label.text() for label in dialog.findChildren(QLabel)]
     blob = "\n".join(texts)
-    assert "老牛选股助手" in blob
+    assert "老牛选股" in blob          # 软件名（用户 2026-09-20 改名）
     assert f"版本：{laoa_trader.__version__}（测试版）" in blob
     assert "作者 / 版权所有人：async-chen" in blob
     assert "版权所有 © 2026 async-chen，保留所有权利。" in blob
@@ -1919,7 +1919,7 @@ def test_about_copy_version_info_to_clipboard(window, qapp) -> None:
 
     lines = QApplication.clipboard().text().splitlines()
     assert lines == [
-        "老牛选股助手",
+        "老牛选股",
         f"版本：{laoa_trader.__version__}（测试版）",
         "版权所有 © 2026 async-chen，保留所有权利。",
     ]
@@ -1944,7 +1944,7 @@ def test_about_close_button_closes_dialog(window, qapp) -> None:
 
 
 def test_window_icon_comes_from_assets(window, qapp) -> None:
-    """窗口图标是随包那张 256 图（不是空图标，也不是系统默认图标）。
+    """窗口图标是随包那套多档图标（不是空图标，也不是系统默认图标）。
 
     先清掉应用级图标：`QWidget.windowIcon()` 在窗口没设图标时会退回**应用**图标，
     不清掉的话这条断言就分不清"窗口自己设上了"和"蹭了应用图标"。
@@ -1953,7 +1953,9 @@ def test_window_icon_comes_from_assets(window, qapp) -> None:
 
     qapp.setWindowIcon(QIcon())
     assert window.windowIcon().isNull() is False
-    assert [size.width() for size in window.windowIcon().availableSizes()] == [256]
+    # 多档（含 256）—— 见 `test_application_icon_is_set` 里为什么不再只塞一张 256
+    sizes = sorted(size.width() for size in window.windowIcon().availableSizes())
+    assert sizes == [16, 24, 32, 48, 64, 128, 256], sizes
 
 
 def test_tray_icon_is_the_dedicated_small_png(window) -> None:
@@ -1971,7 +1973,11 @@ def test_application_icon_is_set(qapp) -> None:
     qapp.setWindowIcon(QIcon())
     ui_app._set_app_icon(qapp)
     assert qapp.windowIcon().isNull() is False
-    assert [size.width() for size in qapp.windowIcon().availableSizes()] == [256]
+    # 图标现在是**多档 QIcon**（用户 2026-09-20 实报"图标偏小、模糊"）：
+    # Windows 会按场景挑最合适的一档，而 16/24/32 那几档是"按角色头部裁过再缩"的，
+    # 只塞一张 256 就等于那些裁剪版白做了。
+    sizes = sorted(size.width() for size in qapp.windowIcon().availableSizes())
+    assert sizes == [16, 24, 32, 48, 64, 128, 256], sizes
 
 
 def test_about_dialog_shows_icon(window, qapp) -> None:

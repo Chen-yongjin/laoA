@@ -126,17 +126,19 @@ def test_icon_files_exist() -> None:
     directory = assets.assets_dir()
     assert directory.is_dir(), f"图标目录不存在：{directory}"
     for name in ("icon.png", "icon.ico", "icon-16.png", "icon-32.png",
-                 "icon-48.png", "icon-128.png", "icon-256.png"):
+                 "icon-48.png", "icon-64.png", "icon-128.png", "icon-256.png",
+                 "icon-16-full.png", "icon-32-full.png"):
         assert (directory / name).is_file(), f"缺少 {name}"
 
 
 def test_ico_has_all_windows_sizes() -> None:
-    """ICO 里 16~128 六档齐全 —— 缺档时 Windows 会缩放凑合，任务栏图标就糊。
+    """ICO 里 16/24/32/48/64/128/**256** 七档齐全。
 
-    为什么不再要求 256（2026-09-20 换图标时改）：新图标是桌宠插画，256 那一档的
-    PNG 负载 40 多 KB，塞进 .ico 会顶破 100KB 的体积上限（实测 100.8KB）；
-    Windows 拿 128 放大到 256 够用，界面那条路本来就用 `icon.png`（256），不经 .ico。
-    这里直接解 ICO 头（格式很简单，不值得为它装 Pillow）。
+    为什么 256 必须在内（用户 2026-09-20 实报"图标偏小、模糊"）：资源管理器与任务栏的
+    大图标视图用的就是 256 那一档，缺档时 Windows 会拿 128 放大 —— 糊就是这么来的。
+    第一版为了不顶破体积上限把 256 砍掉了，那次取舍是错的：现在改成
+    **体积上限跟着图标走**（见 `test_icon_file_sizes_are_reasonable`），
+    而不是"砍图标去将就上限"。
     """
     data = assets.icon_ico().read_bytes()
     reserved, kind, count = struct.unpack("<HHH", data[:6])
@@ -146,8 +148,7 @@ def test_ico_has_all_windows_sizes() -> None:
         entry = data[6 + i * 16 : 22 + i * 16]
         width, height = entry[0], entry[1]
         sizes.add((width or 256, height or 256))
-    assert {(s, s) for s in (16, 24, 32, 48, 64, 128)} <= sizes, sizes
-    assert (256, 256) not in sizes, "256 不该进 ICO（体积原因，见 docstring）"
+    assert {(s, s) for s in (16, 24, 32, 48, 64, 128, 256)} <= sizes, sizes
 
 
 def test_png_sizes_match_file_names() -> None:
@@ -279,7 +280,10 @@ def test_icon_size_is_reasonable() -> None:
     """图标别做成 1MB 的巨无霸（`datas` 会把它塞进每个用户的安装目录）。"""
     directory = assets.assets_dir()
     for path in directory.glob("icon*"):
-        assert path.stat().st_size < 100_000, f"{path.name} 太大"
+        # 上限从 100KB 调到 160KB（2026-09-20）：ICO 现在**含 256 那一档**（它单独就 67KB），
+        # 体积变大是"图标不糊"的代价 —— 上限跟着图标走，不是砍图标迁就上限。
+        assert path.stat().st_size < 160_000, f"{path.name} 太大"
     ico_size = assets.icon_ico().stat().st_size
-    # ICO 里是 16~128 六档（256 那一档的 PNG 负载太大，会顶破 100KB；见 build/make_app_icon.py）
-    assert 5_000 < ico_size < 100_000, f"ICO 体积不合理：{ico_size} B（应当含 6 档尺寸）"
+    # ICO 里是 16~256 **七档**（见 build/make_app_icon.py 的 ICO_SIZES）：
+    # 256 那一档单独就 67KB，所以下限/上限都要按"含 256"来定
+    assert 5_000 < ico_size < 160_000, f"ICO 体积不合理：{ico_size} B（应当含 7 档尺寸）"

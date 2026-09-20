@@ -113,7 +113,12 @@ if QT_AVAILABLE:
         bubble_clicked = Signal()
 
         def __init__(self, parent: Any = None, *, size: int = PET_SIZE) -> None:
-            super().__init__(parent)
+            # ⚠️ **故意不挂父窗口**（2026-09-20 用户实报"主界面最小化后桌宠也消失"）。
+            # 老写法 `super().__init__(parent)` 把主窗口当父窗口，而 Qt 在父窗口
+            # `showMinimized()`/`hide()` 时会**连带隐藏子窗口** —— 而"软件隐藏时它还在"
+            # 正是桌宠存在的意义。现在 parent 参数只为兼容签名保留、**不再传给 Qt**，
+            # 由主窗口自己持有引用（`self.pet`）并在退出时显式收掉，避免 Python 回收它。
+            super().__init__(None)
             # Tool + 置顶 + 无边框：不进任务栏、不被别的窗口盖住、没有标题栏
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint
@@ -144,6 +149,23 @@ if QT_AVAILABLE:
             self.setToolTip("老牛选股的桌宠：双击看消息，右键有菜单")
 
         # ── 素材 ─────────────────────────────────────────────────────
+
+        def shutdown(self) -> None:
+            """收尾：停掉两个定时器再关窗（桌宠没有父窗口，Qt 不会替我们收）。
+
+            ⚠️ 必须在 close 之前停定时器：`_hop_timer` 每 90ms 回调一次改窗口位置，
+            控件析构后还回调就是访问已释放的 C++ 对象 —— 实测这条会让整个测试进程崩掉
+            （`pytest` 收尾阶段 fatal error）。主窗口销毁钩子与退出口都会调它。
+            """
+            try:
+                self._hop_timer.stop()
+                self._bubble_timer.stop()
+            except RuntimeError:      # 底层对象已经被 Qt 销毁
+                pass
+
+        def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt 命名
+            self.shutdown()
+            super().closeEvent(event)
 
         @staticmethod
         def _load_pet() -> Any:

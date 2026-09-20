@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import struct
 import sys
+from typing import Any
 from pathlib import Path
 
 import os
@@ -33,20 +34,62 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSETS = PROJECT_ROOT / "src" / "laoa_trader" / "assets"
 DEFAULT_SOURCE = PROJECT_ROOT.parent / "桌宠2.png"     # 桌宠同款（透明底）
-#: 生成哪些尺寸（Windows 会按需要挑；24 是小图标档，任务栏用 32/48）
+#: 生成哪些尺寸（Windows 会按需要挑；24 是小图标档，任务栏/资源管理器用 32/48/256）
 SIZES: tuple[int, ...] = (16, 24, 32, 48, 64, 128, 256)
-#: ICO 里装哪几个尺寸。**故意不放 256**：这张插画压缩后 256 那一档的 PNG 就有 40 多 KB，
-#: 塞进去整个 .ico 会超过 `tests/test_assets.py` 定的 100KB 上限（实测 100.8KB）——
-#: 而 Windows 拿 128 放大到 256 完全够用；界面那条路本来就用 `icon.png`（256），不走 .ico。
-ICO_SIZES: tuple[int, ...] = (16, 24, 32, 48, 64, 128)
+#: ICO 里装哪几个尺寸。**256 必须在**（用户 2026-09-20 实报"图标偏小、模糊"）：
+#: 资源管理器与任务栏的大图标视图直接用 256 那一档，缺档时 Windows 会拿小的放大 → 糊。
+#: 代价是 .ico 变大（256 那档的 PNG 负载 40 多 KB），`tests/test_assets.py` 的体积上限
+#: 按新的实际大小调高了，**不是**为了过测试而砍图标。
+ICO_SIZES: tuple[int, ...] = (16, 24, 32, 48, 64, 128, 256)
+#: **小尺寸（≤ 这个值）先按"角色头部"裁剪再缩**：整张"财神娃娃骑牛"缩到 16 像素就是
+#: 一坨看不清的东西（用户原话"图标偏小、模糊"）。裁到头部之后同一个 16 像素里
+#: 主体占比大得多，任务栏那一档才认得出来。
+SMALL_CROP_MAX = 32
+#: 头部裁剪框：取主体 alpha 包围盒**上半部分**（人 + 元宝在牛的上方），再左右居中成方形。
+#: 这个 0.58 是实测出来的比例：再小会把帽子切掉，再大又会把牛身一起吃进来变糊。
+HEAD_CROP_RATIO = 0.58
 
 
-def _render(source: Path, size: int) -> QImage:
-    """把源图等比缩放成 size×size 的 RGBA 图（透明底保留，四周留一点边）。"""
+def _subject_box(img: QImage) -> Any:
+    """主体（角色）的 alpha 包围盒。**每张图都现算**：素材换一张，裁剪框自动跟着走。"""
+    left, top, right, bottom = img.width(), img.height(), 0, 0
+    for y in range(0, img.height(), 4):                 # 每 4 行/列采一次，够准且快
+        for x in range(0, img.width(), 4):
+            if (img.pixel(x, y) >> 24) & 0xFF > 24:
+                left, top = min(left, x), min(top, y)
+                right, bottom = max(right, x), max(bottom, y)
+    if right <= left or bottom <= top:                  # 全透明（坏素材）：退回整张
+        return (0, 0, img.width(), img.height())
+    return (left, top, right - left, bottom - top)
+
+
+def _head_crop(img: QImage) -> QImage:
+    """裁出"角色头部"那一块（小尺寸图标专用，见 `SMALL_CROP_MAX` 的注释）。
+
+    做法：先取主体包围盒，只保留**上半部分**（`HEAD_CROP_RATIO`），
+    再以它为中心扩成一个正方形（正方形缩到 16×16 才不变形）。
+    """
+    x, y, w, h = _subject_box(img)
+    side = int(max(w, h * HEAD_CROP_RATIO) * 1.12)      # 留一点余量，别贴着帽子边切
+    cx = x + w // 2
+    cy = y + int(h * HEAD_CROP_RATIO * 0.5)
+    left = max(0, min(img.width() - side, cx - side // 2))
+    top = max(0, min(img.height() - side, cy - side // 2))
+    return img.copy(left, top, min(side, img.width() - left), min(side, img.height() - top))
+
+
+def _render(source: Path, size: int, *, cropped: bool = False) -> QImage:
+    """把源图等比缩放成 size×size 的 RGBA 图（透明底保留，四周留一点边）。
+
+    Args:
+        cropped: True 时**先裁到角色头部再缩**（小尺寸专用，见 `_head_crop`）。
+    """
     img = QImage(str(source))
     if img.isNull():
         raise SystemExit(f"读不出源图：{source}")
     img = img.convertToFormat(QImage.Format.Format_ARGB32)
+    if cropped:
+        img = _head_crop(img)
     inner = max(1, int(size * 0.92))                    # 留 4% 边，免得贴边难看
     scaled = img.scaled(inner, inner, Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation)
@@ -100,14 +143,21 @@ def main(argv: list[str]) -> int:
     ASSETS.mkdir(parents=True, exist_ok=True)
     blobs: list[bytes] = []
     for size in SIZES:
-        image = _render(source, size)
+        # 小尺寸走"裁剪版"（更好认）；同时存一张"整图缩"的对比图，便于肉眼比谁的辨识度高
+        cropped = size <= SMALL_CROP_MAX
+        image = _render(source, size, cropped=cropped)
         blob = _png_bytes(image)
         blobs.append(blob)
         (ASSETS / f"icon-{size}.png").write_bytes(blob)
+        if cropped:
+            (ASSETS / f"icon-{size}-full.png").write_bytes(_png_bytes(_render(source, size)))
         if size == 256:
             (ASSETS / "icon.png").write_bytes(blob)
     picked = [blob for size, blob in zip(SIZES, blobs, strict=True) if size in ICO_SIZES]
     _write_ico(ASSETS / "icon.ico", picked, list(ICO_SIZES))
+    for size, blob in zip(SIZES, blobs, strict=True):
+        print(f"  {size:>3}px  {len(blob):>6} B"
+              + ("（裁剪版，另存 icon-%d-full.png 供对比）" % size if size <= SMALL_CROP_MAX else ""))
     print(f"{source.name} → {ASSETS}/icon.png + icon-*.png + icon.ico"
           f"（PNG {len(SIZES)} 档：{', '.join(str(s) for s in SIZES)}；"
           f"ICO {len(ICO_SIZES)} 档：{', '.join(str(s) for s in ICO_SIZES)}）")

@@ -5,7 +5,7 @@
     build\\build.bat                       # 一键：建 venv → 装依赖 → 打包
     pyinstaller --noconfirm --clean build\\laoa_trader.spec
 
-产出：`dist\\老牛选股助手\\老牛选股助手.exe`（**onedir** 目录版）。
+产出：`dist\\LaoniuTrader\\LaoniuTrader.exe`（**onedir** 目录版）。
 
 为什么是 onedir 而不是 onefile
 ------------------------------
@@ -192,7 +192,7 @@ exe = EXE(  # noqa: F821
     a.scripts,
     [],
     exclude_binaries=True,
-    name="老牛选股助手",   # exe 名 = 用户在桌面/任务栏看到的名字（与界面标题一致）
+    name="LaoniuTrader",   # exe 名（用户 2026-09-20 定：产物用 ASCII 名 LaoniuTrader）
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -213,7 +213,7 @@ coll = COLLECT(  # noqa: F821
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="老牛选股助手",   # 产出 dist/老牛选股助手/老牛选股助手.exe
+    name="LaoniuTrader",   # 产出 dist/LaoniuTrader/LaoniuTrader.exe
 )
 
 if sys.platform != "win32":
