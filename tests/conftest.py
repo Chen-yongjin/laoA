@@ -549,6 +549,39 @@ def sqlite_conn(db: str):
 
 
 @pytest.fixture(autouse=True)
+def _close_orphan_top_level_windows():
+    """每个用例收尾：把**没有父窗口**的顶层窗口（桌宠 / 消息列表 / 浮窗）显式关掉。
+
+    为什么需要兜底：这几只都是无父窗口的顶层窗口，`deleteLater()` 收不掉它们 ——
+    用例里建了主窗口却忘了收（或只 `close()` 了主窗口）时，它们会留在事件循环里，
+    定时器继续跑、窗口继续重绘，某一次就会踩到已销毁的 C++ 对象，让**整个 pytest
+    进程中途 Aborted**（实测：连建三次主窗口 → 三只桌宠残留 → 下一次全量崩在 25% 处）。
+    生产代码的退出路径（`MainWindow.shutdown`）负责正常收尾，这里只是测试侧的安全网。
+    """
+    yield
+    try:
+        from PySide6.QtWidgets import QApplication
+    except Exception:      # noqa: BLE001 - 没装 Qt 的极简环境
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in list(QApplication.topLevelWidgets()):
+        name = type(widget).__name__
+        if name not in ("DesktopPet", "MessageCenter", "AlertPopup"):
+            continue
+        try:
+            shutdown = getattr(widget, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+            widget.close()
+            widget.deleteLater()
+        except Exception:  # noqa: BLE001 - 兜底收尾失败不该把用例带崩
+            pass
+    app.processEvents()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_desktop_export(tmp_path, monkeypatch):
     """测试期间**绝不往真桌面写文件**（选股结果导出会落在桌面）。
 

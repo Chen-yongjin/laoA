@@ -150,6 +150,20 @@ if QT_AVAILABLE:
 
         # ── 素材 ─────────────────────────────────────────────────────
 
+        def _alive(self) -> bool:
+            """底层 C++ 对象还在不在（没有父窗口的窗口可能先一步被 Qt 销毁）。
+
+            为什么需要：桌宠**没有父窗口**（见 `__init__`），销毁次序不受主窗口约束；
+            定时器回调里直接碰它的成员会踩到已释放对象 —— 那是 `Fatal Python error: Aborted`
+            级别的事故（实测过），所以在每个定时器回调的最前面问一句。
+            """
+            try:
+                import shiboken6
+
+                return bool(shiboken6.isValid(self))
+            except Exception:  # noqa: BLE001 - 没有 shiboken6 就当它一直在（非 PySide 环境）
+                return True
+
         def shutdown(self) -> None:
             """收尾：停掉两个定时器再关窗（桌宠没有父窗口，Qt 不会替我们收）。
 
@@ -253,6 +267,8 @@ if QT_AVAILABLE:
             self._hop_timer.start(90)
 
         def _hop_step(self) -> None:
+            if not self._alive():        # 见 `_alive`：无父窗口的桌宠可能已被销毁
+                return
             self.move(self.x(), self.y() + self._hop_dir * max(1, HOP_HEIGHT // 2))
             self._hop_dir = -self._hop_dir
             self._hop_left -= 1

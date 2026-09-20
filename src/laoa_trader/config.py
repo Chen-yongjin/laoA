@@ -508,6 +508,10 @@ class Config:
     #: 朗读音量（0~1）与语速（Windows SAPI 的 Rate：-10 最慢 ~ 10 最快）
     notify_voice_volume: float = 0.9
     notify_voice_rate: int = 0
+    #: **指定音色**（用户 2026-09-18："设置里桌宠声音可以自由改"）：空 = 自动挑中文音色；
+    #: 填系统里某个音色的完整名字（设置页那个下拉框写进去的就是它）。指定的音色在本机
+    #: 不存在时回落到"自动挑中文"，不会因为换了台机器就念不出来。
+    notify_voice_name: str = ""
     # ── 单频道开关（老配置沿用；与 notify_channels 同时生效）──
     #: （`notify_windows` 已于 2026-09-18 随那一整路删除；老配置里还有它也不会报错）
     notify_feishu: bool = True

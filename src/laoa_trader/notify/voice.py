@@ -134,6 +134,29 @@ def _list_voices_raw() -> list[tuple[str, str]]:
     return voices
 
 
+def installed_voices(*, refresh: bool = False) -> list[tuple[str, str]]:
+    """系统里装着的音色 → `[(名字, 区域)]`（缓存；`refresh=True` 重新枚举）。
+
+    给设置页那个**音色下拉**用（用户 2026-09-18："设置里桌宠声音可以自由改"）：
+    列表里可能有英文音色 —— 界面照列，但**默认项是"自动挑中文"**，
+    因为英文音色念中文是怪腔怪调（那是给懂英文的人听另一种语言用的）。
+    """
+    global _voices
+    if not available():
+        return []
+    with _voices_lock:
+        if _voices is None or refresh:
+            _voices = _list_voices_raw()
+        return list(_voices)
+
+
+def voice_label(name: str, culture: str = "") -> str:
+    """下拉框里显示的一行：`微软慧慧（zh-CN）` 这种（没区域就只写名字）。"""
+    name = str(name or "").strip()
+    culture = str(culture or "").strip()
+    return f"{name}（{culture}）" if culture else name
+
+
 def voice_name() -> str | None:
     """挑一个中文音色名；没有中文音色返回 None（调用方据此**不念**）。
 
@@ -236,6 +259,20 @@ def compose(target: str, kind_label: str, detail: str = "", price: Any = None) -
 # ── 朗读 ─────────────────────────────────────────────────────────────
 
 
+def chosen_voice(cfg: Any = None) -> str | None:
+    """当前该用哪个音色：配置里点名了就用它（**即便不是中文音色** —— 那是用户自己选的），
+    没点名或点名的不在系统里就回到"自动挑中文"。
+    """
+    wanted = str(getattr(cfg, "notify_voice_name", "") or "").strip()
+    if not wanted:
+        return voice_name()
+    names = [name for name, _culture in installed_voices()]
+    if wanted in names:
+        return wanted
+    logger.info(f"配置里指定的语音「{wanted}」在本机不存在，改用自动挑选")
+    return voice_name()
+
+
 def speak(text: str, *, cfg: Any = None) -> bool:
     """把 `text` 排进朗读队列（**立刻返回，绝不阻塞**）。
 
@@ -250,11 +287,18 @@ def speak(text: str, *, cfg: Any = None) -> bool:
     if muted():
         logger.debug("静音中，跳过朗读")
         return False
-    if voice_name() is None:
+    if chosen_voice(cfg) is None:
         _prompt_missing_voice()
         return False
+    # 队列里带上**这一刻的全部语音参数**（音色/音量/语速）：用户改完设置立刻生效，
+    # 不用等队列里排着的几条念完（"改了没反应"是最容易被当成坏了的那种现象）
     try:
-        _queue.put_nowait(str(text))
+        _queue.put_nowait({
+            "text": str(text),
+            "voice": chosen_voice(cfg),
+            "volume": float(getattr(cfg, "notify_voice_volume", 0.9) or 0.9),
+            "rate": int(getattr(cfg, "notify_voice_rate", 0) or 0),
+        })
     except queue.Full:
         # 队满：丢掉**最旧**的一条再排新的（新消息永远比旧消息值得念）
         try:
@@ -293,11 +337,16 @@ def _ensure_worker() -> None:
 def _loop() -> None:
     """逐条念（**不重叠**）：真正慢的是起进程那一下，所以整段都在这里排队等完。"""
     while True:
-        text = _queue.get()
+        item = _queue.get()
         try:
-            if muted() or voice_name() is None:
+            if isinstance(item, dict):
+                text, voice = item["text"], item["voice"]
+                volume, rate = item["volume"], item["rate"]
+            else:                      # 老格式（纯文本）：走默认参数
+                text, voice, volume, rate = str(item), None, 0.9, 0
+            if muted() or voice is None:
                 continue
-            run_command(_speak_command(text))
+            run_command(_speak_command(text, voice=voice, volume=volume, rate=rate))
         except Exception as exc:  # noqa: BLE001 - 念不出来不许影响任何别的东西
             logger.debug(f"朗读失败（已忽略）：{exc}")
         finally:
@@ -345,6 +394,27 @@ def run_command(command: list[str]) -> None:
                    timeout=SPEAK_TIMEOUT, creationflags=_no_window_flag())
 
 
+class _VoiceOverride:
+    """`speak_now(voice=..., volume=..., rate=...)` 用的临时配置（只带语音这三个属性）。"""
+
+    def __init__(self, base: Any, *, voice: str | None, volume: float | None, rate: int | None):
+        self.notify_voice = bool(getattr(base, "notify_voice", True)) if base is not None else True
+        self.notify_voice_name = voice or str(getattr(base, "notify_voice_name", "") or "")
+        self.notify_voice_volume = (
+            float(volume) if volume is not None
+            else float(getattr(base, "notify_voice_volume", 0.9) or 0.9)
+        )
+        self.notify_voice_rate = (
+            int(rate) if rate is not None else int(getattr(base, "notify_voice_rate", 0) or 0)
+        )
+
+
+def _cfg_with_overrides(cfg: Any, *, voice: str | None,
+                        volume: float | None, rate: int | None) -> Any:
+    """把"这一次的语音参数"合成一份临时配置（None 的项沿用原来的 cfg）。"""
+    return _VoiceOverride(cfg, voice=voice, volume=volume, rate=rate)
+
+
 def can_speak(*, cfg: Any = None, force: bool = False) -> bool:
     """现在这一刻能不能念（**只做判断、不出声、不起进程**）。
 
@@ -356,10 +426,12 @@ def can_speak(*, cfg: Any = None, force: bool = False) -> bool:
         return False
     if not force and muted():
         return False
-    return voice_name() is not None
+    return chosen_voice(cfg) is not None
 
 
-def speak_now(text: str, *, cfg: Any = None, force: bool = False) -> bool:
+def speak_now(text: str, *, cfg: Any = None, force: bool = False,
+              voice: str | None = None, volume: float | None = None,
+              rate: int | None = None) -> bool:
     """同步念一句（桌宠右键【试喊一条】用它：用户点了按钮，要立刻听到）。
 
     只走语音这一条路，不进队列 —— 与 `speak()` 的"排队不阻塞"不同：
@@ -369,7 +441,13 @@ def speak_now(text: str, *, cfg: Any = None, force: bool = False) -> bool:
     Args:
         force: 用户**主动**点的"试喊一条"传 True —— 静音的意思是"别被盘中提醒打扰"，
             不是"我点它也不许出声"。真正"没有中文音色"这条硬约束不受它影响。
+        voice / volume / rate: 覆盖配置里的音色、音量、语速（设置页那个【试听】按钮
+            用它们试**面板上当前**的值，不必先保存）。传 None 就走配置/默认。
     """
+    if voice or volume is not None or rate is not None:
+        # 覆盖值走一个临时 cfg：`_speak_command` 只认 `notify_voice_name` 之类的属性，
+        # 与其到处加参数，不如在这里合成一份"这次就用这套"的配置 —— 逻辑只有一套。
+        cfg = _cfg_with_overrides(cfg, voice=voice, volume=volume, rate=rate)
     if cfg is not None and not bool(getattr(cfg, "notify_voice", True)):
         return False
     body = sanitize(text)
@@ -379,7 +457,12 @@ def speak_now(text: str, *, cfg: Any = None, force: bool = False) -> bool:
         _prompt_missing_voice()
         return False
     try:
-        run_command(_speak_command(body))
+        run_command(_speak_command(
+            body,
+            voice=chosen_voice(cfg),
+            volume=float(getattr(cfg, "notify_voice_volume", 0.9) or 0.9),
+            rate=int(getattr(cfg, "notify_voice_rate", 0) or 0),
+        ))
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"朗读失败（已忽略）：{exc}")
         return False

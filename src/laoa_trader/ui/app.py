@@ -284,9 +284,9 @@ SOURCE_CAPABILITIES: dict[str, str] = {
 #: 什么时候会走到它：注册表里的来源都已经加进 `data_sources` 了，或者
 #: `data.sources` 读不出来（那时列表里只有内置同花顺那一行 + 兜底说明）。
 SOURCE_ADD_UNAVAILABLE_TEXT = (
-    "没有可添加的来源了：注册表里已实现的来源都已经在下面的列表里"
-    "（启停就是「在不在这个列表里」，想停用一个来源就点它那一行的【删除】）。"
-    "如果这里本该还有别的来源，请查看日志里的「数据来源注册表」相关警告。"
+    # 2026-09-20 按用户"只保留有用的"精简：原来三句里只有"怎么停用一个来源"是操作，
+    # 其余（为什么没有可加的、去查日志）都是解释 —— 真出问题时日志照旧有记录。
+    "没有可添加的来源了。想停用一个：点它那一行的【删除】。"
 )
 #: 数据来源的显示名：键 → 中文。
 #: 界面上**如实显示配置里的值**，认不出的键原样显示 + 注明"界面没有它的实现" ——
@@ -1738,6 +1738,14 @@ if QT_AVAILABLE:
             # 浮窗/主窗口）立刻停 —— 见 `_start_alert_flash` / `_stop_alert_flash`
             self._flash_timer = QTimer(self)
             self._flash_timer.timeout.connect(self._flash_step)
+            # "闪 N 秒后自己停"的那只单次定时器：**必须挂窗口**（不是 QTimer.singleShot +
+            # lambda），否则窗口销毁后它仍会到点触发并访问已释放的对象 —— 见 `_start_alert_flash`
+            self._flash_stop_timer = QTimer(self)
+            self._flash_stop_timer.setSingleShot(True)
+            self._flash_stop_timer.timeout.connect(self._on_flash_timeout)
+            #: 当前这一轮闪烁的代次（`_start_alert_flash` 写、`_on_flash_timeout` 读）：
+            #: 上一条提醒的"到点停闪"不能把这一条刚起的闪烁掐掉
+            self._pending_flash_token = 0
             # 切到这一页时立刻刷一次（定时器是整分钟对齐的，切过来时可能差几十秒到点）
             self.tabs.currentChanged.connect(self._on_tab_changed)
             # 启动第一屏就是概览页（它是第一个页签）：起来后立刻取一次，
@@ -2829,10 +2837,12 @@ if QT_AVAILABLE:
                 layout, "数据来源",
                 # ⚠️ 这一行是**用户可见**的小字（QLabel 不解析 markdown），别写 `**加粗**`
                 # —— 那会原样显示成两个星号（用户明确说过不喜欢这种星号）。
-                "列表顺序 = 取数优先级：同花顺是主源（需要 Key，见它那一行的申请地址）；"
-                "公开行情源是兜底（免 Key，实测会被限流，只在没配 Key / Key 失效时用）。"
-                f"【{BTN_DOWNLOAD_TEXT}】【{BTN_REFRESH_TEXT}】【{BTN_CHECK_TEXT}】"
-                f"【{BTN_PAUSE_TEXT}】也都在这一组里",
+                #
+                # 2026-09-20（用户："把数据来源下面的灰色说明小字都去掉，只保留有用的。
+                # 做到简洁明了。"）：原来这里写了三句解释（主源/兜底/四个按钮在哪），
+                # 现在只留**看完知道下一步做什么**的那一句 —— 主次关系由下面那行
+                # 「当前来源」如实显示，申请地址在同花顺那一行，都不必在这儿再说一遍。
+                "列表顺序 = 取数优先级；需要 Key 的来源，在它那一行填。",
             )
             # 配置里的**原值**也写出来："界面说的"与"config.toml 里写的"必须对得上
             # （认不出的键照实显示，不假装认识）—— 老属性名 `data_source_label` 保留
@@ -3073,6 +3083,26 @@ if QT_AVAILABLE:
             pet_row.addWidget(self.voice_rate_box)
             pet_row.addStretch(1)
             body.addLayout(pet_row)
+
+            # 音色下拉 + 【试听】（用户 2026-09-18："设置里桌宠声音可以自由改"）：
+            # 第一项永远是"自动挑中文"（默认），其余是这台机器上真实装着的音色。
+            voice_row = QHBoxLayout()
+            voice_row.addWidget(QLabel("音色："))
+            self.voice_name_box = QComboBox()
+            self.voice_name_box.setToolTip(
+                "用哪个声音念。第一项是自动挑中文音色（推荐）；\n"
+                "下面列的是这台机器上装着的语音，选了就用它（英文音色念中文会怪腔怪调）"
+            )
+            self._fill_voice_names()
+            voice_row.addWidget(self.voice_name_box, 1)
+            self.btn_voice_try = QPushButton("试听")
+            self.btn_voice_try.setToolTip(
+                "用**当前**的音色/音量/语速念一句样本（不用先保存）——\n"
+                "听一下就知道这几个设置合不合适"
+            )
+            self.btn_voice_try.clicked.connect(self.on_try_voice)
+            voice_row.addWidget(self.btn_voice_try)
+            body.addLayout(voice_row)
 
             self.voice_hint = QLabel("")
             self.voice_hint.setObjectName("statusTag")
@@ -5530,6 +5560,66 @@ if QT_AVAILABLE:
             except Exception as exc:  # noqa: BLE001 - 位置记不住只影响下次启动的位置
                 logger.debug(f"写桌宠位置失败：{exc}")
 
+        def _fill_voice_names(self) -> None:
+            """把系统里装着的音色填进下拉框（第一项 = 自动挑中文）。
+
+            枚举失败（没有 PowerShell / 不是 Windows / 没有音色）时**只剩第一项** ——
+            这是对的：那种机器本来就没得挑，界面不该给一堆点了没用的选项。
+            """
+            box = getattr(self, "voice_name_box", None)
+            if box is None:
+                return
+            from laoa_trader.notify import voice as voice_mod
+
+            try:
+                voices = voice_mod.installed_voices()
+            except Exception as exc:  # noqa: BLE001 - 枚举失败只影响"能不能挑"，不影响别的
+                logger.debug(f"枚举系统音色失败：{exc}")
+                voices = []
+            kept = str(getattr(self.cfg, "notify_voice_name", "") or "").strip()
+            box.clear()
+            box.addItem("自动挑中文（推荐）", "")
+            for name, culture in voices:
+                box.addItem(voice_mod.voice_label(name, culture), name)
+            # 配置里点名的音色：选中它；本机没有它就回到第一项（并在提示行里说明）
+            index = box.findData(kept) if kept else 0
+            box.setCurrentIndex(index if index >= 0 else 0)
+
+        def on_try_voice(self) -> None:
+            """【试听】：按**当前**面板上的音色/音量/语速念一句样本。
+
+            为什么用面板上的值而不是已保存的配置：这一行就是给"调参数"用的 ——
+            调了听一下、不满意再调，不该逼用户先保存再听（那样每次试都要写一次盘）。
+            念的那一步在后台线程里（起进程要几百毫秒），界面不会被按住。
+            """
+            from laoa_trader.notify import voice as voice_mod
+
+            text = voice_mod.test_text()
+            voice_name = str(self.voice_name_box.currentData() or "") or None
+            volume = int(self.voice_volume_box.value()) / 100.0
+            rate = int(self.voice_rate_box.value())
+            if not self.voice_box.isChecked():
+                self._set_settings_hint("语音朗读是关着的：勾上「中文语音朗读」再试听。")
+                return
+            if not voice_mod.available():
+                self._set_settings_hint(
+                    "这台机器没有可用的语音合成（只有 Windows 自带语音这条路，且需要 PowerShell）。"
+                )
+                return
+            if voice_mod.chosen_voice(self.cfg) is None and not voice_name:
+                self._set_settings_hint(
+                    "这台机器没有中文语音：装一个中文语音包（设置 → 时间和语言 → 语音），"
+                    "或在上面挑一个别的音色再试听。"
+                )
+                return
+            self._set_settings_hint("正在试听…（念一句要一两秒）")
+            threading.Thread(
+                target=voice_mod.speak_now, args=(text,),
+                kwargs={"cfg": self.cfg, "force": True, "voice": voice_name,
+                        "volume": volume, "rate": rate},
+                daemon=True, name="voice-try",
+            ).start()
+
         def _refresh_voice_hint(self) -> None:
             """把"这台机器到底能不能念"写清楚（用户不用去猜为什么没声音）。"""
             label = getattr(self, "voice_hint", None)
@@ -5546,7 +5636,11 @@ if QT_AVAILABLE:
                 logger.debug(f"查语音失败：{exc}")
                 name = None
             if name:
-                label.setText(f"将使用系统语音「{name}」朗读（不联网）。")
+                picked = str(getattr(self.cfg, "notify_voice_name", "") or "").strip()
+                label.setText(
+                    f"将使用系统语音「{name}」朗读（不联网）。"
+                    + ("" if picked else "当前是自动挑中文音色；上面可以指定。")
+                )
             elif sys.platform.startswith("win"):
                 label.setText(
                     "⚠️ 这台机器没有中文语音，消息不会念出来（其余提醒照常）。"
@@ -5742,8 +5836,15 @@ if QT_AVAILABLE:
             self._flashing = True
             self._flash_step()          # 立刻亮一次，不然要等半秒才看得出
             self._flash_timer.start(FLASH_INTERVAL_MS)
-            # 代次放在闭包里：上一条提醒的"到点停闪"不能把这一条刚起的闪烁掐掉
-            QTimer.singleShot(seconds * 1000, lambda: self._stop_alert_flash(token))
+            # 代次放在闭包里：上一条提醒的"到点停闪"不能把这一条刚起的闪烁掐掉。
+            # ⚠️ 用**挂在窗口上的**单次定时器，不用 `QTimer.singleShot(..., lambda: self...)`：
+            # 后者把 `self` 绑进了一个不属于任何对象的定时器里 —— 窗口销毁之后它仍然会到点触发，
+            # 回调里访问已释放的 C++ 对象就是 `Fatal Python error: Aborted`（实测过）。
+            # 挂在窗口上之后，窗口一销毁定时器跟着消失，不存在"回调到空壳"这件事。
+            # 代次放进成员变量、**定时器只连一次**（见 `_on_flash_timeout`）：
+            # 每次进来都重连会得到一条 `Failed to disconnect (None)` 的运行告警
+            self._pending_flash_token = token
+            self._flash_stop_timer.start(max(1, seconds) * 1000)
             try:
                 # 任务栏按钮闪烁（Windows 上就是任务栏图标闪）。
                 # ⚠️ 这里给的是**有限的毫秒数**（= 上面那个闪烁秒数），不是 `0`：
@@ -5754,6 +5855,10 @@ if QT_AVAILABLE:
                 QApplication.alert(self, max(1, seconds) * 1000)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"任务栏提醒失败（不影响消息列表与托盘闪烁）：{exc}")
+
+        def _on_flash_timeout(self) -> None:
+            """"闪够时间了，自己停"（挂窗口的单次定时器，见 `_start_alert_flash`）。"""
+            self._stop_alert_flash(int(getattr(self, "_pending_flash_token", 0)))
 
         def _flash_step(self) -> None:
             """一闪：正常图标 ↔ 红点图标交替。"""
@@ -6197,9 +6302,7 @@ if QT_AVAILABLE:
                 extra = (f"（免 Key，提供 {cap}）" if not state.get("needs_key")
                          else f"（要用你自己的 Key，提供 {cap}）")
                 parts.append(f"{state.get('name')}{extra}")
-            hint.setText("可以添加：" + "；".join(parts)
-                         + "　—— 添加后写回 config.toml 的 data_sources，"
-                           "顺序就是取数的优先级（前一个不可用就落到下一个）")
+            hint.setText("可以添加：" + "；".join(parts) + "（按顺序生效）")
 
         def _source_add_menu(self) -> Any:
             """【添加来源】的菜单（候选来自注册表；没有候选就返回 None）。
@@ -6378,6 +6481,8 @@ if QT_AVAILABLE:
                 "notify_voice": self.voice_box.isChecked(),
                 "notify_voice_volume": int(self.voice_volume_box.value()) / 100.0,
                 "notify_voice_rate": int(self.voice_rate_box.value()),
+                # 空字符串 = 自动挑中文（第一项），与 config 的口径一致
+                "notify_voice_name": str(self.voice_name_box.currentData() or ""),
                 "notify_flash_seconds": int(self.flash_seconds_box.value()),
                 "notify_popup_seconds": int(self.popup_seconds_box.value()),
                 "notify_popup_max_items": int(self.popup_items_box.value()),
@@ -7121,23 +7226,48 @@ if QT_AVAILABLE:
                 logger.debug(f"处理激活事件失败：{exc}")
             super().changeEvent(event)
 
+        def shutdown(self) -> None:
+            """**确定性收尾**：把没有父窗口的顶层窗口与它自己的定时器全部收掉（可重复调用）。
+
+            为什么需要它（2026-09-20 实测）：为了让桌宠在主窗口最小化时仍显示，桌宠改成了
+            **没有父窗口**的顶层窗口 —— 于是 `self.deleteLater()` **不会**销毁它。结果是
+            "每建一次主窗口都留下一只桌宠"，反复建/收之后孤儿窗口越积越多，最终某一只在
+            事件循环里重绘/触发定时器时踩到已析构的 C++ 对象，整个测试进程 `Fatal Python
+            error: Aborted`（实测：连建三次 → 三只桌宠都还在，紧接着 pytest 中途崩掉）。
+
+            所以退出路径（`_quit`）、`QApplication.aboutToQuit`、以及**测试的收尾**都必须
+            走这里。异常一律吞掉并记日志：收尾失败不该挡住退出。
+            """
+            # 闪烁的"到点停"定时器也挂在窗口上（见 `_start_alert_flash`），先停掉它
+            for timer_name in ("_flash_timer", "_flash_stop_timer"):
+                timer = getattr(self, timer_name, None)
+                if timer is not None:
+                    try:
+                        timer.stop()
+                    except RuntimeError:      # 底层对象已销毁
+                        pass
+            if self.alert_popup is not None:
+                try:
+                    self.alert_popup.hide_popup()
+                except Exception:  # noqa: BLE001
+                    logger.debug("收浮窗失败", exc_info=True)
+            # 桌宠：**先停定时器再关窗**（见 `DesktopPet.shutdown` 的注释）
+            self._close_pet_safely()
+            center = self.message_center
+            if center is not None:
+                try:
+                    center.close()
+                    center.deleteLater()
+                except Exception:  # noqa: BLE001
+                    logger.debug("收消息列表失败", exc_info=True)
+                self.message_center = None
+
         def _quit(self) -> None:
             try:
                 self.scheduler.stop()
             except Exception:  # noqa: BLE001
                 pass
-            # 浮窗是**没有父窗口的顶层窗口**，不主动收掉会在退出后留一张空壳在屏幕上
-            if self.alert_popup is not None:
-                self.alert_popup.hide_popup()
-            # 桌宠同理（2026-09-20 起它也**没有父窗口**了，见 `_ensure_pet`）：
-            # 不显式收掉，退出后桌面上会留一只点不动的空壳
-            if self.pet is not None:
-                try:
-                    self.pet.shutdown()
-                    self.pet.close()
-                except Exception:  # noqa: BLE001 - 收桌宠失败不该挡住退出
-                    logger.debug("收桌宠失败", exc_info=True)
-                self.pet = None
+            self.shutdown()
             self.tray.hide()
             QApplication.quit()
 

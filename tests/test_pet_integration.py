@@ -454,3 +454,69 @@ def _alert_rows(cfg) -> list[tuple]:
         return conn.execute(
             "SELECT date, symbol, kind, detail FROM intraday_alert ORDER BY date, symbol, kind"
         ).fetchall()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 设置里"桌宠声音可以自由改"（用户 2026-09-20 原话）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 用户要的是"能自己挑声音"：音色下拉（第一项 = 自动挑中文）+【试听】按钮，
+# 音量/语速保留。这里钉三件事：下拉里真的有系统音色、选了能存进配置并立刻生效、
+# 【试听】按**面板当前**的参数念（不必先保存）。
+
+
+def test_voice_picker_lists_system_voices_and_defaults_to_auto(window) -> None:
+    """下拉框：第一项是"自动挑中文"，后面是本机装着的音色。"""
+    box = window.voice_name_box
+
+    assert box.count() >= 1
+    assert box.itemData(0) == ""                     # 空 = 自动挑中文
+    assert "自动" in box.itemText(0)
+    # 用例里把音色名单固定成一条假的（见 `_quiet_voice`），它应当出现在第二项
+    assert box.count() == 2
+    assert box.itemData(1) == "Fake 中文"
+    assert "zh-CN" in box.itemText(1)                # 名字后面带着区域，便于区分
+
+
+def test_voice_picker_choice_is_saved_and_used(window, qapp) -> None:
+    """选一个音色 → 一键保存写回 `notify_voice_name`，并且下次念就用它。"""
+    box = window.voice_name_box
+    box.setCurrentIndex(box.findData("Fake 中文"))
+
+    window.on_save_settings()
+    qapp.processEvents()
+
+    assert window.cfg.notify_voice_name == "Fake 中文"
+    assert 'notify_voice_name = "Fake 中文"' in window.cfg.source_path.read_text(encoding="utf-8")
+
+
+def test_try_listen_speaks_with_the_panel_values(window, qapp, _quiet_voice) -> None:
+    """【试听】用面板上的音色/音量/语速念一句样本，且**不写配置、不写库**。
+
+    `_quiet_voice` 这个 fixture 把真正"起进程说话"的那一步换成了"把命令记下来"
+    （见它的 docstring），所以这里可以**逐字断言**念的是什么、用哪个音色、音量语速是多少 ——
+    而 CI 上不会发出任何声音。
+    """
+    import time
+
+    spoken: list[str] = _quiet_voice
+    window.voice_name_box.setCurrentIndex(window.voice_name_box.findData("Fake 中文"))
+    window.voice_volume_box.setValue(60)
+    window.voice_rate_box.setValue(-2)
+    before = window.cfg.source_path.read_text(encoding="utf-8")
+
+    window.on_try_voice()
+
+    # 念的活交给后台线程（起进程要几百毫秒，放主线程会卡界面）——等它落地
+    deadline = time.monotonic() + 5
+    while not spoken and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert spoken, "【试听】没有把朗读命令发出去"
+    command = spoken[0]
+    assert "SelectVoice('Fake 中文')" in command      # 用的是下拉里选的那个音色
+    assert "$s.Volume = 60" in command                # 面板上的音量
+    assert "$s.Rate = -2" in command                  # 面板上的语速
+    assert window.cfg.source_path.read_text(encoding="utf-8") == before   # 试听不写配置
+    assert window.cfg.notify_voice_name == ""         # 也没偷偷改内存里的配置

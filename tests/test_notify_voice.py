@@ -242,3 +242,76 @@ def test_queue_full_drops_the_oldest(monkeypatch, cfg) -> None:
     left = [voice._queue.get_nowait() for _ in range(voice._queue.qsize())]
     assert "最新的那条" in left
     assert "第0条" not in left                 # 最旧的那条被挤掉了
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 音色可选（用户 2026-09-20："设置里桌宠声音可以自由改"）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 这一段钉的是"用户能挑声音"这条链：枚举 → 下拉用的一行文案 → 配置里点名的音色
+# 真的进了 PowerShell 命令；点名的音色在本机不存在时回落到"自动挑中文"（换台机器
+# 不会因此没声）；没有中文音色时的行为不变（不念，并给出原因）。
+
+
+def test_installed_voices_lists_what_the_system_has(monkeypatch, cfg) -> None:
+    """枚举出来的名单就是下拉框的数据源（名字 + 区域，界面自己拼显示文案）。"""
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Microsoft Huihui Desktop", "zh-CN"),
+                               ("Microsoft Zira Desktop", "en-US")])
+
+    assert voice.installed_voices() == [("Microsoft Huihui Desktop", "zh-CN"),
+                                        ("Microsoft Zira Desktop", "en-US")]
+    assert voice.voice_label("Microsoft Huihui Desktop", "zh-CN") == \
+        "Microsoft Huihui Desktop（zh-CN）"
+    assert voice.voice_label("没有区域的名字", "") == "没有区域的名字"
+
+
+def test_chosen_voice_uses_the_configured_name(monkeypatch, cfg) -> None:
+    """配置里点名了音色就用它 —— **即便它是英文音色**（那是用户自己挑的）。"""
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Microsoft Huihui Desktop", "zh-CN"),
+                               ("Microsoft Zira Desktop", "en-US")])
+    cfg.notify_voice_name = "Microsoft Zira Desktop"
+
+    assert voice.chosen_voice(cfg) == "Microsoft Zira Desktop"
+    command = voice._speak_command("测试", voice=voice.chosen_voice(cfg))
+    assert "SelectVoice('Microsoft Zira Desktop')" in " ".join(command)
+
+
+def test_chosen_voice_falls_back_when_the_named_voice_is_gone(monkeypatch, cfg) -> None:
+    """点名的音色在本机没有（换了台机器）→ 回落到自动挑中文，而不是不念。"""
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Microsoft Huihui Desktop", "zh-CN")])
+    cfg.notify_voice_name = "这台机器上没有的音色"
+
+    assert voice.chosen_voice(cfg) == "Microsoft Huihui Desktop"
+
+
+def test_try_listen_uses_the_panel_values(monkeypatch, cfg) -> None:
+    """【试听】把**面板上当前**的音色/音量/语速带进命令里（不必先保存）。"""
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Microsoft Huihui Desktop", "zh-CN")])
+    spoken: list[list[str]] = []
+    monkeypatch.setattr(voice, "run_command", spoken.append)
+
+    ok = voice.speak_now("老牛选股助手，语音提醒测试", cfg=cfg, force=True,
+                         voice="Microsoft Huihui Desktop", volume=0.5, rate=3)
+
+    assert ok is True
+    command = " ".join(spoken[0])
+    assert "SelectVoice('Microsoft Huihui Desktop')" in command
+    assert "$s.Volume = 50" in command          # 0.5 → 50
+    assert "$s.Rate = 3" in command
+
+
+def test_no_chinese_voice_still_means_no_speaking(monkeypatch, cfg) -> None:
+    """一个中文音色都没有 → 不念（这条硬约束不因为"能挑音色"而放松）。"""
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Microsoft Zira Desktop", "en-US")])
+    spoken: list[list[str]] = []
+    monkeypatch.setattr(voice, "run_command", spoken.append)
+
+    assert voice.voice_name() is None
+    assert voice.speak("贵州茅台 600519，止损提醒", cfg=cfg) is False
+    assert voice.speak_now("试一条", cfg=cfg, force=True) is False
+    assert spoken == []

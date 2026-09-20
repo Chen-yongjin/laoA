@@ -163,6 +163,11 @@ def window(seeded, qapp):
         win.about_dialog.close()    # 「关于软件」窗口同理
     if win.status_dialog is not None:
         win.status_dialog.close()   # 「状态详情」窗口同理
+    # ⚠️ **必须显式 shutdown**：桌宠/消息列表/浮窗都是**没有父窗口**的顶层窗口，
+    # `win.deleteLater()` 收不掉它们 —— 每建一次主窗口就留一只桌宠，孤儿越积越多，
+    # 最终某一只在事件循环里踩到已析构对象，pytest 中途 `Fatal Python error: Aborted`
+    # （2026-09-20 实测：连建三次就留下三只）。这条收尾与生产代码的退出路径是同一个方法。
+    win.shutdown()
     win.tray.hide()
     win.close()
     win.deleteLater()
@@ -2096,9 +2101,12 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
     "notify_popup_seconds", "notify_popup_max_items", "notify_tray_duration_ms", "feishu_on",
     "feishu_app_id", "feishu_app_secret", "feishu_chat_id",
     # 桌宠 + 中文朗读（2026-09-18 用户要的"机器人/桌宠喊出消息内容"）：
-    # 四个键都在「通知方式」这一组里，一键保存就该把它们写回去
+    # 这些键都在「通知方式」这一组里，一键保存就该把它们写回去
     # （`pet_x`/`pet_y` **不在**这里：那是拖动时单独写的，界面里没有对应控件）
+    # `notify_voice_name` 是 2026-09-20 加的（用户："设置里桌宠声音可以自由改" →
+    # 音色下拉框，空字符串 = 自动挑中文）
     "notify_pet", "notify_voice", "notify_voice_volume", "notify_voice_rate",
+    "notify_voice_name",
     # 3) 竞价扫描
     "intraday_auction", "auction_min_pct", "auction_max_pct", "auction_min_amount",
     "auction_min_volume_ratio", "auction_min_score", "auction_alert_max_items",
@@ -2138,10 +2146,11 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     } - SETTINGS_KEYS
     updates = window._collect_settings_updates()
     assert set(updates) == SETTINGS_KEYS | extra_key_fields
-    # 当前：37 个固定键（35 → 33：删掉 Windows 通知那一路时
+    # 当前：38 个固定键（35 → 33：删掉 Windows 通知那一路时
     # `notify_windows_sound` / `notify_windows_open_url` 随之取消；
-    # 33 → 37：加上桌宠与中文朗读的 4 个键）
-    assert len(updates) == 37
+    # 33 → 37：加上桌宠与中文朗读的 4 个键；
+    # 37 → 38：用户要求"桌宠声音可以自由改"，加上音色下拉的 `notify_voice_name`）
+    assert len(updates) == 38
     # 2026-09-18 起**必须收**它：内置同花顺那一行有输入框，一键保存就该把它写回去
     # （出厂值是空串，程序从不预置；"填了没保存"才是要防的那件事）
     assert "hithink_api_key" in updates
@@ -3223,10 +3232,11 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     qapp.processEvents()
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
     assert f'{fake_key} = "token-abc"' in text
-    # 37 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 38 项
+    # 38 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 39 项
     # （35 + 1 → 33 + 1：2026-09-18 删掉 Windows 通知那一路少了两个键；
-    #  33 + 1 → 37 + 1：加上桌宠与中文朗读的四个键）
-    assert window.save_settings_hint.text().startswith("✅ 已保存 38 项")
+    #  33 + 1 → 37 + 1：加上桌宠与中文朗读的四个键；
+    #  37 + 1 → 38 + 1：用户要求"桌宠声音可以自由改"，加上 `notify_voice_name`）
+    assert window.save_settings_hint.text().startswith("✅ 已保存 39 项")
     # 内置同花顺的 Key 也在这份键集合里（它的输入框和替身来源的走同一条规则）
     assert "hithink_api_key" in window._collect_settings_updates()
 
