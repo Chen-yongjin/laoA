@@ -38,6 +38,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from laoa_trader import clock
 from laoa_trader import hints, state
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import hithink as hx
@@ -1001,7 +1002,7 @@ def sync_daily(
 
             # 3) 涨停池（策略/热门行业都依赖它）
             _notify(progress_cb, "同步涨停池", 0, 1)
-            limit_day = day or storage.latest_date(conn) or datetime.now().strftime("%Y-%m-%d")
+            limit_day = day or storage.latest_date(conn) or clock.today_cn()
             try:
                 limit_rows = sync_limit_up_pool(cfg, client=client, day=limit_day, conn=conn)
                 limit_ok, limit_n, limit_err = limit_rows.ok, limit_rows.rows, limit_rows.error
@@ -1115,7 +1116,7 @@ def limit_up_row(day: str, r: dict) -> tuple | None:
     if not code:
         return None
     symbol = hx.to_local_symbol(str(code)) if "." in str(code) else str(code).zfill(6)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = clock.stamp_cn()
     return (
         day,
         symbol,
@@ -1152,7 +1153,7 @@ def sync_limit_up_pool(
     result = SyncResult(stage="涨停池")
     try:
         client = client or make_client(cfg)
-        day = day or datetime.now().strftime("%Y-%m-%d")
+        day = day or clock.today_cn()
         rows = client.limit_up_pool(day)
         payload = [r for r in (limit_up_row(day, row) for row in rows) if r]
         if not payload:

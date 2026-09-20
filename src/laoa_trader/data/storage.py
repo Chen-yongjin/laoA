@@ -35,10 +35,11 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Iterable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from laoa_trader import clock
 from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
@@ -407,8 +408,21 @@ def upsert(
     return total
 
 
+#: 北京时间（UTC+8）。**时间戳一律按北京时间写**，理由见 `_now()`。
+_CN_TZ = timezone(timedelta(hours=8))
+
+
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """时间戳（`pushed_at` 等）→ **北京时间** `YYYY-MM-DD HH:MM:SS`。
+
+    为什么不用 `datetime.now()`（机器本地时间）：本项目的"今天"处处按北京时间算
+    （`intraday.now_shanghai()`），而日期列（`date`）也是北京日期 —— 时间戳若按本地时间写，
+    在 UTC 机器上就会出现"`date` 是今天、时间戳还是昨天"（差 8 小时，跨零点时差一整天）。
+    这不是纸上谈兵：CI 的 Windows runner 是 UTC，实测过一条断言
+    `assert today in tooltip` 因此变红 —— 库里那行 `date` 是 2026-09-21（北京），
+    时间戳却是 2026-09-20 17:10（UTC），界面上显示的时间与"今天"对不上。
+    """
+    return clock.stamp_cn()
 
 
 # ── 行情 ──

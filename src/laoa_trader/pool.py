@@ -38,6 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from laoa_trader import clock
 from laoa_trader.config import get_config
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
@@ -440,7 +441,9 @@ def hot_industries(
 
 def save_pool(db_path: str, pool: list[dict], day: str | None = None) -> int:
     """把股票池写入 `stock_pool`（幂等 upsert，同一天重复跑只会覆盖同代码的行）。"""
-    day = day or datetime.now().strftime("%Y-%m-%d")
+    # 用**北京日期**：池子是按"行情日"存的，机器在 UTC（NAS/Docker/CI）时
+    # `datetime.now()` 会差 8 小时、跨零点就写成昨天 —— 界面上"今天的池子"会查不到。
+    day = day or clock.today_cn()
     with storage.connect(db_path) as conn:
         written = storage.save_pool(conn, pool, day)
     logger.info(f"股票池已写入 {written} 只（{day}）")

@@ -77,6 +77,7 @@ from laoa_trader.config import (
     split_scan_at,
 )
 from laoa_trader.data import hithink as hx
+from laoa_trader import clock
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
 from laoa_trader.log import get_logger
@@ -311,9 +312,10 @@ def now_shanghai(now: datetime | None = None) -> datetime:
     `TypeError: can't compare offset-naive and offset-aware`。所以这里把北京时间的
     墙上钟面值取出来、丢掉 tzinfo —— 语义就是"现在是北京几点"，与既有代码天然一致。
     """
-    if now is not None:
-        return now
-    return datetime.now(_TZ_SHANGHAI).replace(tzinfo=None)
+    # 真正的实现搬到了 `clock.now_cn()`（那个模块存在的理由见它的 docstring）：
+    # 这里保留这个函数名，是因为项目里到处都在用它（界面、调度、提醒……），
+    # 改名只会制造一次没有收益的大范围改动。
+    return clock.now_cn(now)
 
 
 def in_session(now: datetime | None = None) -> bool:

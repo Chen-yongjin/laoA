@@ -60,6 +60,7 @@ import time
 from datetime import datetime
 from typing import Any
 
+from laoa_trader import clock
 from laoa_trader.data import hithink as hx
 from laoa_trader.data import public_market
 from laoa_trader.log import get_logger
@@ -594,7 +595,9 @@ def _collect_overview(cfg: Any, client: Any, errors: list[str], *, signature: tu
                       force: bool) -> dict:
     """真正取一趟概览（三路各自降级）。`fetch_overview` 只管"用哪个客户端"。"""
     overview = _skeleton(configured=_configured_group_keys(cfg))
-    overview["as_of"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # 北京时间的"取数时刻"：机器在 UTC 时按本地时间显示会差 8 小时（用户看到的
+    # 是行情时间，不该受机器时区影响）
+    overview["as_of"] = clock.now_cn().strftime("%Y-%m-%d %H:%M")
 
     overview["limits"] = _fetch_limits(client, errors)
     groups, failed = _fetch_groups(cfg, client, errors)

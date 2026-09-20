@@ -55,6 +55,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Callable, Iterable, Sequence
 
+from laoa_trader import clock
 from laoa_trader.config import Config, get_config
 from laoa_trader.data import public_market as pm
 from laoa_trader.data import storage
@@ -343,7 +344,7 @@ def limit_pool_from_snapshot(
     rows = list(rows)
     names = names or {}
     prev = _previous_pool_days(conn, day)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = clock.stamp_cn()          # 北京时间（与 date 列同源）
     out: list[tuple] = []
     for row in rows:
         symbol = str(row.get("symbol") or "")
@@ -527,7 +528,7 @@ def daily_update_public(
         result.error = "全市场快照为空（网络不通或被限流）—— 本次不写任何数据"
         return [result]
 
-    day = market_date() or datetime.now().strftime("%Y-%m-%d")
+    day = market_date() or clock.today_cn()
     names = {str(r.get("symbol")): str(r.get("name") or "") for r in rows if r.get("symbol")}
     extra: dict[str, Any] = {"day": day, "snapshot_rows": len(rows)}
 
