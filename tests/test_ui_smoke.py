@@ -2089,6 +2089,10 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
     "notify_popup", "notify_channels", "notify_sound", "notify_flash_seconds",
     "notify_popup_seconds", "notify_popup_max_items", "notify_tray_duration_ms", "feishu_on",
     "feishu_app_id", "feishu_app_secret", "feishu_chat_id",
+    # 桌宠 + 中文朗读（2026-09-18 用户要的"机器人/桌宠喊出消息内容"）：
+    # 四个键都在「通知方式」这一组里，一键保存就该把它们写回去
+    # （`pet_x`/`pet_y` **不在**这里：那是拖动时单独写的，界面里没有对应控件）
+    "notify_pet", "notify_voice", "notify_voice_volume", "notify_voice_rate",
     # 3) 竞价扫描
     "intraday_auction", "auction_min_pct", "auction_max_pct", "auction_min_amount",
     "auction_min_volume_ratio", "auction_min_score", "auction_alert_max_items",
@@ -2106,8 +2110,9 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
 def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None:
     """收集函数的键集合 = 五组控件的**全部**键（一键保存的"写哪些"就是它决定的）。
 
-    **33 是现在的个数**（2026-09-18：`hithink_api_key` 又回到了这份键集合里 ——
-    用户澄清"不要配 KEY"指的是**程序里不许预置自己的 Key**，不是不给填，
+    **37 是现在的个数**（33 + 桌宠/语音那 4 个键，2026-09-18 用户要的"桌宠 + 中文朗读"；
+    33 那部分里含 `hithink_api_key` —— 用户澄清"不要配 KEY"指的是**程序里不许预置自己的
+    Key**，不是不给填，
     所以内置同花顺那一行重新有了输入框，一键保存也就该把它写回去；
     出厂包里这个值始终是空串，程序从不写死它）。
     在此之上，每个**已启用、需要 Key 且界面上真有输入框**的来源会按注册表给的
@@ -2127,9 +2132,10 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     } - SETTINGS_KEYS
     updates = window._collect_settings_updates()
     assert set(updates) == SETTINGS_KEYS | extra_key_fields
-    # 当前：33 个固定键（原来 35 —— 2026-09-18 删掉 Windows 通知那一路时，
-    # `notify_windows_sound` / `notify_windows_open_url` 两个键随之取消）
-    assert len(updates) == 33
+    # 当前：37 个固定键（35 → 33：删掉 Windows 通知那一路时
+    # `notify_windows_sound` / `notify_windows_open_url` 随之取消；
+    # 33 → 37：加上桌宠与中文朗读的 4 个键）
+    assert len(updates) == 37
     # 2026-09-18 起**必须收**它：内置同花顺那一行有输入框，一键保存就该把它写回去
     # （出厂值是空串，程序从不预置；"填了没保存"才是要防的那件事）
     assert "hithink_api_key" in updates
@@ -3211,9 +3217,10 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     qapp.processEvents()
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
     assert f'{fake_key} = "token-abc"' in text
-    # 33 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 34 项
-    # （原先是 35 + 1 = 36：2026-09-18 删掉 Windows 通知那一路，少了两个键）
-    assert window.save_settings_hint.text().startswith("✅ 已保存 34 项")
+    # 37 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 38 项
+    # （35 + 1 → 33 + 1：2026-09-18 删掉 Windows 通知那一路少了两个键；
+    #  33 + 1 → 37 + 1：加上桌宠与中文朗读的四个键）
+    assert window.save_settings_hint.text().startswith("✅ 已保存 38 项")
     # 内置同花顺的 Key 也在这份键集合里（它的输入框和替身来源的走同一条规则）
     assert "hithink_api_key" in window._collect_settings_updates()
 

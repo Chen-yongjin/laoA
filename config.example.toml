@@ -114,12 +114,11 @@ watchlist_in_pool = true
 # **出厂默认一条都不勾**（用户拍板）：提醒默认只走"图标闪烁 + 消息列表"
 # （托盘/任务栏图标闪，点托盘图标打开「消息」窗口看列表；飞书那一套照旧能勾），
 # 系统弹窗/托盘气泡/飞书由你自己勾上 —— 第一次跑就被系统窗口打断不是这个程序该干的事。
-# 想开哪路就把名字写进列表，例如：notify_channels = ["windows", "tray"]
+# 想开哪路就把名字写进列表，例如：notify_channels = ["feishu", "tray"]
+# （Windows 系统通知那一整路已于 2026-09-18 按用户要求删除）
 notify_channels = []
 
 # Windows 弹窗参数
-notify_windows_sound = true      # 是否带提示音（开会时建议 false）
-notify_windows_open_url = true   # 弹窗按钮点击是否打开雪球页面
 
 # 托盘气泡显示时长（毫秒）
 notify_tray_duration_ms = 8000
@@ -135,6 +134,17 @@ notify_popup_seconds = 8         # 浮窗几秒后自动消失（鼠标停在上
 notify_popup_max_items = 5       # 浮窗最多列几条（1~10），点任意一条看详情
 notify_sound = true              # 提醒时响一声系统提示音（winsound，仅 Windows 有效）
 notify_flash_seconds = 6         # 托盘/任务栏图标闪烁几秒（0 = 不闪）
+# 桌宠（用户 2026-09-18 要的）：常驻桌面、置顶、不进任务栏的小卡片；
+# 有消息时冒气泡 + 蹦两下，双击它打开消息列表，右键有【消息】【试喊一条】
+# 【静音一小时】【藏起来】。拖动它会被记住位置（pet_x / pet_y）。
+notify_pet = true
+pet_x = 0                        # 0 = 还没拖过 → 默认放屏幕右下角
+pet_y = 0
+# 中文语音朗读：用 Windows 自带的语音合成（不联网、不用装东西）。
+# 这台机器没有中文音色时**自动不念**（英文音色念中文是怪腔怪调），其余提醒照常。
+notify_voice = true
+notify_voice_volume = 0.9        # 0~1，用户要求「大声喊」，默认 90%
+notify_voice_rate = 0            # -10（慢）~ 10（快），0 = 正常
 
 # 飞书频道：自建应用的 App ID / App Secret / 目标会话 ID。
 # 没配凭证时：勾了飞书也只会提示「未配置飞书凭证，已跳过」，不影响其它频道。
@@ -147,7 +157,6 @@ receive_id_type = "chat_id"
 
 # 单频道开关（老配置沿用；与 notify_channels 同时生效，任一为 false 就不发）
 notify_feishu = true
-notify_windows = true
 notify_tray = true
 
 # ── 交易参数（只用于生成条件单文本，本程序不含任何下单功能）─────────

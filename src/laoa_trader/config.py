@@ -434,6 +434,20 @@ class Config:
     notify_sound: bool = True
     #: 托盘 / 任务栏图标闪烁几秒（0 = 不闪）
     notify_flash_seconds: int = 6
+    #: **桌宠**（用户 2026-09-18 要求："像一个桌宠一样的，软件隐藏时停留在桌面"）：
+    #: 一张常驻桌面、置顶、不进任务栏的小卡片；有消息冒气泡 + 蹦两下，双击开消息列表。
+    #: 默认**开**（是用户点名要的东西）；关掉之后提醒照走（图标闪 + 消息列表）。
+    notify_pet: bool = True
+    #: 桌宠的位置（拖动后记住；None/0 = 还没拖过，用屏幕右下角的默认位）
+    pet_x: int = 0
+    pet_y: int = 0
+    #: **中文语音朗读**（用户："可不可以编写个机器人，直接中文语音提醒……大声喊出消息内容"）：
+    #: 走 Windows 自带的语音合成（不引新依赖，详见 `notify/voice.py`）。
+    #: 默认开；这台机器**没有中文音色**时自动不念（英文音色念中文是怪腔怪调）。
+    notify_voice: bool = True
+    #: 朗读音量（0~1）与语速（Windows SAPI 的 Rate：-10 最慢 ~ 10 最快）
+    notify_voice_volume: float = 0.9
+    notify_voice_rate: int = 0
     # ── 单频道开关（老配置沿用；与 notify_channels 同时生效）──
     #: （`notify_windows` 已于 2026-09-18 随那一整路删除；老配置里还有它也不会报错）
     notify_feishu: bool = True
@@ -632,6 +646,24 @@ class Config:
         self.notify_flash_seconds = _bounded_int(
             self.notify_flash_seconds, DEFAULT_NOTIFY_FLASH_SECONDS, 0, 120
         )
+        # 朗读音量 0~1、语速 -10~10（Windows SAPI 的量纲）：越界夹取、乱码回默认。
+        # 夹取而不是回默认：`notify_voice_volume = 1.5` 明显是"想更响一点"，
+        # 按 1.0 办比丢回 0.9 更贴近本意；而语速写 20 就是"想更快"，按 10 办。
+        try:
+            self.notify_voice_volume = min(max(float(self.notify_voice_volume), 0.0), 1.0)
+        except (TypeError, ValueError):
+            self.notify_voice_volume = 0.9
+        try:
+            self.notify_voice_rate = min(max(int(self.notify_voice_rate), -10), 10)
+        except (TypeError, ValueError):
+            self.notify_voice_rate = 0
+        # 桌宠坐标：负数会让它跑到屏幕外（用户就只能靠改配置文件找回来了），一律当没记过。
+        # 0 是"还没拖过"的哨兵值（真实桌面上 x=0 也几乎不可能是用户想要的位置）。
+        for attr in ("pet_x", "pet_y"):
+            try:
+                setattr(self, attr, max(0, int(getattr(self, attr, 0) or 0)))
+            except (TypeError, ValueError):
+                setattr(self, attr, 0)
         # 做T的四个阈值：0/负数会让判据失真（"涨过 0%" 等于任何一分钟都触发），
         # 写坏（乱码/None）同理 → 一律回默认值。四个数**互不约束**：
         # 回落幅度比涨幅还大是可能的（涨 3% 之后回落 2.5%），不该当成配置矛盾挡回去。
@@ -961,6 +993,9 @@ def _apply_env(cfg: Config) -> Config:
         # 应该是"没生效、仍是默认开着"，而不是把一个核心功能悄悄关掉
         ("NOTIFY_POPUP", "notify_popup"),
         ("NOTIFY_SOUND", "notify_sound"),
+        # 桌宠与语音朗读（用户 2026-09-18 要的）：环境变量写错一律回默认（都开着）
+        ("NOTIFY_PET", "notify_pet"),
+        ("NOTIFY_VOICE", "notify_voice"),
         # 推送过滤：写错（"maybe"）→ 回到默认（**全推**，与新默认一致）
         # 持仓做T近似提示：写错（"maybe"）→ 回到默认（**关着**，与 `intraday_t` 新默认一致）
         ("INTRADAY_T", "intraday_t"),

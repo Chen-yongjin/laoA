@@ -68,6 +68,20 @@ def icon_ico() -> Path | None:
     return _first(("icon.ico",))
 
 
+def pet_png() -> Path | None:
+    """桌宠形象（用户 2026-09-18 给的图，缩到 512×512 后随包）路径；缺失返回 None。
+
+    为什么单独一个函数、而不是让界面自己拼路径：与图标同一个理由 ——
+    "素材在哪"只有这一处说了算（源码运行 / `pip install -e` / PyInstaller 解包
+    三种形态各写一份必然漏一处）。**找不到时返回 None，桌宠要降级成自己画的小家伙**，
+    而不是让桌面宠物把主界面拖死（它是锦上添花的东西）。
+
+    原图是 8-bit RGB、没有 alpha（见 `build/make_pet_asset.py` 的说明），
+    所以桌宠按**圆角卡片**呈现；将来换透明底素材时只换这个文件、不用改画法。
+    """
+    return _first(("pet.png",))
+
+
 def ui_asset(name: str) -> Path | None:
     """界面素材（皮肤用的纹理图等）路径；**找不到返回 None**（界面必须优雅降级）。
 

@@ -849,3 +849,48 @@ def test_push_only_proven_key_is_gone() -> None:
     """
     cfg = load_config(use_env=False)
     assert not hasattr(cfg, "push_only_proven")
+
+
+def test_default_pet_and_voice_are_on() -> None:
+    """桌宠与中文朗读**默认开**（用户 2026-09-18 点名要的），并且示例文件里教得会。
+
+    为什么默认开：用户原话"像一个桌宠一样的，软件隐藏时停留在桌面，有消息时大声喊出
+    消息内容" —— 这是他主动要的功能，出厂就该看得见。两个开关随时能关
+    （关掉任何一个都不影响其余提醒：气泡/消息列表/图标闪烁各自独立）。
+    """
+    cfg = load_config(use_env=False)
+    assert cfg.notify_pet is True
+    assert cfg.notify_voice is True
+    assert cfg.notify_voice_volume == 0.9        # 「大声喊」
+    assert cfg.notify_voice_rate == 0            # 正常语速
+    assert (cfg.pet_x, cfg.pet_y) == (0, 0)      # 0 = 还没拖过 → 默认右下角
+
+
+def test_pet_and_voice_keys_are_validated(tmp_path: Path) -> None:
+    """音量/语速/坐标写坏了都不许把程序带崩：越界夹取、乱码回默认。"""
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "notify_voice_volume = 1.7\n"
+        "notify_voice_rate = 99\n"
+        "pet_x = -50\n"
+        "pet_y = 12\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(path=path, use_env=False)
+    assert cfg.notify_voice_volume == 1.0        # 夹到上限（"想更响一点"就按上限办）
+    assert cfg.notify_voice_rate == 10
+    assert cfg.pet_x == 0                        # 负数 = 屏幕外，当没记过
+    assert cfg.pet_y == 12
+
+    path.write_text('notify_voice_volume = "响"\nnotify_voice_rate = "快"\n',
+                    encoding="utf-8")
+    cfg = load_config(path=path, use_env=False)
+    assert cfg.notify_voice_volume == 0.9 and cfg.notify_voice_rate == 0
+
+
+def test_pet_and_voice_env_switches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """环境变量也能开关（与其它通知开关同一套写法）。"""
+    monkeypatch.setenv("NOTIFY_PET", "false")
+    monkeypatch.setenv("NOTIFY_VOICE", "0")
+    cfg = load_config(use_env=True)
+    assert cfg.notify_pet is False and cfg.notify_voice is False

@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -1643,6 +1644,8 @@ if QT_AVAILABLE:
             #: 「消息」窗口（仿 QQ 的消息列表，用户 2026-09-18 要求）。
             #: 懒建：只有真的来消息 / 用户点托盘图标时才创建 —— 没消息的人一辈子不需要它。
             self.message_center: Any = None
+            #: 桌宠（用户 2026-09-18 要求；默认开，见 `_ensure_pet`）
+            self.pet: Any = None
             #: 消息列表有没有灌过库里的历史（第一次对账时灌一次，且**不算未读**）
             self._messages_seeded = False
             self.alert_detail_dialog: Any = None
@@ -1671,6 +1674,10 @@ if QT_AVAILABLE:
             self._apply_screen_geometry()
             self._build_ui()
             self._build_tray()
+            # 桌宠**启动就摆出来**（用户原话："像一个桌宠一样的，软件隐藏时停留在桌面"）——
+            # 不是"来消息才出现"：桌宠是常驻的，用户要能随时看到它、双击它看消息。
+            # `notify_pet` 关着时 `_ensure_pet()` 直接把已有那只藏起来（见它的实现）。
+            self._ensure_pet()
             self._start_scheduler()
 
             # 实时行情快照缓存（两张表的现价/涨幅）：**没有自己的 QTimer**，
@@ -2995,6 +3002,53 @@ if QT_AVAILABLE:
             param_row.addWidget(self.popup_items_box)
             param_row.addStretch(1)
             body.addLayout(param_row)
+
+            # ── 桌宠 + 中文语音（用户 2026-09-18："像一个桌宠一样的，软件隐藏时停留在桌面，
+            #    有消息时大声喊出消息内容"）──
+            #
+            # 为什么把这两个开关放在「通知方式」里、并且都默认开：它们是**用户点名的默认路径**
+            # （闪图标那种"看一眼"的提醒不够，他要的是桌面上有个东西蹦一下、并且念出来）。
+            # 关掉任何一个都不影响别的路：气泡、消息列表、图标闪烁各自独立。
+            pet_row = QHBoxLayout()
+            self.pet_box = QCheckBox("桌宠（常驻桌面，有消息冒气泡 + 蹦两下）")
+            self.pet_box.setChecked(bool(getattr(self.cfg, "notify_pet", True)))
+            self.pet_box.setToolTip(
+                "一张置顶的小卡片，主窗口最小化/隐藏时它还在桌面上；双击它打开「消息」列表，\n"
+                "右键有【消息】【试喊一条】【静音一小时】【藏起来】；拖动它换位置会被记住"
+            )
+            pet_row.addWidget(self.pet_box)
+
+            self.voice_box = QCheckBox("中文语音朗读")
+            self.voice_box.setChecked(bool(getattr(self.cfg, "notify_voice", True)))
+            self.voice_box.setToolTip(
+                "用 Windows 自带的中文语音把消息念出来（不联网、不装东西）。\n"
+                "这台机器没有中文语音时**自动不念**（英文音色念中文是怪腔怪调），"
+                "其余提醒照常。"
+            )
+            pet_row.addWidget(self.voice_box)
+            pet_row.addWidget(QLabel("　音量："))
+            self.voice_volume_box = QSpinBox()
+            self.voice_volume_box.setRange(0, 100)
+            self.voice_volume_box.setSuffix(" %")
+            self.voice_volume_box.setValue(
+                int(round(float(getattr(self.cfg, "notify_voice_volume", 0.9)) * 100))
+            )
+            self.voice_volume_box.setToolTip("朗读音量（用户要求「大声喊」，默认 90%）")
+            pet_row.addWidget(self.voice_volume_box)
+            pet_row.addWidget(QLabel("　语速："))
+            self.voice_rate_box = QSpinBox()
+            self.voice_rate_box.setRange(-10, 10)
+            self.voice_rate_box.setValue(int(getattr(self.cfg, "notify_voice_rate", 0)))
+            self.voice_rate_box.setToolTip("负数更慢、正数更快（0 = 正常）")
+            pet_row.addWidget(self.voice_rate_box)
+            pet_row.addStretch(1)
+            body.addLayout(pet_row)
+
+            self.voice_hint = QLabel("")
+            self.voice_hint.setObjectName("statusTag")
+            self.voice_hint.setWordWrap(True)
+            body.addWidget(self.voice_hint)
+            self._refresh_voice_hint()
 
             # 托盘参数
             tray_row = QHBoxLayout()
@@ -4991,12 +5045,15 @@ if QT_AVAILABLE:
             """
             if not alerts:
                 return
-            self._ensure_message_center().add_messages(
-                self._alert_items([dict(row) for row in alerts])
-            )
+            # 展示条目只算一次：消息列表、桌宠气泡、朗读三处用的是**同一份文本**
+            # （三处各拼一遍迟早会出现"列表里写 A、嘴里念 B"）
+            items = self._alert_items([dict(row) for row in alerts])
+            self._ensure_message_center().add_messages(items)
             self._refresh_message_badge()
             if bool(getattr(self.cfg, "notify_sound", True)):
                 sound.play()
+            # 桌宠 + 中文朗读（用户 2026-09-18："像一个桌宠一样的……有消息时大声喊出消息内容"）
+            self._announce(items)
             self._start_alert_flash()
             if bool(getattr(self.cfg, "notify_popup", False)):
                 self.show_alert_popup(alerts)
@@ -5107,6 +5164,264 @@ if QT_AVAILABLE:
             except Exception as exc:  # noqa: BLE001 - 消息列表没灌上不影响盯盘
                 logger.debug(f"消息历史灌入失败：{exc}")
 
+        # ── 桌宠 + 中文朗读（用户 2026-09-18 要求）─────────────────────
+        #
+        # 用户原话："可不可以编写个机器人，直接中文语音提醒。像一个桌宠一样的，
+        # 软件隐藏时停留在桌面，有消息时大声喊出消息内容。"
+        #
+        # 所以这一节把三件事接起来，且**每一件失败都不影响别的**：
+        #   1. 桌宠（`ui/desktop_pet.py`）：常驻桌面，冒气泡 + 蹦两下；
+        #   2. 中文朗读（`notify/voice.py`）：Windows 自带语音，排队念、不阻塞界面；
+        #   3. 消息列表：本来就已经进了（上面那一步）。
+        # 桌宠自己不知道"声音"这回事，语音也不知道"气泡"这回事 —— 主窗口是唯一接线的地方。
+
+        def _ensure_pet(self) -> Any:
+            """建（或取回）桌宠；`notify_pet` 关着时**不建**（省得在用户桌面上留个东西）。"""
+            if not bool(getattr(self.cfg, "notify_pet", True)):
+                if self.pet is not None:
+                    self.pet.hide()
+                return None
+            if self.pet is None:
+                try:
+                    from laoa_trader.ui.desktop_pet import DesktopPet
+
+                    pet = DesktopPet(self)
+                    pet.activated.connect(self.on_pet_activated)
+                    pet.test_requested.connect(self.on_pet_test)
+                    pet.mute_requested.connect(self.on_pet_mute)
+                    pet.hide_requested.connect(self.on_pet_hide)
+                    pet.moved.connect(self.on_pet_moved)
+                    self.pet = pet
+                except Exception as exc:  # noqa: BLE001 - 桌宠建不起来不该拖垮主窗口
+                    logger.warning(f"桌宠建不起来（已跳过）：{exc}")
+                    return None
+            self.pet.set_unread(self._message_unread())
+            self._place_pet(self.pet)
+            self.pet.show()
+            return self.pet
+
+        def _message_unread(self) -> int:
+            """当前未读数（桌宠标题与托盘菜单都要它）。"""
+            center = self.message_center
+            try:
+                return int(center.unread_count()) if center is not None else 0
+            except Exception:  # noqa: BLE001
+                return 0
+
+        def _place_pet(self, pet: Any) -> None:
+            """摆桌宠：记得住的位置优先，否则屏幕右下角（避开任务栏，留点边距）。
+
+            为什么每次显示都摆一次：用户可能换了显示器/改了缩放，`pet_x/pet_y` 记的是
+            上一次的绝对坐标 —— 那个坐标在新屏幕上可能已经在可视区之外（桌宠"看不见了"
+            是最难查的一类问题：程序没报错，用户就是找不到它）。
+            """
+            x = int(getattr(self.cfg, "pet_x", 0) or 0)
+            y = int(getattr(self.cfg, "pet_y", 0) or 0)
+            if x > 0 or y > 0:
+                pet.move(x, y)
+                return
+            screen = None
+            try:
+                screen = self.screen() or QApplication.primaryScreen()
+            except Exception:  # noqa: BLE001
+                screen = None
+            if screen is None:
+                return
+            area = screen.availableGeometry()
+            pet.move(max(0, area.right() - pet.width() - 24),
+                      max(0, area.bottom() - pet.height() - 24))
+
+        def _announce(self, items: list[dict]) -> None:
+            """桌宠冒气泡 + 中文朗读（消息内容取最新的那一条）。
+
+            一次来多条时**只念最新的一条**，再把"还有几条"带上：连着念五条会把正在做事的人
+            烦到关掉语音（"大声喊"要喊得有用，不是喊得久）。气泡同理，只显示最新一条。
+            """
+            if not items:
+                return
+            newest = items[0]
+            text = self._announce_text(newest, extra=len(items) - 1)
+            pet = self._ensure_pet()
+            if pet is not None:
+                try:
+                    pet.notify(text)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"桌宠冒泡失败：{exc}")
+            self._speak(text)
+
+        @staticmethod
+        def _announce_text(item: dict, *, extra: int = 0) -> str:
+            """要念/要显示的那句话：`名称(代码)，类型，说明 现价 x`（+ 还有 N 条）。"""
+            from laoa_trader.notify import voice as voice_mod
+
+            text = voice_mod.compose(
+                str(item.get("target") or ""),
+                str(item.get("kind_label") or ""),
+                str(item.get("detail") or ""),
+                item.get("price_text") or None,
+            )
+            if extra > 0:
+                text = f"{text}，还有 {extra} 条"
+            return text
+
+        def _speak(self, text: str) -> bool:
+            """朗读（排队、不阻塞）；关掉或没有中文音色时返回 False，什么都不发生。"""
+            try:
+                from laoa_trader.notify import voice as voice_mod
+
+                return bool(voice_mod.speak(text, cfg=self.cfg))
+            except Exception as exc:  # noqa: BLE001 - 念不出来不许影响提醒本身
+                logger.debug(f"朗读调用失败（已忽略）：{exc}")
+                return False
+
+        def on_pet_activated(self) -> None:
+            """双击桌宠 → 打开「消息」列表（与托盘左键**同一个回调**）。
+
+            刻意不写第二套逻辑：消息窗口的"打开即已读 + 停闪"都在
+            `on_open_messages()` 里，桌宠再走一遍就会出现两条打开路径
+            （一条清未读、一条忘了清 —— 那是最难发现的一类不一致）。
+            """
+            self.on_open_messages()
+
+        @staticmethod
+        def _test_alert_item() -> dict:
+            """【试喊一条】用的那条消息（**纯内存，不落库**）。
+
+            为什么要有它：用户原话"不是实盘时间，无法测试消息模式" —— 盘中提醒只在
+            交易时段产生，收盘后想验"桌宠会不会冒泡、会不会念"就没有样本。所以给一条
+            手动触发的样本，它走的是**与真实提醒完全相同的那几条路**（消息列表 / 响声 /
+            气泡 / 朗读），只是自己不写进 `intraday_alert`：它标成 `kind="test"`，
+            只在消息窗口的视图里存在，因此不会污染提醒去重、按天记账与推送那些逻辑。
+            """
+            stamp = intraday.now_shanghai().strftime("%Y-%m-%d %H:%M:%S")
+            return {
+                "date": "", "symbol": "600519", "kind": "test", "label": "测试",
+                "detail": "这是一条测试提醒，收到它说明提醒链路正常",
+                "price": 1234.56, "pushed_at": stamp,
+                "target": "贵州茅台(600519)", "name": "贵州茅台",
+                "kind_label": "测试", "price_text": "1234.56", "time": stamp,
+            }
+
+        def on_pet_test(self) -> None:
+            """桌宠右键【试喊一条】：走一遍**真实链路**（用户点名说非交易时段没法测）。
+
+            顺序与 `_notify_alerts()` 刻意保持一致（进列表 → 响声 → 冒泡 + 朗读 → 闪图标），
+            这样"能测"才是真的能测：哪一环坏了，点这里就看得出来。
+            """
+            from laoa_trader.notify import voice as voice_mod
+
+            item = self._test_alert_item()
+            self._ensure_message_center().add_messages([item])
+            self._refresh_message_badge()
+            if bool(getattr(self.cfg, "notify_sound", True)):
+                sound.play()
+            text = self._announce_text(item)
+            pet = self._ensure_pet()
+            if pet is not None:
+                pet.notify(text)
+            self._start_alert_flash()
+            # 朗读：**用户点了按钮就是想听**，所以 `force=True`（不受"静音"影响）——
+            # 静音的意思是"别被盘中提醒打扰"，不是"我点它也不许出声"。
+            # 先问 `can_speak()`（缓存过的判断，秒回）再起线程：念一句要几秒，
+            # 放主线程里就是"点完卡几秒"；而没有中文音色时要说清原因，别让用户以为程序坏了。
+            if voice_mod.can_speak(cfg=self.cfg, force=True):
+                threading.Thread(
+                    target=voice_mod.speak_now, args=(text,),
+                    kwargs={"cfg": self.cfg, "force": True},
+                    daemon=True, name="voice-test",
+                ).start()
+            else:
+                self._set_settings_hint(self._voice_missing_reason())
+            return None
+
+        def _voice_missing_reason(self) -> str:
+            """"为什么没念出来"的一句中文（真念出来了就不会走到这里）。"""
+            from laoa_trader.notify import voice as voice_mod
+
+            if not bool(getattr(self.cfg, "notify_voice", True)):
+                return "已试喊一条：气泡与响声正常；语音朗读在设置里是关着的。"
+            if not sys.platform.startswith("win"):
+                return "已试喊一条：气泡与响声正常；当前系统不是 Windows，语音朗读不可用。"
+            if voice_mod.voice_name() is None:
+                return ("已试喊一条：气泡与响声正常；这台机器没有中文语音，所以没有念出来"
+                        "（装一个中文语音包即可：设置 → 时间和语言 → 语音）。")
+            return "已试喊一条：气泡与响声正常；语音那一步没能出声（详见日志）。"
+
+        def on_pet_mute(self, seconds: int) -> None:
+            """桌宠右键【静音一小时】/【取消静音】：只影响朗读（气泡与列表照常）。
+
+            反馈**写在桌宠自己的气泡上**、不弹标题区提示（用户 2026-09-18："软件操作的
+            一些提醒都不需要"）：静音这种操作，点完菜单里那行字本身就变成【取消静音】了，
+            再弹一句"已静音"是纯打扰；而气泡正好浮在他刚点的地方。
+            """
+            from laoa_trader.notify import voice as voice_mod
+
+            if int(seconds) <= 0:
+                voice_mod.unmute()
+                text = "取消静音：提醒会继续念出来"
+            else:
+                voice_mod.mute_for(int(seconds))
+                text = f"静音 {max(1, int(seconds) // 60)} 分钟：气泡与消息列表照常"
+            logger.info(text)
+            if self.pet is not None:
+                try:
+                    self.pet.notify(text, hop=False)
+                except Exception as exc:  # noqa: BLE001 - 气泡失败不影响静音本身
+                    logger.debug(f"静音气泡失败：{exc}")
+
+        def on_pet_hide(self) -> None:
+            """桌宠右键【藏起来】：藏起来并把配置关掉（设置页那一栏会跟着显示未勾选）。"""
+            if self.pet is not None:
+                self.pet.hide()
+            try:
+                from laoa_trader.config import save_settings
+
+                path, self.cfg = save_settings(self.cfg, {"notify_pet": False})
+                logger.info(f"桌宠已藏起来（写回 {path.name} 的 notify_pet=false）")
+            except Exception as exc:  # noqa: BLE001 - 配置写不进去也不该炸
+                logger.debug(f"写桌宠开关失败：{exc}")
+            if getattr(self, "pet_box", None) is not None:
+                self.pet_box.setChecked(False)
+            # 反馈写在设置页那一行提示上（**被动文字**，不是弹窗）：用户把桌宠藏了之后
+            # 要找回来，得有个地方明确告诉他去哪儿找 —— 否则桌宠就是"凭空消失了"。
+            self._set_settings_hint(
+                "桌宠已藏起来（想叫回来：这一页勾上「桌宠」，或改 config.toml 的 notify_pet）"
+            )
+
+        def on_pet_moved(self, x: int, y: int) -> None:
+            """桌宠被拖到新位置 → 记进配置（下次启动回到这里）。"""
+            try:
+                from laoa_trader.config import save_settings
+
+                _, self.cfg = save_settings(self.cfg, {"pet_x": int(x), "pet_y": int(y)})
+            except Exception as exc:  # noqa: BLE001 - 位置记不住只影响下次启动的位置
+                logger.debug(f"写桌宠位置失败：{exc}")
+
+        def _refresh_voice_hint(self) -> None:
+            """把"这台机器到底能不能念"写清楚（用户不用去猜为什么没声音）。"""
+            label = getattr(self, "voice_hint", None)
+            if label is None:
+                return
+            if not self.voice_box.isChecked():
+                label.setText("语音朗读已关闭（气泡与消息列表照常）。")
+                return
+            try:
+                from laoa_trader.notify import voice as voice_mod
+
+                name = voice_mod.voice_name()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"查语音失败：{exc}")
+                name = None
+            if name:
+                label.setText(f"将使用系统语音「{name}」朗读（不联网）。")
+            elif sys.platform.startswith("win"):
+                label.setText(
+                    "⚠️ 这台机器没有中文语音，消息不会念出来（其余提醒照常）。"
+                    "装一个中文语音包即可：设置 → 时间和语言 → 语音。"
+                )
+            else:
+                label.setText("当前系统不是 Windows，语音朗读不可用（其余提醒照常）。")
+
         def _refresh_message_badge(self) -> None:
             """把未读数写到托盘菜单与提示上（QQ 的"消息(n)"就是这个意思）。"""
             try:
@@ -5126,6 +5441,13 @@ if QT_AVAILABLE:
                     self.tray.setToolTip(title)
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(f"托盘提示更新失败：{exc}")
+            # 桌宠的未读数也要跟着走（它自己的右键菜单里写着「消息（N）」）——
+            # 托盘提示、菜单文案、桌宠三处必须是同一个数；只刷一处，用户就会看到两个数
+            if self.pet is not None:
+                try:
+                    self.pet.set_unread(count)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"桌宠未读数更新失败：{exc}")
 
         def on_open_messages(self, _checked: bool = False) -> None:
             """打开「消息」窗口（托盘左键 / 托盘菜单 / 主窗口入口都走这里）。
@@ -5919,6 +6241,10 @@ if QT_AVAILABLE:
                     name for name, box in self.channel_boxes.items() if box.isChecked()
                 ],
                 "notify_sound": self.sound_box.isChecked(),
+                "notify_pet": self.pet_box.isChecked(),
+                "notify_voice": self.voice_box.isChecked(),
+                "notify_voice_volume": int(self.voice_volume_box.value()) / 100.0,
+                "notify_voice_rate": int(self.voice_rate_box.value()),
                 "notify_flash_seconds": int(self.flash_seconds_box.value()),
                 "notify_popup_seconds": int(self.popup_seconds_box.value()),
                 "notify_popup_max_items": int(self.popup_items_box.value()),
@@ -6103,7 +6429,22 @@ if QT_AVAILABLE:
             # 刷一次 —— 两个界面管同一个键时，最忌讳"这边改了、那边还显示旧状态"，
             # 而用户没法从任何一句提示里看出这一点。
             self._reload_formula_list()
+            # 桌宠与语音同理：设置里刚勾/刚取消，界面上要**立刻**生效 ——
+            # 勾上要马上出现桌宠、取消要马上消失；语音那一行的说明也要跟着刷新
+            # （它写着"将使用系统语音 XX"或"这台机器没有中文语音"）。
+            self._apply_pet_and_voice_settings()
             return message
+
+        def _apply_pet_and_voice_settings(self) -> None:
+            """设置保存之后把「桌宠 / 语音」这两项的变化落到界面上（失败只记日志）。"""
+            try:
+                self._ensure_pet()
+            except Exception as exc:  # noqa: BLE001 - 桌宠建不起来不该影响"设置已保存"
+                logger.debug(f"桌宠开关生效失败：{exc}")
+            try:
+                self._refresh_voice_hint()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"语音说明刷新失败：{exc}")
 
         def _reload_formula_list(self) -> None:
             """刷新「策略选股」的策略列表（失败只记日志：不该影响"设置已保存"这个事实）。"""
