@@ -422,9 +422,14 @@ jobs:
             gh release create $tag --title "老牛选股 · 最新构建" --notes "见 Assets：主程序与注册机"
             if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
           }
-          gh release upload $tag dist/keygen.exe --clobber
-          if ($LASTEXITCODE -ne 0) { throw "上传 keygen.exe 到 Release 失败" }
-          Write-Host "::notice::注册机已挂到 Release：https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/keygen.exe"
+          # 打成 keygen.zip 再挂：与主程序同一个页面、同一个附件风格（解压即得 keygen.exe），
+          # 也避免"裸 exe 被浏览器/杀软拦下"这类下载端的麻烦。
+          Compress-Archive -Path 'dist/keygen.exe' -DestinationPath 'keygen.zip' -Force
+          gh release upload $tag keygen.zip --clobber
+          if ($LASTEXITCODE -ne 0) { throw "上传 keygen.zip 到 Release 失败" }
+          Write-Host "Release 现有附件："
+          gh release view $tag --json assets --jq '.assets[].name'
+          Write-Host "::notice::注册机已挂到 Release：https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/keygen.zip"
 
       - id: keygen_upload
         name: 上传注册机 artifact（额度满了会失败，不影响上面的 Release）
@@ -432,7 +437,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: keygen
-          path: dist/keygen.exe
+          path: keygen.zip
           retention-days: 2
           if-no-files-found: error
 
@@ -440,7 +445,7 @@ jobs:
         if: steps.keygen_upload.outcome == 'failure'
         shell: pwsh
         run: |
-          Write-Host "::warning::注册机没传上 artifact（私有仓库存储额度已满）—— 不影响下载：去 Release 页面取 keygen.exe（与主程序同一个页面）。"
+          Write-Host "::warning::注册机没传上 artifact（私有仓库存储额度已满，官方原文：Artifact storage quota has been hit）—— 不影响下载：去 Release 页面取 keygen.zip（与主程序同一个页面）。"
 
       # 结果同样写回 ci-log：只写 ci-log/keygen-meta.txt（**不动** build job 写的 meta.txt），
       # 并且从远端 ci-log 的状态开始改再推 —— 两个 job 可能同时在写这个分支，
@@ -462,6 +467,10 @@ jobs:
             "step_keygen_release=${{ steps.keygen_release.outcome }}"
             "step_keygen_upload=${{ steps.keygen_upload.outcome }}"
           ) | Set-Content keygen-meta.txt
+          # 附件清单：`keygen.zip` 在里面 = 主人真的能下载到（artifact 额度爆了也不影响这条）
+          $env:GH_TOKEN = $env:GITHUB_TOKEN
+          $assets = gh release view latest --json assets --jq '[.assets[].name] | join(",")' 2>$null
+          if ($LASTEXITCODE -eq 0 -and $assets) { Add-Content keygen-meta.txt "release_assets=$assets" }
           Get-Content keygen-meta.txt
           # 只更新 ci-log/keygen-meta.txt，而且**从远端 ci-log 的现状开始改**再推：
           # build 与 keygen 两个 job 可能同时在写这个分支，各自 force-push 会把对方那份抹掉。

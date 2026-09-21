@@ -102,8 +102,8 @@ def test_keygen_is_published_to_the_release_not_only_as_an_artifact() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     keygen_job = text[text.index("  keygen:"):]
 
-    assert "gh release upload $tag dist/keygen.exe --clobber" in keygen_job, \
-        "注册机 job 里少了上传 Release 附件这一步"
+    assert "gh release upload $tag keygen.zip --clobber" in keygen_job, \
+        "注册机 job 里少了上传 Release 附件这一步（附件名 keygen.zip，主人从这里下）"
     assert re.search(r"id:\s*keygen_release", keygen_job), "这一步要有 id，才能记进 ci-log"
     assert "step_keygen_release=" in keygen_job, "注册机的 Release 结果要记进 ci-log（否则无法远程验证）"
     # artifact 那条保留但**不许**再影响判定（额度满了也不该让整轮红）
