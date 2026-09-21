@@ -61,7 +61,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: 跑测试（不通过就不出包）
+      - id: test
+        name: 跑测试（不通过就不出包）
         # 本机约 5 分钟，Windows runner 实测约 20 分钟（慢约 3~4 倍），上限必须留足：
         # 2026-09-21 那轮就是「1622 条测试全过、却因为这一步撞上 20 分钟上限」被判失败。
         timeout-minutes: 40
@@ -149,11 +150,23 @@ jobs:
           python -c "import platform,sys;print('平台',platform.platform());print('Python',sys.version)"
           python -c "import PySide6,pyarrow,pandas;print('PySide6',PySide6.__version__,'| pyarrow',pyarrow.__version__,'| pandas',pandas.__version__)"
 
-      - name: PyInstaller 打包
-        timeout-minutes: 15
-        run: pyinstaller --noconfirm --clean build/laoa_trader.spec
+      - id: pack
+        name: PyInstaller 打包
+        # 15 → 25 分钟：本步在 Windows runner 上本来就慢，而它一超时就是「测试全过、包没出来」
+        # （2026-09-21 排查中发现：失败根本不在测试那一步，而在打包/检查这一段）。
+        timeout-minutes: 25
+        shell: pwsh
+        run: |
+          # 用 `*>` 重定向而不是管道：管道里 `$LASTEXITCODE` 的语义要靠运气
+          # （上一版就因为这类写法差点把失败当成成功），重定向后退出码就是 pyinstaller 的
+          pyinstaller --noconfirm --clean build/laoa_trader.spec *> pyinstaller.log
+          $code = $LASTEXITCODE
+          Get-Content pyinstaller.log | Select-Object -Last 10
+          if ($code -ne 0) { Write-Host "::error::PyInstaller 失败（退出码 $code），详见 pyinstaller.log"; exit 1 }
 
-      - name: 检查产物
+      - id: check
+        name: 检查产物
+        shell: pwsh
         run: |
           if (-not (Test-Path "dist/LaoniuTrader/LaoniuTrader.exe")) { throw "没找到 dist/LaoniuTrader/LaoniuTrader.exe" }
           $size = (Get-ChildItem -Recurse 'dist/LaoniuTrader' | Measure-Object -Property Length -Sum).Sum / 1MB
@@ -169,8 +182,10 @@ jobs:
               Write-Warning "产物里似乎没找到 $p"
             }
           }
+          "产物检查通过" | Set-Content check.log
 
-      - name: 上传产物
+      - id: upload
+        name: 上传产物
         uses: actions/upload-artifact@v7
         with:
           name: LaoniuTrader
@@ -209,7 +224,15 @@ jobs:
             "ref=$env:GITHUB_REF_NAME"
             "job=$env:GITHUB_JOB"
             "result=${{ job.status }}"
+            # 每一步的结论都记下来：只写一个总的 result 时，根本看不出"是测试挂了还是打包挂了"
+            # （2026-09-21 就为此白跑了两轮 CI：测试明明 1622 条全过，失败却在后面几步）。
+            "step_test=${{ steps.test.outcome }}"
+            "step_pack=${{ steps.pack.outcome }}"
+            "step_check=${{ steps.check.outcome }}"
+            "step_upload=${{ steps.upload.outcome }}"
           ) | Set-Content ci-log/meta.txt
+          if (Test-Path pyinstaller.log) { Copy-Item pyinstaller.log ci-log/pyinstaller.log -Force }
+          if (Test-Path check.log) { Copy-Item check.log ci-log/check.log -Force }
           Get-Content ci-log/meta.txt
           git add -f ci-log
           git commit -m "CI 结果：${{ job.status }}（run $env:GITHUB_RUN_ID）" --no-verify
