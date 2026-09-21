@@ -66,14 +66,25 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_tests != true }}
         shell: pwsh
         run: |
-          # 完整输出落盘并在失败时上传成产物，方便定位（Windows 上的失败多半是本机看不出来的平台差异）
-          python -m pytest tests -q --tb=short 2>&1 | Tee-Object -FilePath pytest.log
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::测试未通过，详见 pytest.log 产物"
+          # ⚠️ 这里**不用** `Tee-Object` 管道：2026-09-21 那次"跑到 89~93% 就没声音了"
+          # 的排查中，管道的缓冲把中止前最后那段（faulthandler 的线程栈）吞掉了 ——
+          # 直接重定向到两个文件最可靠：stdout 是 pytest 的进度与失败摘要，
+          # stderr 里才有 `Thread 0x… (most recent call first)` 这样的**线程栈**。
+          # `-p no:cacheprovider` 与本地一致；`--tb=short` 便于失败摘要读取。
+          $env:PYTHONFAULTHANDLER = "1"
+          # `faulthandler` 的"卡住 N 秒就 dump 所有线程栈"兜底：正常跑完不会触发
+          python -m pytest tests -q --tb=short -p no:cacheprovider --faulthandler-timeout=900 > pytest.log 2> pytest-err.log
+          $code = $LASTEXITCODE
+          Get-Content pytest.log | Select-Object -Last 3
+          if (Test-Path pytest-err.log) {
+            $errLines = (Get-Content pytest-err.log).Count
+            Write-Host "stderr 行数：$errLines（线程栈/日志报错都在这里）"
+            Get-Content pytest-err.log | Select-Object -Last 30
+          }
+          if ($code -ne 0) {
+            Write-Host "::error::测试未通过，详见 pytest.log / pytest-err.log 产物"
             exit 1
           }
-          # 顺便报告条数（便于和本地对比）
-          Get-Content pytest.log | Select-Object -Last 3
 
       - name: 失败摘要（直接变成 GitHub 注解，便于复制定位）
         if: failure() && hashFiles('pytest.log') != ''
@@ -91,12 +102,39 @@ jobs:
           $summary = ($lines | Where-Object { $_ -match 'passed|failed|error' } | Select-Object -Last 1)
           Write-Host "::error::测试汇总：$summary"
 
-      - name: 失败时上传测试日志
-        if: failure() && hashFiles('pytest.log') != '' 
+      - name: 失败时上传测试日志（**含 stderr**）
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: pytest-log
-          path: pytest.log
+          # 两个都传：pytest 的进度/摘要在 pytest.log，而**线程栈只在 stderr**
+          # （上次那种"跑到半路中止、没有失败记录"必须靠它才能定位）
+          path: |
+            pytest.log
+            pytest-err.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 失败时用固定顺序再跑一遍（便于本地复现，不参与判定）
+        # 随机顺序下崩在"某条用例留下的线程/窗口"上时，固定顺序往往能说清是谁的锅；
+        # `|| true` 是刻意的：这一步只为留下证据，不能让它的结果盖掉真正的失败信息。
+        if: failure()
+        continue-on-error: true
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          python -m pytest tests -q --tb=short -p no:randomly -p no:cacheprovider -x > pytest-fixed.log 2> pytest-fixed-err.log
+          Get-Content pytest-fixed.log | Select-Object -Last 5
+          Get-Content pytest-fixed-err.log | Select-Object -Last 20
+
+      - name: 固定顺序的证据也上传
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pytest-log-fixed-order
+          path: |
+            pytest-fixed.log
+            pytest-fixed-err.log
           retention-days: 7
           if-no-files-found: ignore
 
@@ -157,6 +195,9 @@ jobs:
           git config user.email "ci-log-bot@users.noreply.github.com"
           New-Item -ItemType Directory -Force -Path ci-log | Out-Null
           if (Test-Path pytest.log) { Copy-Item pytest.log ci-log/pytest.log -Force }
+          # stderr 也要（线程栈在里面：上次"跑到半路中止"就是靠它定位的）
+          if (Test-Path pytest-err.log) { Copy-Item pytest-err.log ci-log/pytest-err.log -Force }
+          if (Test-Path pytest-fixed.log) { Copy-Item pytest-fixed.log ci-log/pytest-fixed.log -Force }
           @(
             "run=$env:GITHUB_RUN_ID"
             "sha=$env:GITHUB_SHA"

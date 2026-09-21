@@ -1582,7 +1582,16 @@ if QT_AVAILABLE:
 
         为什么要这样：PySide6 里**只有主线程能碰控件**。下载 10 年数据要十几分钟，
         直接在按钮回调里跑会"窗口未响应"（Windows 还会弹"程序无响应"）。
+
+        **所有实例都登记在 `_live` 里**：收尾时不可能"逐个数着属性收" ——
+        实测漏一条（当时漏了竞价取数 `_auction_worker`）就会在 CI 的随机顺序下
+        变成"某条线程活过整个用例、在解释器收尾时踩到已关闭的流或已析构的对象"，
+        表现是跑到半路 `Fatal Python error: Aborted`、没有任何用例失败记录。
+        有了登记册，`wait_all()` 就是一条兜底网：**不依赖谁记得把线程挂到哪个属性上**。
         """
+        #: 还活着的工作线程（`run()` 结束就自己注销；用 id 做键避免强引用阻止回收）
+        _live: dict[int, "Any"] = {}
+        _live_lock = threading.Lock()
 
         progress = Signal(str, int, int)
         finished_ok = Signal(object)
@@ -1605,6 +1614,8 @@ if QT_AVAILABLE:
             self._with_note = with_note
 
         def run(self) -> None:  # noqa: D102
+            with Worker._live_lock:
+                Worker._live[id(self)] = self
             try:
                 kwargs = dict(self._kwargs)
                 if self._with_progress:
@@ -1618,6 +1629,38 @@ if QT_AVAILABLE:
             except Exception as exc:  # noqa: BLE001 - 工作线程异常也必须回主线程提示
                 logger.exception("后台任务异常")
                 self.failed.emit(f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+            finally:
+                with Worker._live_lock:
+                    Worker._live.pop(id(self), None)
+
+        @classmethod
+        def wait_all(cls, timeout: float = 5.0) -> int:
+            """等**所有**还在跑的工作线程结束，返回没等到的条数（0 = 全收干净）。
+
+            为什么要按条分配超时、而不是"总共等 N 秒"：几条线程各自卡在超时边界上时，
+            总共等 N 秒会让最后那条连等的机会都没有 —— 收尾阶段最怕的就是"漏一条"。
+
+            ⚠️ `timeout` 的单位是**秒**（跟 `threading.Thread.join` 一致，方便调用方读），
+            而 Qt 的 `QThread.wait()` 收的是**毫秒** —— 这里必须乘 1000 再传，
+            否则 5.0 会被当成 5 毫秒（实测：线程没跑完就返回，收尾等于没做）。
+            """
+            wait_ms = int(max(timeout, 0) * 1000)
+            with cls._live_lock:
+                pending = list(cls._live.values())
+            left = 0
+            for thread in pending:
+                try:
+                    if thread.isRunning():
+                        thread.wait(wait_ms)
+                    if thread.isRunning():
+                        left += 1
+                except RuntimeError:       # 底层 C++ 对象已销毁
+                    continue
+                except Exception:  # noqa: BLE001 - 收尾失败不该挡住退出
+                    left += 1
+            with cls._live_lock:
+                cls._live.clear()
+            return left
 
         def _emit_progress(self, stage: str, done: int, total: int) -> None:
             self.progress.emit(stage, int(done), int(total))
@@ -7422,7 +7465,9 @@ if QT_AVAILABLE:
                     stop(target)
                 except Exception:  # noqa: BLE001 - 收尾失败不该挡住退出
                     logger.debug(f"收 {name} 失败", exc_info=True)
-            for attr in ("_market_worker", "_worker"):
+            for attr in ("_market_worker", "_auction_worker", "_worker"):
+                # 竞价取数（`_auction_worker`）是 2026-09-21 补上的：它当时漏在这份名单外，
+                # 而它跑的是真的网络请求 —— 收尾时它还在飞，就会成为"活过用例的那条线程"。
                 thread = getattr(self, attr, None)
                 if thread is None:
                     continue
@@ -7434,6 +7479,21 @@ if QT_AVAILABLE:
                 except Exception:  # noqa: BLE001
                     logger.debug(f"等 {attr} 结束失败", exc_info=True)
                 setattr(self, attr, None)
+            # 登记册兜底：**不依赖"上面那几个属性名写全了"** —— 漏一个名字就等于漏一条线程，
+            # 而漏掉的后果是 CI 上那种"跑到半路中止、没有失败记录"（见 `Worker._live` 的注释）。
+            try:
+                left = Worker.wait_all(5.0)
+                if left:
+                    logger.warning(f"收尾时还有 {left} 条后台线程没结束（已尽力等待）")
+            except Exception:  # noqa: BLE001
+                logger.debug("等工作线程结束失败", exc_info=True)
+            # 朗读线程：它是"永远堵在队列上"的守护线程，必须送哨兵叫停（Windows 上真的会起来）
+            try:
+                from laoa_trader.notify import voice as voice_mod
+
+                voice_mod.shutdown()
+            except Exception:  # noqa: BLE001
+                logger.debug("收朗读线程失败", exc_info=True)
             # 桌宠：**先停定时器再关窗**（见 `DesktopPet.shutdown` 的注释）
             self._close_pet_safely()
             center = self.message_center

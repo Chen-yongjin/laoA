@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 import socket
 import sqlite3
 import sys
@@ -128,6 +129,44 @@ def _block_network_for_the_whole_session():
         yield
     finally:
         _restore_network(_restore_network_on_exit)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _drain_threads_at_session_end():
+    """整场收尾：把还活着的后台线程**等到落地**，并把没落地的名字打到日志里。
+
+    为什么要有这一条（2026-09-21）：CI（Windows）三次死在"跑到 89~93% 就没声音了、
+    没有任何失败用例"，症状是后台线程在 `sys.stderr` 已关之后还在写日志 ——
+    也就是**线程活过了整场测试**。线程漏收的根因已分别修掉（`MainWindow.shutdown()`
+    现在会等 `_auction_worker`、走 `Worker.wait_all()` 兜底、并给朗读线程送哨兵），
+    这里再兜最后一道：如果还有线程没落地，**把它的名字打出来**，下次一眼就能定位是谁
+    （上一次就是靠"日志里只剩 I/O operation on closed file"猜了好几轮）。
+    """
+    yield
+    import threading
+
+    try:
+        from laoa_trader.notify import voice as voice_mod
+
+        voice_mod.shutdown()
+    except Exception:  # noqa: BLE001 - 收尾失败不该影响测试结论
+        pass
+    main = threading.main_thread()
+    deadline = __import__("time").monotonic() + 5.0
+    while __import__("time").monotonic() < deadline:
+        alive = [t for t in threading.enumerate() if t is not main and t.is_alive()
+                 and not t.daemon]
+        if not alive:
+            return
+        __import__("time").sleep(0.1)
+    leftover = [f"{t.name}(daemon={t.daemon})" for t in threading.enumerate()
+                if t is not main and t.is_alive()]
+    if leftover:
+        # 用 `logger` 而不是 print：CI 的 pytest.log 收 stdout/stderr，两边都能看到
+        logging.getLogger("laoa_trader.tests").warning(
+            "整场收尾时仍有线程存活：%s（若 CI 再出现'跑到半路中止'，先看这一行）",
+            "、".join(leftover),
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -574,6 +613,38 @@ def _isolate_license_state(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _never_speak_for_real(monkeypatch: pytest.MonkeyPatch):
+    """整场把**朗读**这一路钉成"不发声、不起进程、不起线程"。
+
+    为什么必须（2026-09-21，CI 三次红在同一个地方）：`voice` 模块在 **Windows** 上
+    真的可用（那里有 PowerShell），于是它会：① 起一个 `powershell` 子进程枚举音色；
+    ② 起一条**永远堵在队列上**的守护线程等朗读。Linux 上没有 PowerShell，所以这两个
+    副作用在本机（以及之前的本地全量）**永远看不到** —— 而 CI 是 Windows，于是那条
+    线程可能活到 pytest 收尾之后：那时 `sys.stderr` 已经关了，它再写一句日志就是
+    `I/O operation on closed file`，再往后整个进程中止（日志停在半路、没有任何用例失败记录）。
+
+    生产代码那边也做了两道（`MainWindow.shutdown()` 会 `voice.shutdown()` 送哨兵、
+    `log.py` 的 handler 对"流已关闭"免疫），这里是最外面一道：**测试根本不发声**。
+    要验"念的是什么"的用例自己 monkeypatch `run_command`/`_list_voices_raw` 即可。
+    """
+    try:
+        from laoa_trader.notify import voice as voice_mod
+    except Exception:      # noqa: BLE001 - 极小依赖环境
+        return
+    monkeypatch.setattr(voice_mod, "run_command", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(voice_mod, "_list_voices_raw",
+                        lambda *a, **k: [], raising=False)
+    monkeypatch.setattr(voice_mod, "_powershell", lambda: None, raising=False)
+    voice_mod.reset_cache()
+    yield
+    # 收尾：把朗读线程叫停（送哨兵 + join），不让它跨用例存活
+    try:
+        voice_mod.shutdown()
+    except Exception:      # noqa: BLE001 - 收尾失败不该把用例带崩
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _close_orphan_top_level_windows():
     """每个用例收尾：把**没有父窗口**的顶层窗口（桌宠 / 消息列表 / 浮窗）显式关掉。
 
@@ -624,6 +695,17 @@ def _close_orphan_top_level_windows():
         except Exception:  # noqa: BLE001 - 兜底收尾失败不该把用例带崩
             pass
     app.processEvents()
+    # ── 最后一道：**所有**登记在册的工作线程都必须落地 ──
+    # 为什么不能只靠上面那几个属性名：漏一个名字就等于漏一条线程，而漏掉的后果是
+    # CI 上"跑到半路中止、没有任何失败记录"（`Worker._live` 的注释里写了同源事故）。
+    try:
+        from laoa_trader.ui import app as ui_app
+
+        worker_cls = getattr(ui_app, "Worker", None)
+        if worker_cls is not None:
+            worker_cls.wait_all(5.0)
+    except Exception:      # noqa: BLE001 - 没装 Qt / 导入失败时安静跳过
+        pass
 
 
 @pytest.fixture(autouse=True)

@@ -531,8 +531,19 @@ def _prompt_missing_voice() -> None:
                    "装一个中文语音包即可（设置 → 时间和语言 → 语音）")
 
 
+#: 「让朗读线程收工」的哨兵：队列里出现它，`_loop` 就返回。
+#:
+#: 为什么需要（2026-09-21，CI 三次红在同一个地方）：朗读线程原来是个"永远堵在
+#: `_queue.get()`"的守护线程 —— 在 Windows 上它真的会起来（那里有 PowerShell），
+#: 于是它可能活到 pytest 收尾之后：那时 `sys.stderr` 已关，它再写一句日志就是
+#: `I/O operation on closed file`，再往后就是整个进程中止。守护线程"进程退出时自然结束"
+#: 在正常情况下成立，但在"解释器已经开始收尾、Qt 也在拆对象"的窗口期里并不安全 ——
+#: 所以给它一个**确定的收工信号**，由 `shutdown()` 在收尾时送进去。
+_STOP = object()
+
+
 def _ensure_worker() -> None:
-    """起（或复用）朗读线程：守护线程，进程退出时自然结束。"""
+    """起（或复用）朗读线程：守护线程；收尾由 `shutdown()` 显式叫停。"""
     global _worker
     with _worker_lock:
         if _worker is not None and _worker.is_alive():
@@ -541,10 +552,39 @@ def _ensure_worker() -> None:
         _worker.start()
 
 
+def shutdown(timeout: float = 3.0) -> bool:
+    """叫停朗读线程（幂等）：送哨兵 → 等它退出 → 清掉引用。
+
+    什么时候调：`MainWindow.shutdown()`（所有退出路径都走它）与测试收尾夹具。
+    返回值只表示"线程确实退了"，失败不抛异常（收尾失败不该挡住退出）。
+    """
+    global _worker
+    with _worker_lock:
+        worker, _worker = _worker, None
+    if worker is None:
+        return True
+    try:
+        _queue.put_nowait(_STOP)
+    except queue.Full:
+        # 队列满：丢一条最旧的再塞哨兵（哨兵必须能进去，否则线程收不了工）
+        try:
+            _queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            _queue.put_nowait(_STOP)
+        except queue.Full:
+            pass
+    worker.join(timeout=timeout)
+    return not worker.is_alive()
+
+
 def _loop() -> None:
     """逐条念（**不重叠**）：真正慢的是起进程那一下，所以整段都在这里排队等完。"""
     while True:
         item = _queue.get()
+        if item is _STOP:              # 收尾信号：干净退出（见 `shutdown()`）
+            return
         try:
             if isinstance(item, dict):
                 text, voice = item["text"], item["voice"]
@@ -725,4 +765,5 @@ __all__ = [
     "test_text",
     "unmute",
     "voice_name",
+    "shutdown",
 ]

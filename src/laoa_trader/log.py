@@ -18,6 +18,28 @@ _FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _configured = False
 
 
+class _SafeStreamHandler(logging.StreamHandler):
+    """往控制台写日志的 handler：**流已经关了就当这条没写**，绝不抛异常。
+
+    为什么需要它（2026-09-21，CI 三次红在同一个地方）：桌面版有一批后台线程
+    （取数、调度、朗读……）。用例跑完、pytest 把 `sys.stderr` 关掉之后，只要还有一条
+    线程活到那一刻并发出一句日志，`StreamHandler.emit()` 就会抛
+    `ValueError: I/O operation on closed file` —— 它本身只是噪音，但它会把
+    "线程活过了收尾"这件事暴露在日志里，还可能让 logging 自己再去处理异常时踩到同一个
+    已关闭的流。收尾的**根因**在别处（线程必须确定性收干净，见 `ui/app.py` 的
+    `MainWindow.shutdown()` 与 `tests/conftest.py` 的收尾夹具），这里只保证"日志这一层
+    不会成为崩溃的放大器"。
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:  # noqa: D102 - logging 约定
+        try:
+            super().emit(record)
+        except (ValueError, OSError):
+            # 流已关闭 / 管道断开：丢掉这一条，什么都不做
+            # （连 `handleError` 都不调用 —— 它默认又要往同一个流里写，正是我们要避开的）
+            pass
+
+
 def setup_logging(data_dir: Path | str | None = None, level: int = logging.INFO) -> Path | None:
     """配置根 logger（幂等），返回日志文件路径（未写入文件时返回 None）。
 
@@ -36,7 +58,7 @@ def setup_logging(data_dir: Path | str | None = None, level: int = logging.INFO)
     root.setLevel(logging.DEBUG)
     root.propagate = False
 
-    console = logging.StreamHandler(sys.stderr)
+    console = _SafeStreamHandler(sys.stderr)
     console.setLevel(level)
     console.setFormatter(logging.Formatter(_FORMAT))
     root.addHandler(console)
