@@ -390,8 +390,10 @@ def prepare(text: Any, cfg: Any = None) -> str:
     处理哪怕差一点点，用户就会听到"消息列表里那条念得对、试听念得不对"。
     """
     out = sanitize(text)
-    if cfg is None or bool(getattr(cfg, "notify_voice_digits", True)):
-        out = digits_for_speech(out)
+    # 读法是**固定的**（主人 2026-09-21："价格逐位不需要有选项，直接按我说的做就行了"）：
+    # 代码逐位、价格整读、数量整读 —— 见 `digits_for_speech` 的规则。
+    # 以前这里看 `cfg.notify_voice_digits`，那个配置项与设置页勾选框都已经删掉。
+    out = digits_for_speech(out)
     return out
 
 
@@ -718,7 +720,7 @@ class _VoiceOverride:
     """
 
     def __init__(self, base: Any, *, voice: str | None, volume: float | None,
-                 rate: float | None, digits: bool | None = None):
+                 rate: float | None):
         self.notify_voice = bool(getattr(base, "notify_voice", True)) if base is not None else True
         #: `speak_now(voice=...)` 传进来的是**具体音色名**（界面已经把"男声/女声"解析过了），
         #: 所以它不能塞回 `notify_voice_name`（那个字段现在是"auto/female/male"枚举）——
@@ -733,16 +735,13 @@ class _VoiceOverride:
             float(rate) if rate is not None
             else float(getattr(base, "notify_voice_rate", 1.0) or 1.0)
         )
-        self.notify_voice_digits = (
-            bool(digits) if digits is not None
-            else bool(getattr(base, "notify_voice_digits", True))
-        )
+
 
 
 def _cfg_with_overrides(cfg: Any, *, voice: str | None, volume: float | None,
-                        rate: float | None, digits: bool | None = None) -> Any:
+                        rate: float | None) -> Any:
     """把"这一次的语音参数"合成一份临时配置（None 的项沿用原来的 cfg）。"""
-    return _VoiceOverride(cfg, voice=voice, volume=volume, rate=rate, digits=digits)
+    return _VoiceOverride(cfg, voice=voice, volume=volume, rate=rate)
 
 
 def can_speak(*, cfg: Any = None, force: bool = False) -> bool:
@@ -761,7 +760,7 @@ def can_speak(*, cfg: Any = None, force: bool = False) -> bool:
 
 def speak_now(text: str, *, cfg: Any = None, force: bool = False,
               voice: str | None = None, volume: float | None = None,
-              rate: float | None = None, digits: bool | None = None) -> bool:
+              rate: float | None = None) -> bool:
     """同步念一句（桌宠右键【试喊一条】用它：用户点了按钮，要立刻听到）。
 
     只走语音这一条路，不进队列 —— 与 `speak()` 的"排队不阻塞"不同：
@@ -771,14 +770,14 @@ def speak_now(text: str, *, cfg: Any = None, force: bool = False,
     Args:
         force: 用户**主动**点的"试喊一条"传 True —— 静音的意思是"别被盘中提醒打扰"，
             不是"我点它也不许出声"。真正"没有中文音色"这条硬约束不受它影响。
-        voice / volume / rate / digits: 覆盖配置里的音色、音量、语速（**倍率**，1.0 = 正常）
+        voice / volume / rate: 覆盖配置里的音色、音量、语速（**倍率**，1.0 = 正常）
             与"数字逐位"（设置页那个【试听】按钮用它们试**面板上当前**的值，不必先保存）。
             传 None 就走配置/默认。
     """
-    if voice or volume is not None or rate is not None or digits is not None:
+    if voice or volume is not None or rate is not None:
         # 覆盖值走一个临时 cfg：`_speak_command` 只认 `notify_voice_name` 之类的属性，
         # 与其到处加参数，不如在这里合成一份"这次就用这套"的配置 —— 逻辑只有一套。
-        cfg = _cfg_with_overrides(cfg, voice=voice, volume=volume, rate=rate, digits=digits)
+        cfg = _cfg_with_overrides(cfg, voice=voice, volume=volume, rate=rate)
     if cfg is not None and not bool(getattr(cfg, "notify_voice", True)):
         return False
     body = prepare(text, cfg)

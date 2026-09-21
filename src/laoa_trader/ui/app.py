@@ -3158,19 +3158,9 @@ if QT_AVAILABLE:
             pet_row.addStretch(1)
             body.addLayout(pet_row)
 
-            # 数字逐位（用户 2026-09-18："播报代码可以设置成一个一个读数字吗？
-            # 现在直接是 6 万零 5 百一十九"）：默认开，关掉就回到整数字念法
-            digits_row = QHBoxLayout()
-            self.voice_digits_box = QCheckBox("数字逐位念（代码、价格）")
-            self.voice_digits_box.setChecked(bool(getattr(self.cfg, "notify_voice_digits", True)))
-            self.voice_digits_box.setToolTip(
-                "勾上：股票代码与价格一位一位念（600519 → 六零零五一九、1234.56 → 一二三四点五六）；\n"
-                "成交量、家数、涨跌幅这类带单位或百分号的\"数量\"仍然整读。\n"
-                "取消：全部按现在的整数字念法。"
-            )
-            digits_row.addWidget(self.voice_digits_box)
-            digits_row.addStretch(1)
-            body.addLayout(digits_row)
+            # ⚠️ 这里**没有**"数字逐位念"的勾选框（2026-09-21 主人："价格逐位不需要有选项，
+            # 直接按我说的做就行了"）：读法固定成 代码逐位 / 价格整读 / 数量整读，
+            # 见 `notify/voice.py` 的 `digits_for_speech`。那个配置项也已从 Config 里删掉。
 
             # 音色下拉 + 【试听】（用户 2026-09-18："设置里桌宠声音可以自由改"，
             # 随后又改成"音色改成让用户可选男声和女声，而不是中英文"）：
@@ -5687,7 +5677,6 @@ if QT_AVAILABLE:
             voice_name = voice_mod.resolve_gender_voice(gender) if gender else None
             volume = int(self.voice_volume_box.value()) / 100.0
             rate = round(float(self.voice_rate_box.value()), 2)
-            digits = self.voice_digits_box.isChecked()
             if not self.voice_box.isChecked():
                 self._set_settings_hint("语音朗读是关着的：勾上「中文语音朗读」再试听。")
                 return
@@ -5705,7 +5694,7 @@ if QT_AVAILABLE:
             threading.Thread(
                 target=voice_mod.speak_now, args=(text,),
                 kwargs={"cfg": self.cfg, "force": True, "voice": voice_name,
-                        "volume": volume, "rate": rate, "digits": digits},
+                        "volume": volume, "rate": rate},
                 daemon=True, name="voice-try",
             ).start()
 
@@ -6636,7 +6625,6 @@ if QT_AVAILABLE:
                 "notify_voice_rate": round(float(self.voice_rate_box.value()), 2),
                 # 空字符串 = 自动挑中文（第一项）；"female" / "male" = 按性别挑
                 "notify_voice_name": str(self.voice_name_box.currentData() or ""),
-                "notify_voice_digits": self.voice_digits_box.isChecked(),
                 "notify_flash_seconds": int(self.flash_seconds_box.value()),
                 "notify_popup_seconds": int(self.popup_seconds_box.value()),
                 "notify_popup_max_items": int(self.popup_items_box.value()),

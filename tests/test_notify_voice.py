@@ -292,12 +292,18 @@ def test_a_sentence_keeps_code_spelled_and_price_intact() -> None:
         "贵州茅台 六零零五一九 现价 1234.56"
 
 
-def test_digits_can_be_switched_off(cfg) -> None:
-    """关掉这个开关 → 回到原来的整数字念法（用户随时能改回去）。"""
+def test_the_reading_rule_has_no_switch(cfg) -> None:
+    """读法是**固定的、没有开关**（主人 2026-09-21："价格逐位不需要有选项，直接按我说的做就行了"）。
+
+    以前有个 `notify_voice_digits` 勾选框能整体关掉逐位；现在：
+    * 配置项与设置页勾选框都已删除（老配置里还写着这个键也不会报错）；
+    * `prepare()` 一律按规则处理 —— 代码逐位、价格整读、数量整读。
+    """
+    assert not hasattr(cfg, "notify_voice_digits"), "配置项应当已经删掉"
+    # 就算有人往配置对象上硬塞这个属性（老配置/外部脚本），读法也不受影响
     cfg.notify_voice_digits = False
-    assert voice.prepare("贵州茅台 600519，现价 1234.56", cfg) == "贵州茅台 600519，现价 1234.56"
-    cfg.notify_voice_digits = True
-    assert voice.prepare("贵州茅台 600519", cfg) == "贵州茅台 六零零五一九"
+    assert voice.prepare("贵州茅台 600519，现价 1234.56", cfg) == \
+        "贵州茅台 六零零五一九，现价 1234.56"
 
 
 def test_speech_path_applies_digit_spelling(monkeypatch, cfg) -> None:

@@ -561,3 +561,19 @@ def test_try_listen_speaks_with_the_panel_values(window, qapp, _quiet_voice) -> 
     assert "$s.Rate = 5" in command                   # 倍率 1.5 → SAPI 5
     assert window.cfg.source_path.read_text(encoding="utf-8") == before   # 试听不写配置
     assert window.cfg.notify_voice_name == ""         # 也没偷偷改内存里的配置
+
+
+def test_settings_page_has_no_digits_switch(window) -> None:
+    """设置页**不能再有**数字逐位念的勾选框（主人 2026-09-21："价格逐位不需要有选项"）。
+
+    控件本身、以及任何指向它的属性都不该留着 —— 只删控件、把 `voice_digits_box`
+    这类名字留在页面上，下一个人想"顺手再画出来"就只差几行（这与之前"结果区删干净"
+    的做法是同一条纪律）。
+    """
+    for stale in ("voice_digits_box", "voice_digits_row"):
+        assert not hasattr(window, stale), f"「{stale}」应当已经删掉"
+
+    from PySide6.QtWidgets import QCheckBox
+
+    texts = [box.text() for box in window.findChildren(QCheckBox)]
+    assert all("逐位" not in text for text in texts), f"还有逐位相关的勾选框：{texts}"

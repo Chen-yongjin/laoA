@@ -865,7 +865,8 @@ def test_default_pet_and_voice_are_on() -> None:
     # 语速是**倍率**：1.0 = 正常（用户 2026-09-18："语速默认改成 1 正常点"）
     assert cfg.notify_voice_rate == 1.0
     assert cfg.notify_voice_name == ""           # 空 = 自动挑中文音色
-    assert cfg.notify_voice_digits is True       # 代码/价格逐位念（默认开）
+    # `notify_voice_digits` 已于 2026-09-21 删除（读法固定，没有开关）
+    assert not hasattr(cfg, "notify_voice_digits")
     assert (cfg.pet_x, cfg.pet_y) == (0, 0)      # 0 = 还没拖过 → 默认右下角
 
 
