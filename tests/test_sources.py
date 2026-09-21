@@ -819,6 +819,61 @@ def test_quotes_sends_nothing_without_a_usable_source(monkeypatch: pytest.Monkey
     assert entered == []
 
 
+def test_cancelled_quote_worker_never_emits(qapp) -> None:
+    """被取消的取数线程**一个信号都不许再发**（CI 那个"没有失败记录的中途崩溃"的堵口）。
+
+    为什么钉这条：CI（Windows）上反复出现"跑到 ~93% 进程直接没了、没有任何用例失败记录"，
+    faulthandler 抓到的现场就是 `QuoteWorker.run` 里的 `ready.emit(...)` ——
+    接收方（已被销毁的控件）成了悬空指针。本机（Linux）复现不了 Windows 的 access
+    violation，所以只能在源头把"取消之后不发信号"这条行为钉死：
+    这里直接同步调 `run()`，模拟"取消之后那一轮才收工"。
+    """
+    from laoa_trader.ui import quotes as q
+
+    got: list = []
+    worker = q.QuoteWorker(lambda cfg, syms: {"600001": {"close": 1.0}}, "cfg", ["600001"])
+    worker.ready.connect(got.append)
+
+    worker.cancel()
+    worker.run()
+
+    assert got == [], "取消之后还发了 ready 信号 —— 顶层窗口销毁时这就是那个 access violation"
+    assert worker.cancelled() is True
+
+
+def test_running_quote_worker_without_cancel_still_emits(qapp) -> None:
+    """反向：没被取消的那一轮**必须照常发结果**（否则就是"修崩了功能"）。"""
+    from laoa_trader.ui import quotes as q
+
+    got: list = []
+    worker = q.QuoteWorker(lambda cfg, syms: {"600001": {"close": 1.0}}, "cfg", ["600001"])
+    worker.ready.connect(got.append)
+
+    worker.run()
+
+    assert got == [{"600001": {"close": 1.0}}]
+
+
+def test_stopping_the_service_cancels_the_inflight_worker(qapp) -> None:
+    """`stop()` 不只是"等 3 秒" —— 它**先取消**，等不到也不会留下会发信号的线程。
+
+    顺序为什么重要：真实环境一轮取数要几秒到几十秒，3 秒等不到是常态；只 wait 的话，
+    线程会带着"发结果"的念头活到窗口销毁之后（CI 上就这么崩的）。
+    """
+    from laoa_trader.ui import quotes as q
+
+    service = q.QuoteService(cfg_sources("public"), lambda: ["600001"])
+    service._fetch = lambda cfg, syms, **kw: {}        # 不发网络请求
+    assert service.request() is True
+    worker = service._worker
+    assert worker is not None
+
+    service.stop()
+
+    assert worker.cancelled() is True
+    assert service._worker is None
+
+
 def test_quotes_service_gate_follows_usable_sources(
     monkeypatch: pytest.MonkeyPatch, qapp
 ) -> None:

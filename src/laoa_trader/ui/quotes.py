@@ -212,7 +212,17 @@ def fetch_snapshot_prices(
 
 
 class QuoteWorker(QThread):
-    """把一轮快照取数丢到后台线程跑（界面线程一次都不许被网络按住）。"""
+    """把一轮快照取数丢到后台线程跑（界面线程一次都不许被网络按住）。
+
+    **收尾时必须 `cancel()`**（`QuoteService.stop()` 会做）：这一轮取数可能要几秒
+    （真实网络实测 20~30 秒也出现过），而窗口/服务随时可能被关掉 —— 那时如果再
+    `ready.emit(...)`，接收方（已被销毁的控件）就成了悬空指针。
+
+    这不是理论风险：CI（Windows）上反复出现"跑到 ~93% 时进程直接没了、没有任何用例
+    失败记录"，faulthandler 抓到的现场就是这条线程还在 `ready.emit`；本机（Linux）
+    复现不了 Windows 的 access violation，只能在源头把这条路堵掉：
+    **被取消之后一律不再发信号**（连日志都只写 debug，免得往已关闭的日志流里写）。
+    """
 
     ready = Signal(object)
     failed = Signal(str)
@@ -221,13 +231,32 @@ class QuoteWorker(QThread):
         super().__init__()
         self._fn = fn
         self._args = args
+        #: 已被取消（收尾时置位）。用普通 bool 而不是锁：只会被主线程写、被工作线程读，
+        #: 而且"读到旧值"的最坏后果只是多发一次信号（与不加它时一样），没有正确性风险。
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """标记这一轮作废（**在等它结束之前**调用，见 `QuoteService.stop()`）。"""
+        self._cancelled = True
+
+    def cancelled(self) -> bool:
+        return self._cancelled
 
     def run(self) -> None:  # noqa: D102 - QThread 约定
         try:
-            self.ready.emit(self._fn(*self._args))
+            result = self._fn(*self._args)
         except Exception as exc:  # noqa: BLE001 - 工作线程异常也必须回主线程
+            if self._cancelled:
+                logger.debug(f"快照线程失败，但这一轮已取消（忽略）：{exc}")
+                return
             logger.exception("实时快照线程异常")
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+            return
+        if self._cancelled:
+            # 取数成功、但收尾时已经作废 → **不要再发信号**（这一发就可能打到已销毁的接收方）
+            logger.debug("快照线程已取消，丢弃这一轮结果")
+            return
+        self.ready.emit(result)
 
 
 class QuoteService(QObject):
@@ -364,9 +393,18 @@ class QuoteService(QObject):
         logger.info(f"实时快照失败（表格退回本地收盘价）：{str(message).splitlines()[0]}")
 
     def stop(self) -> None:
-        """停掉在飞的工作线程（窗口关闭 / 用例收尾）。"""
+        """停掉在飞的工作线程（窗口关闭 / 用例收尾）。
+
+        顺序是刻意的：**先 `cancel()` 再 `wait()`**。只 wait 的话，等不到（取数卡在网络上，
+        真实环境 20~30 秒很常见）时线程会带着"发结果"的念头活到窗口销毁之后 ——
+        在 Windows 上就是那个查了很久的 access violation（见 `QuoteWorker` 的 docstring）。
+        cancel 之后即使它稍后才收工，也只会把结果丢掉。
+        """
         worker, self._worker = self._worker, None
-        if worker is not None and worker.isRunning():
+        if worker is None:
+            return
+        worker.cancel()
+        if worker.isRunning():
             worker.wait(3_000)
 
 
