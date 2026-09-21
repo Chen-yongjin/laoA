@@ -326,7 +326,13 @@ jobs:
             # Release 那条路（主下载通道）：它 success 就说明包已经能下载了，
             # 哪怕 step_upload 因额度失败也不影响用户拿包
             "step_release=${{ steps.release.outcome }}"
+            # Release 上现在有哪些附件（keygen.exe 由**另一个 job**传，两个 job 的先后不保证；
+            # 记下来是为了"注册机到底传上去没有"这件事**不用翻 Actions 页面**就能查）
+            "release_assets=${{ steps.release.outcome == 'success' && '见下一步' || '未取' }}"
           ) | Set-Content ci-log/meta.txt
+          $env:GH_TOKEN = $env:GITHUB_TOKEN
+          $assets = gh release view latest --json assets --jq '[.assets[].name] | join(",")' 2>$null
+          if ($LASTEXITCODE -eq 0 -and $assets) { Add-Content ci-log/meta.txt "release_assets=$assets" }
           if (Test-Path pyinstaller.log) { Copy-Item pyinstaller.log ci-log/pyinstaller.log -Force }
           if (Test-Path check.log) { Copy-Item check.log ci-log/check.log -Force }
           Get-Content ci-log/meta.txt
@@ -401,7 +407,10 @@ jobs:
       # 所以从这里下载：Release 页面 → Assets → keygen.exe（与 LaoniuTrader.zip 同一个页面）。
       - id: keygen_release
         name: 把注册机挂到滚动 Release（与主程序同一个页面）
-        continue-on-error: true
+        # ⚠️ 这一步**故意不写 continue-on-error**（与主程序那一步相反）：注册机没有第二个
+        # 下载通道，它必须真的传上去。让"这个 job 是绿的"直接等价于"keygen.exe 已在 Release 上"，
+        # 看颜色就知道成没成，不用翻日志（2026-09-21 主人手动跑了却拿不到东西，
+        # 就是因为原来那一步走 artifact、失败了还被标成"不影响"）。
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -454,15 +463,21 @@ jobs:
             "step_keygen_upload=${{ steps.keygen_upload.outcome }}"
           ) | Set-Content keygen-meta.txt
           Get-Content keygen-meta.txt
-          for ($i = 1; $i -le 3; $i++) {
-            git fetch origin ci-log *> $null
-            git checkout -B ci-log-tmp origin/ci-log *> $null
+          # 只更新 ci-log/keygen-meta.txt，而且**从远端 ci-log 的现状开始改**再推：
+          # build 与 keygen 两个 job 可能同时在写这个分支，各自 force-push 会把对方那份抹掉。
+          # 用 FETCH_HEAD（不依赖本地已有分支）+ 多次重试，尽量减少"推送被拒"造成的丢记录。
+          $pushed = $false
+          for ($i = 1; $i -le 5; $i++) {
+            git fetch origin ci-log --depth=1 *> $null
+            if ($LASTEXITCODE -ne 0) { Write-Host "拉取 ci-log 失败，重试第 $i 次"; Start-Sleep -Seconds 8; continue }
+            git checkout -B ci-log-push FETCH_HEAD *> $null
             New-Item -ItemType Directory -Force -Path ci-log | Out-Null
             Copy-Item keygen-meta.txt ci-log/keygen-meta.txt -Force
             git add -f ci-log
             git commit -m "注册机结果：${{ job.status }}（run $env:GITHUB_RUN_ID）" --no-verify *> $null
             git push origin HEAD:ci-log
-            if ($LASTEXITCODE -eq 0) { Write-Host "已写入 ci-log/keygen-meta.txt"; break }
-            Write-Host "推送被拒（另一个 job 也在写），重试第 $i 次"
-            Start-Sleep -Seconds 5
+            if ($LASTEXITCODE -eq 0) { $pushed = $true; Write-Host "已写入 ci-log/keygen-meta.txt"; break }
+            Write-Host "推送被拒（另一个 job 也在写 ci-log），第 $i 次重试"
+            Start-Sleep -Seconds 8
           }
+          if (-not $pushed) { Write-Host "::warning::没能把注册机结果写回 ci-log（不影响 keygen.exe 本身）" }
