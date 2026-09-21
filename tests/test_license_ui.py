@@ -59,6 +59,35 @@ def _expire_trial(path: Path) -> None:
     }), encoding="utf-8")
 
 
+def _teardown_window(win, qapp) -> None:
+    """收尾：**与 `tests/test_ui_smoke.py` 的 window fixture 逐条对齐**。
+
+    为什么必须一样严（这里踩过）：主窗口一建起来就在后台起 `_market_worker`（概览取数）
+    与 `quotes`（快照）两条线程。只 `close()` 的话它们还在飞，收尾时往**已经关掉的日志流**
+    里写日志（CI 日志里能看到 `I/O operation on closed file`），再往后就是随机顺序下的
+    `Fatal Python error: Aborted` —— 与 2026-09-20 那次"孤儿桌宠"是同一种病：
+    **窗口/线程比测试活得久**。
+    """
+    from PySide6.QtCore import QEvent
+
+    for timer_name in ("_timer", "_market_timer", "_auction_timer", "_flash_timer"):
+        timer = getattr(win, timer_name, None)
+        if timer is not None:
+            timer.stop()
+    win.scheduler.stop()
+    win.quotes.stop()
+    # 等概览那条后台线程落地（它是最慢的一条；不等就是在赌它跑完前进程先退出）
+    worker = getattr(win, "_market_worker", None)
+    if worker is not None and worker.isRunning():
+        worker.wait(3_000)
+    win.shutdown()                 # 收桌宠 / 消息列表 / 浮窗 / 授权·关于窗口
+    win.tray.hide()
+    win.close()
+    win.deleteLater()
+    qapp.processEvents()
+    qapp.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
 @pytest.fixture()
 def window(cfg, qapp, fingerprint, license_file):
     """按"试用已到期"建一只主窗口（授权相关的用例都从这个状态出发）。"""
@@ -66,22 +95,7 @@ def window(cfg, qapp, fingerprint, license_file):
     _expire_trial(license_file)
     win = ui_app.MainWindow(cfg)
     yield win
-    # 收尾与 test_ui_smoke 的 window fixture 一致：授权对话框是**有父窗口**的，
-    # 但桌宠/消息列表是无父窗口的顶层窗口，必须走同一个 shutdown()。
-    if win.license_dialog is not None:
-        win.license_dialog.close()
-    if win.about_dialog is not None:
-        win.about_dialog.close()
-    for timer_name in ("_timer", "_market_timer", "_auction_timer", "_flash_timer"):
-        timer = getattr(win, timer_name, None)
-        if timer is not None:
-            timer.stop()
-    win.scheduler.stop()
-    win.quotes.stop()
-    win.shutdown()
-    win.close()
-    win.deleteLater()
-    qapp.processEvents()
+    _teardown_window(win, qapp)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -171,12 +185,7 @@ def test_trial_active_does_not_prompt_at_launch(cfg, qapp, fingerprint, license_
         assert L.is_licensed(cfg) is True
         assert win.license_dialog is None
     finally:
-        win.scheduler.stop()
-        win.quotes.stop()
-        win.shutdown()
-        win.close()
-        win.deleteLater()
-        qapp.processEvents()
+        _teardown_window(win, qapp)
 
 
 # ══════════════════════════════════════════════════════════════════════════
