@@ -591,6 +591,26 @@ def _close_orphan_top_level_windows():
     app = QApplication.instance()
     if app is None:
         return
+    # ── 先收**主窗口**：它是所有后台线程的源头 ──
+    # `MainWindow.shutdown()` 现在会把 `quotes` / `scheduler` / `_market_worker` / `_worker`
+    # 四条线程与桌宠/消息列表/浮窗/对话框一起收掉（见它的 docstring）。为什么要在这层兜底：
+    # 测试里只要有一条用例建了主窗口又漏了收尾，那条线程就会活到**下一个用例甚至解释器退出**,
+    # 在 Windows 上表现为随机顺序下跑到中途 `Fatal Python error: Aborted`（CI 实测：
+    # 两次都停在 93% 附近、没有任何用例失败记录，日志里只剩"往已关闭的日志流里写"）。
+    # 让每条用例自己记得收是不可靠的，所以这里统一兜一层。
+    try:
+        from laoa_trader.ui import app as ui_app
+
+        window_cls = getattr(ui_app, "MainWindow", None)
+        if window_cls is not None:
+            for widget in list(QApplication.topLevelWidgets()):
+                if isinstance(widget, window_cls):
+                    try:
+                        widget.shutdown()
+                    except Exception:  # noqa: BLE001 - 兜底收尾失败不该把用例带崩
+                        pass
+    except Exception:      # noqa: BLE001 - 没装 Qt / 导入失败时安静跳过
+        pass
     for widget in list(QApplication.topLevelWidgets()):
         name = type(widget).__name__
         if name not in ("DesktopPet", "MessageCenter", "AlertPopup", "LicenseDialog"):

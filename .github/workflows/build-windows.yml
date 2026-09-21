@@ -40,6 +40,10 @@ jobs:
     timeout-minutes: 35
     env:
       PYTHONUTF8: "1"                       # Windows 上避免中文路径/日志乱码
+      # 崩了要能看到"是哪条线程/哪一行崩的"：`Fatal Python error: Aborted` 这类中止
+      # 默认只给一段 C 栈，打开 faulthandler 会连 Python 侧的线程栈一起打出来
+      # （2026-09-20 那次"偶发中止"就是靠它才定位到"孤儿桌宠"的）。
+      PYTHONFAULTHANDLER: "1"
 
     steps:
       - name: 检出代码
