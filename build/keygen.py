@@ -1,3 +1,5 @@
+# 触发说明（2026-09-21）：CI 里的 keygen job 只在提交改动过本文件或 keygen.spec 时才跑，
+# 所以需要重新出注册机时，改这一行注释并推送即可（产物会挂到滚动 Release 的 keygen.zip）。
 """
 （2026-09-21：本文件、keygen.spec、licensing.py 或 workflow 有改动时，CI 会自动重发注册机到 Release。）
 注册机（**作者自己用的签发工具，不要分发给用户**）。
