@@ -184,14 +184,28 @@ jobs:
           }
           "产物检查通过" | Set-Content check.log
 
+      - id: zip
+        name: 压缩产物（打成一个 zip 再上传）
+        shell: pwsh
+        run: |
+          # 为什么先打 zip：整目录上传在 CI 上失败过一次（step_upload=failure，
+          # 而打包与检查都是 success —— 也就是说"包做好了、只是没传上去"）。
+          # 打成**单个文件**上传更稳、也更快：dist 目录里有一万多个小文件
+          # （PySide6/pyarrow 那一堆），逐个小文件走 artifact 服务既慢又容易在
+          # 某一步上翻车；用户下载回来同样是"解压 → 进 LaoniuTrader 目录 → 双击 exe"。
+          Compress-Archive -Path 'dist/LaoniuTrader' -DestinationPath 'LaoniuTrader.zip' -Force
+          $zip = Get-Item 'LaoniuTrader.zip'
+          Write-Host ("压缩包：{0:N1} MB" -f ($zip.Length / 1MB))
+
       - id: upload
         name: 上传产物
         uses: actions/upload-artifact@v7
         with:
           name: LaoniuTrader
-          path: dist/LaoniuTrader/
+          path: LaoniuTrader.zip
           retention-days: 14
-          compression-level: 6
+          # 0 = 不再二次压缩（zip 已经是压缩过的，再压只是白花时间）
+          compression-level: 0
           if-no-files-found: error
 
       # 想发版本时打个 tag（如 v0.1.0），这里会自动生成 Release 附件；
@@ -200,7 +214,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/LaoniuTrader/LaoniuTrader.exe
+          files: LaoniuTrader.zip
           generate_release_notes: true
 
       # ── 构建结果回写 ci-log 分支 ──
