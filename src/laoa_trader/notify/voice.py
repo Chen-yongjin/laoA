@@ -415,7 +415,11 @@ def compose(target: str, kind_label: str, detail: str = "", price: Any = None) -
 # ── 朗读 ─────────────────────────────────────────────────────────────
 
 
-#: 语速倍率的范围（界面给的就这个区间；1.0 = 正常）
+#: 语速**锁定**成这个倍率（1.0 = 正常）。主人 2026-09-21："把播报速度直接锁定 1.0 吧
+#: 不要给选择了 选错了感觉太怪了" —— 所以界面没有语速控件、配置里也没有这个键，
+#: 三条朗读路径（实时提醒、试听、测试）都用它。
+RATE_LOCKED = 1.0
+#: 语速倍率的合法区间（只用于内部换算与校验；界面上已经不给选了）
 RATE_MIN = 0.5
 RATE_MAX = 2.0
 
@@ -570,7 +574,8 @@ def speak(text: str, *, cfg: Any = None) -> bool:
         "text": body,
         "voice": chosen_voice(cfg),
         "volume": float(getattr(cfg, "notify_voice_volume", 0.9) or 0.9),
-        "rate": float(getattr(cfg, "notify_voice_rate", 1.0) or 1.0),
+        # 语速锁定 1.0（配置里已经没有这个键了；以前会读 `notify_voice_rate`）
+        "rate": RATE_LOCKED,
     }
     try:
         _queue.put_nowait(item)
@@ -731,10 +736,8 @@ class _VoiceOverride:
             float(volume) if volume is not None
             else float(getattr(base, "notify_voice_volume", 0.9) or 0.9)
         )
-        self.notify_voice_rate = (
-            float(rate) if rate is not None
-            else float(getattr(base, "notify_voice_rate", 1.0) or 1.0)
-        )
+        # 语速锁定 1.0：调用方传进来的值一律忽略（保留形参只为兼容旧调用点）
+        self.notify_voice_rate = RATE_LOCKED
 
 
 
@@ -791,7 +794,7 @@ def speak_now(text: str, *, cfg: Any = None, force: bool = False,
             body,
             voice=chosen_voice(cfg),
             volume=float(getattr(cfg, "notify_voice_volume", 0.9) or 0.9),
-            rate=rate_to_sapi(getattr(cfg, "notify_voice_rate", 1.0)),
+            rate=rate_to_sapi(RATE_LOCKED),
         ))
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"朗读失败（已忽略）：{exc}")
@@ -814,6 +817,7 @@ __all__ = [
     "gender_label",
     "normalize_voices",
     "prepare",
+    "RATE_LOCKED",
     "rate_to_sapi",
     "resolve_gender_voice",
     "sapi_to_rate",

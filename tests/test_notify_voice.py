@@ -456,10 +456,11 @@ def test_legacy_voice_name_means_auto(monkeypatch, cfg) -> None:
     assert voice.chosen_voice(cfg) == "Chinese Huihui"
 
 
-def test_try_listen_uses_the_panel_values(monkeypatch, cfg) -> None:
-    """【试听】把**面板上当前**的音色/音量/语速带进命令里（不必先保存）。
+def test_speak_always_uses_the_locked_rate(monkeypatch, cfg) -> None:
+    """**语速恒为锁定值 1.0**（→ SAPI 的 0 = 正常），面板上的音色与音量照旧生效。
 
-    语速这一项面板上是**倍率**（1 = 正常），进命令时换算成 SAPI 的整数。
+    主人 2026-09-21："把播报速度直接锁定 1.0 吧 不要给选择了 选错了感觉太怪了"。
+    所以这里连"调用方硬塞一个别的 rate"也断言**不生效** —— 语速是锁死的。
     """
     monkeypatch.setattr(voice, "available", lambda: True)
     _fake_voices(monkeypatch, [("Chinese Huihui", "zh-CN", "female")])
@@ -472,8 +473,24 @@ def test_try_listen_uses_the_panel_values(monkeypatch, cfg) -> None:
     assert ok is True
     command = " ".join(spoken[0])
     assert "SelectVoice('Chinese Huihui')" in command
-    assert "$s.Volume = 50" in command          # 0.5 → 50
-    assert "$s.Rate = 5" in command             # 倍率 1.5 → SAPI 5
+    assert "$s.Volume = 50" in command          # 音量仍然可调（主人没要求锁）
+    assert "$s.Rate = 0" in command             # 语速锁定 1.0 → SAPI 0
+    assert voice.RATE_LOCKED == 1.0
+
+
+def test_the_spoken_command_rate_is_always_normal(monkeypatch, cfg) -> None:
+    """实时提醒那条路也一样：不管配置里写过什么，念的时候语速都是 1.0 → SAPI 0。"""
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Chinese Huihui", "zh-CN", "female")])
+    spoken: list[list[str]] = []
+    monkeypatch.setattr(voice, "run_command", spoken.append)
+    monkeypatch.setattr(voice, "_ensure_worker", lambda: None)     # 不真起线程，直接看队列
+
+    cfg.notify_voice_rate = 2.0            # 硬塞一个老键（配置里已经没有了）
+    voice.speak("贵州茅台 600519，止损提醒", cfg=cfg)
+    item = voice._queue.get_nowait()
+
+    assert item["rate"] == voice.RATE_LOCKED == 1.0
 
 
 def test_no_chinese_voice_still_means_no_speaking(monkeypatch, cfg) -> None:

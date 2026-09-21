@@ -532,7 +532,7 @@ def test_voice_picker_choice_is_saved_and_used(window, qapp) -> None:
 
 
 def test_try_listen_speaks_with_the_panel_values(window, qapp, _quiet_voice) -> None:
-    """【试听】用面板上的音色/音量/语速念一句样本，且**不写配置、不写库**。
+    """【试听】用面板上的音色/音量念一句样本（**语速锁定 1.0**），且**不写配置、不写库**。
 
     `_quiet_voice` 这个 fixture 把真正"起进程说话"的那一步换成了"把命令记下来"
     （见它的 docstring），所以这里可以**逐字断言**念的是什么、用哪个音色、音量语速是多少 ——
@@ -543,7 +543,6 @@ def test_try_listen_speaks_with_the_panel_values(window, qapp, _quiet_voice) -> 
     spoken: list[str] = _quiet_voice
     window.voice_name_box.setCurrentIndex(window.voice_name_box.findData("male"))
     window.voice_volume_box.setValue(60)
-    window.voice_rate_box.setValue(1.5)          # 语速是倍率：1.5 = 稍快
     before = window.cfg.source_path.read_text(encoding="utf-8")
 
     window.on_try_voice()
@@ -558,7 +557,7 @@ def test_try_listen_speaks_with_the_panel_values(window, qapp, _quiet_voice) -> 
     command = spoken[0]
     assert "SelectVoice('Fake 中文 男')" in command   # 下拉选的是「男声」→ 挑到男声那一条
     assert "$s.Volume = 60" in command                # 面板上的音量
-    assert "$s.Rate = 5" in command                   # 倍率 1.5 → SAPI 5
+    assert "$s.Rate = 0" in command                   # 语速锁定 1.0 → SAPI 0（不给选）
     assert window.cfg.source_path.read_text(encoding="utf-8") == before   # 试听不写配置
     assert window.cfg.notify_voice_name == ""         # 也没偷偷改内存里的配置
 
@@ -599,8 +598,8 @@ def test_a_fresh_install_shows_rate_1_0_and_the_pet_on(qapp, tmp_path) -> None:
     win.show()
     qapp.processEvents()
     try:
-        assert win.voice_rate_box.value() == 1.0, "全新安装的设置页应当显示语速 1.0"
-        assert win.voice_rate_box.text().endswith("×")     # 是倍率，不是 SAPI 的 0/1
+        # 语速已于 2026-09-21 锁定 1.0 并去掉控件（主人："不要给选择了"）
+        assert not hasattr(win, "voice_rate_box"), "设置页不该再有语速控件"
         assert win.pet_box.isChecked() is True, "全新安装桌宠应当默认勾上"
         assert win.pet is not None and win.pet.isVisible() is True, "全新安装桌宠就该在桌面上"
     finally:
@@ -618,3 +617,21 @@ def test_a_fresh_install_shows_rate_1_0_and_the_pet_on(qapp, tmp_path) -> None:
         win.close()
         win.deleteLater()
         qapp.processEvents()
+
+
+def test_settings_page_has_no_rate_control(window) -> None:
+    """设置页**不能有语速控件**（主人 2026-09-21："把播报速度直接锁定 1.0 吧 不要给选择了
+    选错了感觉太怪了"）。
+
+    音量仍然可调（主人没要求锁），所以这条只针对语速：控件、以及任何指向它的属性都不留。
+    """
+    assert not hasattr(window, "voice_rate_box"), "语速控件应当已经删掉"
+
+    from PySide6.QtWidgets import QDoubleSpinBox, QLabel, QSpinBox
+
+    # 界面上再没有"语速"这两个字（连标签都不留）
+    labels = [label.text() for label in window.findChildren(QLabel)]
+    assert all("语速" not in text for text in labels), [t for t in labels if "语速" in t]
+    # 也没有带 "×" 后缀的倍率控件（那是原来语速框的特征）
+    for box in window.findChildren(QDoubleSpinBox) + window.findChildren(QSpinBox):
+        assert "×" not in box.suffix(), f"还有个倍率控件：{box.suffix()}"

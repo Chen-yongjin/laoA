@@ -862,53 +862,58 @@ def test_default_pet_and_voice_are_on() -> None:
     assert cfg.notify_pet is True
     assert cfg.notify_voice is True
     assert cfg.notify_voice_volume == 0.9        # 「大声喊」
-    # 语速是**倍率**：1.0 = 正常（用户 2026-09-18："语速默认改成 1 正常点"）
-    assert cfg.notify_voice_rate == 1.0
     assert cfg.notify_voice_name == ""           # 空 = 自动挑中文音色
+    # `notify_voice_rate` 已于 2026-09-21 删除（语速锁定 1.0，界面不给选）
+    assert not hasattr(cfg, "notify_voice_rate")
     # `notify_voice_digits` 已于 2026-09-21 删除（读法固定，没有开关）
     assert not hasattr(cfg, "notify_voice_digits")
     assert (cfg.pet_x, cfg.pet_y) == (0, 0)      # 0 = 还没拖过 → 默认右下角
 
 
 def test_pet_and_voice_keys_are_validated(tmp_path: Path) -> None:
-    """音量/语速/坐标写坏了都不许把程序带崩：越界夹取、乱码回默认。"""
+    """音量/坐标写坏了都不许把程序带崩：越界夹取、乱码回默认。
+
+    语速键已于 2026-09-21 删除（语速锁定 1.0）：老配置里还写着它、甚至写成乱码，
+    **都不报错、也不再生效** —— 这里顺手把这条兼容性也钉住。
+    """
     path = tmp_path / "config.toml"
     path.write_text(
         "notify_voice_volume = 1.7\n"
-        "notify_voice_rate = 99\n"
+        "notify_voice_rate = 99\n"          # 老键：忽略
         "pet_x = -50\n"
         "pet_y = 12\n",
         encoding="utf-8",
     )
     cfg = load_config(path=path, use_env=False)
     assert cfg.notify_voice_volume == 1.0        # 夹到上限（"想更响一点"就按上限办）
-    # 99 不在倍率区间（0.5~2.0）里 → 按**老配置的 SAPI 整数**认，夹到 10 再换算成倍率上限
-    assert cfg.notify_voice_rate == 2.0
+    assert not hasattr(cfg, "notify_voice_rate")
     assert cfg.pet_x == 0                        # 负数 = 屏幕外，当没记过
     assert cfg.pet_y == 12
 
     path.write_text('notify_voice_volume = "响"\nnotify_voice_rate = "快"\n',
                     encoding="utf-8")
     cfg = load_config(path=path, use_env=False)
-    assert cfg.notify_voice_volume == 0.9 and cfg.notify_voice_rate == 1.0
+    assert cfg.notify_voice_volume == 0.9 and not hasattr(cfg, "notify_voice_rate")
 
 
-def test_voice_rate_accepts_both_new_multiplier_and_legacy_sapi_rate(tmp_path: Path) -> None:
-    """语速既能读**新写法**（倍率 1 = 正常），也能读**老写法**（SAPI 的 -10~10）。
+def test_the_legacy_voice_rate_key_no_longer_has_any_effect(tmp_path: Path) -> None:
+    """老配置里的语速值（不管写什么）**都不再生效**，也不报错。
 
-    为什么要兼容：2026-09-18 之前的配置里存的是 SAPI 整数，用户升级之后语速不能
-    突然变快或变慢。判据是区间：0.5~2.0 当倍率，其余当老整数换算（见
-    `config._normalize_voice_rate` 的注释，包括 1/2 那个已知的模糊地带）。
+    主人 2026-09-21："把播报速度直接锁定 1.0 吧 不要给选择了 选错了感觉太怪了"。
+    所以 `notify_voice_rate` 这个键从 Config 里删掉了：老配置里留着它、写着 0 / 99 /
+    乱码，都只是被忽略（未知键），语速恒为 1.0。
     """
+    from laoa_trader.notify import voice as voice_mod
+    from laoa_trader.notify.voice import RATE_LOCKED, rate_to_sapi
+
     path = tmp_path / "config.toml"
-    for raw, expected in (("1.0", 1.0), ("1.5", 1.5), ("0.5", 0.5),
-                          ("0", 1.0),          # 老写法的"正常" → 倍率 1.0
-                          ("-5", 0.67), ("5", 1.48), ("10", 2.0), ("-10", 0.5),
-                          ("3.0", 1.27),       # 倍率区间外 → 当老 SAPI 的 3（略快）→ 1.27
-                          ("20", 2.0)):        # 老整数越界 → 夹到 10 → 倍率上限 2.0
+    for raw in ("0", "-5", "5", "10", "99", '"快"'):
         path.write_text(f"notify_voice_rate = {raw}\n", encoding="utf-8")
         cfg = load_config(path=path, use_env=False)
-        assert cfg.notify_voice_rate == expected, (raw, cfg.notify_voice_rate)
+        assert not hasattr(cfg, "notify_voice_rate"), raw
+        # 真正念的时候用的是锁定值：1.0 → SAPI 的 0（正常语速）
+        assert RATE_LOCKED == 1.0 and rate_to_sapi(RATE_LOCKED) == 0, raw
+    assert voice_mod.RATE_LOCKED == 1.0
 
 
 def test_voice_name_accepts_gender_enum_and_ignores_legacy_voice_names(tmp_path: Path) -> None:
@@ -944,10 +949,13 @@ def test_pet_and_voice_env_switches(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 
 def test_fresh_install_defaults_for_voice_and_pet(tmp_path: Path) -> None:
-    """全新配置（`Config()`，没有任何 config.toml）下：语速 1.0、桌宠开。"""
+    """全新配置（`Config()`，没有任何 config.toml）下：桌宠开、音量 90%、音色自动。
+
+    （语速已于 2026-09-21 锁定 1.0 并删掉配置键，所以这里断言"键不存在"。）
+    """
     cfg = Config(data_dir=tmp_path / "data")
 
-    assert cfg.notify_voice_rate == 1.0, "全新安装的语速应当是 1.0（正常语速）"
+    assert not hasattr(cfg, "notify_voice_rate"), "语速键已删除（语速锁定 1.0）"
     assert cfg.notify_pet is True, "全新安装桌宠应当默认开启"
     assert cfg.notify_voice is True
     assert cfg.notify_voice_volume == 0.9        # "大声喊"，默认 90%
@@ -965,16 +973,4 @@ def test_a_config_file_without_these_keys_keeps_the_same_defaults(tmp_path: Path
 
     loaded = load_config(path, use_env=False)
 
-    assert loaded.notify_voice_rate == 1.0 and loaded.notify_pet is True
-
-
-def test_old_sapi_rate_zero_loads_as_1_0(tmp_path: Path) -> None:
-    """老配置里的 SAPI 写法（`notify_voice_rate = 0` = 正常）→ 加载成倍率 **1.0**。
-
-    这条是"升级不会被带偏"的判据：界面上不会再出现 0 这种 SAPI 原始值。
-    """
-    from laoa_trader.config import _normalize_voice_rate
-
-    assert _normalize_voice_rate(0) == 1.0
-    assert _normalize_voice_rate(-5) < 1.0         # 老值 -5（更慢）→ 倍率小于 1
-    assert _normalize_voice_rate(5) > 1.0          # 老值 +5（更快）→ 倍率大于 1
+    assert not hasattr(loaded, "notify_voice_rate") and loaded.notify_pet is True

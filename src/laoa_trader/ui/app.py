@@ -3143,18 +3143,9 @@ if QT_AVAILABLE:
             )
             self.voice_volume_box.setToolTip("朗读音量（用户要求「大声喊」，默认 90%）")
             pet_row.addWidget(self.voice_volume_box)
-            pet_row.addWidget(QLabel("　语速："))
-            # 语速是**倍率**（用户 2026-09-18："语速默认改成 1 正常点"）：
-            # 界面上 1 = 正常、0.5 = 最慢、2.0 = 最快；配置里存的也是倍率，
-            # 换算成 Windows SAPI 的 Rate 只发生在拼命令那一步（见 notify/voice.py）
-            self.voice_rate_box = QDoubleSpinBox()
-            self.voice_rate_box.setRange(voice_mod.RATE_MIN, voice_mod.RATE_MAX)
-            self.voice_rate_box.setSingleStep(0.1)
-            self.voice_rate_box.setDecimals(1)
-            self.voice_rate_box.setSuffix(" ×")
-            self.voice_rate_box.setValue(float(getattr(self.cfg, "notify_voice_rate", 1.0) or 1.0))
-            self.voice_rate_box.setToolTip("1 = 正常；小于 1 更慢、大于 1 更快（默认 1.0）")
-            pet_row.addWidget(self.voice_rate_box)
+            # ⚠️ 这里**没有**语速控件（2026-09-21 主人："把播报速度直接锁定 1.0 吧
+            # 不要给选择了 选错了感觉太怪了"）：语速固定 1.0（= 正常），
+            # 配置里的 `notify_voice_rate` 也一并删除。音量仍然可调（主人没要求锁）。
             pet_row.addStretch(1)
             body.addLayout(pet_row)
 
@@ -5676,7 +5667,6 @@ if QT_AVAILABLE:
             # 面板上的"女声/男声"先在这里解析成具体音色名（没解析出来就交给自动挑选）
             voice_name = voice_mod.resolve_gender_voice(gender) if gender else None
             volume = int(self.voice_volume_box.value()) / 100.0
-            rate = round(float(self.voice_rate_box.value()), 2)
             if not self.voice_box.isChecked():
                 self._set_settings_hint("语音朗读是关着的：勾上「中文语音朗读」再试听。")
                 return
@@ -5693,8 +5683,9 @@ if QT_AVAILABLE:
             self._set_settings_hint("正在试听…（念一句要一两秒）")
             threading.Thread(
                 target=voice_mod.speak_now, args=(text,),
+                # 语速锁定 1.0：不传 rate（`speak_now` 内部用 `RATE_LOCKED`）
                 kwargs={"cfg": self.cfg, "force": True, "voice": voice_name,
-                        "volume": volume, "rate": rate},
+                        "volume": volume},
                 daemon=True, name="voice-try",
             ).start()
 
@@ -6621,8 +6612,6 @@ if QT_AVAILABLE:
                 "notify_pet": self.pet_box.isChecked(),
                 "notify_voice": self.voice_box.isChecked(),
                 "notify_voice_volume": int(self.voice_volume_box.value()) / 100.0,
-                # 倍率（1.0 = 正常）
-                "notify_voice_rate": round(float(self.voice_rate_box.value()), 2),
                 # 空字符串 = 自动挑中文（第一项）；"female" / "male" = 按性别挑
                 "notify_voice_name": str(self.voice_name_box.currentData() or ""),
                 "notify_flash_seconds": int(self.flash_seconds_box.value()),

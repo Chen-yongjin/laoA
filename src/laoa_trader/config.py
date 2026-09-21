@@ -366,39 +366,12 @@ def parse_scan_at(value: Any) -> list[str]:
     return split_scan_at(value)[0]
 
 
-#: 朗读语速的倍率范围（界面给的就这个区间；1.0 = 正常）
-VOICE_RATE_MIN = 0.5
-VOICE_RATE_MAX = 2.0
+# （朗读语速的倍率范围常量随 `notify_voice_rate` 一起删掉了，2026-09-21：
+#   语速锁定 1.0，界面不再给控件）
 
 #: 音色的三个取值（`notify_voice_name`）：空/auto = 自动挑中文，其余按性别挑
 VOICE_GENDERS: tuple[str, ...] = ("female", "male")
 VOICE_NAME_AUTO = ""
-
-
-def _normalize_voice_rate(value: Any) -> float:
-    """语速 → **倍率**（1.0 = 正常）。老配置里的 SAPI 整数会被认出来并换算。
-
-    判据（为什么这样分）：界面现在写的是倍率，范围 0.5~2.0；而 2026-09-18 之前
-    存的是 Windows SAPI 的 Rate（-10~10）。两拨值的区间**几乎不重叠**，所以：
-
-    * 落在 `[0.5, 2.0]` → 当成倍率（新配置）；
-    * 其余（例如 0 / -5 / 8 / 20）→ 当成老配置的 SAPI 整数，按同一映射反算成倍率
-      （`sapi_to_rate`），越界夹到边界、乱码回 1.0；
-    * 有个已知的模糊地带：老的 `1` / `2` 落在倍率区间里，会被当成倍率。
-      代价很小（老 1 ≈ 略快、新 1.0 = 正常；老 2 ≈ 略快、新 2.0 = 明显更快），
-      而"把新配置的 1.0 误判成老 SAPI 的 1"才是更糟的方向 —— 所以宁可这样分。
-    """
-    from laoa_trader.notify import voice as voice_mod
-
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return 1.0
-    if VOICE_RATE_MIN <= number <= VOICE_RATE_MAX:
-        return round(number, 2)
-    # 老配置：SAPI 的 -10~10（越界先夹住，再换算）
-    legacy = min(max(number, -10.0), 10.0)
-    return voice_mod.sapi_to_rate(legacy)
 
 
 def _normalize_voice_name(value: Any) -> str:
@@ -561,11 +534,10 @@ class Config:
     notify_voice: bool = True
     #: 朗读音量（0~1）
     notify_voice_volume: float = 0.9
-    #: **语速：倍率**，1.0 = 正常（用户 2026-09-18："语速默认改成 1 正常点"）。
-    #: 界面给 0.5~2.0（小于 1 更慢、大于 1 更快），内部再换算成 Windows SAPI 的
-    #: Rate（-10~10，那是近似对数的量纲，换算见 `notify/voice.py` 的 `rate_to_sapi()`）。
-    #: 老配置里存的是 SAPI 的整数（-10~10），加载时按同一映射反算（见 `_normalize_voice_rate`）。
-    notify_voice_rate: float = 1.0
+    # ⚠️ `notify_voice_rate`（朗读语速）**已于 2026-09-21 删除**：主人说
+    # "把播报速度直接锁定1.0吧 不要给选择了 选错了感觉太怪了" ——
+    # 语速固定 1.0（= 正常），界面不给控件，老配置里存过的别的值**也不再生效**。
+    # 老配置里还写着这个键不会报错（未知键被忽略）。
     #: **音色**（用户 2026-09-18："音色改成让用户可选男声和女声，而不是中英文"）：
     #: `""` / `"auto"` = 自动挑中文音色（推荐）；`"female"` = 女声；`"male"` = 男声。
     #: 老配置里存的是某个音色的完整名字 —— 那种值现在**认不出来，一律当自动**
@@ -779,7 +751,6 @@ class Config:
             self.notify_voice_volume = min(max(float(self.notify_voice_volume), 0.0), 1.0)
         except (TypeError, ValueError):
             self.notify_voice_volume = 0.9
-        self.notify_voice_rate = _normalize_voice_rate(self.notify_voice_rate)
         self.notify_voice_name = _normalize_voice_name(self.notify_voice_name)
         # 桌宠坐标：负数会让它跑到屏幕外（用户就只能靠改配置文件找回来了），一律当没记过。
         # 0 是"还没拖过"的哨兵值（真实桌面上 x=0 也几乎不可能是用户想要的位置）。
