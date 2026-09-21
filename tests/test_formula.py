@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import os
+
 import ast
 from datetime import date, timedelta
 from pathlib import Path
@@ -1157,11 +1159,17 @@ C>M5 AND V>V5*1.5 AND R<1.15 AND S<0.05 AND CNT>=3 AND UP AND (DD OR LIM OR ZT) 
 
 
 def test_complex_formula_on_5000_bars_under_50ms() -> None:
-    """5000 根 K 线上一条复杂公式 < 50ms。
+    """5000 根 K 线上一条复杂公式的求值耗时要在量级上合理（本机 50ms 内）。
 
     取 3 次里**最快**的一次：单次测量在 CI 上会被调度抖动污染（偶尔 3~5 倍），
     而这里要守的是"算法没有写出 O(n²)"，不是"这台机器此刻有多闲"。
-    实测约 10ms（见 print 输出），阈值留了 5 倍余量。
+    实测本机约 10ms，阈值留了 5 倍余量。
+
+    ⚠️ CI（GitHub 的 Windows runner）比开发机慢 3~4 倍：2026-09-21 那次 CI 上最快
+    一次是 **63.3ms**，于是整轮因为这条"性能断言"变红（其它 1637 条全过）。
+    所以 **CI 环境下用 150ms 这一档**（仍然能抓住"退化成 O(n²)"——那会是几百毫秒到几秒），
+    本机保留 50ms 这一档（本地改坏了立刻能看出来）。
+    别把它改成"CI 里不跑"：那等于把这条守卫在唯一会变红的机器上关掉。
     """
     rng = np.random.default_rng(7)
     n = 5000
@@ -1185,7 +1193,8 @@ def test_complex_formula_on_5000_bars_under_50ms() -> None:
     best = min(timings)
     print(f"\n性能：5000 根 K 线求值 {[f'{t:.2f}ms' for t in timings]}（最快 {best:.2f}ms）")
     assert out.shape == (n,)
-    assert best < 50.0, f"复杂公式在 5000 根 K 线上耗时 {best:.1f}ms，超过 50ms"
+    cap = 150.0 if os.environ.get("CI") else 50.0      # 见 docstring：CI 的 runner 慢 3~4 倍
+    assert best < cap, f"复杂公式在 5000 根 K 线上耗时 {best:.1f}ms，超过 {cap:.0f}ms"
 
 
 def test_compile_is_fast_enough_for_live_validation() -> None:
