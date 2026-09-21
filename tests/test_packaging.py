@@ -78,13 +78,39 @@ def test_ci_keeps_the_keygen_out_of_the_main_artifact() -> None:
     assert re.search(r"^\s{2}keygen:", text, re.M), "workflow 里没有独立的 keygen job"
     assert re.search(r"name:\s*keygen\b", text), "注册机 artifact 名必须是 keygen"
     assert re.search(r"name:\s*LaoniuTrader\b", text), "主 artifact 名仍是 LaoniuTrader"
-    # 注册机 job 只在手动触发时跑（push 不必白跑一个 runner）
+    # 注册机 job：手动触发时跑；另外**只在改动注册机相关文件时**才额外跑一次
+    # （2026-09-21 起：主人手动跑过一次却没拿到产物 —— 因为那一步走的是 artifact，
+    #   撞上私有仓库的存储额度。现在注册机也挂 Release，改动 spec/算法时自动重发一次。）
     assert "github.event_name == 'workflow_dispatch'" in text
+    assert "contains(github.event.head_commit.modified, 'build/keygen.spec')" in text, \
+        "改动 keygen.spec 时应当自动重发注册机"
     # 主 job 里那条"产物不许混进注册机"的检查还在
     assert "混进了注册机相关文件" in text, "主 job 的产物检查里少了注册机泄漏检查"
-    # Release 只挂主程序 exe（注册机不该出现在用户的 Release 里）
+    # 主程序的 Release 附件仍只有主程序 zip（注册机是**另一个附件**，不走这个 files:）
     release_zip = re.search(r"files:\s*(.+)", text)
     assert release_zip is not None and "keygen" not in release_zip.group(1)
+
+
+def test_keygen_is_published_to_the_release_not_only_as_an_artifact() -> None:
+    """注册机要挂到**滚动 Release**（与主程序同一个页面），artifact 只作备用。
+
+    为什么（主人 2026-09-21 实报「keygen 没跑通」）：注册机原来只走 artifact，
+    而那一步在私有仓库上会因**存储额度已满**失败 —— 手动跑了 workflow 也拿不到东西。
+    Release 附件与那份额度是两回事，所以这条用例把"注册机必须走 Release"钉住：
+    以后谁把这一步删掉，主人就会再遇到一次"跑了却拿不到"。
+    """
+    text = WORKFLOW.read_text(encoding="utf-8")
+    keygen_job = text[text.index("  keygen:"):]
+
+    assert "gh release upload $tag dist/keygen.exe --clobber" in keygen_job, \
+        "注册机 job 里少了上传 Release 附件这一步"
+    assert re.search(r"id:\s*keygen_release", keygen_job), "这一步要有 id，才能记进 ci-log"
+    assert "step_keygen_release=" in keygen_job, "注册机的 Release 结果要记进 ci-log（否则无法远程验证）"
+    # artifact 那条保留但**不许**再影响判定（额度满了也不该让整轮红）
+    assert re.search(r"id:\s*keygen_upload", keygen_job)
+    upload_block = keygen_job[keygen_job.index("id: keygen_upload"):]
+    assert "continue-on-error: true" in upload_block[:400], \
+        "artifact 上传要标成 continue-on-error（额度问题不该让注册机拿不到）"
 
 
 def test_keygen_uses_the_same_algorithm_as_the_client() -> None:

@@ -8,6 +8,7 @@
 #   3. 解压后双击 LaoniuTrader.exe 即可（首次运行会走数据自检 → 下载向导）
 #   注：该次运行页面底部的 Artifacts 里也有一份（LaoniuTrader），但 artifact 有额度限制，
 #       额度满了那一步会失败 —— 所以 Release 才是主下载通道（见下面 step_release）。
+#   注册机（作者专用）也在**同一个 Release 页面**的 Assets 里：``keygen.exe``。
 #
 # 说明：
 # - 测试不过就不出包（pytest 失败即整轮失败），避免把坏版本发出去
@@ -273,7 +274,7 @@ jobs:
           - 提交：``$env:GITHUB_SHA``
           - 构建：run $env:GITHUB_RUN_ID
           - 下载：``LaoniuTrader.zip``（解压 → 进 LaoniuTrader 目录 → 双击 LaoniuTrader.exe）
-          - 注册机不在这里（作者专用）：Actions → build-windows → Run workflow，取 artifact ``keygen``
+          - 注册机（作者专用，**别发给用户**）：同一个 Assets 里的 ``keygen.exe``
           "@
           # 先看 Release 在不在（不在就建一个，tag 指向默认分支即可 —— 我们要的是附件，不是 tag 本身）
           gh release view $tag --json tagName *> $null
@@ -346,7 +347,19 @@ jobs:
   #   artifact `keygen`。作者本地打包同样可以（见 docs/打包教程.md 第八·五节）：
   #   `pyinstaller --noconfirm --clean build\keygen.spec`。
   keygen:
-    if: github.event_name == 'workflow_dispatch'
+    # 什么时候跑：
+    #   ① 主人手动触发（Actions → build-windows → Run workflow）；
+    #   ② **改动到注册机相关文件**时（spec / 签发算法 / 这个 workflow 自己）——
+    #      这样"注册机该更新了"这件事不用靠人记得去点一下，我也能在推代码后直接验证它。
+    # 其余 push 不跑（Windows runner 很贵，注册机跟用户那版没关系）。
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && (
+        contains(github.event.head_commit.modified, 'build/keygen.spec') ||
+        contains(github.event.head_commit.modified, 'build/keygen.py') ||
+        contains(github.event.head_commit.modified, 'src/laoa_trader/licensing.py') ||
+        contains(github.event.head_commit.modified, '.github/workflows/build-windows.yml')
+      ))
     runs-on: windows-latest
     timeout-minutes: 15
     env:
@@ -368,21 +381,88 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: PyInstaller 打包注册机
+      - id: keygen_pack
+        name: PyInstaller 打包注册机
         timeout-minutes: 10
         run: pyinstaller --noconfirm --clean build/keygen.spec
 
-      - name: 检查产物
+      - id: keygen_check
+        name: 检查产物
         shell: pwsh
         run: |
           if (-not (Test-Path "dist/keygen.exe")) { throw "没找到 dist/keygen.exe" }
           $size = (Get-Item 'dist/keygen.exe').Length / 1MB
           Write-Host ("注册机大小：{0:N1} MB" -f $size)
 
-      - name: 上传注册机（**只有作者自己下载这个 artifact**）
+      # ── 主下载通道：挂到与主程序同一个滚动 Release ──
+      # 为什么不再只靠 artifact（2026-09-21 的教训）：私有仓库的 artifact 存储有硬额度
+      # （免费 500MB，主包一封就几百 MB），额度满了**上传必失败** —— 主人手动跑了
+      # workflow 也拿不到注册机。Release 附件与那份额度是两回事、链接还固定，
+      # 所以从这里下载：Release 页面 → Assets → keygen.exe（与 LaoniuTrader.zip 同一个页面）。
+      - id: keygen_release
+        name: 把注册机挂到滚动 Release（与主程序同一个页面）
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "latest"
+          gh release view $tag --json tagName *> $null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Release $tag 不存在，先创建一个（主程序那一轮通常会先建好）"
+            gh release create $tag --title "老牛选股 · 最新构建" --notes "见 Assets：主程序与注册机"
+            if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
+          }
+          gh release upload $tag dist/keygen.exe --clobber
+          if ($LASTEXITCODE -ne 0) { throw "上传 keygen.exe 到 Release 失败" }
+          Write-Host "::notice::注册机已挂到 Release：https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/keygen.exe"
+
+      - id: keygen_upload
+        name: 上传注册机 artifact（额度满了会失败，不影响上面的 Release）
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: keygen
           path: dist/keygen.exe
           retention-days: 2
           if-no-files-found: error
+
+      - name: artifact 没传上去就说清去哪下
+        if: steps.keygen_upload.outcome == 'failure'
+        shell: pwsh
+        run: |
+          Write-Host "::warning::注册机没传上 artifact（私有仓库存储额度已满）—— 不影响下载：去 Release 页面取 keygen.exe（与主程序同一个页面）。"
+
+      # 结果同样写回 ci-log：只写 ci-log/keygen-meta.txt（**不动** build job 写的 meta.txt），
+      # 并且从远端 ci-log 的状态开始改再推 —— 两个 job 可能同时在写这个分支，
+      # 直接 force-push 会把对方那份结果抹掉（这就是为什么下面带重试 + rebase）。
+      - name: 记录注册机构建结果到 ci-log 分支
+        if: always()
+        shell: pwsh
+        run: |
+          git config user.name "ci-log-bot"
+          git config user.email "ci-log-bot@users.noreply.github.com"
+          @(
+            "run=$env:GITHUB_RUN_ID"
+            "sha=$env:GITHUB_SHA"
+            "ref=$env:GITHUB_REF_NAME"
+            "job=$env:GITHUB_JOB"
+            "result=${{ job.status }}"
+            "step_keygen_pack=${{ steps.keygen_pack.outcome }}"
+            "step_keygen_check=${{ steps.keygen_check.outcome }}"
+            "step_keygen_release=${{ steps.keygen_release.outcome }}"
+            "step_keygen_upload=${{ steps.keygen_upload.outcome }}"
+          ) | Set-Content keygen-meta.txt
+          Get-Content keygen-meta.txt
+          for ($i = 1; $i -le 3; $i++) {
+            git fetch origin ci-log *> $null
+            git checkout -B ci-log-tmp origin/ci-log *> $null
+            New-Item -ItemType Directory -Force -Path ci-log | Out-Null
+            Copy-Item keygen-meta.txt ci-log/keygen-meta.txt -Force
+            git add -f ci-log
+            git commit -m "注册机结果：${{ job.status }}（run $env:GITHUB_RUN_ID）" --no-verify *> $null
+            git push origin HEAD:ci-log
+            if ($LASTEXITCODE -eq 0) { Write-Host "已写入 ci-log/keygen-meta.txt"; break }
+            Write-Host "推送被拒（另一个 job 也在写），重试第 $i 次"
+            Start-Sleep -Seconds 5
+          }
