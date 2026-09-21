@@ -16,6 +16,7 @@ CI（Windows）连着三次跑到 89~93% 就"没声音了"，**没有任何失�
 from __future__ import annotations
 
 import logging
+import os
 import threading
 
 import pytest
@@ -124,8 +125,13 @@ def test_worker_wait_all_on_an_empty_registry_is_a_noop(qapp) -> None:
 
 
 def test_log_handler_survives_a_closed_stream() -> None:
-    """往**已关闭**的流写日志不许抛异常（收尾阶段那一条日志不该放大成崩溃）。"""
-    handler = log_mod._SafeStreamHandler(open("/dev/null", "w"))   # noqa: SIM115
+    """往**已关闭**的流写日志不许抛异常（收尾阶段那一条日志不该放大成崩溃）。
+
+    ⚠️ 这里必须用 `os.devnull`，**不能写死 `/dev/null`**：Windows 上那个路径不存在，
+    会以 `FileNotFoundError` 把 CI 直接弄红（2026-09-20 实测：CI 就是死在这一条上，
+    而且是在 79% 处"停下来"的那种红，很容易被误当成又一次偶发崩溃）。
+    """
+    handler = log_mod._SafeStreamHandler(open(os.devnull, "w"))    # noqa: SIM115
     record = logging.LogRecord("laoa_trader.test", logging.INFO, __file__, 1, "x", (), None)
     handler.stream.close()                  # 模拟 pytest 收尾：流已关闭
 

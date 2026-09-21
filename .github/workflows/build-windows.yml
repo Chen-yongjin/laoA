@@ -73,7 +73,10 @@ jobs:
           # `-p no:cacheprovider` 与本地一致；`--tb=short` 便于失败摘要读取。
           $env:PYTHONFAULTHANDLER = "1"
           # `faulthandler` 的"卡住 N 秒就 dump 所有线程栈"兜底：正常跑完不会触发
-          python -m pytest tests -q --tb=short -p no:cacheprovider --faulthandler-timeout=900 > pytest.log 2> pytest-err.log
+          # ⚠️ 用 `-o faulthandler_timeout=`（ini 形式）而不是 `--faulthandler-timeout=`：
+          # 2026-09-21 实测后者会被当成未知参数、pytest 直接报错退出（CI 因为这条红过一次，
+          # 测试压根没跑起来）。它的作用是"某条用例卡住超过 N 秒就把所有线程栈 dump 出来"。
+          python -m pytest tests -q --tb=short -p no:cacheprovider -o faulthandler_timeout=900 > pytest.log 2> pytest-err.log
           $code = $LASTEXITCODE
           Get-Content pytest.log | Select-Object -Last 3
           if (Test-Path pytest-err.log) {
