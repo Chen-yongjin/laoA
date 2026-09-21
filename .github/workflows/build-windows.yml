@@ -2,8 +2,12 @@
 #
 # 用法（你本机不需要装 Python）：
 #   1. 代码推到 main 后会自动构建；也可以在 Actions 页面点 "Run workflow" 手动触发
-#   2. 构建完成后，在该次运行的页面底部 Artifacts 里下载 LaoniuTrader
+#   2. 构建完成后，**优先去 Release 页面下载**（固定链接，不受 artifact 额度影响）：
+#      https://github.com/Chen-yongjin/laoA/releases/tag/latest
+#      直链：https://github.com/Chen-yongjin/laoA/releases/download/latest/LaoniuTrader.zip
 #   3. 解压后双击 LaoniuTrader.exe 即可（首次运行会走数据自检 → 下载向导）
+#   注：该次运行页面底部的 Artifacts 里也有一份（LaoniuTrader），但 artifact 有额度限制，
+#       额度满了那一步会失败 —— 所以 Release 才是主下载通道（见下面 step_release）。
 #
 # 说明：
 # - 测试不过就不出包（pytest 失败即整轮失败），避免把坏版本发出去
@@ -225,7 +229,7 @@ jobs:
         run: |
           # 这一步不会让 job 变红（额度问题是账号侧的事），但必须**显眼且可操作**：
           # 用户看到这条就知道"包没出来"是存储额度满了，去清理旧产物即可。
-          Write-Host "::warning::产物没传上去：测试/打包/检查都过了，失败在 artifact 上传（多半是私有仓库的 Actions 存储额度已满）。请到 GitHub 仓库 → Actions → 勾选旧的运行 → Delete run（或等旧产物到期）后重跑一次；否则这一轮没有 exe 可下载。"
+          Write-Host "::warning::产物没传上 artifact（多半是私有仓库的 Actions 存储额度已满）—— 不影响下载：请去 Release 页面取 https://github.com/Chen-yongjin/laoA/releases/tag/latest （直链 …/releases/download/latest/LaoniuTrader.zip）。想恢复 artifact 通道就到 Actions 里删掉一批旧运行。"
 
       - name: 上传产物（失败时换名再试一次）
         # 主上传失败不一定是"包有问题"（可能是同名冲突 / 服务端抖动 / 存储额度），
@@ -241,6 +245,48 @@ jobs:
 
       # 想发版本时打个 tag（如 v0.1.0），这里会自动生成 Release 附件；
       # 产物超过 artifact 上限时用 Release 更稳（单文件上限更宽松）。
+      # ── 滚动 Release：固定链接的主下载通道 ──
+      # 为什么必须有这一步（2026-09-21 的结论）：私有仓库的 **Actions artifact 存储有硬额度**
+      # （免费 500MB），而这份产物压完是几百 MB —— 攒几轮就顶爆，之后 `step_upload` 必失败，
+      # 用户就**没有包可下载**（测试/打包/检查全都是 success，唯独传不上去）。
+      # Release 附件与 artifact 额度是两回事，而且下载链接**固定不变**，所以把它当主通道：
+      #   页面 https://github.com/Chen-yongjin/laoA/releases/tag/latest
+      #   直链 https://github.com/Chen-yongjin/laoA/releases/download/latest/LaoniuTrader.zip
+      # 用 runner 自带的 `gh`（不引第三方 action，少一个失败点）；
+      # 同一个 tag 每次覆盖同名附件（`--clobber`），所以链接永远是那一个。
+      # 附件名**不带 SHA**：带 SHA 会每轮多一份几百 MB 的附件、把 Release 也撑爆；
+      # 这一轮构建自哪个提交，写在 Release 说明里（每次覆盖更新）。
+      - id: release
+        name: 把 zip 挂到滚动 Release（固定下载链接）
+        if: steps.zip.outcome == 'success'
+        # 与 artifact 那一步同理：这一步失败也不该把整轮判红（账号/网络侧的事），
+        # 但会记进 meta.txt（step_release）并在下面显眼警告，便于一眼看出走的哪条路。
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "latest"
+          $notes = @"
+          ## 老牛选股 · 最新构建
+
+          - 提交：``$env:GITHUB_SHA``
+          - 构建：run $env:GITHUB_RUN_ID
+          - 下载：``LaoniuTrader.zip``（解压 → 进 LaoniuTrader 目录 → 双击 LaoniuTrader.exe）
+          - 注册机不在这里（作者专用）：Actions → build-windows → Run workflow，取 artifact ``keygen``
+          "@
+          # 先看 Release 在不在（不在就建一个，tag 指向默认分支即可 —— 我们要的是附件，不是 tag 本身）
+          gh release view $tag --json tagName *> $null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Release $tag 不存在，创建"
+            gh release create $tag --title "老牛选股 · 最新构建" --notes $notes
+            if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
+          }
+          gh release upload $tag LaoniuTrader.zip --clobber
+          if ($LASTEXITCODE -ne 0) { throw "上传 Release 附件失败" }
+          gh release edit $tag --notes $notes
+          Write-Host "::notice::已挂到 Release：https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/LaoniuTrader.zip"
+
       - name: 打 tag 时创建 Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -276,6 +322,9 @@ jobs:
             "step_check=${{ steps.check.outcome }}"
             "step_zip=${{ steps.zip.outcome }}"
             "step_upload=${{ steps.upload.outcome }}"
+            # Release 那条路（主下载通道）：它 success 就说明包已经能下载了，
+            # 哪怕 step_upload 因额度失败也不影响用户拿包
+            "step_release=${{ steps.release.outcome }}"
           ) | Set-Content ci-log/meta.txt
           if (Test-Path pyinstaller.log) { Copy-Item pyinstaller.log ci-log/pyinstaller.log -Force }
           if (Test-Path check.log) { Copy-Item check.log ci-log/check.log -Force }
