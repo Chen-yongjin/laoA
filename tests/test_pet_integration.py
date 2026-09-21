@@ -577,3 +577,44 @@ def test_settings_page_has_no_digits_switch(window) -> None:
 
     texts = [box.text() for box in window.findChildren(QCheckBox)]
     assert all("逐位" not in text for text in texts), f"还有逐位相关的勾选框：{texts}"
+
+
+def test_a_fresh_install_shows_rate_1_0_and_the_pet_on(qapp, tmp_path) -> None:
+    """**全新安装**（没有任何 config.toml）打开设置页：语速显示 1.0、桌宠勾上是勾着的。
+
+    主人 2026-09-21 的两条默认值口径：
+    ① 播报速度默认 1.0（= 正常语速；界面上不该出现 SAPI 的 0 / 1 那种原始值）；
+    ② 桌宠默认开启（全新安装就该出现在桌面上）。
+    """
+    from laoa_trader.config import Config
+    from laoa_trader.ui import app as ui_app
+
+    # 全新配置：数据目录与 config.toml 都在临时目录里，什么都没写过
+    fresh = Config(data_dir=tmp_path / "fresh-data")
+    fresh.ensure_dirs()
+    fresh.source_path = tmp_path / "config.toml"          # 不存在 = 全新安装
+    storage.init_db(fresh.db_path)
+
+    win = ui_app.MainWindow(fresh)
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.voice_rate_box.value() == 1.0, "全新安装的设置页应当显示语速 1.0"
+        assert win.voice_rate_box.text().endswith("×")     # 是倍率，不是 SAPI 的 0/1
+        assert win.pet_box.isChecked() is True, "全新安装桌宠应当默认勾上"
+        assert win.pet is not None and win.pet.isVisible() is True, "全新安装桌宠就该在桌面上"
+    finally:
+        for name in ("_timer", "_market_timer", "_auction_timer", "_flash_timer"):
+            timer = getattr(win, name, None)
+            if timer is not None:
+                timer.stop()
+        win.scheduler.stop()
+        win.quotes.stop()
+        worker = getattr(win, "_market_worker", None)
+        if worker is not None and worker.isRunning():
+            worker.wait(3_000)
+        win.shutdown()
+        win.tray.hide()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()

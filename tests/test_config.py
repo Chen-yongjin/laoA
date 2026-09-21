@@ -933,3 +933,48 @@ def test_pet_and_voice_env_switches(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("NOTIFY_VOICE", "0")
     cfg = load_config(use_env=True)
     assert cfg.notify_pet is False and cfg.notify_voice is False
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 全新安装的默认值（主人 2026-09-21 要求"核对并钉住"）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 两条口径：① 播报速度默认 **1.0**（= 正常语速，界面显示的就是 1.0，不是 SAPI 的 0/1）；
+# ② **桌宠默认开启**（全新安装就该出现在桌面右下角）。
+
+
+def test_fresh_install_defaults_for_voice_and_pet(tmp_path: Path) -> None:
+    """全新配置（`Config()`，没有任何 config.toml）下：语速 1.0、桌宠开。"""
+    cfg = Config(data_dir=tmp_path / "data")
+
+    assert cfg.notify_voice_rate == 1.0, "全新安装的语速应当是 1.0（正常语速）"
+    assert cfg.notify_pet is True, "全新安装桌宠应当默认开启"
+    assert cfg.notify_voice is True
+    assert cfg.notify_voice_volume == 0.9        # "大声喊"，默认 90%
+    assert cfg.notify_voice_name == ""           # 自动挑中文音色
+
+
+def test_a_config_file_without_these_keys_keeps_the_same_defaults(tmp_path: Path) -> None:
+    """配置文件存在、但没写这两项 → 仍然是同一套默认值（不是 0 / 空）。
+
+    走**真的加载入口**（`load_config`）而不是只 `Config()`：用户现场就是"文件里没写"，
+    而加载器的默认值/规范化是最容易把它们带偏的一层。
+    """
+    path = tmp_path / "config.toml"
+    path.write_text('hithink_api_key = "k"\n', encoding="utf-8")
+
+    loaded = load_config(path, use_env=False)
+
+    assert loaded.notify_voice_rate == 1.0 and loaded.notify_pet is True
+
+
+def test_old_sapi_rate_zero_loads_as_1_0(tmp_path: Path) -> None:
+    """老配置里的 SAPI 写法（`notify_voice_rate = 0` = 正常）→ 加载成倍率 **1.0**。
+
+    这条是"升级不会被带偏"的判据：界面上不会再出现 0 这种 SAPI 原始值。
+    """
+    from laoa_trader.config import _normalize_voice_rate
+
+    assert _normalize_voice_rate(0) == 1.0
+    assert _normalize_voice_rate(-5) < 1.0         # 老值 -5（更慢）→ 倍率小于 1
+    assert _normalize_voice_rate(5) > 1.0          # 老值 +5（更快）→ 倍率大于 1
