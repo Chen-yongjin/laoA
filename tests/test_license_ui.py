@@ -263,3 +263,89 @@ def test_keygen_matches_the_client_algorithm() -> None:
     machine = L.machine_code()
     assert keygen.make_code(machine) == L.expected_code(machine)
     assert L.verify(machine, keygen.make_code(machine))[0] is True
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 机器码只在"要注册的时候"才读（主人 2026-09-21 的明确口径）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 原话：「不用每次都读机器码啊，客户要注册的时候再去读」。
+# 所以：启动、点【策略编辑】、刷新设置/关于、保存设置 —— **一次都不许读硬件**；
+# 只有打开授权对话框（或点【注册】）才读，而且同一进程里只读一次。
+
+
+def _counting_machine(monkeypatch) -> dict:
+    """把机器码查询换成计数器（不读硬件、不缓存）。"""
+    calls = {"n": 0}
+
+    def counting():
+        calls["n"] += 1
+        return ["CPU-1", "BOARD-1", "DISK-1"]
+
+    monkeypatch.setattr(L, "_fingerprint_parts", counting)
+    L.forget_cached_machine_code()
+    return calls
+
+
+def _wait_machine(dialog, qapp, timeout: float = 5.0) -> None:
+    """等后台那条"读机器码"落地（对话框里那一栏从"正在读取…"变成真机器码）。"""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if dialog.machine:
+            return
+        time.sleep(0.01)
+    raise AssertionError("机器码一直没读出来")
+
+
+def test_routine_paths_never_read_the_machine_code(window, qapp, cfg, monkeypatch) -> None:
+    """**没打开授权对话框之前，机器码函数一次都没被调用**（这条是主人这次的硬要求）。"""
+    calls = _counting_machine(monkeypatch)
+
+    # ① 启动时已经建过窗口（fixture 里建的）→ 先清一次计数，再把这些日常动作走一遍
+    calls["n"] = 0
+    window._maybe_prompt_license()                     # 启动那条检查
+    window._apply_license_lock()                       # 刷新锁定状态（策略编辑的 tooltip）
+    window.license_status_line()                       # 「关于」里那一行
+    window.version_info_text()                         # 复制版本信息
+    window.about_lines()
+    window.on_save_settings()                          # 保存设置
+    qapp.processEvents()
+    page = window.formula_page
+    if page is not None:
+        guard = getattr(page, "open_editor_guard", None)
+        if callable(guard):
+            guard()                                    # 点【策略编辑】走的那条路
+    qapp.processEvents()
+
+    assert calls["n"] == 0, f"日常路径读了 {calls['n']} 次机器码（应当是 0 次）"
+
+
+def test_opening_the_dialog_reads_it_exactly_once(window, qapp, monkeypatch) -> None:
+    """打开授权对话框才读机器码，**且只读一次**（再开一次也不重读）。
+
+    注意这个 fixture 是"试用已到期"：主窗口构造时就会自动弹一次授权对话框
+    （那是**允许**读机器码的路径 —— 它就是在"要注册"的现场，而且在后台线程里读、界面不冻）。
+    所以这里先把那只对话框丢掉、重新开一只，用来量"打开对话框"这一个动作读了几次。
+    """
+    window.license_dialog = None        # 丢掉启动时自动弹的那一只
+    calls = _counting_machine(monkeypatch)
+
+    window.on_open_license()
+    qapp.processEvents()
+    dialog = window.license_dialog
+
+    # 界面先出来，机器码那一栏先写"正在读取…"（不能把界面冻住）
+    assert dialog.machine_label.text() in ("正在读取…", dialog.machine)
+    _wait_machine(dialog, qapp)
+
+    assert calls["n"] == 1, f"读机器码 {calls['n']} 次（应当只有 1 次）"
+    assert dialog.machine == L.machine_code()
+    assert dialog.machine_label.text() == dialog.machine
+
+    window.on_open_license()                           # 再开一次（复用同一个对话框）
+    qapp.processEvents()
+    _wait_machine(window.license_dialog, qapp)
+    assert calls["n"] == 1, "第二次打开又读了一遍机器码"

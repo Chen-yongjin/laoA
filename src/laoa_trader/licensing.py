@@ -446,8 +446,23 @@ def _stored_code(state: dict) -> str:
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def license_status(cfg: Any = None) -> dict:
+def license_status(cfg: Any = None, *, verify_machine: bool = False) -> dict:
     """**授权的唯一真相来源**：界面、CLI、锁功能都读它，别在各处各算一套。
+
+    ⚠️ **默认不读机器码**（主人 2026-09-21 的明确口径："不用每次都读机器码啊，
+    客户要注册的时候再去读"）。读机器码在 Windows 上要起一个 PowerShell 问硬件，
+    而启动、点【策略编辑】、刷新设置/关于、保存设置都会走到这个函数 ——
+    每次都读就是"点一下卡一下"。
+
+    所以这里分成两档：
+
+    * **默认（平时）**：只读授权文件与试用记账（普通文件/数据库读取，几毫秒）。
+      `registered` 的判断是"文件里有没有注册码"，**不校验它属于哪台机器**；
+    * **`verify_machine=True`**（只有打开授权对话框/点【注册】时才用）：算一次机器码
+      （进程内缓存），校验注册码是不是这台机器的、状态文件是不是本机的。
+
+    为什么可以这样分：日常使用只需要回答"现在能不能用"，而"这份授权是不是这台机器的"
+    只在**要注册**的时候才有意义。代价见 `verify_machine` 的调用方注释（授权对话框）。
 
     Returns:
         `{"licensed": bool, "registered": bool, "trial": bool, "days_left": int,
@@ -458,18 +473,19 @@ def license_status(cfg: Any = None) -> dict:
         * `trial` —— 当前是否处于试用期；
         * `days_left` —— 试用期剩余天数（已注册时是 `TRIAL_DAYS`，无意义；
           已到期时是 0）；
+        * `machine` —— 本机机器码；**没校验时是空串**（这样调用方一眼能看出
+          "这一份状态没读过机器码"，不会误当成"机器码是空的"）；
         * `reason` —— 未授权/回拨时给用户看的中文原因（已授权时是空串）。
     """
-    machine = machine_code()
     state = _read_state()
     today = _today()
+    machine = machine_code() if verify_machine else ""
 
-    # 1) 已注册？（状态文件里的机器码必须与**本机**一致 —— 直接把别人的
-    #    license.json 拷过来是没用的，因为注册码与机器码绑定）
+    # 1) 已注册？
     stored_machine = _normalize(state.get("machine"))
     stored_code = _stored_code(state)
-    if stored_code and stored_machine == _normalize(machine):
-        ok, _why = verify(machine, stored_code)
+    if stored_code and (not verify_machine or stored_machine == _normalize(machine)):
+        ok, _why = verify(state.get("machine") or machine, stored_code)
         if ok:
             _remember_day(today, state, cfg)
             return {
@@ -477,7 +493,8 @@ def license_status(cfg: Any = None) -> dict:
                 "days_left": TRIAL_DAYS, "machine": machine, "code": state.get("code", ""),
                 "reason": "",
             }
-        logger.warning("状态文件里的注册码验不过（机器变了或文件被改过），按未授权处理")
+        if verify_machine:
+            logger.warning("状态文件里的注册码验不过（机器变了或文件被改过），按未授权处理")
 
     # 2) 时钟回拨：系统时间比我们见过的最晚日期还早 → 按到期处理
     max_seen = _max_seen_day(state, cfg)

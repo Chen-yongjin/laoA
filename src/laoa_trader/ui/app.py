@@ -1773,7 +1773,6 @@ if QT_AVAILABLE:
             self._start_scheduler()
             # 授权检查放在最后：先让界面出来（他要能看到机器码），再决定要不要提醒。
             # 试用期内不打扰；到期/未授权才弹一次（见 `_maybe_prompt_license`）。
-            self._warm_machine_code()          # 后台把机器码算好（点按钮时就不卡）
             self._maybe_prompt_license()
 
             # 实时行情快照缓存（两张表的现价/涨幅）：**没有自己的 QTimer**，
@@ -7363,29 +7362,12 @@ if QT_AVAILABLE:
                         + "\n" + licensing.CONTACT_TEXT
                     )
 
-        def _warm_machine_code(self) -> None:
-            """启动时在**后台线程**里先把授权状态算好（主人 2026-09-21："点策略什么的都会卡一下"）。
-
-            为什么要有这一步：第一次算机器码要问硬件（Windows 上是起一个 PowerShell，
-            几百毫秒），而"点【策略编辑】"那条路会读授权状态 → 读机器码。
-            放主线程里就是"第一次点会顿一下"。这里提前在后台算掉，
-            用户点的时候拿到的已经是缓存值（见 `licensing.machine_code` 的取值顺序）。
-            失败/不支持的平台什么都不做 —— 那条路会在需要时自己算一遍。
-            """
-            try:
-                # 预热的是**整条状态查询**（机器码 + 状态文件 + 数据库那份备份），
-                # 因为点按钮走的就是它 —— 只热机器码的话，第一次点击仍要花几百毫秒读状态。
-                threading.Thread(
-                    target=lambda: licensing.license_status(self.cfg),
-                    daemon=True, name="warm-license",
-                ).start()
-            except Exception as exc:  # noqa: BLE001 - 预热失败不该影响启动
-                logger.debug(f"机器码预热线程没起来：{exc}")
-
         def _maybe_prompt_license(self) -> None:
             """启动时的授权检查：**只提醒一次**（试用中/已注册都不打扰）。"""
             if self._license_prompted:
                 return
+            # 这里**不许**传 verify_machine=True：启动检查只需要"能不能用"，
+            # 读机器码会起 PowerShell（主人 2026-09-21："不用每次都读机器码"）。
             status = licensing.license_status(self.cfg)
             self._apply_license_lock()
             if status.get("licensed"):

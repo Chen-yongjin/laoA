@@ -262,11 +262,19 @@ def test_a_copied_license_file_does_not_license_another_machine(
     lic.register(machine_a, lic.expected_code(machine_a), cfg)
     assert lic.license_status(cfg)["registered"] is True
 
-    # 换一台机器（指纹变了）→ 文件里那份注册码不再匹配
+    # 换一台机器（指纹变了）→ 一旦**校验**（`verify_machine=True`，即打开授权对话框那条路）
+    # 就认出来"这份授权不是本机的"
     monkeypatch.setattr(lic, "_fingerprint_parts", lambda: ["CPU-7", "BOARD-7", "DISK-7"])
     lic.forget_cached_machine_code()   # 换了机器 → 缓存的机器码作废
-    status = lic.license_status(cfg)
+    status = lic.license_status(cfg, verify_machine=True)
     assert status["registered"] is False            # 授权没有跟过来
+
+    # ⚠️ 而**不校验**的日常路径会（暂时地）把它当成已注册 —— 这是主人 2026-09-21 定的
+    # 取舍："不用每次都读机器码"。也就是说：拷来的授权文件在日常使用里**不会立刻暴露**，
+    # 只有在用户打开授权对话框（或注册）时才被识破。要改回"启动就校验"，
+    # 只需在启动路径上传 `verify_machine=True`（代价是每次启动起一次 PowerShell）。
+    plain = lic.license_status(cfg)
+    assert plain["registered"] is True and plain["machine"] == ""
 
     # 拷来的文件很旧（first_run 是 30 天前）→ 连试用都过期，等于完全不能用
     old_day = (clock.now_cn().date() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
@@ -277,7 +285,8 @@ def test_a_copied_license_file_does_not_license_another_machine(
     )
     lic._db_write("license_first_run", old_day, cfg)
 
-    status = lic.license_status(cfg)
+    # 一校验就识破：注册码不是本机的 + 试用也过期了 → 完全不能用
+    status = lic.license_status(cfg, verify_machine=True)
     assert status["licensed"] is False and status["registered"] is False
 
 
@@ -324,12 +333,14 @@ def test_machine_code_asks_the_hardware_only_once(lic: L, monkeypatch: pytest.Mo
     assert asked["n"] == 1, f"硬件指纹被问了 {asked['n']} 次（应当只有 1 次）"
 
 
-def test_license_status_does_not_reask_the_hardware(
+def test_the_routine_path_never_touches_the_hardware(
         lic: L, cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
-    """点【策略编辑】走的是 `is_licensed()` / `status_text()` —— 它们都不该再问硬件。
+    """**日常那条路一次都不读硬件**（主人 2026-09-21："不用每次都读机器码啊，
+    客户要注册的时候再去读"）。
 
-    这条直接对着主人报的场景：以前每点一次都要 1 秒多（三条 PowerShell），
-    现在第一次预热完，后面每次都是读缓存。
+    覆盖的是启动、点【策略编辑】、刷新设置/关于、保存设置都会走的那几个函数：
+    `license_status()` / `is_licensed()` / `status_text()`。
+    以前它们内部顺手算机器码（Windows 上一条 PowerShell），于是"点一下卡一下"。
     """
     asked = {"n": 0}
 
@@ -341,10 +352,32 @@ def test_license_status_does_not_reask_the_hardware(
     lic.forget_cached_machine_code()
 
     for _ in range(5):
+        status = lic.license_status(cfg)
         lic.is_licensed(cfg)
         lic.status_text(cfg)
 
-    assert asked["n"] == 1
+    assert asked["n"] == 0, f"日常路径读了 {asked['n']} 次硬件指纹（应当是 0 次）"
+    assert status["machine"] == "", "没校验时 machine 应当是空串（一眼看出没读过机器码）"
+
+
+def test_only_verify_machine_reads_the_hardware(lic: L, cfg: Config,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    """只有 `verify_machine=True`（打开授权对话框 / 点【注册】那一路）才读机器码，且只读一次。"""
+    asked = {"n": 0}
+
+    def counting():
+        asked["n"] += 1
+        return ["CPU-1", "BOARD-1", "DISK-1"]
+
+    monkeypatch.setattr(lic, "_fingerprint_parts", counting)
+    lic.forget_cached_machine_code()
+
+    first = lic.license_status(cfg, verify_machine=True)
+    for _ in range(3):
+        lic.license_status(cfg, verify_machine=True)
+
+    assert asked["n"] == 1, f"读了 {asked['n']} 次（缓存之后应当只有 1 次）"
+    assert first["machine"] == lic.machine_code()
 
 
 def test_machine_code_is_not_persisted_to_the_license_file(
