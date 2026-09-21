@@ -737,6 +737,11 @@ if QT_AVAILABLE:
             #: 每次开始新一轮【运行】时先清空它：**绝不导出上一轮的陈结果**。
             self.last_run: dict | None = None
             self.hint_text: str = ""
+            #: 【策略编辑】的**闸门**（`ui/app.py` 挂上来的回调，见 `on_open_editor`）：
+            #: 返回空串 = 放行；返回中文原因 = 已拦下（未授权时由主窗口弹授权对话框）。
+            #: 为什么做成回调而不是页面自己判断授权：授权逻辑只允许有一处
+            #: （`licensing`），这一页不该知道"授权"这件事怎么算。
+            self.open_editor_guard: Any = None
             #: 公式行的勾选框（键 = 公式名）。竞价那一行单独存在 `_auction_box`
             #: （只有一行，不值当再开一个字典）。
             self._row_boxes: dict[str, Any] = {}
@@ -1686,7 +1691,21 @@ if QT_AVAILABLE:
         # ── 编译器 / 校验 / 运行 ──────────────────────────────────────
 
         def on_open_editor(self, spec: Any = None) -> None:
-            """打开公式编辑器（点【策略编辑】按钮，或点列表里的公式行）。"""
+            """打开公式编辑器（点【策略编辑】按钮，或点列表里的公式行）。
+
+            未授权时**不开编辑器**：交给主窗口挂上来的 `open_editor_guard`（它会弹授权
+            对话框），这里只把那句原因写进提示区 —— 用户点了按钮必须有反应。
+            """
+            guard = getattr(self, "open_editor_guard", None)
+            if callable(guard):
+                try:
+                    reason = guard()
+                except Exception as exc:  # noqa: BLE001 - 闸门自己坏了不该锁死编辑器
+                    logger.warning(f"策略编辑闸门出错（按放行处理）：{exc}")
+                    reason = ""
+                if reason:
+                    self._set_hint("🔒 " + str(reason))
+                    return
             if spec is not None:
                 self._load_spec(spec)
             elif not self.editor.toPlainText().strip() and not self.name_edit.text().strip():

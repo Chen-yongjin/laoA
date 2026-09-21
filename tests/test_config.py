@@ -862,7 +862,10 @@ def test_default_pet_and_voice_are_on() -> None:
     assert cfg.notify_pet is True
     assert cfg.notify_voice is True
     assert cfg.notify_voice_volume == 0.9        # 「大声喊」
-    assert cfg.notify_voice_rate == 0            # 正常语速
+    # 语速是**倍率**：1.0 = 正常（用户 2026-09-18："语速默认改成 1 正常点"）
+    assert cfg.notify_voice_rate == 1.0
+    assert cfg.notify_voice_name == ""           # 空 = 自动挑中文音色
+    assert cfg.notify_voice_digits is True       # 代码/价格逐位念（默认开）
     assert (cfg.pet_x, cfg.pet_y) == (0, 0)      # 0 = 还没拖过 → 默认右下角
 
 
@@ -878,14 +881,49 @@ def test_pet_and_voice_keys_are_validated(tmp_path: Path) -> None:
     )
     cfg = load_config(path=path, use_env=False)
     assert cfg.notify_voice_volume == 1.0        # 夹到上限（"想更响一点"就按上限办）
-    assert cfg.notify_voice_rate == 10
+    # 99 不在倍率区间（0.5~2.0）里 → 按**老配置的 SAPI 整数**认，夹到 10 再换算成倍率上限
+    assert cfg.notify_voice_rate == 2.0
     assert cfg.pet_x == 0                        # 负数 = 屏幕外，当没记过
     assert cfg.pet_y == 12
 
     path.write_text('notify_voice_volume = "响"\nnotify_voice_rate = "快"\n',
                     encoding="utf-8")
     cfg = load_config(path=path, use_env=False)
-    assert cfg.notify_voice_volume == 0.9 and cfg.notify_voice_rate == 0
+    assert cfg.notify_voice_volume == 0.9 and cfg.notify_voice_rate == 1.0
+
+
+def test_voice_rate_accepts_both_new_multiplier_and_legacy_sapi_rate(tmp_path: Path) -> None:
+    """语速既能读**新写法**（倍率 1 = 正常），也能读**老写法**（SAPI 的 -10~10）。
+
+    为什么要兼容：2026-09-18 之前的配置里存的是 SAPI 整数，用户升级之后语速不能
+    突然变快或变慢。判据是区间：0.5~2.0 当倍率，其余当老整数换算（见
+    `config._normalize_voice_rate` 的注释，包括 1/2 那个已知的模糊地带）。
+    """
+    path = tmp_path / "config.toml"
+    for raw, expected in (("1.0", 1.0), ("1.5", 1.5), ("0.5", 0.5),
+                          ("0", 1.0),          # 老写法的"正常" → 倍率 1.0
+                          ("-5", 0.67), ("5", 1.48), ("10", 2.0), ("-10", 0.5),
+                          ("3.0", 1.27),       # 倍率区间外 → 当老 SAPI 的 3（略快）→ 1.27
+                          ("20", 2.0)):        # 老整数越界 → 夹到 10 → 倍率上限 2.0
+        path.write_text(f"notify_voice_rate = {raw}\n", encoding="utf-8")
+        cfg = load_config(path=path, use_env=False)
+        assert cfg.notify_voice_rate == expected, (raw, cfg.notify_voice_rate)
+
+
+def test_voice_name_accepts_gender_enum_and_ignores_legacy_voice_names(tmp_path: Path) -> None:
+    """音色只认 自动/男声/女声 三个值；老配置里的"某个音色完整名"一律当自动。
+
+    为什么老值不当自动之外的东西：界面已经不再列具体音色（用户改成按性别选），
+    留着一个选不中的名字会让"设置页显示自动、实际却用着那个音色"两处对不上。
+    """
+    path = tmp_path / "config.toml"
+    for raw, expected in (('""', ""), ('"auto"', ""), ('"female"', "female"),
+                          ('"male"', "male"), ('"女声"', "female"), ('"男声"', "male"),
+                          ('"Microsoft Huihui Desktop"', ""),   # 老写法 → 自动
+                          ('"乱写"', "")):
+        path.write_text(f"notify_voice_name = {raw}\n", encoding="utf-8")
+        cfg = load_config(path=path, use_env=False)
+        assert cfg.notify_voice_name == expected, (raw, cfg.notify_voice_name)
 
 
 def test_pet_and_voice_env_switches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

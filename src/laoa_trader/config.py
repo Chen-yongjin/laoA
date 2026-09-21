@@ -366,6 +366,60 @@ def parse_scan_at(value: Any) -> list[str]:
     return split_scan_at(value)[0]
 
 
+#: 朗读语速的倍率范围（界面给的就这个区间；1.0 = 正常）
+VOICE_RATE_MIN = 0.5
+VOICE_RATE_MAX = 2.0
+
+#: 音色的三个取值（`notify_voice_name`）：空/auto = 自动挑中文，其余按性别挑
+VOICE_GENDERS: tuple[str, ...] = ("female", "male")
+VOICE_NAME_AUTO = ""
+
+
+def _normalize_voice_rate(value: Any) -> float:
+    """语速 → **倍率**（1.0 = 正常）。老配置里的 SAPI 整数会被认出来并换算。
+
+    判据（为什么这样分）：界面现在写的是倍率，范围 0.5~2.0；而 2026-09-18 之前
+    存的是 Windows SAPI 的 Rate（-10~10）。两拨值的区间**几乎不重叠**，所以：
+
+    * 落在 `[0.5, 2.0]` → 当成倍率（新配置）；
+    * 其余（例如 0 / -5 / 8 / 20）→ 当成老配置的 SAPI 整数，按同一映射反算成倍率
+      （`sapi_to_rate`），越界夹到边界、乱码回 1.0；
+    * 有个已知的模糊地带：老的 `1` / `2` 落在倍率区间里，会被当成倍率。
+      代价很小（老 1 ≈ 略快、新 1.0 = 正常；老 2 ≈ 略快、新 2.0 = 明显更快），
+      而"把新配置的 1.0 误判成老 SAPI 的 1"才是更糟的方向 —— 所以宁可这样分。
+    """
+    from laoa_trader.notify import voice as voice_mod
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    if VOICE_RATE_MIN <= number <= VOICE_RATE_MAX:
+        return round(number, 2)
+    # 老配置：SAPI 的 -10~10（越界先夹住，再换算）
+    legacy = min(max(number, -10.0), 10.0)
+    return voice_mod.sapi_to_rate(legacy)
+
+
+def _normalize_voice_name(value: Any) -> str:
+    """音色 → 枚举值（`""` / `female` / `male`）；老的"完整音色名"一律当自动。
+
+    为什么老值不保留：界面已经不再列具体音色了（用户要求改成"男声/女声"），
+    留着一个选不中的名字只会让"设置页显示自动、实际用的是那个音色"两处对不上。
+    """
+    text = str(value or "").strip().lower()
+    if text in ("", "auto", "自动"):
+        return VOICE_NAME_AUTO
+    if text in VOICE_GENDERS:
+        return text
+    # 中文写法也认（配置文件里手写"女声"很自然）
+    if text in ("女声", "female", "woman"):
+        return "female"
+    if text in ("男声", "male", "man"):
+        return "male"
+    return VOICE_NAME_AUTO
+
+
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     """整数必须落在 `[minimum, maximum]` 内；写错或越界**一律回默认值**。
 
@@ -505,13 +559,23 @@ class Config:
     #: 走 Windows 自带的语音合成（不引新依赖，详见 `notify/voice.py`）。
     #: 默认开；这台机器**没有中文音色**时自动不念（英文音色念中文是怪腔怪调）。
     notify_voice: bool = True
-    #: 朗读音量（0~1）与语速（Windows SAPI 的 Rate：-10 最慢 ~ 10 最快）
+    #: 朗读音量（0~1）
     notify_voice_volume: float = 0.9
-    notify_voice_rate: int = 0
-    #: **指定音色**（用户 2026-09-18："设置里桌宠声音可以自由改"）：空 = 自动挑中文音色；
-    #: 填系统里某个音色的完整名字（设置页那个下拉框写进去的就是它）。指定的音色在本机
-    #: 不存在时回落到"自动挑中文"，不会因为换了台机器就念不出来。
+    #: **语速：倍率**，1.0 = 正常（用户 2026-09-18："语速默认改成 1 正常点"）。
+    #: 界面给 0.5~2.0（小于 1 更慢、大于 1 更快），内部再换算成 Windows SAPI 的
+    #: Rate（-10~10，那是近似对数的量纲，换算见 `notify/voice.py` 的 `rate_to_sapi()`）。
+    #: 老配置里存的是 SAPI 的整数（-10~10），加载时按同一映射反算（见 `_normalize_voice_rate`）。
+    notify_voice_rate: float = 1.0
+    #: **音色**（用户 2026-09-18："音色改成让用户可选男声和女声，而不是中英文"）：
+    #: `""` / `"auto"` = 自动挑中文音色（推荐）；`"female"` = 女声；`"male"` = 男声。
+    #: 老配置里存的是某个音色的完整名字 —— 那种值现在**认不出来，一律当自动**
+    #: （界面已经不再列具体音色了；见 `_normalize_voice_name`）。
     notify_voice_name: str = ""
+    #: **数字逐位朗读**（用户 2026-09-18："播报代码可以设置成一个一个读数字吗？
+    #: 现在直接是 6 万零 5 百一十九"）：把股票代码与价格逐位念出来
+    #: （`600519` → 六零零五一九、`1234.56` → 一二三四点五六）；成交量/家数这类
+    #: 带单位或百分号的"数量"保持整读。默认开，可以关掉（关掉回到整数字念法）。
+    notify_voice_digits: bool = True
     # ── 单频道开关（老配置沿用；与 notify_channels 同时生效）──
     #: （`notify_windows` 已于 2026-09-18 随那一整路删除；老配置里还有它也不会报错）
     notify_feishu: bool = True
@@ -710,17 +774,14 @@ class Config:
         self.notify_flash_seconds = _bounded_int(
             self.notify_flash_seconds, DEFAULT_NOTIFY_FLASH_SECONDS, 0, 120
         )
-        # 朗读音量 0~1、语速 -10~10（Windows SAPI 的量纲）：越界夹取、乱码回默认。
-        # 夹取而不是回默认：`notify_voice_volume = 1.5` 明显是"想更响一点"，
-        # 按 1.0 办比丢回 0.9 更贴近本意；而语速写 20 就是"想更快"，按 10 办。
+        # 朗读音量 0~1：越界夹取、乱码回默认。夹取而不是回默认：`notify_voice_volume = 1.5`
+        # 明显是"想更响一点"，按 1.0 办比丢回 0.9 更贴近本意。
         try:
             self.notify_voice_volume = min(max(float(self.notify_voice_volume), 0.0), 1.0)
         except (TypeError, ValueError):
             self.notify_voice_volume = 0.9
-        try:
-            self.notify_voice_rate = min(max(int(self.notify_voice_rate), -10), 10)
-        except (TypeError, ValueError):
-            self.notify_voice_rate = 0
+        self.notify_voice_rate = _normalize_voice_rate(self.notify_voice_rate)
+        self.notify_voice_name = _normalize_voice_name(self.notify_voice_name)
         # 桌宠坐标：负数会让它跑到屏幕外（用户就只能靠改配置文件找回来了），一律当没记过。
         # 0 是"还没拖过"的哨兵值（真实桌面上 x=0 也几乎不可能是用户想要的位置）。
         for attr in ("pet_x", "pet_y"):

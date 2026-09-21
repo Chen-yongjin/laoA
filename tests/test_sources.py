@@ -119,11 +119,13 @@ def test_registry_has_all_builtin_sources() -> None:
     # CAP_DAILY_HISTORY 加回来，界面就会写着"历史日K"而实际取不到，
     # 用户只会认为"这个源坏了"—— 能力声明是给用户看的承诺，不是实现清单。
     assert pub_info.capabilities == frozenset({sources.CAP_SNAPSHOT})
-    # 没接通的链路必须在界面能看到的 note 里点名，否则用户会归因错误
-    # 没接通的链路要在界面能看到的 note 里点名（概览现在**有**免 Key 兜底，所以这里
-    # 点名的是"完整历史下载与选股"——2026-09-18 用户拍板：那两样要 Key）
-    assert "大盘概览" in pub_info.note and "完整历史下载" in pub_info.note
-    assert pub_info.note            # 风险与口径如实写在这一行里（界面直接显示它）
+    # note 是**界面直接显示**的那句话。2026-09-20 用户要求把它压成一句
+    # （"只保留当前用哪个来源 / 怎么申请 Key 这类有用的，纯解释的长句全删"），
+    # 所以这里钉的是新口径：一句话说清"它是兜底、免 Key、不用申请"，
+    # 且**不再**出现能力清单、实测数字、限流故事、字段清单这些解释性文字。
+    assert pub_info.note == "兜底源：免 Key，不用申请、不用填。"
+    for jargon in ("实测", "限流", "字段", "data/public_market.py", "完整历史"):
+        assert jargon not in pub_info.note, jargon
 
 
 def test_every_snapshot_source_has_a_fetcher() -> None:
@@ -289,13 +291,16 @@ def test_source_states_default_order_and_texts() -> None:
     # 两边的角色说明必须是**新口径**（这一栏直接显示在界面上，写错就是在说假话）
     hx_note = states["hithink"]["note"]
     pub_note = states["public"]["note"]
-    assert hx_note
-    assert "主源" in hx_note and "默认排第一" in hx_note       # 同花顺 = 主源
-    assert "兜底" in hx_note                                   # 公开源在它这里是兜底
-    assert pub_note
-    assert "兜底" in pub_note and "没配同花顺 Key" in pub_note  # 公开源 = 兜底源
-    # 兜底源也不能过度承诺：完整历史与选股仍然要同花顺 Key（2026-09-18 用户拍板）
-    assert "完整历史" in pub_note and "选股" in pub_note
+    # 2026-09-20 起：这两句都压成了**一句话**（用户："只保留当前用哪个来源 / 怎么申请
+    # Key 这类有用的，纯解释的长句全删"）。钉住的是"留下的是哪两件有用的事"：
+    assert "主源" in hx_note and "申请" in hx_note             # 同花顺 = 主源 + 去哪申请
+    assert "fuyao.aicubes.cn" in hx_note                        # 申请地址必须还在（可点）
+    assert "选股" in hx_note                                    # 没 Key 的后果：选股被自检拒绝
+    assert "config.toml" not in hx_note and "环境变量" not in hx_note   # 实现细节不上界面
+    assert pub_note == "兜底源：免 Key，不用申请、不用填。"
+    # 两句话都必须短（长文就是这次要清掉的东西）
+    # 短到"一眼看完"：同花顺那句 65 字（主源 + 申请地址 + 没 Key 的后果），公开源 16 字
+    assert len(hx_note) <= 80 and len(pub_note) <= 30
 
 
 def test_source_states_capabilities_text_drops_missing_ones() -> None:

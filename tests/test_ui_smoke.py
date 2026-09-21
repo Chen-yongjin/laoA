@@ -875,8 +875,14 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     # 所以列表里是两行、同花顺排第一（**列表顺序 = 优先级**）
     assert window.cfg.data_sources == ["hithink", "public"]   # 2026-09-18：同花顺回到主源
     assert "同花顺金融数据服务（内置）" in window.data_source_label.text()
-    assert "hithink" in window.data_source_label.text()        # 把配置里的原值也写出来
-    assert window.data_source_label.text().startswith("取数顺序")   # 顺序 = 优先级
+    assert "公开行情源" in window.data_source_label.text()      # 两个来源都如实列出来
+    # 顺序 = 优先级：同花顺（主源）必须排在公开源**前面**（这是用户看这一行的目的）
+    label = window.data_source_label.text()
+    assert label.startswith("当前来源（按优先级）")
+    assert label.index("同花顺") < label.index("公开行情源")
+    # 2026-09-20（用户："纯解释的长句全删…界面不需要教配置"）：配置键名与那串 TOML
+    # 写法不再出现在界面上 —— 用户看这一行只想知道"现在用哪几个来源"
+    assert "config.toml" not in label and "data_sources" not in label
     # 列表只画**已启用**的来源（这一份配置里的两个）；能力文案来自注册表
     assert list(window.source_rows) == [ui_app.BUILTIN_SOURCE, "public"]
     from laoa_trader.data import sources as sources_mod
@@ -1874,7 +1880,7 @@ def test_window_title_is_just_the_app_name(window, qapp) -> None:
     qapp.processEvents()
     blob = "\n".join(lb.text() for lb in window.about_dialog.findChildren(
         type(window.market_title)))
-    assert f"版本：{laoa_trader.__version__}（测试版）" in blob
+    assert f"版本：{laoa_trader.__version__}" in blob
     assert "版权所有" in blob
     window.about_dialog.close()
     # 【显示详情】里也有版本号（报障时要贴的就是那段）
@@ -1894,7 +1900,7 @@ def test_about_dialog_shows_version_and_copyright(window, qapp) -> None:
     texts = [label.text() for label in dialog.findChildren(QLabel)]
     blob = "\n".join(texts)
     assert "老牛选股" in blob          # 软件名（用户 2026-09-20 改名）
-    assert f"版本：{laoa_trader.__version__}（测试版）" in blob
+    assert f"版本：{laoa_trader.__version__}" in blob
     assert "作者 / 版权所有人：async-chen" in blob
     assert "版权所有 © 2026 async-chen，保留所有权利。" in blob
     # 数据来源那一行现在把**公开源写在前面**（2026-09-17：公开源是主源、同花顺是备用），
@@ -1925,7 +1931,7 @@ def test_about_copy_version_info_to_clipboard(window, qapp) -> None:
     lines = QApplication.clipboard().text().splitlines()
     assert lines == [
         "老牛选股",
-        f"版本：{laoa_trader.__version__}（测试版）",
+        f"版本：{laoa_trader.__version__}",
         "版权所有 © 2026 async-chen，保留所有权利。",
     ]
     assert "已复制版本信息" in window.status_label.fullText()
@@ -2106,7 +2112,7 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
     # `notify_voice_name` 是 2026-09-20 加的（用户："设置里桌宠声音可以自由改" →
     # 音色下拉框，空字符串 = 自动挑中文）
     "notify_pet", "notify_voice", "notify_voice_volume", "notify_voice_rate",
-    "notify_voice_name",
+    "notify_voice_name", "notify_voice_digits",
     # 3) 竞价扫描
     "intraday_auction", "auction_min_pct", "auction_max_pct", "auction_min_amount",
     "auction_min_volume_ratio", "auction_min_score", "auction_alert_max_items",
@@ -2146,11 +2152,12 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     } - SETTINGS_KEYS
     updates = window._collect_settings_updates()
     assert set(updates) == SETTINGS_KEYS | extra_key_fields
-    # 当前：38 个固定键（35 → 33：删掉 Windows 通知那一路时
+    # 当前：39 个固定键（35 → 33：删掉 Windows 通知那一路时
     # `notify_windows_sound` / `notify_windows_open_url` 随之取消；
     # 33 → 37：加上桌宠与中文朗读的 4 个键；
-    # 37 → 38：用户要求"桌宠声音可以自由改"，加上音色下拉的 `notify_voice_name`）
-    assert len(updates) == 38
+    # 37 → 38：用户要求"桌宠声音可以自由改"，加上音色下拉的 `notify_voice_name`；
+    # 38 → 39：用户要求"播报代码逐位念"，加上 `notify_voice_digits`）
+    assert len(updates) == 39
     # 2026-09-18 起**必须收**它：内置同花顺那一行有输入框，一键保存就该把它写回去
     # （出厂值是空串，程序从不预置；"填了没保存"才是要防的那件事）
     assert "hithink_api_key" in updates
@@ -3232,11 +3239,12 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     qapp.processEvents()
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
     assert f'{fake_key} = "token-abc"' in text
-    # 38 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 39 项
+    # 39 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 40 项
     # （35 + 1 → 33 + 1：2026-09-18 删掉 Windows 通知那一路少了两个键；
     #  33 + 1 → 37 + 1：加上桌宠与中文朗读的四个键；
-    #  37 + 1 → 38 + 1：用户要求"桌宠声音可以自由改"，加上 `notify_voice_name`）
-    assert window.save_settings_hint.text().startswith("✅ 已保存 39 项")
+    #  37 + 1 → 38 + 1：用户要求"桌宠声音可以自由改"，加上 `notify_voice_name`；
+    #  38 + 1 → 39 + 1：用户要求"播报代码逐位念"，加上 `notify_voice_digits`）
+    assert window.save_settings_hint.text().startswith("✅ 已保存 40 项")
     # 内置同花顺的 Key 也在这份键集合里（它的输入框和替身来源的走同一条规则）
     assert "hithink_api_key" in window._collect_settings_updates()
 

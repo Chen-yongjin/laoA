@@ -549,6 +549,31 @@ def sqlite_conn(db: str):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_license_state(tmp_path_factory, monkeypatch):
+    """每个用例都用一份**干净的授权状态**（默认：刚装上、试用第 1 天）。
+
+    为什么必须隔离：授权状态文件在 `%APPDATA%\LaoATrader\license.json`（开发机上
+    也可能真的存在）。不隔离的话，**测试行为会跟着开发机/CI 机器上那份文件变**：
+    那里写着"试用到期"时，每个建 `MainWindow` 的用例都会多弹一个授权窗口，
+    定时器与窗口数跟着变（这类差异最难的是一开始就看不出来 —— 本机全绿、CI 上偶发崩）。
+    用 monkeypatch 指到 tmp_path，pytest 结束自动还原。
+    """
+    from laoa_trader import clock, licensing as licensing_mod
+
+    # ⚠️ 用 `tmp_path_factory`（会话临时根下的独立目录）而不是 `tmp_path`：
+    # 后者是本用例的"工作目录"，有些用例会断言"这个目录里现在只有哪几个文件"
+    # （桌面导出、公式保存各有一条），往里塞东西会把它们弄红 —— 实测踩过。
+    path = tmp_path_factory.mktemp("license-state") / "license.json"
+    today = clock.today_cn()
+    path.write_text('{"first_run": "%s", "max_seen": "%s"}' % (today, today),
+                    encoding="utf-8")
+    # 注意：这里刻意**只**隔离授权状态文件。数据库那份（`app_state` 表）跟着各用例
+    # 自己的 `cfg.db_path` 走 —— 它们是 tmp 目录里的独立库，不会互相串。
+    monkeypatch.setattr(licensing_mod, "state_path", lambda: path)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _close_orphan_top_level_windows():
     """每个用例收尾：把**没有父窗口**的顶层窗口（桌宠 / 消息列表 / 浮窗）显式关掉。
 
@@ -568,7 +593,7 @@ def _close_orphan_top_level_windows():
         return
     for widget in list(QApplication.topLevelWidgets()):
         name = type(widget).__name__
-        if name not in ("DesktopPet", "MessageCenter", "AlertPopup"):
+        if name not in ("DesktopPet", "MessageCenter", "AlertPopup", "LicenseDialog"):
             continue
         try:
             shutdown = getattr(widget, "shutdown", None)

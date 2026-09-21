@@ -51,7 +51,10 @@ def _quiet_voice(monkeypatch: pytest.MonkeyPatch):
     """
     spoken: list[str] = []
     monkeypatch.setattr(voice, "available", lambda: True)
-    monkeypatch.setattr(voice, "_list_voices_raw", lambda: [("Fake 中文", "zh-CN")])
+    # 两条假音色（女/男各一条）：'按性别挑'这条链要靠它们验
+    monkeypatch.setattr(voice, "_list_voices_raw",
+                        lambda: [("Fake 中文 女", "zh-CN", "Female"),
+                                 ("Fake 中文 男", "zh-CN", "Male")])
     voice.reset_cache()
     voice.unmute()
     monkeypatch.setattr(voice, "run_command", lambda command: spoken.append(" ".join(command)))
@@ -191,7 +194,8 @@ def test_alert_makes_the_pet_bubble_and_speaks(window, qapp, _quiet_voice) -> No
 
         _time.sleep(0.01)
     assert _quiet_voice, "没有把这句话送去朗读"
-    assert "600519" in _quiet_voice[0] and "止损提醒" in _quiet_voice[0]
+    # 代码与价格**逐位**念（用户 2026-09-18："播报代码可以设置成一个一个读数字吗"）
+    assert "六零零五一九" in _quiet_voice[0] and "止损提醒" in _quiet_voice[0]
 
 
 def test_several_alerts_speak_only_the_newest_and_say_how_many_more(
@@ -465,29 +469,31 @@ def _alert_rows(cfg) -> list[tuple]:
 # 【试听】按**面板当前**的参数念（不必先保存）。
 
 
-def test_voice_picker_lists_system_voices_and_defaults_to_auto(window) -> None:
-    """下拉框：第一项是"自动挑中文"，后面是本机装着的音色。"""
+def test_voice_picker_offers_genders_not_voice_names(window) -> None:
+    """下拉框只给三项：自动（推荐）/ 女声 / 男声（用户："音色改成让用户可选男声和女声，
+    而不是中英文" —— 所以这里**不再**逐条列音色名）。"""
     box = window.voice_name_box
 
-    assert box.count() >= 1
-    assert box.itemData(0) == ""                     # 空 = 自动挑中文
+    assert [box.itemData(i) for i in range(box.count())] == ["", "female", "male"]
     assert "自动" in box.itemText(0)
-    # 用例里把音色名单固定成一条假的（见 `_quiet_voice`），它应当出现在第二项
-    assert box.count() == 2
-    assert box.itemData(1) == "Fake 中文"
-    assert "zh-CN" in box.itemText(1)                # 名字后面带着区域，便于区分
+    assert box.itemText(1) == "女声" and box.itemText(2) == "男声"
+    # 关掉再开也不会多出别的项（枚举失败/成功都不影响这三项）
+    window._fill_voice_names()
+    assert box.count() == 3
 
 
 def test_voice_picker_choice_is_saved_and_used(window, qapp) -> None:
-    """选一个音色 → 一键保存写回 `notify_voice_name`，并且下次念就用它。"""
+    """选「女声」→ 一键保存写回 `notify_voice_name`，并且下次念就用那个性别的音色。"""
     box = window.voice_name_box
-    box.setCurrentIndex(box.findData("Fake 中文"))
+    box.setCurrentIndex(box.findData("female"))
 
     window.on_save_settings()
     qapp.processEvents()
 
-    assert window.cfg.notify_voice_name == "Fake 中文"
-    assert 'notify_voice_name = "Fake 中文"' in window.cfg.source_path.read_text(encoding="utf-8")
+    assert window.cfg.notify_voice_name == "female"
+    assert 'notify_voice_name = "female"' in window.cfg.source_path.read_text(encoding="utf-8")
+    # 真挑出来的是那条女性音色（`_quiet_voice` 里喂的两条假音色之一）
+    assert voice.chosen_voice(window.cfg) == "Fake 中文 女"
 
 
 def test_try_listen_speaks_with_the_panel_values(window, qapp, _quiet_voice) -> None:
@@ -500,9 +506,9 @@ def test_try_listen_speaks_with_the_panel_values(window, qapp, _quiet_voice) -> 
     import time
 
     spoken: list[str] = _quiet_voice
-    window.voice_name_box.setCurrentIndex(window.voice_name_box.findData("Fake 中文"))
+    window.voice_name_box.setCurrentIndex(window.voice_name_box.findData("male"))
     window.voice_volume_box.setValue(60)
-    window.voice_rate_box.setValue(-2)
+    window.voice_rate_box.setValue(1.5)          # 语速是倍率：1.5 = 稍快
     before = window.cfg.source_path.read_text(encoding="utf-8")
 
     window.on_try_voice()
@@ -513,10 +519,10 @@ def test_try_listen_speaks_with_the_panel_values(window, qapp, _quiet_voice) -> 
         qapp.processEvents()
         time.sleep(0.01)
 
-    assert spoken, "【试听】没有把朗读命令发出去"
+    assert spoken, "【试听】没有把把朗读命令发出去"
     command = spoken[0]
-    assert "SelectVoice('Fake 中文')" in command      # 用的是下拉里选的那个音色
+    assert "SelectVoice('Fake 中文 男')" in command   # 下拉选的是「男声」→ 挑到男声那一条
     assert "$s.Volume = 60" in command                # 面板上的音量
-    assert "$s.Rate = -2" in command                  # 面板上的语速
+    assert "$s.Rate = 5" in command                   # 倍率 1.5 → SAPI 5
     assert window.cfg.source_path.read_text(encoding="utf-8") == before   # 试听不写配置
     assert window.cfg.notify_voice_name == ""         # 也没偷偷改内存里的配置

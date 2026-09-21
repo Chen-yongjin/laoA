@@ -104,8 +104,12 @@ def _powershell() -> str | None:
     return None
 
 
-def _list_voices_raw() -> list[tuple[str, str]]:
-    """枚举系统音色 → `[(名字, 区域)]`；失败返回空列表（**不抛异常**）。
+def _list_voices_raw() -> list[tuple[str, str, str]]:
+    """枚举系统音色 → `[(名字, 区域, 性别)]`；失败返回空列表（**不抛异常**）。
+
+    性别（`$i.Gender`，取值 `Male` / `Female` / `NotSet`）是 2026-09-18 加的：
+    用户要求把"音色"改成**男声 / 女声**可选，而不是按中英文列一堆音色名。
+    有些语音不报性别（`NotSet`）—— 那时按空串处理，挑选逻辑会退回"自动挑中文"。
 
     单独一层是为了让测试能替换掉（CI 上没有 Windows，也不该真去起进程）。
     """
@@ -115,7 +119,7 @@ def _list_voices_raw() -> list[tuple[str, str]]:
     script = (
         "Add-Type -AssemblyName System.Speech;"
         "(New-Object System.Speech.Synthesis.SpeechSynthesizer).GetInstalledVoices()"
-        " | ForEach-Object { $i=$_.VoiceInfo; \"$($i.Name)|$($i.Culture)\" }"
+        " | ForEach-Object { $i=$_.VoiceInfo; \"$($i.Name)|$($i.Culture)|$($i.Gender)\" }"
     )
     try:
         done = subprocess.run(
@@ -126,27 +130,55 @@ def _list_voices_raw() -> list[tuple[str, str]]:
     except Exception as exc:  # noqa: BLE001 - 环境问题一律降级，不往上抛
         logger.debug(f"枚举语音失败（当作没有可用音色）：{exc}")
         return []
-    voices: list[tuple[str, str]] = []
+    voices: list[tuple[str, str, str]] = []
     for line in (done.stdout or "").splitlines():
-        name, _, culture = line.strip().partition("|")
+        name, _, rest = line.strip().partition("|")
+        culture, _, gender = rest.partition("|")
         if name:
-            voices.append((name, culture.strip()))
+            voices.append((name, culture.strip(), _normalize_gender(gender)))
     return voices
 
 
-def installed_voices(*, refresh: bool = False) -> list[tuple[str, str]]:
-    """系统里装着的音色 → `[(名字, 区域)]`（缓存；`refresh=True` 重新枚举）。
+def _normalize_gender(raw: Any) -> str:
+    """SAPI 的 `Gender` → `"female"` / `"male"` / `""`（认不出来就是空串）。"""
+    text = str(raw or "").strip().lower()
+    if text.startswith("f"):
+        return "female"
+    if text.startswith("m"):
+        return "male"
+    return ""
 
-    给设置页那个**音色下拉**用（用户 2026-09-18："设置里桌宠声音可以自由改"）：
-    列表里可能有英文音色 —— 界面照列，但**默认项是"自动挑中文"**，
-    因为英文音色念中文是怪腔怪调（那是给懂英文的人听另一种语言用的）。
+
+def normalize_voices(voices: Any) -> list[tuple[str, str, str]]:
+    """把音色名单统一成 `(名字, 区域, 性别)` 三元组（性别规范成 `female`/`male`/`""`）。
+
+    规范化放在**进缓存这一步**、而不是只放在 PowerShell 解析那一层：测试替身直接喂
+    `("Huihui", "zh-CN", "Female")` 这种原始值，两条路必须得到同一个结果 ——
+    否则"真实环境挑得对、测试里看着也对"就成了假象。
+    """
+    out: list[tuple[str, str, str]] = []
+    for item in (voices or []):
+        parts = list(item) if isinstance(item, (list, tuple)) else [item]
+        name = str(parts[0] if parts else "").strip()
+        culture = str(parts[1] if len(parts) > 1 else "").strip()
+        gender = _normalize_gender(parts[2] if len(parts) > 2 else "")
+        if name:
+            out.append((name, culture, gender))
+    return out
+
+
+def installed_voices(*, refresh: bool = False) -> list[tuple[str, str, str]]:
+    """系统里装着的音色 → `[(名字, 区域, 性别)]`（缓存；`refresh=True` 重新枚举）。
+
+    给"漂不挑得到男声/女声"用（用户 2026-09-18：音色改成男声/女声可选）。
+    设置页不再逐个列音色名（那是上一版的做法，用户要求改掉）。
     """
     global _voices
     if not available():
         return []
     with _voices_lock:
         if _voices is None or refresh:
-            _voices = _list_voices_raw()
+            _voices = normalize_voices(_list_voices_raw())
         return list(_voices)
 
 
@@ -168,12 +200,12 @@ def voice_name() -> str | None:
         return None
     with _voices_lock:
         if _voices is None:
-            _voices = _list_voices_raw()
+            _voices = normalize_voices(_list_voices_raw())
         voices = list(_voices)
-    simplified = [name for name, culture in voices if culture.lower().startswith("zh-cn")]
+    simplified = [v[0] for v in voices if v[1].lower().startswith("zh-cn")]
     if simplified:
         return simplified[0]
-    chinese = [name for name, culture in voices if culture.lower().startswith("zh")]
+    chinese = [v[0] for v in voices if v[1].lower().startswith("zh")]
     if chinese:
         return chinese[0]
     if voices:
@@ -241,6 +273,79 @@ def sanitize(text: Any) -> str:
     return out.strip("，,、;；:：-— ")
 
 
+#: 逐位朗读用的汉字
+_CHINESE_DIGITS = {"0": "零", "1": "一", "2": "二", "3": "三", "4": "四",
+                   "5": "五", "6": "六", "7": "七", "8": "八", "9": "九",
+                   ".": "点", "-": "负"}
+
+#: 数字（含可选的负号与小数部分）
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+
+#: 跟在这些字后面的数字是**数量**（成交量、家数、天数、百分比、倍数…），保持整读：
+#: "五百零七家"比"五零七家"顺耳得多；而代码与价格要一位一位听才准。
+_UNIT_AFTER = set("%％万亿手只家元股天倍条个点年")
+
+#: 六位以上的纯整数按**代码**处理（A 股代码就是 6 位）
+_CODE_MIN_DIGITS = 6
+
+
+def digits_for_speech(text: Any) -> str:
+    """把"该逐位念"的数字改成逐位（用户 2026-09-18 的原话："播报代码可以设置成一个
+    一个读数字吗？现在直接是 6 万零 5 百一十九"）。
+
+    规则（为什么这么分）：
+
+    * **股票代码**（6 位及以上纯整数）→ 逐位：`600519` 整读会变成"六十万零五百一十九"，
+      这正是用户实报的问题；
+    * **价格 / 带小数的数**（`1234.56`）→ 逐位（含"点"）：听价格要一位一位才准；
+    * **带单位或百分号的"数量"**（`500万股`、`37家`、`3.21%`、`2.5倍`）→ **保持整读**：
+      这些按数量念才自然；
+    * **1~5 位纯整数**（条数、天数）→ 保持整读（同上）。
+
+    负数带"负"（`-3.2` → 负三点二）。这个变换只在**朗读**这一路做
+    （消息列表、桌面导出、推送正文里仍然是 `600519` 原样）。
+    """
+    out = str(text or "")
+
+    def _spell(number: str) -> str:
+        return "".join(_CHINESE_DIGITS.get(ch, ch) for ch in number)
+
+    pieces: list[str] = []
+    cursor = 0
+    for match in _NUMBER.finditer(out):
+        raw = match.group(0)
+        digits = raw.lstrip("-")
+        after = out[match.end():match.end() + 1]
+        amount = bool(after) and after in _UNIT_AFTER
+        if amount:
+            keep = True                      # 数量：整读
+        elif "." in digits:
+            keep = False                     # 价格/小数：逐位
+        else:
+            keep = len(digits) < _CODE_MIN_DIGITS   # 6 位以上当代码逐位，短整数整读
+        if keep:
+            continue
+        pieces.append(out[cursor:match.start()])
+        pieces.append(_spell(raw))
+        cursor = match.end()
+    if not pieces:
+        return out
+    pieces.append(out[cursor:])
+    return "".join(pieces)
+
+
+def prepare(text: Any, cfg: Any = None) -> str:
+    """朗读前的最后一道加工：清洗 + （按设置）数字逐位。
+
+    单独一层是为了让 `speak()` 与 `speak_now()` **走同一条路** —— 两条路的文本
+    处理哪怕差一点点，用户就会听到"消息列表里那条念得对、试听念得不对"。
+    """
+    out = sanitize(text)
+    if cfg is None or bool(getattr(cfg, "notify_voice_digits", True)):
+        out = digits_for_speech(out)
+    return out
+
+
 def compose(target: str, kind_label: str, detail: str = "", price: Any = None) -> str:
     """拼一句要念的话：`名称(代码)，类型，说明 现价 x`。
 
@@ -259,17 +364,113 @@ def compose(target: str, kind_label: str, detail: str = "", price: Any = None) -
 # ── 朗读 ─────────────────────────────────────────────────────────────
 
 
-def chosen_voice(cfg: Any = None) -> str | None:
-    """当前该用哪个音色：配置里点名了就用它（**即便不是中文音色** —— 那是用户自己选的），
-    没点名或点名的不在系统里就回到"自动挑中文"。
-    """
-    wanted = str(getattr(cfg, "notify_voice_name", "") or "").strip()
+#: 语速倍率的范围（界面给的就这个区间；1.0 = 正常）
+RATE_MIN = 0.5
+RATE_MAX = 2.0
+
+#: 倍率 → SAPI Rate 的换算底数。SAPI 的 Rate（-10~10）在听感上**近似对数**：
+#: 加减同一个数带来的"快慢变化"是相对量，所以用对数映射而不是线性。
+#: 底数取 2.2 是实测口径：倍率 2.0 → +9、1.5 → +5、1.2 → +2、0.8 → -2、0.5 → -9，
+#: 与"1.0 附近才自然、两端都很难听"的 SAPI 特性对得上（±10 几乎没法听，所以不贴边）。
+_RATE_LOG_BASE = 2.2
+
+
+def rate_to_sapi(multiplier: Any) -> int:
+    """语速倍率（1.0 = 正常）→ Windows SAPI 的 Rate（-10~10）。"""
+    import math
+
+    try:
+        value = float(multiplier)
+    except (TypeError, ValueError):
+        return 0
+    value = min(max(value, RATE_MIN), RATE_MAX)
+    if value <= 0:
+        return 0
+    rate = round(10 * math.log(value) / math.log(_RATE_LOG_BASE))
+    return int(min(max(rate, -10), 10))
+
+
+def sapi_to_rate(rate: Any) -> float:
+    """Windows SAPI 的 Rate（-10~10）→ 语速倍率（老配置反算用）。"""
+    try:
+        value = float(rate)
+    except (TypeError, ValueError):
+        return 1.0
+    value = min(max(value, -10.0), 10.0)
+    multiplier = _RATE_LOG_BASE ** (value / 10.0)
+    return round(min(max(multiplier, RATE_MIN), RATE_MAX), 2)
+
+
+def gender_label(gender: Any) -> str:
+    """`"female"` / `"male"` → 界面上的中文（设置页说明行用它）。"""
+    return {"female": "女声", "male": "男声"}.get(_normalize_gender(gender), "该音色")
+
+
+def voices_of_gender(gender: str) -> list[tuple[str, str, str]]:
+    """某种性别的音色（**中文优先排序**：`zh-CN` → 其它 `zh*` → 其它语言）。"""
+    wanted = _normalize_gender(gender)
     if not wanted:
-        return voice_name()
-    names = [name for name, _culture in installed_voices()]
-    if wanted in names:
-        return wanted
-    logger.info(f"配置里指定的语音「{wanted}」在本机不存在，改用自动挑选")
+        return []
+    same = [v for v in installed_voices() if v[2] == wanted]
+    same.sort(key=lambda v: (0 if v[1].lower().startswith("zh-cn")
+                             else 1 if v[1].lower().startswith("zh") else 2))
+    return same
+
+
+def resolve_gender_voice(gender: str) -> str | None:
+    """按性别挑一个音色；挑不到返回 None（调用方回落到"自动挑中文"）。
+
+    挑选规则（用户 2026-09-18 定的口径）：该性别的音色里 **`zh-CN` 优先，其次任何 `zh*`，
+    再其次该性别的其它语言音色** —— 最后那一档只在"这台机器确实有中文音色"时才用得上
+    （一个中文音色都没有的机器上，`speak()` 那条"没有中文音色就不念"的硬口径会拦住它，
+    不会出现英文音色硬念中文的情况）。
+
+    取不到性别（有些语音报 `NotSet`）时这里自然返回 None → 回落自动。
+    """
+    same = voices_of_gender(gender)
+    if not same:
+        logger.debug(f"没有性别为 {gender} 的音色，改用自动挑中文")
+        return None
+    chinese = [v for v in same if v[1].lower().startswith("zh")]
+    if chinese:
+        return chinese[0][0]
+    # 该性别只有非中文音色：机器上还有中文音色的话，用它（用户明确点了这个性别）；
+    # 一个中文音色都没有就直接回落自动 —— 自动那边会返回 None（不念）。
+    return same[0][0] if voice_name() is not None else None
+
+
+def configured_gender(cfg: Any = None) -> str:
+    """配置里的音色选项 → `"female"` / `"male"` / `""`（自动）。
+
+    老配置里存的是**音色完整名**（上一版的写法）—— 认不出来一律当自动，
+    原因见 `config._normalize_voice_name`：界面已经不再列具体音色，
+    留一个选不中的名字只会让"设置页显示自动、实际却用着某个音色"两处对不上。
+    """
+    raw = str(getattr(cfg, "notify_voice_name", "") or "").strip().lower()
+    if raw in ("female", "女声"):
+        return "female"
+    if raw in ("male", "男声"):
+        return "male"
+    return ""
+
+
+def chosen_voice(cfg: Any = None) -> str | None:
+    """当前该用哪个音色（优先级从高到低）。
+
+    1. **调用方已经解析好的具体音色名**（`speak_now(voice=...)` 合成的临时配置，见
+       `_VoiceOverride.resolved_voice`）—— 设置页【试听】走的就是这条路：面板上选的是
+       "男声"，界面先把它解析成一个具体音色名再传进来；
+    2. 配置里的**性别**（男声/女声）→ 在该性别的音色里挑，挑不到就自动；
+    3. **自动挑中文**。
+    """
+    explicit = getattr(cfg, "resolved_voice", None)
+    if explicit:
+        return str(explicit)
+    gender = configured_gender(cfg)
+    if gender:
+        picked = resolve_gender_voice(gender)
+        if picked:
+            return picked
     return voice_name()
 
 
@@ -290,20 +491,26 @@ def speak(text: str, *, cfg: Any = None) -> bool:
     if chosen_voice(cfg) is None:
         _prompt_missing_voice()
         return False
+    body = prepare(text, cfg)
+    if not body:
+        return False
     # 队列里带上**这一刻的全部语音参数**（音色/音量/语速）：用户改完设置立刻生效，
     # 不用等队列里排着的几条念完（"改了没反应"是最容易被当成坏了的那种现象）
+    item = {
+        "text": body,
+        "voice": chosen_voice(cfg),
+        "volume": float(getattr(cfg, "notify_voice_volume", 0.9) or 0.9),
+        "rate": float(getattr(cfg, "notify_voice_rate", 1.0) or 1.0),
+    }
     try:
-        _queue.put_nowait({
-            "text": str(text),
-            "voice": chosen_voice(cfg),
-            "volume": float(getattr(cfg, "notify_voice_volume", 0.9) or 0.9),
-            "rate": int(getattr(cfg, "notify_voice_rate", 0) or 0),
-        })
+        _queue.put_nowait(item)
     except queue.Full:
-        # 队满：丢掉**最旧**的一条再排新的（新消息永远比旧消息值得念）
+        # 队满：丢掉**最旧**的一条再排新的（新消息永远比旧消息值得念）。
+        # 塞回去的也是同一份 item（早先这里塞的是纯文本，音色/音量/语速就丢了 ——
+        # 表现为"队满之后那几条用的是默认音色"，很隐蔽）
         try:
             _queue.get_nowait()
-            _queue.put_nowait(str(text))
+            _queue.put_nowait(item)
         except Exception:  # noqa: BLE001 - 丢不进去就算了，不影响任何事
             return False
     _ensure_worker()
@@ -343,10 +550,11 @@ def _loop() -> None:
                 text, voice = item["text"], item["voice"]
                 volume, rate = item["volume"], item["rate"]
             else:                      # 老格式（纯文本）：走默认参数
-                text, voice, volume, rate = str(item), None, 0.9, 0
+                text, voice, volume, rate = str(item), None, 0.9, 1.0
             if muted() or voice is None:
                 continue
-            run_command(_speak_command(text, voice=voice, volume=volume, rate=rate))
+            run_command(_speak_command(text, voice=voice, volume=volume,
+                                       rate=rate_to_sapi(rate)))
         except Exception as exc:  # noqa: BLE001 - 念不出来不许影响任何别的东西
             logger.debug(f"朗读失败（已忽略）：{exc}")
         finally:
@@ -395,24 +603,38 @@ def run_command(command: list[str]) -> None:
 
 
 class _VoiceOverride:
-    """`speak_now(voice=..., volume=..., rate=...)` 用的临时配置（只带语音这三个属性）。"""
+    """`speak_now(voice=..., volume=..., rate=...)` 用的临时配置。
 
-    def __init__(self, base: Any, *, voice: str | None, volume: float | None, rate: int | None):
+    语速这一项是**倍率**（与配置同一个量纲，1.0 = 正常）；换算成 SAPI 的整数
+    只发生在真正拼命令那一步（`_speak_command`）。
+    """
+
+    def __init__(self, base: Any, *, voice: str | None, volume: float | None,
+                 rate: float | None, digits: bool | None = None):
         self.notify_voice = bool(getattr(base, "notify_voice", True)) if base is not None else True
-        self.notify_voice_name = voice or str(getattr(base, "notify_voice_name", "") or "")
+        #: `speak_now(voice=...)` 传进来的是**具体音色名**（界面已经把"男声/女声"解析过了），
+        #: 所以它不能塞回 `notify_voice_name`（那个字段现在是"auto/female/male"枚举）——
+        #: 塞回去会被当成认不出的老值 → 回落自动，用户就会听到"选男声却念女声"。
+        self.resolved_voice = str(voice) if voice else None
+        self.notify_voice_name = str(getattr(base, "notify_voice_name", "") or "")
         self.notify_voice_volume = (
             float(volume) if volume is not None
             else float(getattr(base, "notify_voice_volume", 0.9) or 0.9)
         )
         self.notify_voice_rate = (
-            int(rate) if rate is not None else int(getattr(base, "notify_voice_rate", 0) or 0)
+            float(rate) if rate is not None
+            else float(getattr(base, "notify_voice_rate", 1.0) or 1.0)
+        )
+        self.notify_voice_digits = (
+            bool(digits) if digits is not None
+            else bool(getattr(base, "notify_voice_digits", True))
         )
 
 
-def _cfg_with_overrides(cfg: Any, *, voice: str | None,
-                        volume: float | None, rate: int | None) -> Any:
+def _cfg_with_overrides(cfg: Any, *, voice: str | None, volume: float | None,
+                        rate: float | None, digits: bool | None = None) -> Any:
     """把"这一次的语音参数"合成一份临时配置（None 的项沿用原来的 cfg）。"""
-    return _VoiceOverride(cfg, voice=voice, volume=volume, rate=rate)
+    return _VoiceOverride(cfg, voice=voice, volume=volume, rate=rate, digits=digits)
 
 
 def can_speak(*, cfg: Any = None, force: bool = False) -> bool:
@@ -431,7 +653,7 @@ def can_speak(*, cfg: Any = None, force: bool = False) -> bool:
 
 def speak_now(text: str, *, cfg: Any = None, force: bool = False,
               voice: str | None = None, volume: float | None = None,
-              rate: int | None = None) -> bool:
+              rate: float | None = None, digits: bool | None = None) -> bool:
     """同步念一句（桌宠右键【试喊一条】用它：用户点了按钮，要立刻听到）。
 
     只走语音这一条路，不进队列 —— 与 `speak()` 的"排队不阻塞"不同：
@@ -441,16 +663,17 @@ def speak_now(text: str, *, cfg: Any = None, force: bool = False,
     Args:
         force: 用户**主动**点的"试喊一条"传 True —— 静音的意思是"别被盘中提醒打扰"，
             不是"我点它也不许出声"。真正"没有中文音色"这条硬约束不受它影响。
-        voice / volume / rate: 覆盖配置里的音色、音量、语速（设置页那个【试听】按钮
-            用它们试**面板上当前**的值，不必先保存）。传 None 就走配置/默认。
+        voice / volume / rate / digits: 覆盖配置里的音色、音量、语速（**倍率**，1.0 = 正常）
+            与"数字逐位"（设置页那个【试听】按钮用它们试**面板上当前**的值，不必先保存）。
+            传 None 就走配置/默认。
     """
-    if voice or volume is not None or rate is not None:
+    if voice or volume is not None or rate is not None or digits is not None:
         # 覆盖值走一个临时 cfg：`_speak_command` 只认 `notify_voice_name` 之类的属性，
         # 与其到处加参数，不如在这里合成一份"这次就用这套"的配置 —— 逻辑只有一套。
-        cfg = _cfg_with_overrides(cfg, voice=voice, volume=volume, rate=rate)
+        cfg = _cfg_with_overrides(cfg, voice=voice, volume=volume, rate=rate, digits=digits)
     if cfg is not None and not bool(getattr(cfg, "notify_voice", True)):
         return False
-    body = sanitize(text)
+    body = prepare(text, cfg)
     if not body:
         return False
     if not can_speak(cfg=cfg, force=force):
@@ -461,7 +684,7 @@ def speak_now(text: str, *, cfg: Any = None, force: bool = False,
             body,
             voice=chosen_voice(cfg),
             volume=float(getattr(cfg, "notify_voice_volume", 0.9) or 0.9),
-            rate=int(getattr(cfg, "notify_voice_rate", 0) or 0),
+            rate=rate_to_sapi(getattr(cfg, "notify_voice_rate", 1.0)),
         ))
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"朗读失败（已忽略）：{exc}")
@@ -476,7 +699,18 @@ def test_text() -> str:
 
 __all__ = [
     "MAX_QUEUE",
+    "RATE_MAX",
+    "RATE_MIN",
     "available",
+    "configured_gender",
+    "digits_for_speech",
+    "gender_label",
+    "normalize_voices",
+    "prepare",
+    "rate_to_sapi",
+    "resolve_gender_voice",
+    "sapi_to_rate",
+    "voices_of_gender",
     "can_speak",
     "compose",
     "has_chinese_voice",

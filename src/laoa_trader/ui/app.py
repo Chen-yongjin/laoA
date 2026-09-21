@@ -39,6 +39,8 @@ from typing import Any
 
 import laoa_trader
 from laoa_trader import assets, intraday, market, pool, state
+# 授权（机器码/注册码/试用）：界面只读它，判定逻辑全在 licensing 里
+from laoa_trader import licensing
 from laoa_trader import pool as pool_mod
 from laoa_trader import config
 from laoa_trader.config import Config, get_config
@@ -52,6 +54,8 @@ from laoa_trader.hints import (
 )
 from laoa_trader.log import get_logger, log_file_path
 from laoa_trader.notify import KINDS, sound, summarize
+# 语音模块在设置页构建控件时要用（语速范围常量），模块级导入一次，别在构造函数里再 import
+from laoa_trader.notify import voice as voice_mod
 from laoa_trader.scheduler import Scheduler, data_gate, refresh_data, run_daily
 from laoa_trader.ui import quotes as quotes_mod
 from laoa_trader.ui import theme as theme_mod
@@ -1669,6 +1673,10 @@ if QT_AVAILABLE:
             self.about_dialog: Any = None
             #: 「关于软件」里的图标标签（资源缺失时为 None）
             self.about_icon: Any = None
+            #: 「软件授权」对话框（未授权时点【策略编辑】/ 试用到期启动时弹的就是它）
+            self.license_dialog: Any = None
+            #: 试用到期时"启动自动弹一次"的闸门：**只弹一次**，用户关掉就不再来烦他
+            self._license_prompted = False
             #: 提醒浮窗（QQ 式）与「提醒详情」对话框；都是**用一次建一次、之后复用**
             self.alert_popup: Any = None
             #: 「消息」窗口（仿 QQ 的消息列表，用户 2026-09-18 要求）。
@@ -1693,6 +1701,7 @@ if QT_AVAILABLE:
 
             # 标题栏**只写软件名**（用户给定的布局：标题区就是"软件名 + 运行状态 +
             # 显示详情 + 关于软件"）。原来挂的"v0.1.0（Windows 单机版 · 测试版）"
+            # （"测试版"三个字按用户 2026-09-18 的要求已全部去掉，只留版本号）
             # 在 1366 宽 + 125% 缩放的机器上只剩一串省略号，而版本/版权本来就有
             # 【关于软件】与【显示详情】两个正经去处（报障时要贴的是那里那份文本）。
             self.setWindowTitle(APP_NAME)
@@ -1709,6 +1718,9 @@ if QT_AVAILABLE:
             # `notify_pet` 关着时 `_ensure_pet()` 直接把已有那只藏起来（见它的实现）。
             self._ensure_pet()
             self._start_scheduler()
+            # 授权检查放在最后：先让界面出来（他要能看到机器码），再决定要不要提醒。
+            # 试用期内不打扰；到期/未授权才弹一次（见 `_maybe_prompt_license`）。
+            self._maybe_prompt_license()
 
             # 实时行情快照缓存（两张表的现价/涨幅）：**没有自己的 QTimer**，
             # 跟着下面这个 5 秒拍子走、内部按 60 秒限流（见 `quotes.QuoteService.tick`）
@@ -1818,6 +1830,9 @@ if QT_AVAILABLE:
             # 4) 策略选股：**顶部一行【开始选股】+ 原来的公式编辑器**（编辑器原样挂过来，
             #    这一阶段只换"挂法"）
             self.formula_page = FormulaPage(self.cfg, status_cb=self._toast)
+            # 未授权/试用到期时锁住「策略编辑」（用户原话："策略编辑锁住，点击提醒需要授权"）：
+            # 这里只挂一个**回调**给页面，页面自己不判断授权（授权逻辑只有 licensing 一处）
+            self.formula_page.open_editor_guard = self._editor_guard
             # 【开始选股】按钮在「策略选股」页里（B2b 的 `FormulaPage` 提供），
             # 它通过 `start_pick_requested` 信号请主窗口跑选股 —— 主窗口这边**只连一次**：
             # 用 `getattr` 而不是直接取属性，是因为两个模块正在并行改，彼此不该因为
@@ -3076,22 +3091,44 @@ if QT_AVAILABLE:
             self.voice_volume_box.setToolTip("朗读音量（用户要求「大声喊」，默认 90%）")
             pet_row.addWidget(self.voice_volume_box)
             pet_row.addWidget(QLabel("　语速："))
-            self.voice_rate_box = QSpinBox()
-            self.voice_rate_box.setRange(-10, 10)
-            self.voice_rate_box.setValue(int(getattr(self.cfg, "notify_voice_rate", 0)))
-            self.voice_rate_box.setToolTip("负数更慢、正数更快（0 = 正常）")
+            # 语速是**倍率**（用户 2026-09-18："语速默认改成 1 正常点"）：
+            # 界面上 1 = 正常、0.5 = 最慢、2.0 = 最快；配置里存的也是倍率，
+            # 换算成 Windows SAPI 的 Rate 只发生在拼命令那一步（见 notify/voice.py）
+            self.voice_rate_box = QDoubleSpinBox()
+            self.voice_rate_box.setRange(voice_mod.RATE_MIN, voice_mod.RATE_MAX)
+            self.voice_rate_box.setSingleStep(0.1)
+            self.voice_rate_box.setDecimals(1)
+            self.voice_rate_box.setSuffix(" ×")
+            self.voice_rate_box.setValue(float(getattr(self.cfg, "notify_voice_rate", 1.0) or 1.0))
+            self.voice_rate_box.setToolTip("1 = 正常；小于 1 更慢、大于 1 更快（默认 1.0）")
             pet_row.addWidget(self.voice_rate_box)
             pet_row.addStretch(1)
             body.addLayout(pet_row)
 
-            # 音色下拉 + 【试听】（用户 2026-09-18："设置里桌宠声音可以自由改"）：
-            # 第一项永远是"自动挑中文"（默认），其余是这台机器上真实装着的音色。
+            # 数字逐位（用户 2026-09-18："播报代码可以设置成一个一个读数字吗？
+            # 现在直接是 6 万零 5 百一十九"）：默认开，关掉就回到整数字念法
+            digits_row = QHBoxLayout()
+            self.voice_digits_box = QCheckBox("数字逐位念（代码、价格）")
+            self.voice_digits_box.setChecked(bool(getattr(self.cfg, "notify_voice_digits", True)))
+            self.voice_digits_box.setToolTip(
+                "勾上：股票代码与价格一位一位念（600519 → 六零零五一九、1234.56 → 一二三四点五六）；\n"
+                "成交量、家数、涨跌幅这类带单位或百分号的\"数量\"仍然整读。\n"
+                "取消：全部按现在的整数字念法。"
+            )
+            digits_row.addWidget(self.voice_digits_box)
+            digits_row.addStretch(1)
+            body.addLayout(digits_row)
+
+            # 音色下拉 + 【试听】（用户 2026-09-18："设置里桌宠声音可以自由改"，
+            # 随后又改成"音色改成让用户可选男声和女声，而不是中英文"）：
+            # 所以这里只给三项 —— 自动（推荐）/ 女声 / 男声，不再列一长串音色名。
             voice_row = QHBoxLayout()
             voice_row.addWidget(QLabel("音色："))
             self.voice_name_box = QComboBox()
             self.voice_name_box.setToolTip(
-                "用哪个声音念。第一项是自动挑中文音色（推荐）；\n"
-                "下面列的是这台机器上装着的语音，选了就用它（英文音色念中文会怪腔怪调）"
+                "用哪种声音念：自动 = 挑这台机器上最合适的中文音色（推荐）；\n"
+                "女声 / 男声 = 在该性别的中文音色里挑（这台机器没有那个性别时\n"
+                "自动回落到「自动」，下面的说明会写清楚）"
             )
             self._fill_voice_names()
             voice_row.addWidget(self.voice_name_box, 1)
@@ -4045,7 +4082,7 @@ if QT_AVAILABLE:
                 "────────────",
                 # 版本/版权只是标题栏里不再挂了，**不是没了**：报障时要贴的就是这几行
                 # （【关于软件】里那份是同一份文案，见 `about_lines`）
-                f"{APP_NAME} v{laoa_trader.__version__}（测试版）",
+                f"{APP_NAME} v{laoa_trader.__version__}",
                 f"后台任务：{'运行中' if st.get('running') else '未运行'}",
                 f"最新数据日期：{latest}",
                 f"本地股票数：{summary.get('symbols', 0)} 只",
@@ -5561,29 +5598,25 @@ if QT_AVAILABLE:
                 logger.debug(f"写桌宠位置失败：{exc}")
 
         def _fill_voice_names(self) -> None:
-            """把系统里装着的音色填进下拉框（第一项 = 自动挑中文）。
+            """填音色下拉：**自动（推荐）/ 女声 / 男声** 三项。
 
-            枚举失败（没有 PowerShell / 不是 Windows / 没有音色）时**只剩第一项** ——
-            这是对的：那种机器本来就没得挑，界面不该给一堆点了没用的选项。
+            用户 2026-09-18 的原话是"音色改成让用户可选男声和女声，而不是中英文" ——
+            所以这里不再列一长串具体音色名（上一版的做法），只给三个选项；
+            具体挑到哪个音色由 `notify/voice.py` 按"该性别里中文优先"的规则决定。
+
+            某个性别在这台机器上没有对应音色时，选项**仍然给**（用户换了机器/装了语音包
+            就能用），只是选中它会在下面的说明行里写明"会回落成自动"。
             """
             box = getattr(self, "voice_name_box", None)
             if box is None:
                 return
-            from laoa_trader.notify import voice as voice_mod
-
-            try:
-                voices = voice_mod.installed_voices()
-            except Exception as exc:  # noqa: BLE001 - 枚举失败只影响"能不能挑"，不影响别的
-                logger.debug(f"枚举系统音色失败：{exc}")
-                voices = []
-            kept = str(getattr(self.cfg, "notify_voice_name", "") or "").strip()
+            kept = str(getattr(self.cfg, "notify_voice_name", "") or "").strip().lower()
             box.clear()
-            box.addItem("自动挑中文（推荐）", "")
-            for name, culture in voices:
-                box.addItem(voice_mod.voice_label(name, culture), name)
-            # 配置里点名的音色：选中它；本机没有它就回到第一项（并在提示行里说明）
-            index = box.findData(kept) if kept else 0
-            box.setCurrentIndex(index if index >= 0 else 0)
+            box.addItem("自动（推荐）", "")
+            box.addItem("女声", "female")
+            box.addItem("男声", "male")
+            index = box.findData(kept)
+            box.setCurrentIndex(index if index >= 0 else 0)   # 老配置（音色名）→ 自动
 
         def on_try_voice(self) -> None:
             """【试听】：按**当前**面板上的音色/音量/语速念一句样本。
@@ -5595,9 +5628,12 @@ if QT_AVAILABLE:
             from laoa_trader.notify import voice as voice_mod
 
             text = voice_mod.test_text()
-            voice_name = str(self.voice_name_box.currentData() or "") or None
+            gender = str(self.voice_name_box.currentData() or "")
+            # 面板上的"女声/男声"先在这里解析成具体音色名（没解析出来就交给自动挑选）
+            voice_name = voice_mod.resolve_gender_voice(gender) if gender else None
             volume = int(self.voice_volume_box.value()) / 100.0
-            rate = int(self.voice_rate_box.value())
+            rate = round(float(self.voice_rate_box.value()), 2)
+            digits = self.voice_digits_box.isChecked()
             if not self.voice_box.isChecked():
                 self._set_settings_hint("语音朗读是关着的：勾上「中文语音朗读」再试听。")
                 return
@@ -5606,17 +5642,16 @@ if QT_AVAILABLE:
                     "这台机器没有可用的语音合成（只有 Windows 自带语音这条路，且需要 PowerShell）。"
                 )
                 return
-            if voice_mod.chosen_voice(self.cfg) is None and not voice_name:
+            if voice_name is None and voice_mod.voice_name() is None:
                 self._set_settings_hint(
-                    "这台机器没有中文语音：装一个中文语音包（设置 → 时间和语言 → 语音），"
-                    "或在上面挑一个别的音色再试听。"
+                    "这台机器没有中文语音：装一个中文语音包（设置 → 时间和语言 → 语音）再试听。"
                 )
                 return
             self._set_settings_hint("正在试听…（念一句要一两秒）")
             threading.Thread(
                 target=voice_mod.speak_now, args=(text,),
                 kwargs={"cfg": self.cfg, "force": True, "voice": voice_name,
-                        "volume": volume, "rate": rate},
+                        "volume": volume, "rate": rate, "digits": digits},
                 daemon=True, name="voice-try",
             ).start()
 
@@ -5629,18 +5664,28 @@ if QT_AVAILABLE:
                 label.setText("语音朗读已关闭（气泡与消息列表照常）。")
                 return
             try:
-                from laoa_trader.notify import voice as voice_mod
-
-                name = voice_mod.voice_name()
+                auto_name = voice_mod.voice_name()
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"查语音失败：{exc}")
-                name = None
+                auto_name = None
+            # 下拉选的是"男声/女声"：把**真正会用的那个音色**说出来，
+            # 并在"这个性别本机没有、回落成自动"时明说一句（否则用户以为设置没生效）
+            panel_gender = ""
+            box = getattr(self, "voice_name_box", None)
+            if box is not None:
+                panel_gender = str(box.currentData() or "")
+            picked = voice_mod.resolve_gender_voice(panel_gender) if panel_gender else None
+            name = picked or auto_name
             if name:
-                picked = str(getattr(self.cfg, "notify_voice_name", "") or "").strip()
-                label.setText(
-                    f"将使用系统语音「{name}」朗读（不联网）。"
-                    + ("" if picked else "当前是自动挑中文音色；上面可以指定。")
-                )
+                if picked:
+                    label.setText(f"将使用系统语音「{name}」朗读（不联网）。")
+                elif panel_gender:
+                    label.setText(
+                        f"这台机器没有{voice_mod.gender_label(panel_gender)}，已回落到自动挑中文："
+                        f"「{name}」。（装了对应语音包就会用上）"
+                    )
+                else:
+                    label.setText(f"将使用系统语音「{name}」朗读（不联网，自动挑的中文音色）。")
             elif sys.platform.startswith("win"):
                 label.setText(
                     "⚠️ 这台机器没有中文语音，消息不会念出来（其余提醒照常）。"
@@ -6379,16 +6424,18 @@ if QT_AVAILABLE:
             """
             names = [str(x) for x in (sources or []) if str(x).strip()]
             if not names:
-                return ("取数顺序：（`data_sources` 是空的 —— 程序不会取任何行情数据，"
-                        "请填上 `public`（免 Key）或 `hithink`）")
+                # 空列表是**真要拦一下**的情况（程序不会取任何行情），所以这条留着，
+                # 但只说人话：点哪里能把来源加回来
+                return "当前没有启用的来源：点下面的【添加来源】加一个（公开源免 Key）。"
             shown = []
             for name in names:
                 label = self._source_label(name)
                 shown.append(f"{label}" if label else f"{name}（界面没有它的实现，"
                                                        f"只如实显示）")
-            return (f"取数顺序（前一个不可用就落到下一个）：{'、'.join(shown)}"
-                    f"　·　config.toml: "
-                    f"data_sources = [{', '.join(repr(n) for n in names)}]")
+            # 2026-09-20（用户："只保留当前用哪个来源…纯解释的长句全删"）：
+            # 原来这里还跟着 `· config.toml: data_sources = [...]` 与"前一个不可用就落到
+            # 下一个"的解释 —— 界面不该教用户改配置文件，顺序本身就是优先级，看得见。
+            return f"当前来源（按优先级）：{'、'.join(shown)}"
 
         @staticmethod
         def _source_label(name: str) -> str:
@@ -6480,9 +6527,11 @@ if QT_AVAILABLE:
                 "notify_pet": self.pet_box.isChecked(),
                 "notify_voice": self.voice_box.isChecked(),
                 "notify_voice_volume": int(self.voice_volume_box.value()) / 100.0,
-                "notify_voice_rate": int(self.voice_rate_box.value()),
-                # 空字符串 = 自动挑中文（第一项），与 config 的口径一致
+                # 倍率（1.0 = 正常）
+                "notify_voice_rate": round(float(self.voice_rate_box.value()), 2),
+                # 空字符串 = 自动挑中文（第一项）；"female" / "male" = 按性别挑
                 "notify_voice_name": str(self.voice_name_box.currentData() or ""),
+                "notify_voice_digits": self.voice_digits_box.isChecked(),
                 "notify_flash_seconds": int(self.flash_seconds_box.value()),
                 "notify_popup_seconds": int(self.popup_seconds_box.value()),
                 "notify_popup_max_items": int(self.popup_items_box.value()),
@@ -7103,10 +7152,13 @@ if QT_AVAILABLE:
             """
             return [
                 APP_NAME,
-                f"版本：{laoa_trader.__version__}（测试版）",
+                f"版本：{laoa_trader.__version__}",
                 "作者 / 版权所有人：async-chen",
                 COPYRIGHT_TEXT,
                 SOURCE_TEXT,
+                # 授权状态也进「关于」：用户报障时贴的版本信息里就带着它，
+                # 一眼能看出"他到底注册了没有"
+                self.license_status_line(),
             ]
 
         def version_info_text(self) -> str:
@@ -7140,6 +7192,87 @@ if QT_AVAILABLE:
             ))
             return label
 
+        # ── 授权（机器码 / 注册码 / 试用）──────────────────────────────
+        #
+        # 用户 2026-09-20 拍板："策略编辑锁住，点击提醒需要授权，请联系作者wx：q352162"、
+        # "免费运行7天，到期打开同样授权提醒。"、"做个注册机给我…机器码下面加上注册码
+        # 输入口和注册按键，点击可以注册。"
+        #
+        # 这一层只做三件事：**弹对话框 / 拦策略编辑 / 在「关于」里显示状态**；
+        # 判定（机器码、注册码、试用剩余）全部读 `licensing.license_status()` ——
+        # 界面里绝不自己算一套（两套算法迟早对不上，而对不上的表现是"明明注册了还说没授权"）。
+
+        def on_open_license(self) -> None:
+            """打开「软件授权」对话框（未授权时的提醒、以及「关于」里的入口都走它）。"""
+            dialog = self.license_dialog
+            if dialog is None:
+                try:
+                    from laoa_trader.ui.license_dialog import LicenseDialog
+                except Exception as exc:  # noqa: BLE001 - Qt 缺失/资源问题：说人话，别崩
+                    logger.warning(f"授权对话框打不开：{exc}")
+                    self._set_status(f"⚠️ 授权对话框打不开：{exc}")
+                    return
+                dialog = LicenseDialog(self.cfg, self, title="软件授权")
+                dialog.registered.connect(self._on_license_registered)
+                self.license_dialog = dialog
+            else:
+                dialog.refresh()
+            dialog.show()          # 非模态：与「关于」一致，不挡住主窗口、也不会卡住测试
+            dialog.raise_()
+
+        def _on_license_registered(self) -> None:
+            """注册成功：解锁界面（策略编辑立刻可用）+ 在状态栏说一句（**不是**弹窗）。"""
+            self._apply_license_lock()
+            self._set_status("✅ 已注册（单机终身授权），策略编辑已解锁")
+
+        def _editor_guard(self) -> str:
+            """【策略编辑】的闸门：返回空串 = 放行；返回中文原因 = 已拦下。
+
+            未授权时**弹授权对话框**（用户要的就是"点击提醒需要授权"），并返回一句
+            提示给「策略选股」页显示 —— 用户点了按钮总得看到有反应。
+            """
+            status = licensing.license_status(self.cfg)
+            if status.get("licensed"):
+                return ""
+            self.on_open_license()
+            return str(status.get("reason") or "免费试用已到期") + "（" + licensing.CONTACT_TEXT + "）"
+
+        def _apply_license_lock(self) -> None:
+            """把"锁没锁"画到界面上：策略编辑按钮的 tooltip 与「关于」里的状态行。
+
+            为什么不去 disable 按钮：用户要的是"**点击提醒**需要授权" —— 点得动、
+            点了弹出机器码与注册入口，比一个灰按钮（点了没反应、也不知道要干什么）好得多。
+            """
+            page = getattr(self, "formula_page", None)
+            button = getattr(page, "btn_edit", None)
+            licensed = licensing.is_licensed(self.cfg)
+            if button is not None:
+                if licensed:
+                    button.setToolTip(
+                        "打开公式编辑器：左边写公式、右边点按钮插入（点列表里的公式行也会打开它）"
+                    )
+                else:
+                    button.setToolTip(
+                        "🔒 需要授权后才能编辑策略：" + licensing.status_text(self.cfg)
+                        + "\n" + licensing.CONTACT_TEXT
+                    )
+
+        def _maybe_prompt_license(self) -> None:
+            """启动时的授权检查：**只提醒一次**（试用中/已注册都不打扰）。"""
+            if self._license_prompted:
+                return
+            status = licensing.license_status(self.cfg)
+            self._apply_license_lock()
+            if status.get("licensed"):
+                return
+            self._license_prompted = True
+            self.on_open_license()
+            self._set_status("⚠️ " + licensing.status_text(self.cfg))
+
+        def license_status_line(self) -> str:
+            """「关于」里那一行授权状态（与对话框同源）。"""
+            return "授权：" + licensing.status_text(self.cfg)
+
         def on_about(self) -> None:
             """【关于】：图标 + 版本号 + 版权 + 数据来源，外加一键复制（用户不必自己敲版本）。"""
             if self.about_dialog is not None:
@@ -7167,6 +7300,12 @@ if QT_AVAILABLE:
             copy_btn = QPushButton("复制版本信息")
             copy_btn.clicked.connect(self.on_copy_version_info)
             buttons.addWidget(copy_btn)
+            # 【授权…】：机器码与注册入口都在这里（用户"到期了不知道去哪注册"的那个去处）
+            license_btn = QPushButton("授权…")
+            license_btn.setToolTip("查看机器码、填注册码（未授权时在这里注册）")
+            license_btn.clicked.connect(self.on_open_license)
+            buttons.addWidget(license_btn)
+            self.about_license_button = license_btn
             close_btn = QPushButton("关闭")
             close_btn.clicked.connect(dialog.accept)
             buttons.addWidget(close_btn)

@@ -44,9 +44,15 @@ def cfg(tmp_path) -> Config:
     return config
 
 
-def _fake_voices(monkeypatch: pytest.MonkeyPatch, names: list[tuple[str, str]]) -> None:
-    """给一份假的音色名单（不启动任何进程）。"""
-    monkeypatch.setattr(voice, "_list_voices_raw", lambda: list(names))
+def _fake_voices(monkeypatch: pytest.MonkeyPatch,
+                 names: list[tuple]) -> None:
+    """给一份假的音色名单（不启动任何进程）。
+
+    每一项可以写 `(名字, 区域)` 或 `(名字, 区域, 性别)` —— 两元的自动补成"性别未知"
+    （`""`），这样"这台机器报得出性别"与"报不出性别"两种情况都能一句话造出来。
+    """
+    normalized = [(v[0], v[1], v[2] if len(v) > 2 else "") for v in names]
+    monkeypatch.setattr(voice, "_list_voices_raw", lambda: list(normalized))
     voice.reset_cache()
 
 
@@ -239,69 +245,180 @@ def test_queue_full_drops_the_oldest(monkeypatch, cfg) -> None:
         assert voice.speak(f"第{index}条", cfg=cfg) is True
     assert voice.speak("最新的那条", cfg=cfg) is True
 
-    left = [voice._queue.get_nowait() for _ in range(voice._queue.qsize())]
+    # 队列里存的是**一条完整参数**（文本 + 音色/音量/语速），所以取出来看 text
+    left = [item["text"] for item in
+            (voice._queue.get_nowait() for _ in range(voice._queue.qsize()))]
     assert "最新的那条" in left
     assert "第0条" not in left                 # 最旧的那条被挤掉了
+    # 队满之后塞回去的仍然是**同一份参数**（早先这里塞的是纯文本，音色/音量/语速就丢了）
+    assert all(isinstance(item, dict) for item in
+               [voice._queue.get_nowait() for _ in range(voice._queue.qsize())])
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 音色可选（用户 2026-09-20："设置里桌宠声音可以自由改"）
+# 数字逐位（用户 2026-09-18："播报代码可以设置成一个一个读数字吗？
+# 现在直接是 6 万零 5 百一十九"）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_stock_codes_and_prices_are_spelled_digit_by_digit() -> None:
+    """代码与价格逐位念；带单位/百分号的"数量"保持整读。"""
+    assert voice.digits_for_speech("贵州茅台 600519") == "贵州茅台 六零零五一九"
+    assert voice.digits_for_speech("现价 1234.56") == "现价 一二三四点五六"
+    assert voice.digits_for_speech("跌到 -3.2") == "跌到 负三点二"
+    # 成交量 / 家数 / 天数 / 百分号 / 倍数：整读（"五百零七家"比"五零七家"顺耳）
+    assert voice.digits_for_speech("成交 500万股") == "成交 500万股"
+    assert voice.digits_for_speech("共 37 家涨停") == "共 37 家涨停"
+    assert voice.digits_for_speech("连板 2 天") == "连板 2 天"
+    assert voice.digits_for_speech("涨跌幅 3.21%") == "涨跌幅 3.21%"
+    assert voice.digits_for_speech("量比 2.5倍") == "量比 2.5倍"
+    # 短整数（1~5 位）不动；6 位及以上按代码逐位
+    assert voice.digits_for_speech("池子 12 只") == "池子 12 只"
+    assert voice.digits_for_speech("成交额 1234567 元") == "成交额 一二三四五六七 元"
+
+
+def test_digits_can_be_switched_off(cfg) -> None:
+    """关掉这个开关 → 回到原来的整数字念法（用户随时能改回去）。"""
+    cfg.notify_voice_digits = False
+    assert voice.prepare("贵州茅台 600519，现价 1234.56", cfg) == "贵州茅台 600519，现价 1234.56"
+    cfg.notify_voice_digits = True
+    assert voice.prepare("贵州茅台 600519", cfg) == "贵州茅台 六零零五一九"
+
+
+def test_speech_path_applies_digit_spelling(monkeypatch, cfg) -> None:
+    """真正念的那条路上（`speak` 与 `speak_now` 都要）代码已经是逐位形式。"""
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Huihui", "zh-CN", "female")])
+    spoken: list[list[str]] = []
+    monkeypatch.setattr(voice, "run_command", spoken.append)
+
+    assert voice.speak_now("贵州茅台 600519 触及止损", cfg=cfg, force=True) is True
+    assert "$s.Speak('贵州茅台 六零零五一九 触及止损')" in " ".join(spoken[0])
+
+    monkeypatch.setattr(voice, "_ensure_worker", lambda: None)
+    voice.speak("宁德时代 300750 现价 200.5", cfg=cfg)
+    item = voice._queue.get_nowait()
+    assert item["text"] == "宁德时代 三零零七五零 现价 二零零点五"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 语速：倍率 1 = 正常（用户 2026-09-18："语速默认改成 1 正常点"）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_rate_multiplier_maps_to_sapi_rate() -> None:
+    """倍率 ↔ SAPI Rate 的换算：1.0 → 0（正常），两端贴近但不贴边。"""
+    assert voice.rate_to_sapi(1.0) == 0
+    assert voice.rate_to_sapi(2.0) == 9
+    assert voice.rate_to_sapi(1.5) == 5
+    assert voice.rate_to_sapi(1.2) == 2
+    assert voice.rate_to_sapi(0.8) == -3
+    assert voice.rate_to_sapi(0.5) == -9
+    # 越界夹到区间；乱码按正常
+    assert voice.rate_to_sapi(9) == 9 and voice.rate_to_sapi(-9) == -9
+    assert voice.rate_to_sapi("快") == 0
+    # 反算（老配置用）能回到同一个量级
+    for rate in (-9, -5, 0, 5, 9):
+        back = voice.sapi_to_rate(rate)
+        assert voice.rate_to_sapi(back) == rate, rate
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 音色：按**男声 / 女声**选（用户 2026-09-20："音色改成让用户可选男声和女声，
+# 而不是中英文"；再之前一句是"设置里桌宠声音可以自由改"）
 # ══════════════════════════════════════════════════════════════════════════
 #
-# 这一段钉的是"用户能挑声音"这条链：枚举 → 下拉用的一行文案 → 配置里点名的音色
-# 真的进了 PowerShell 命令；点名的音色在本机不存在时回落到"自动挑中文"（换台机器
-# 不会因此没声）；没有中文音色时的行为不变（不念，并给出原因）。
+# 这一段钉的是"用户能挑声音"这条链：枚举（含性别）→ 按性别挑 → 真进了 PowerShell 命令；
+# 这台机器没有那个性别、或者音色压根不报性别时**回落到自动挑中文**（不会因此没声）；
+# 没有中文音色时的行为不变（不念，并给出原因）。
 
 
-def test_installed_voices_lists_what_the_system_has(monkeypatch, cfg) -> None:
-    """枚举出来的名单就是下拉框的数据源（名字 + 区域，界面自己拼显示文案）。"""
+def test_installed_voices_lists_name_culture_and_gender(monkeypatch, cfg) -> None:
+    """枚举出来的是（名字, 区域, 性别）—— 性别是"按男/女挑"的判据。"""
     monkeypatch.setattr(voice, "available", lambda: True)
-    _fake_voices(monkeypatch, [("Microsoft Huihui Desktop", "zh-CN"),
-                               ("Microsoft Zira Desktop", "en-US")])
+    _fake_voices(monkeypatch, [("Microsoft Huihui Desktop", "zh-CN", "Female"),
+                               ("Microsoft Kangkang", "zh-CN", "Male"),
+                               ("Microsoft Zira Desktop", "en-US", "Female")])
 
-    assert voice.installed_voices() == [("Microsoft Huihui Desktop", "zh-CN"),
-                                        ("Microsoft Zira Desktop", "en-US")]
+    assert voice.installed_voices() == [("Microsoft Huihui Desktop", "zh-CN", "female"),
+                                        ("Microsoft Kangkang", "zh-CN", "male"),
+                                        ("Microsoft Zira Desktop", "en-US", "female")]
     assert voice.voice_label("Microsoft Huihui Desktop", "zh-CN") == \
         "Microsoft Huihui Desktop（zh-CN）"
     assert voice.voice_label("没有区域的名字", "") == "没有区域的名字"
 
 
-def test_chosen_voice_uses_the_configured_name(monkeypatch, cfg) -> None:
-    """配置里点名了音色就用它 —— **即便它是英文音色**（那是用户自己挑的）。"""
+def test_gender_choice_picks_that_gender_and_prefers_chinese(monkeypatch, cfg) -> None:
+    """选「女声/男声」→ 在该性别的音色里挑，**中文优先**（zh-CN → zh* → 其它语言）。"""
     monkeypatch.setattr(voice, "available", lambda: True)
-    _fake_voices(monkeypatch, [("Microsoft Huihui Desktop", "zh-CN"),
-                               ("Microsoft Zira Desktop", "en-US")])
-    cfg.notify_voice_name = "Microsoft Zira Desktop"
+    _fake_voices(monkeypatch, [("English Zira", "en-US", "female"),
+                               ("Chinese Huihui", "zh-CN", "female"),
+                               ("Kangkang", "zh-CN", "male")])
+    cfg.notify_voice_name = "female"
+    assert voice.chosen_voice(cfg) == "Chinese Huihui"
 
-    assert voice.chosen_voice(cfg) == "Microsoft Zira Desktop"
-    command = voice._speak_command("测试", voice=voice.chosen_voice(cfg))
-    assert "SelectVoice('Microsoft Zira Desktop')" in " ".join(command)
+    cfg.notify_voice_name = "male"
+    assert voice.chosen_voice(cfg) == "Kangkang"
+
+    # 同一性别有多个中文音色时，取 zh-CN 那个（zh-TW 排在它后面）
+    _fake_voices(monkeypatch, [("Taiwan Hanhan", "zh-TW", "female"),
+                               ("Huihui", "zh-CN", "female")])
+    cfg.notify_voice_name = "female"
+    assert voice.chosen_voice(cfg) == "Huihui"
 
 
-def test_chosen_voice_falls_back_when_the_named_voice_is_gone(monkeypatch, cfg) -> None:
-    """点名的音色在本机没有（换了台机器）→ 回落到自动挑中文，而不是不念。"""
+def test_gender_choice_falls_back_to_auto_when_that_gender_is_missing(monkeypatch, cfg) -> None:
+    """这台机器没有那个性别的中文音色 → 自动回落到「自动挑中文」，而不是不念。"""
     monkeypatch.setattr(voice, "available", lambda: True)
-    _fake_voices(monkeypatch, [("Microsoft Huihui Desktop", "zh-CN")])
-    cfg.notify_voice_name = "这台机器上没有的音色"
+    _fake_voices(monkeypatch, [("Chinese Huihui", "zh-CN", "female")])
+    cfg.notify_voice_name = "male"
 
-    assert voice.chosen_voice(cfg) == "Microsoft Huihui Desktop"
+    assert voice.resolve_gender_voice("male") is None      # 没有男声
+    assert voice.chosen_voice(cfg) == "Chinese Huihui"      # 回落成自动挑中文
+
+
+def test_gender_unknown_voices_fall_back_to_auto(monkeypatch, cfg) -> None:
+    """有些语音**不报性别**（`Gender=NotSet`）→ 当成"该性别没有候选"，回落自动。
+
+    这条是"别让用户以为坏了"：他没做错什么，只是这台机器的语音没提供性别信息。
+    """
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Huihui", "zh-CN", "NotSet"), ("Kangkang", "zh-CN", "")])
+    cfg.notify_voice_name = "female"
+
+    assert voice.voices_of_gender("female") == []
+    assert voice.resolve_gender_voice("female") is None
+    assert voice.chosen_voice(cfg) == "Huihui"
+
+
+def test_legacy_voice_name_means_auto(monkeypatch, cfg) -> None:
+    """老配置里存的是"某个音色的完整名字"→ 一律当自动（界面不再列具体音色）。"""
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Chinese Huihui", "zh-CN", "female")])
+    cfg.notify_voice_name = "Microsoft Zira Desktop"       # 上一版的写法
+
+    assert voice.configured_gender(cfg) == ""
+    assert voice.chosen_voice(cfg) == "Chinese Huihui"
 
 
 def test_try_listen_uses_the_panel_values(monkeypatch, cfg) -> None:
-    """【试听】把**面板上当前**的音色/音量/语速带进命令里（不必先保存）。"""
+    """【试听】把**面板上当前**的音色/音量/语速带进命令里（不必先保存）。
+
+    语速这一项面板上是**倍率**（1 = 正常），进命令时换算成 SAPI 的整数。
+    """
     monkeypatch.setattr(voice, "available", lambda: True)
-    _fake_voices(monkeypatch, [("Microsoft Huihui Desktop", "zh-CN")])
+    _fake_voices(monkeypatch, [("Chinese Huihui", "zh-CN", "female")])
     spoken: list[list[str]] = []
     monkeypatch.setattr(voice, "run_command", spoken.append)
 
     ok = voice.speak_now("老牛选股助手，语音提醒测试", cfg=cfg, force=True,
-                         voice="Microsoft Huihui Desktop", volume=0.5, rate=3)
+                         voice="Chinese Huihui", volume=0.5, rate=1.5)
 
     assert ok is True
     command = " ".join(spoken[0])
-    assert "SelectVoice('Microsoft Huihui Desktop')" in command
+    assert "SelectVoice('Chinese Huihui')" in command
     assert "$s.Volume = 50" in command          # 0.5 → 50
-    assert "$s.Rate = 3" in command
+    assert "$s.Rate = 5" in command             # 倍率 1.5 → SAPI 5
 
 
 def test_no_chinese_voice_still_means_no_speaking(monkeypatch, cfg) -> None:

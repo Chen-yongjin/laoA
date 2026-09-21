@@ -115,6 +115,9 @@ HIDDEN = [
     "laoa_trader.notify.voice",
     "laoa_trader.ui.desktop_pet",
     "laoa_trader.ui.message_center",
+    # 授权：设置/关于页按需导入（`ui.license_dialog`）—— 漏了就是"本机全绿、
+    # exe 里点【授权…】什么都不出来"
+    "laoa_trader.ui.license_dialog",
     "laoa_trader.research.scorecard",
     "laoa_trader.ui.alert_popup",
     "laoa_trader.ui.quotes",

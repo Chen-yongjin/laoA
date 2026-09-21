@@ -111,6 +111,11 @@ jobs:
           if (-not (Test-Path "dist/LaoniuTrader/LaoniuTrader.exe")) { throw "没找到 dist/LaoniuTrader/LaoniuTrader.exe" }
           $size = (Get-ChildItem -Recurse 'dist/LaoniuTrader' | Measure-Object -Property Length -Sum).Sum / 1MB
           Write-Host ("产物大小：{0:N1} MB" -f $size)
+          # ⚠️ 授权相关的硬要求：**注册机绝不能出现在主产物里**
+          # （它有签发密钥的算法，谁拿到谁就能给任意机器码算注册码）。
+          # 这条放在 CI 而不是只写在文档里 —— 文档拦不住"顺手把它加进 DATAS"。
+          $leak = Get-ChildItem -Recurse 'dist/LaoniuTrader' -Include 'keygen*','*注册机*' -ErrorAction SilentlyContinue
+          if ($leak) { throw ("主产物里混进了注册机相关文件：" + ($leak.Name -join ', ')) }
           # 顺手确认关键依赖真的打进去了（缺了会造成运行期报错）
           foreach ($p in @("pandas", "pyarrow", "PySide6")) {
             if (-not (Get-ChildItem -Recurse 'dist/LaoniuTrader' -Filter "*$p*" -ErrorAction SilentlyContinue)) {
@@ -159,3 +164,57 @@ jobs:
           git add -f ci-log
           git commit -m "CI 结果：${{ job.status }}（run $env:GITHUB_RUN_ID）" --no-verify
           git push -f origin HEAD:ci-log
+
+
+  # ── 注册机（作者的签发工具）：**独立 job + 独立 artifact**，与主包彻底分开 ──
+  #
+  # 为什么不并进 build job、也不放进主 artifact：
+  #   注册机里带着签发密钥的算法 —— 谁能拿到它，谁就能给任意机器码算出注册码。
+  #   主 artifact（LaoniuTrader）是发给用户的，注册机只能作者自己拿，所以两边必须分开。
+  #
+  # 为什么只在手动触发时跑：
+  #   它跟"用户拿到的那一版"没关系，每次 push 都白跑一个 Windows runner 没必要。
+  #   想拿注册机：Actions → build-windows → Run workflow（手动触发）→ 跑完下载
+  #   artifact `keygen`。作者本地打包同样可以（见 docs/打包教程.md 第八·五节）：
+  #   `pyinstaller --noconfirm --clean build\keygen.spec`。
+  keygen:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 安装 Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装依赖
+        timeout-minutes: 10
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: PyInstaller 打包注册机
+        timeout-minutes: 10
+        run: pyinstaller --noconfirm --clean build/keygen.spec
+
+      - name: 检查产物
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/keygen.exe")) { throw "没找到 dist/keygen.exe" }
+          $size = (Get-Item 'dist/keygen.exe').Length / 1MB
+          Write-Host ("注册机大小：{0:N1} MB" -f $size)
+
+      - name: 上传注册机（**只有作者自己下载这个 artifact**）
+        uses: actions/upload-artifact@v7
+        with:
+          name: keygen
+          path: dist/keygen.exe
+          retention-days: 14
+          if-no-files-found: error

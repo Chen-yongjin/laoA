@@ -1,0 +1,256 @@
+"""授权界面：机器码展示、注册码输入与注册、锁「策略编辑」、到期提醒。
+
+用户 2026-09-20 拍板的三条，在界面这一层各有对应：
+
+* 「策略编辑锁住，点击提醒需要授权，请联系作者wx：q352162」
+  → 未授权时点【策略编辑】**不打开编辑器**，弹出授权对话框（`test_editor_is_locked_*`）；
+* 「免费运行7天，到期打开同样授权提醒。」
+  → 到期时启动自动弹一次，而且**只弹一次**（`test_expired_launch_prompts_once`）；
+* 「机器码下面加上注册码输入口和注册按键，点击可以注册。」
+  → 对话框里机器码在注册码输入框**上面**，点【注册】当场生效（`test_dialog_*`）。
+
+界面只读 `licensing.license_status()`，这些用例也照这个口径断言（不重复实现一套判定）。
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+from pathlib import Path
+
+import pytest
+
+from laoa_trader import clock, licensing as L
+
+pytest.importorskip("PySide6", reason="未安装 PySide6，跳过授权界面测试")
+
+from laoa_trader.ui import app as ui_app  # noqa: E402
+
+
+@pytest.fixture()
+def qapp():
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+    app.processEvents()
+
+
+@pytest.fixture()
+def fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """固定一份假指纹：机器码在测试里必须稳定（真硬件指纹会让断言跟着机器跑）。"""
+    monkeypatch.setattr(L, "_fingerprint_parts", lambda: ["CPU-T", "BOARD-T", "DISK-T"])
+
+
+@pytest.fixture()
+def license_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """授权状态文件指到 tmp_path（**绝不碰开发机上的真授权**）。"""
+    path = tmp_path / "license.json"
+    monkeypatch.setattr(L, "state_path", lambda: path)
+    return path
+
+
+def _expire_trial(path: Path) -> None:
+    """造"试用已到期"：首次运行放在 10 天前。"""
+    today = clock.now_cn().date()
+    path.write_text(json.dumps({
+        "first_run": (today - datetime.timedelta(days=10)).strftime("%Y-%m-%d"),
+        "max_seen": clock.today_cn(),
+    }), encoding="utf-8")
+
+
+@pytest.fixture()
+def window(cfg, qapp, fingerprint, license_file):
+    """按"试用已到期"建一只主窗口（授权相关的用例都从这个状态出发）。"""
+    assert ui_app.QT_AVAILABLE is True
+    _expire_trial(license_file)
+    win = ui_app.MainWindow(cfg)
+    yield win
+    # 收尾与 test_ui_smoke 的 window fixture 一致：授权对话框是**有父窗口**的，
+    # 但桌宠/消息列表是无父窗口的顶层窗口，必须走同一个 shutdown()。
+    if win.license_dialog is not None:
+        win.license_dialog.close()
+    if win.about_dialog is not None:
+        win.about_dialog.close()
+    for timer_name in ("_timer", "_market_timer", "_auction_timer", "_flash_timer"):
+        timer = getattr(win, timer_name, None)
+        if timer is not None:
+            timer.stop()
+    win.scheduler.stop()
+    win.quotes.stop()
+    win.shutdown()
+    win.close()
+    win.deleteLater()
+    qapp.processEvents()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 授权对话框
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_dialog_shows_machine_code_and_register_controls(window, qapp, cfg) -> None:
+    """对话框里三样东西都在：机器码 / 注册码输入口 / 【注册】按钮（用户要求的位置）。"""
+    window.on_open_license()
+    qapp.processEvents()
+    dialog = window.license_dialog
+
+    assert dialog is not None
+    assert dialog.machine == L.machine_code()
+    assert dialog.machine_label.text() == dialog.machine
+    assert dialog.code_edit.placeholderText() == "XXXX-XXXX-XXXX-XXXX"
+    assert dialog.btn_register.text() == "注册"
+    # 联系方式是用户给定要发出去的那句（一个字都不能改）
+    assert dialog.contact_label.text() == L.CONTACT_TEXT
+
+
+def test_dialog_register_with_wrong_code_says_why(window, qapp, cfg) -> None:
+    """填错：就地给中文原因，**不关窗口**、也绝不写授权状态。"""
+    window.on_open_license()
+    dialog = window.license_dialog
+    dialog.code_edit.setText("AAAA-BBBB-CCCC-DDDD")
+
+    dialog.btn_register.click()
+    qapp.processEvents()
+
+    assert dialog.hint_label.text().startswith("❌")
+    assert "不匹配" in dialog.hint_label.text()
+    assert L.is_licensed(cfg) is False            # 试用本来已到期，不能被"点一下"变成已授权
+
+
+def test_dialog_register_unlocks_immediately(window, qapp, cfg) -> None:
+    """填对：当场生效（不用重启），状态行立刻变成"已注册"。"""
+    window.on_open_license()
+    dialog = window.license_dialog
+    dialog.code_edit.setText(L.expected_code(dialog.machine))
+
+    dialog.btn_register.click()
+    qapp.processEvents()
+
+    assert dialog.hint_label.text().startswith("✅")
+    assert L.is_licensed(cfg) is True
+    assert "已注册" in dialog.status_label.text()
+
+
+def test_dialog_copy_machine_puts_it_in_the_clipboard(window, qapp) -> None:
+    """【复制机器码】：用户要把它发微信，手抄 16 位太容易错。"""
+    from PySide6.QtGui import QGuiApplication
+
+    window.on_open_license()
+    dialog = window.license_dialog
+
+    dialog.btn_copy_machine.click()
+
+    assert QGuiApplication.clipboard().text() == dialog.machine
+    assert dialog.btn_copy_machine.text() == "已复制"      # 看得见又不打断
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 到期提醒（只弹一次）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_expired_launch_prompts_once(window, qapp) -> None:
+    """到期启动自动弹一次授权提醒；再调一次不会重复弹。"""
+    first = window.license_dialog
+    assert first is not None                       # 启动就弹了
+    assert window._license_prompted is True
+
+    window.on_open_license()                       # 用户自己点开（复用同一个窗口）
+    qapp.processEvents()
+    assert window.license_dialog is first
+
+    window._maybe_prompt_license()                 # 内部再检查一次
+    assert window.license_dialog is first          # 没有堆出第二个
+
+
+def test_trial_active_does_not_prompt_at_launch(cfg, qapp, fingerprint, license_file) -> None:
+    """试用期内不打扰（用户没到期就弹提醒 = 骚扰）。"""
+    win = ui_app.MainWindow(cfg)
+    try:
+        assert L.is_licensed(cfg) is True
+        assert win.license_dialog is None
+    finally:
+        win.scheduler.stop()
+        win.quotes.stop()
+        win.shutdown()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 锁「策略编辑」
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_editor_is_locked_and_points_to_the_dialog(window, qapp) -> None:
+    """未授权：点【策略编辑】弹授权对话框、**不打开编辑器**，提示区写明原因与联系方式。"""
+    page = window.formula_page
+
+    reason = page.open_editor_guard()
+    page.btn_edit.click()
+    qapp.processEvents()
+
+    assert reason != ""                            # 闸门拦下了
+    assert window.license_dialog is not None       # 并且把授权窗口给了用户
+    assert page.hint_text.startswith("🔒")
+    assert L.CONTACT_TEXT in page.hint_text        # 微信就在提示里，用户不用猜去哪问
+    assert page.bottom_stack.currentWidget() is page.editor_page   # 仍是默认页，但没显示
+    assert page.bottom_stack.isVisibleTo(page) is False            # 关键：编辑器没被打开
+
+
+def test_editor_unlocks_after_registering(window, qapp, cfg) -> None:
+    """注册之后：闸门放行，编辑器正常打开（同一只窗口，不用重启）。"""
+    page = window.formula_page
+    window.on_open_license()
+    dialog = window.license_dialog
+    dialog.code_edit.setText(L.expected_code(dialog.machine))
+    dialog.btn_register.click()
+    qapp.processEvents()
+
+    assert page.open_editor_guard() == ""          # 放行
+    assert "🔒" not in page.btn_edit.toolTip()     # tooltip 里的锁也撤了
+
+
+def test_editor_tooltip_marks_the_lock(window) -> None:
+    """未授权时按钮 tooltip 标明"需要授权"并给出联系方式（用户不用去别处找）。"""
+    window._apply_license_lock()
+
+    tip = window.formula_page.btn_edit.toolTip()
+    assert "🔒" in tip and L.CONTACT_TEXT in tip
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 「关于」里的入口
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_about_has_license_line_and_entry(window, qapp) -> None:
+    """「关于」里能看到授权状态，并且有一个【授权…】按钮打开对话框。"""
+    lines = window.about_lines()
+
+    assert any(line.startswith("授权：") for line in lines)
+    assert any("试用" in line or "未授权" in line or "已注册" in line for line in lines)
+
+    window.on_about()
+    qapp.processEvents()
+    assert window.about_license_button.text() == "授权…"
+
+    window.about_license_button.click()
+    qapp.processEvents()
+    assert window.license_dialog is not None
+
+
+def test_keygen_matches_the_client_algorithm() -> None:
+    """注册机与客户端**同一把密钥、同一个算法**（两处漂移只在用户注册失败时才被发现）。"""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "laoa_keygen", Path(__file__).resolve().parents[1] / "build" / "keygen.py")
+    keygen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(keygen)
+
+    machine = L.machine_code()
+    assert keygen.make_code(machine) == L.expected_code(machine)
+    assert L.verify(machine, keygen.make_code(machine))[0] is True
