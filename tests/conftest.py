@@ -162,11 +162,23 @@ def _drain_threads_at_session_end():
     leftover = [f"{t.name}(daemon={t.daemon})" for t in threading.enumerate()
                 if t is not main and t.is_alive()]
     if leftover:
-        # 用 `logger` 而不是 print：CI 的 pytest.log 收 stdout/stderr，两边都能看到
-        logging.getLogger("laoa_trader.tests").warning(
-            "整场收尾时仍有线程存活：%s（若 CI 再出现'跑到半路中止'，先看这一行）",
-            "、".join(leftover),
-        )
+        # ⚠️ 这里**不能走 logging**：整场收尾时 pytest 已经把它的 handler/流收掉了，
+        # 再从这儿写日志就会得到 I/O operation on closed file（2026-09-21 实测：
+        # CI 的 stderr 里正是这条 —— 它把「还有线程活着」这个真问题掩盖成了「日志在报错」）。
+        # 直接写**原始 stderr**，并自己兜异常：诊断失败绝不能影响测试结论。
+        try:
+            import sys as _sys
+
+            stream = getattr(_sys, "__stderr__", None)
+            if stream is not None:
+                stream.write(
+                    "[tests] 整场收尾时仍有线程存活："
+                    + "、".join(leftover)
+                    + "（若 CI 再出现跑到半路中止，先看这一行）\n"
+                )
+                stream.flush()
+        except Exception:  # noqa: BLE001 - 诊断失败不影响测试结论
+            pass
 
 
 @pytest.fixture(autouse=True)
@@ -703,7 +715,7 @@ def _close_orphan_top_level_windows():
 
         worker_cls = getattr(ui_app, "Worker", None)
         if worker_cls is not None:
-            worker_cls.wait_all(5.0)
+            worker_cls.wait_all(1.0)
     except Exception:      # noqa: BLE001 - 没装 Qt / 导入失败时安静跳过
         pass
 
