@@ -29,7 +29,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过桌宠接线测试")
 
 from PySide6.QtCore import QEvent, Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from laoa_trader.data import storage  # noqa: E402
 from laoa_trader.notify import sound, voice  # noqa: E402
@@ -629,9 +629,16 @@ def test_settings_page_has_no_rate_control(window) -> None:
 
     from PySide6.QtWidgets import QDoubleSpinBox, QLabel, QSpinBox
 
-    # 界面上再没有"语速"这两个字（连标签都不留）
-    labels = [label.text() for label in window.findChildren(QLabel)]
-    assert all("语速" not in text for text in labels), [t for t in labels if "语速" in t]
+    # 界面上再没有"语速"这两个字（标签、按钮文字、以及**任何 tooltip** 都不许有 ——
+    # 2026-09-21 就漏过一处：试听按钮的 tooltip 还写着"按当前的音色/音量/语速念"，
+    # 那条文字会让人去找一个已经删掉的控件）
+    for widget in window.findChildren(QLabel) + window.findChildren(QPushButton):
+        text = widget.text()
+        tip = widget.toolTip()
+        assert "语速" not in text, f"还有提到语速的可见文字：{text}"
+        if "语速" in tip:
+            # 允许"语速固定/锁定"这种**说明事实**的 tooltip，禁止"可以调语速"的口径
+            assert "固定" in tip or "锁定" in tip, f"tooltip 还在说语速可调：{tip}"
     # 也没有带 "×" 后缀的倍率控件（那是原来语速框的特征）
     for box in window.findChildren(QDoubleSpinBox) + window.findChildren(QSpinBox):
         assert "×" not in box.suffix(), f"还有个倍率控件：{box.suffix()}"

@@ -54,7 +54,7 @@ from laoa_trader.hints import (
 )
 from laoa_trader.log import get_logger, log_file_path
 from laoa_trader.notify import KINDS, sound, summarize
-# 语音模块在设置页构建控件时要用（语速范围常量），模块级导入一次，别在构造函数里再 import
+# 语音模块在设置页构建控件/说明行时要用（音色、能不能念、锁定语速），模块级导入一次，别在构造函数里再 import
 from laoa_trader.notify import voice as voice_mod
 from laoa_trader.scheduler import Scheduler, data_gate, refresh_data, run_daily
 from laoa_trader.ui import quotes as quotes_mod
@@ -3168,8 +3168,8 @@ if QT_AVAILABLE:
             voice_row.addWidget(self.voice_name_box, 1)
             self.btn_voice_try = QPushButton("试听")
             self.btn_voice_try.setToolTip(
-                "用**当前**的音色/音量/语速念一句样本（不用先保存）——\n"
-                "听一下就知道这几个设置合不合适"
+                "用**当前**选中的音色与音量念一句样本（不用先保存）——\n"
+                "听一下就知道合不合适。语速固定正常（不给调，见主人 2026-09-21 的口径）"
             )
             self.btn_voice_try.clicked.connect(self.on_try_voice)
             voice_row.addWidget(self.btn_voice_try)
@@ -5654,7 +5654,7 @@ if QT_AVAILABLE:
             self._mark_missing_genders(box)
 
         def on_try_voice(self) -> None:
-            """【试听】：按**当前**面板上的音色/音量/语速念一句样本。
+            """【试听】：按**当前**面板上的音色与音量念一句样本（**语速固定 1.0，没有控件**）。
 
             为什么用面板上的值而不是已保存的配置：这一行就是给"调参数"用的 ——
             调了听一下、不满意再调，不该逼用户先保存再听（那样每次试都要写一次盘）。
