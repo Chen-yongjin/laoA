@@ -169,6 +169,23 @@ jobs:
           Get-Content pyinstaller.log | Select-Object -Last 10
           if ($code -ne 0) { Write-Host "::error::PyInstaller 失败（退出码 $code），详见 pyinstaller.log"; exit 1 }
 
+      - id: keygen_in_pkg
+        name: 把注册机一并放进包里（作者自用；**分发前必须删掉**）
+        shell: pwsh
+        run: |
+          # 主人 2026-09-21 的决定："直接把注册机打包到程序包里也可以的" ——
+          # 他的理由是他正式分发时会**重新打包**，所以 CI 这个包（他自己用）带上更省事：
+          # 拿到包就能签码，不必再点一次手动 workflow、再去 Release 找 keygen.zip。
+          # ⚠️ 代价说清楚：**这个包不能直接发给用户**（注册机里有签发算法）。
+          # 名字故意写得刺眼，就是为了"分发前一眼看到、顺手删掉"。
+          pyinstaller --noconfirm --clean build/keygen.spec | Out-Null
+          if (-not (Test-Path 'dist/keygen.exe')) { throw "注册机没打出来（build/keygen.spec 失败）" }
+          $dest = 'dist/LaoniuTrader/注册机-作者专用-别分发给用户.exe'
+          Copy-Item 'dist/keygen.exe' $dest -Force
+          $kb = (Get-Item $dest).Length / 1KB
+          Write-Host ("已把注册机放进包里：{0}（{1:N0} KB）" -f (Split-Path $dest -Leaf), $kb)
+          Write-Host "::warning::这个包里带着注册机（作者自用）—— 分发给用户前请删掉「注册机-作者专用-别分发给用户.exe」"
+
       - id: check
         name: 检查产物
         shell: pwsh
@@ -176,11 +193,20 @@ jobs:
           if (-not (Test-Path "dist/LaoniuTrader/LaoniuTrader.exe")) { throw "没找到 dist/LaoniuTrader/LaoniuTrader.exe" }
           $size = (Get-ChildItem -Recurse 'dist/LaoniuTrader' | Measure-Object -Property Length -Sum).Sum / 1MB
           Write-Host ("产物大小：{0:N1} MB" -f $size)
-          # ⚠️ 授权相关的硬要求：**注册机绝不能出现在主产物里**
-          # （它有签发密钥的算法，谁拿到谁就能给任意机器码算注册码）。
-          # 这条放在 CI 而不是只写在文档里 —— 文档拦不住"顺手把它加进 DATAS"。
-          $leak = Get-ChildItem -Recurse 'dist/LaoniuTrader' -Include 'keygen*','*注册机*' -ErrorAction SilentlyContinue
-          if ($leak) { throw ("主产物里混进了注册机相关文件：" + ($leak.Name -join ', ')) }
+          # ⚠️ 注册机与主产物的关系（2026-09-21 起**反转**了，两边都钉住）：
+          #   * **作者这个包**：带**恰好一个**注册机文件，名字固定（分发给用户前要删掉）；
+          #   * 主程序**本身**打进的东西里不许混进 keygen（那是 spec/DATAS 层面的泄漏，
+          #     与上面这个"刻意放进来、刻意命名的文件"是两回事）。
+          # 这样既满足主人"包里带上更省事"，又保留"谁顺手把注册机塞进 DATAS"的拦截。
+          $want = 'dist/LaoniuTrader/注册机-作者专用-别分发给用户.exe'
+          if (-not (Test-Path $want)) { throw "包里没有注册机（作者自用版应当带上）：$want" }
+          $stray = Get-ChildItem -Recurse 'dist/LaoniuTrader' -Include 'keygen*' -ErrorAction SilentlyContinue
+          if ($stray) { throw ("注册机文件命名不对（应当只有上面那一个中文名）：" + ($stray.Name -join ', ')) }
+          $found = @(Get-ChildItem -Recurse 'dist/LaoniuTrader' -Include '*注册机*' -ErrorAction SilentlyContinue)
+          if ($found.Count -ne 1) {
+            throw ("注册机文件应当只有 1 个，实际 " + $found.Count + " 个：" + ($found.Name -join ', '))
+          }
+          Write-Warning "这个包带着注册机（作者自用）：分发前删掉「$($found[0].Name)」"
           # 顺手确认关键依赖真的打进去了（缺了会造成运行期报错）
           foreach ($p in @("pandas", "pyarrow", "PySide6")) {
             if (-not (Get-ChildItem -Recurse 'dist/LaoniuTrader' -Filter "*$p*" -ErrorAction SilentlyContinue)) {

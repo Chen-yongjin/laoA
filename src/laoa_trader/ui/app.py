@@ -5670,6 +5670,7 @@ if QT_AVAILABLE:
             box.addItem("男声", "male")
             index = box.findData(kept)
             box.setCurrentIndex(index if index >= 0 else 0)   # 老配置（音色名）→ 自动
+            self._mark_missing_genders(box)
 
         def on_try_voice(self) -> None:
             """【试听】：按**当前**面板上的音色/音量/语速念一句样本。
@@ -5708,6 +5709,35 @@ if QT_AVAILABLE:
                 daemon=True, name="voice-try",
             ).start()
 
+        def _mark_missing_genders(self, box: Any) -> None:
+            """下拉里"这台机器没有"的性别**直接标在选项上**（用户 2026-09-21 实报）。
+
+            他的原话是"两个声音都是女声，windows没有男声吗？" —— 说明只靠下面那行灰字
+            还不够：他选"男声"时并不知道这台机器压根没有男声。所以把结论写进选项本身
+            （`男声（本机没有）`），并保留可选项（装了语音包、刷新后就正常了，
+            不让缓存把用户锁在"选不了"的状态里）。Tooltip 里写清怎么装。
+            """
+            for i in range(box.count()):
+                gender = str(box.itemData(i) or "")
+                if not gender:
+                    continue                              # "自动"那一项不标
+                has = False
+                try:
+                    has = voice_mod.has_gender(gender)
+                except Exception as exc:  # noqa: BLE001 - 查不到就按"没有"标（保守）
+                    logger.debug(f"查音色性别失败：{exc}")
+                name = {"female": "女声", "male": "男声"}.get(gender, "该音色")
+                box.setItemText(i, name if has else f"{name}（本机没有）")
+                if has:
+                    box.setItemData(i, f"用{name}念（本机有这个性别的音色）", Qt.ItemDataRole.ToolTipRole)
+                else:
+                    box.setItemData(
+                        i,
+                        f"这台机器上没有装{name}音色，选了也会回落到自动挑中文。\n"
+                        "想加：Windows 设置 → 时间和语言 → 语音 → 添加语音（中文）。",
+                        Qt.ItemDataRole.ToolTipRole,
+                    )
+
         def _refresh_voice_hint(self) -> None:
             """把"这台机器到底能不能念"写清楚（用户不用去猜为什么没声音）。"""
             label = getattr(self, "voice_hint", None)
@@ -5729,20 +5759,38 @@ if QT_AVAILABLE:
                 panel_gender = str(box.currentData() or "")
             picked = voice_mod.resolve_gender_voice(panel_gender) if panel_gender else None
             name = picked or auto_name
+            listed = ""
+            try:
+                summary = voice_mod.voices_summary()
+                if summary:
+                    listed = f"\n本机语音：{summary}。"
+            except Exception as exc:  # noqa: BLE001 - 只是说明行，取不到就算了
+                logger.debug(f"取音色清单失败：{exc}")
             if name:
                 if picked:
-                    label.setText(f"将使用系统语音「{name}」朗读（不联网）。")
+                    label.setText(
+                        f"将使用系统语音「{name}」朗读（{voice_mod.gender_label(panel_gender)}，"
+                        f"不联网）。" + listed
+                    )
                 elif panel_gender:
                     label.setText(
-                        f"这台机器没有{voice_mod.gender_label(panel_gender)}，已回落到自动挑中文："
-                        f"「{name}」。（装了对应语音包就会用上）"
+                        f"⚠️ 这台机器没有{voice_mod.gender_label(panel_gender)}音色，"
+                        f"已回落到自动挑中文：「{name}」。"
+                        "（想加：Windows 设置 → 时间和语言 → 语音）" + listed
                     )
                 else:
-                    label.setText(f"将使用系统语音「{name}」朗读（不联网，自动挑的中文音色）。")
+                    label.setText(f"将使用系统语音「{name}」朗读（不联网，自动挑的中文音色）。" + listed)
             elif sys.platform.startswith("win"):
+                extra = ""
+                try:
+                    listed = voice_mod.voices_summary()
+                    if listed:
+                        extra = f"本机语音：{listed}。"
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"取音色清单失败：{exc}")
                 label.setText(
-                    "⚠️ 这台机器没有中文语音，消息不会念出来（其余提醒照常）。"
-                    "装一个中文语音包即可：设置 → 时间和语言 → 语音。"
+                    "⚠️ 这台机器没有可用的中文语音，消息不会念出来（其余提醒照常）。"
+                    "装一个中文语音包即可：设置 → 时间和语言 → 语音。" + extra
                 )
             else:
                 label.setText("当前系统不是 Windows，语音朗读不可用（其余提醒照常）。")

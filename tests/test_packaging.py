@@ -70,8 +70,19 @@ def test_application_code_never_imports_the_keygen() -> None:
     assert hits == [], f"这些源码引用了 keygen：{hits}"
 
 
-def test_ci_keeps_the_keygen_out_of_the_main_artifact() -> None:
-    """CI：注册机是**独立 artifact**，并且主产物里有"不许出现 keygen"的检查。"""
+def test_ci_ships_exactly_one_keygen_in_the_author_package() -> None:
+    """CI 的**作者包**里带**恰好一个**注册机文件，名字固定、而且刺眼（2026-09-21 反转）。
+
+    口径变过一次，两个日期都记着：
+    * 2026-09-20 用户说"注册机做成可执行文件。不随包分发" → 当时钉的是"主产物里不许出现 keygen"；
+    * 2026-09-21 用户说"直接把注册机打包到程序包里也可以的"（理由：他正式分发时会**重新打包**）
+      → 于是 CI 的包里**刻意**放一个，文件名写成「注册机-作者专用-别分发给用户.exe」，
+      分发前删掉即可。
+
+    所以这条用例现在钉三件事：① 包里确实有那一个文件；② 名字就是那个刺眼的名字
+    （不能悄悄换成 `keygen.exe` 混在里面）；③ **主程序自己**打进的东西里仍然不许混进 keygen
+    （spec/DATAS 层面的泄漏拦截）。
+    """
     text = WORKFLOW.read_text(encoding="utf-8")
 
     # 独立 job + 独立 artifact 名
@@ -84,8 +95,12 @@ def test_ci_keeps_the_keygen_out_of_the_main_artifact() -> None:
     assert "github.event_name == 'workflow_dispatch'" in text
     assert "contains(github.event.head_commit.modified, 'build/keygen.spec')" in text, \
         "改动 keygen.spec 时应当自动重发注册机"
-    # 主 job 里那条"产物不许混进注册机"的检查还在
-    assert "混进了注册机相关文件" in text, "主 job 的产物检查里少了注册机泄漏检查"
+    # 主 job：刻意放进一个注册机 + 命名固定 + 分发前删掉（写进 CI 而不是只写文档）
+    assert "keygen_in_pkg" in text, "主 job 少了「把注册机放进包」的那一步"
+    assert "注册机-作者专用-别分发给用户.exe" in text, "包里那个注册机的文件名必须是那个刺眼的名字"
+    assert "分发给用户前" in text, "少了「分发前删掉」的提醒"
+    # 而且不许出现"随便叫 keygen 的文件混进产物"（交给 CI 里那条 stray 检查）
+    assert "注册机文件命名不对" in text, "主 job 少了「命名不对就报错」的检查"
     # 主程序的 Release 附件仍只有主程序 zip（注册机是**另一个附件**，不走这个 files:）
     release_zip = re.search(r"files:\s*(.+)", text)
     assert release_zip is not None and "keygen" not in release_zip.group(1)

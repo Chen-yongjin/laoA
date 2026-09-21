@@ -261,20 +261,35 @@ def test_queue_full_drops_the_oldest(monkeypatch, cfg) -> None:
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_stock_codes_and_prices_are_spelled_digit_by_digit() -> None:
-    """代码与价格逐位念；带单位/百分号的"数量"保持整读。"""
+def test_only_stock_codes_are_spelled_digit_by_digit() -> None:
+    """**只有股票代码**逐位念；价格与各种"数量"一律整读。
+
+    口径改过一次，两个日期都留着：2026-09-18 先把"代码 + 价格"都逐位（当时用户说
+    "6 万零 5 百一十九"听着不对）；2026-09-21 用户反馈"代码播报正常了，但是价格却也
+    变成了逐字播报了" —— 价格一位一位念听着累，所以价格回到整读。
+    """
+    # 代码：逐位（这是这次唯一要逐位的东西）
     assert voice.digits_for_speech("贵州茅台 600519") == "贵州茅台 六零零五一九"
-    assert voice.digits_for_speech("现价 1234.56") == "现价 一二三四点五六"
-    assert voice.digits_for_speech("跌到 -3.2") == "跌到 负三点二"
+    assert voice.digits_for_speech("宁德时代 300750") == "宁德时代 三零零七五零"
+    # 价格：整读（带小数、带负号、带"元/现价"都一样）
+    assert voice.digits_for_speech("现价 1234.56") == "现价 1234.56"
+    assert voice.digits_for_speech("跌到 -3.2") == "跌到 -3.2"
+    assert voice.digits_for_speech("价格 8.06 元") == "价格 8.06 元"
     # 成交量 / 家数 / 天数 / 百分号 / 倍数：整读（"五百零七家"比"五零七家"顺耳）
     assert voice.digits_for_speech("成交 500万股") == "成交 500万股"
     assert voice.digits_for_speech("共 37 家涨停") == "共 37 家涨停"
     assert voice.digits_for_speech("连板 2 天") == "连板 2 天"
     assert voice.digits_for_speech("涨跌幅 3.21%") == "涨跌幅 3.21%"
     assert voice.digits_for_speech("量比 2.5倍") == "量比 2.5倍"
-    # 短整数（1~5 位）不动；6 位及以上按代码逐位
+    # 短整数（1~5 位）不动；纯整数 6 位及以上按代码逐位
     assert voice.digits_for_speech("池子 12 只") == "池子 12 只"
     assert voice.digits_for_speech("成交额 1234567 元") == "成交额 一二三四五六七 元"
+
+
+def test_a_sentence_keeps_code_spelled_and_price_intact() -> None:
+    """同一句里两件事都要对：代码逐位、价格原样（这是主人实报的那一句）。"""
+    assert voice.digits_for_speech("贵州茅台 600519 现价 1234.56") == \
+        "贵州茅台 六零零五一九 现价 1234.56"
 
 
 def test_digits_can_be_switched_off(cfg) -> None:
@@ -298,7 +313,8 @@ def test_speech_path_applies_digit_spelling(monkeypatch, cfg) -> None:
     monkeypatch.setattr(voice, "_ensure_worker", lambda: None)
     voice.speak("宁德时代 300750 现价 200.5", cfg=cfg)
     item = voice._queue.get_nowait()
-    assert item["text"] == "宁德时代 三零零七五零 现价 二零零点五"
+    # 代码逐位、价格原样（2026-09-21 起价格回到整读）
+    assert item["text"] == "宁德时代 三零零七五零 现价 200.5"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -377,18 +393,51 @@ def test_gender_choice_falls_back_to_auto_when_that_gender_is_missing(monkeypatc
     assert voice.chosen_voice(cfg) == "Chinese Huihui"      # 回落成自动挑中文
 
 
-def test_gender_unknown_voices_fall_back_to_auto(monkeypatch, cfg) -> None:
-    """有些语音**不报性别**（`Gender=NotSet`）→ 当成"该性别没有候选"，回落自动。
+def test_unknown_gender_is_guessed_from_the_voice_name(monkeypatch, cfg) -> None:
+    """系统**不报性别**的语音（`Gender=NotSet`）→ 按音色名认一遍（用户 2026-09-21 实报）。
 
-    这条是"别让用户以为坏了"：他没做错什么，只是这台机器的语音没提供性别信息。
+    他的原话是"两个声音都是女声，windows没有男声吗？"。原因之一就是这类语音不报性别：
+    以前一律当"没这个性别"，于是"选了男声还是女声"。现在 `Huihui` 认成女声、
+    `Kangkang` 认成男声，选男声就能真的挑到男声。
     """
     monkeypatch.setattr(voice, "available", lambda: True)
     _fake_voices(monkeypatch, [("Huihui", "zh-CN", "NotSet"), ("Kangkang", "zh-CN", "")])
-    cfg.notify_voice_name = "female"
 
-    assert voice.voices_of_gender("female") == []
-    assert voice.resolve_gender_voice("female") is None
-    assert voice.chosen_voice(cfg) == "Huihui"
+    assert voice.gender_from_name("Microsoft Huihui Desktop") == "female"
+    assert voice.gender_from_name("Microsoft Kangkang Desktop") == "male"
+    assert voice.voices_of_gender("female")[0][0] == "Huihui"
+    assert voice.resolve_gender_voice("male") == "Kangkang"
+    cfg.notify_voice_name = "male"
+    assert voice.chosen_voice(cfg) == "Kangkang"
+
+
+def test_gender_truly_unknown_still_falls_back_to_auto(monkeypatch, cfg) -> None:
+    """名字也认不出来的语音（第三方/自造音色）→ 仍按"没这个性别"处理并回落自动。
+
+    宁可回落，也不按名字瞎猜：猜错会让"男声"念出女声，比回落更难解释。
+    """
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Some Custom Voice", "zh-CN", "NotSet"),
+                               ("Chinese Huihui", "zh-CN", "")])
+    cfg.notify_voice_name = "male"
+
+    assert voice.gender_from_name("Some Custom Voice") == ""
+    assert voice.voices_of_gender("male") == []
+    assert voice.resolve_gender_voice("male") is None
+    # 回落成"自动挑中文"：不写死具体名字（自动挑的是这台机器上最合适的中文音色，
+    # 与假名单的先后有关）—— 判据是"最终用的就是自动那一个"
+    assert voice.chosen_voice(cfg) == voice.voice_name()
+
+
+def test_voices_summary_lists_what_this_machine_has(monkeypatch) -> None:
+    """说明行要能把**实测到的**音色清单摆出来（用户据此判断"到底装没装男声"）。"""
+    monkeypatch.setattr(voice, "available", lambda: True)
+    _fake_voices(monkeypatch, [("Huihui", "zh-CN", "Female"), ("Kangkang", "zh-CN", "Male")])
+
+    summary = voice.voices_summary()
+
+    assert "Huihui（女声 · zh-CN）" in summary and "Kangkang（男声 · zh-CN）" in summary
+    assert voice.has_gender("male") is True and voice.has_gender("female") is True
 
 
 def test_legacy_voice_name_means_auto(monkeypatch, cfg) -> None:

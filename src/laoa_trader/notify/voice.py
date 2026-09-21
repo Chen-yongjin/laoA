@@ -149,6 +149,46 @@ def _normalize_gender(raw: Any) -> str:
     return ""
 
 
+#: 音色名 → 性别。**只在系统没报性别时用**（有些语音 `Gender` 是 `NotSet`）。
+#:
+#: 为什么需要它：用户 2026-09-21 报"两个声音都是女声，windows没有男声吗？" ——
+#: 如果那台机器确实装了男声、但那个音色没报性别，我们就会当成"没有男声"而回落，
+#: 表现成"选了男声还是女声"。按名字认一遍能救回这种情况。
+#: 名单只收**确定**的（Windows 中文语音就那几个 + 英文常见的几个），认不出来仍然算未知 ——
+#: 宁可回落，也不要按名字瞎猜（猜错会让"男声"念出女声，比回落更难解释）。
+_GENDER_BY_NAME: dict[str, str] = {
+    # 中文（SAPI5 桌面语音）
+    "huihui": "female", "yaoyao": "female", "kangkang": "male",
+    # 中文（Windows 10/11 新增的自然语音）
+    "xiaoxiao": "female", "xiaoyi": "female", "xiaohan": "female",
+    "xiaomo": "female", "xiaoxuan": "female", "xiaoshuang": "female",
+    "yunyang": "male", "yunxi": "male", "yunye": "male", "yunhao": "male",
+    "yunjian": "male", "yunze": "male", "yunfeng": "male", "yunxia": "male",
+    # 英文（机器上只有英文语音时也用得着）
+    "david": "male", "mark": "male", "george": "male", "guy": "male",
+    "ryan": "male", "zira": "female", "hazel": "female", "susan": "female",
+    "samantha": "female", "jenny": "female", "aria": "female", "michelle": "female",
+}
+
+
+def gender_from_name(name: Any) -> str:
+    """按音色名猜性别（认不出来返回空串）。仅用于**系统没报性别**的补位。"""
+    text = str(name or "").strip().lower()
+    if not text:
+        return ""
+    # 名字里可能带前缀（`Microsoft Huihui Desktop`）→ 逐词看有没有认识的
+    words = [w for w in text.replace("(", " ").replace(")", " ").split() if w]
+    for word in words:
+        hit = _GENDER_BY_NAME.get(word)
+        if hit:
+            return hit
+    # 连写的情况（`MicrosoftHuihuiDesktop`）
+    for key, gender in _GENDER_BY_NAME.items():
+        if key in text:
+            return gender
+    return ""
+
+
 def normalize_voices(voices: Any) -> list[tuple[str, str, str]]:
     """把音色名单统一成 `(名字, 区域, 性别)` 三元组（性别规范成 `female`/`male`/`""`）。
 
@@ -162,6 +202,13 @@ def normalize_voices(voices: Any) -> list[tuple[str, str, str]]:
         name = str(parts[0] if parts else "").strip()
         culture = str(parts[1] if len(parts) > 1 else "").strip()
         gender = _normalize_gender(parts[2] if len(parts) > 2 else "")
+        if not gender:
+            # 系统没报性别 → 按名字认一遍（认不出仍是空串）。这一层放在规范化里，
+            # 所以"真实枚举"与"测试替身"两条路的行为完全一致。
+            guessed = gender_from_name(name)
+            if guessed:
+                logger.debug(f"音色「{name}」系统没报性别，按名字认定为 {guessed}")
+                gender = guessed
         if name:
             out.append((name, culture, gender))
     return out
@@ -297,7 +344,9 @@ def digits_for_speech(text: Any) -> str:
 
     * **股票代码**（6 位及以上纯整数）→ 逐位：`600519` 整读会变成"六十万零五百一十九"，
       这正是用户实报的问题；
-    * **价格 / 带小数的数**（`1234.56`）→ 逐位（含"点"）：听价格要一位一位才准；
+    * **价格 / 带小数的数**（`1234.56`）→ **整读**（交给系统按数字念：一二三四点五六 那种
+      "一位一位"听着累，而且用户 2026-09-21 明确说"代码播报正常了，但是价格却也变成了
+      逐字播报了"）—— 所以只有**纯整数且够长**的才当代码逐位；
     * **带单位或百分号的"数量"**（`500万股`、`37家`、`3.21%`、`2.5倍`）→ **保持整读**：
       这些按数量念才自然；
     * **1~5 位纯整数**（条数、天数）→ 保持整读（同上）。
@@ -320,7 +369,7 @@ def digits_for_speech(text: Any) -> str:
         if amount:
             keep = True                      # 数量：整读
         elif "." in digits:
-            keep = False                     # 价格/小数：逐位
+            keep = True                      # 价格/小数：整读（2026-09-21 用户要求）
         else:
             keep = len(digits) < _CODE_MIN_DIGITS   # 6 位以上当代码逐位，短整数整读
         if keep:
@@ -437,6 +486,25 @@ def resolve_gender_voice(gender: str) -> str | None:
     # 该性别只有非中文音色：机器上还有中文音色的话，用它（用户明确点了这个性别）；
     # 一个中文音色都没有就直接回落自动 —— 自动那边会返回 None（不念）。
     return same[0][0] if voice_name() is not None else None
+
+
+def voices_summary() -> str:
+    """本机音色的一行清单：`Huihui（女声 · zh-CN）、Kangkang（男声 · zh-CN）`。
+
+    为什么界面上要把它列出来：用户 2026-09-21 报"两个声音都是女声，windows没有男声吗？"——
+    光说"这台机器没有男声"他没法确认到底装了什么。把**实测到的**清单摆出来，
+    他要么看到确实没有男声（那就去装语音包），要么看到有却没被选上（那是 bug，能立刻发现）。
+    """
+    items = []
+    for name, culture, gender in installed_voices():
+        label = gender_label(gender) if gender else "性别未知"
+        items.append(f"{name}（{label} · {culture}）" if culture else f"{name}（{label}）")
+    return "、".join(items)
+
+
+def has_gender(gender: str) -> bool:
+    """这台机器上有没有该性别的音色（设置页用它在下拉项上标「本机没有」）。"""
+    return bool(voices_of_gender(gender))
 
 
 def configured_gender(cfg: Any = None) -> str:

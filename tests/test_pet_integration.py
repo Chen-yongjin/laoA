@@ -28,7 +28,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过桌宠接线测试")
 
-from PySide6.QtCore import QEvent  # noqa: E402
+from PySide6.QtCore import QEvent, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from laoa_trader.data import storage  # noqa: E402
@@ -443,6 +443,40 @@ def test_saved_settings_apply_the_pet_switch_immediately(window, qapp) -> None:
     assert window.pet.isVisible() is True
 
 
+def test_voice_picker_marks_a_gender_this_machine_does_not_have(window, monkeypatch) -> None:
+    """本机没有那个性别时，**选项上直接标出来**（用户 2026-09-21："两个声音都是女声，
+    windows没有男声吗？"）。
+
+    光靠下面那行灰字不够：他选"男声"时并不知道这台机器压根没装男声。标在选项上 +
+    tooltip 里写清怎么装，比事后解释有效。选项**仍然可选**（装了语音包刷新后就正常，
+    不让缓存把用户锁住）。
+    """
+    monkeypatch.setattr(voice, "available", lambda: True)
+    monkeypatch.setattr(voice, "installed_voices",
+                        lambda refresh=False: [("Only Female", "zh-CN", "female")])
+    monkeypatch.setattr(voice, "_voices", None, raising=False)
+
+    window._fill_voice_names()
+
+    box = window.voice_name_box
+    assert box.itemText(1) == "女声"
+    assert box.itemText(2) == "男声（本机没有）"
+    assert "设置" in str(box.itemData(2, Qt.ItemDataRole.ToolTipRole))
+    # 选了它照样能用（回落到自动），只是说明行会讲清楚原因
+    box.setCurrentIndex(box.findData("male"))
+    window._refresh_voice_hint()
+    assert "没有男声音色" in window.voice_hint.text()
+
+
+def test_voice_hint_lists_the_voices_it_found(window) -> None:
+    """说明行要把**实测到的音色清单**摆出来（用户据此判断"到底装没装男声"）。"""
+    window._refresh_voice_hint()
+
+    hint = window.voice_hint.text()
+    assert "本机语音：" in hint
+    assert "Fake 中文 女（女声 · zh-CN）" in hint and "Fake 中文 男（男声 · zh-CN）" in hint
+
+
 def test_voice_hint_says_which_voice_is_used(window, qapp) -> None:
     """设置页那一行说明要告诉用户"到底会不会念、用哪个音色"。"""
     assert "Fake 中文" in window.voice_hint.text()
@@ -476,6 +510,7 @@ def test_voice_picker_offers_genders_not_voice_names(window) -> None:
 
     assert [box.itemData(i) for i in range(box.count())] == ["", "female", "male"]
     assert "自动" in box.itemText(0)
+    # 这台机器两条假音色男/女都有 → 选项上不带"本机没有"的后缀
     assert box.itemText(1) == "女声" and box.itemText(2) == "男声"
     # 关掉再开也不会多出别的项（枚举失败/成功都不影响这三项）
     window._fill_voice_names()
