@@ -203,10 +203,25 @@ jobs:
         with:
           name: LaoniuTrader
           path: LaoniuTrader.zip
-          retention-days: 14
+          # ⚠️ 2 天而不是 14：私有仓库的 Actions 存储有硬额度（免费额度 500MB），
+          # 而这份产物压缩后就有几百 MB —— 攒十几次就把额度顶爆，之后**上传必失败**
+          # （2026-09-21 实测：测试/打包/检查全 success，只有 step_upload=failure）。
+          retention-days: 2
           # 0 = 不再二次压缩（zip 已经是压缩过的，再压只是白花时间）
           compression-level: 0
           if-no-files-found: error
+
+      - name: 上传产物（失败时换名再试一次）
+        # 主上传失败不一定是"包有问题"（可能是同名冲突 / 服务端抖动 / 存储额度），
+        # 所以再给一次机会、换个名字 —— 用户至少能拿到包。
+        if: failure() && hashFiles('LaoniuTrader.zip') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: LaoniuTrader-retry-${{ github.run_id }}
+          path: LaoniuTrader.zip
+          retention-days: 2
+          if-no-files-found: ignore
 
       # 想发版本时打个 tag（如 v0.1.0），这里会自动生成 Release 附件；
       # 产物超过 artifact 上限时用 Release 更稳（单文件上限更宽松）。
@@ -243,6 +258,7 @@ jobs:
             "step_test=${{ steps.test.outcome }}"
             "step_pack=${{ steps.pack.outcome }}"
             "step_check=${{ steps.check.outcome }}"
+            "step_zip=${{ steps.zip.outcome }}"
             "step_upload=${{ steps.upload.outcome }}"
           ) | Set-Content ci-log/meta.txt
           if (Test-Path pyinstaller.log) { Copy-Item pyinstaller.log ci-log/pyinstaller.log -Force }
@@ -303,5 +319,5 @@ jobs:
         with:
           name: keygen
           path: dist/keygen.exe
-          retention-days: 14
+          retention-days: 2
           if-no-files-found: error
