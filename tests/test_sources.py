@@ -151,16 +151,20 @@ def test_capabilities_only_use_known_values() -> None:
 
 
 def test_eastmoney_does_not_claim_what_it_cannot_do() -> None:
-    """不许假装能力：东方财富这里**没有**涨停池 / 复权因子 / 交易日历。"""
+    """不许假装能力：东方财富这里**没有**涨停池 / 复权因子 / 交易日历。
+
+    而且 2026-09-20（用户："按同一把尺子压成一句，只留结论，实现细节别放界面上"）
+    之后，它那句说明只剩"什么时候轮得到它 + 有什么风险"，实测数字/单位差异/
+    能力边界/`klt` 参数这些实现细节**一句都不许再出现在界面上**。
+    """
     em_info = sources.REGISTRY["eastmoney"]
     assert em_info.capabilities == frozenset({
         sources.CAP_SNAPSHOT, sources.CAP_DAILY_HISTORY, sources.CAP_STOCK_LIST,
     })
-    for word in ("涨停池", "复权因子", "交易日历"):
-        assert word in em_info.note            # 风险与短板写在明面上
-    assert "未文档化" in em_info.note
-    # 数值口径也如实写着（它们是实测出来的关键事实）
-    assert "手" in em_info.note or "股" in em_info.note
+    assert em_info.note == ("兜底源之一：需要【添加来源】才会用到，"
+                            "接口未文档化、会被限流，只作备用。")
+    for jargon in ("涨停池", "复权因子", "交易日历", "klt", "手", "实测", "降级"):
+        assert jargon not in em_info.note, jargon
 
 
 def test_capability_labels_are_chinese_and_complete() -> None:
@@ -169,6 +173,26 @@ def test_capability_labels_are_chinese_and_complete() -> None:
         sources.CAP_DAILY_HISTORY: "历史日K",
         sources.CAP_STOCK_LIST: "股票代码表",
     }
+
+
+def test_capability_brief_is_the_one_line_version_for_the_ui() -> None:
+    """界面那一行的"提供：…"用**短**标签（2026-09-20 用户要求压成一行）。
+
+    两份文案必须覆盖**同一批能力**（都从 `capabilities` 集合生成）—— 只长短不同，
+    否则就会出现"短的那行漏了某个能力、用户以为换来源不会丢它"。
+    """
+    assert set(sources.CAPABILITY_SHORT_LABELS) == set(sources.CAPABILITY_LABELS)
+    for info in sources.REGISTRY.values():
+        assert sources.capabilities_brief(info).count("、") + 1 == len(info.capabilities)
+        assert sources.capabilities_brief(info) == (
+            "、".join(sources.CAPABILITY_SHORT_LABELS[cap] for cap in sources.CAPABILITIES
+                      if cap in info.capabilities)
+            or "（无）"
+        )
+    hx = sources.REGISTRY["hithink"]
+    assert sources.capabilities_brief(hx) == "实时快照、日线、股票列表"
+    # 一行放得下（界面那行还带"提供："与"（换来源会影响这些）"两个前后缀）
+    assert len("提供：" + sources.capabilities_brief(hx) + "（换来源会影响这些）") <= 40
 
 
 # ── active_sources：顺序、未知 id、各种写法 ──
@@ -257,7 +281,7 @@ def test_source_states_lists_all_sources_with_enabled_first() -> None:
     assert [row["enabled"] for row in states] == [True, False, False]
     assert set(states[0]) == {
         "id", "name", "enabled", "needs_key", "has_key",
-        "capabilities_text", "note", "key_config", "capabilities",
+        "capabilities_text", "capabilities_brief", "note", "key_config", "capabilities",
     }
 
 

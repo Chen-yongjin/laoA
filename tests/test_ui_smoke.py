@@ -895,10 +895,13 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     # 公开源排在它后面 → 不给角色标记，而是按 Key 状态显示"免 Key"（它确实不用 Key）
     public = window.source_rows["public"]
     assert public.tag_label.text() == "免 Key"
-    # 能力说明写在界面上（换来源会丢掉什么，用户必须看得见）——**文案来自真相源**
+    # 能力说明写在界面上（换来源会丢掉什么，用户必须看得见）——**文案来自真相源**。
+    # 2026-09-20（用户："压成一句…把罗列压缩到一行内、别换行成墙"）：正文用**短**标签 +
+    # 一句后果，完整说法进 tooltip（信息没丢，只是不再占满屏幕）。
     assert builtin.capability_label.text() == \
-        "提供：" + state["hithink"]["capabilities_text"]
-    assert "实时快照" in builtin.capability_label.text()
+        "提供：" + state["hithink"]["capabilities_brief"] + "（换来源会影响这些）"
+    assert builtin.capability_label.text() == "提供：实时快照、日线、股票列表（换来源会影响这些）"
+    assert state["hithink"]["capabilities_text"] in builtin.capability_label.toolTip()
     assert builtin.enabled_box.isChecked() is True
     assert builtin.enabled_box.isEnabled() is False            # 内置来源不能在界面上关
     # 非当前页签里的控件 `isVisible()` 恒为 False，所以这里看的是「有没有被显式藏起来」
@@ -3175,16 +3178,18 @@ def test_source_list_adds_eastmoney_without_a_fake_key_box(
     assert row.key_edit is None
     assert row.btn_test is None
     assert "免 Key" in row.key_label.text()
-    # 风险说明如实显示（后端给的原文：公开但未文档化的接口，可能变更或限流）
-    assert "未文档化" in row.note_label.text()
-    assert "限流" in row.note_label.text()
-    # 后端文案里的 markdown 强调标记在纯文本 QLabel 上会显示成字面星号 —— 去掉
-    assert "**" not in row.note_label.text()
-    assert "单位是手" in row.note_label.text()
-    assert "**手**" in row.note_label.toolTip()          # 原文完整保留在 tooltip 里
-    # 能力文案来自真相源，且**不许**出现它没有的能力（涨停池/复权因子这类）
+    # 2026-09-20（用户："按同一把尺子压成一句，只留结论，实现细节别放界面上"）：
+    # 那一大段（实测条数/单位是手/限流细节/能力边界/klt 参数）压成**一句话**，
+    # 逐字钉住 —— 只留"什么时候轮得到它 + 有什么风险"。
+    assert row.note_label.text() == (
+        "兜底源之一：需要【添加来源】才会用到，接口未文档化、会被限流，只作备用。")
+    for jargon in ("klt", "单位是手", "实测", "降级", "涨停池"):
+        assert jargon not in row.note_label.text(), jargon
+    assert "**" not in row.note_label.text()             # markdown 星号不上界面
+    # 能力文案来自真相源（短的那份），且**不许**出现它没有的能力（涨停池/复权因子这类）
     assert row.capability_label.text() == "提供：" + \
-        sources_mod.capabilities_text(sources_mod.REGISTRY["eastmoney"])
+        sources_mod.capabilities_brief(sources_mod.REGISTRY["eastmoney"]) + \
+        "（换来源会影响这些）"
     assert "涨停" not in row.capability_label.text()
     assert row.btn_delete.isHidden() is False             # 用户加的可以删
     assert window._source_add_menu() is None              # 没有别的可加了

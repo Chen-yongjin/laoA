@@ -63,6 +63,18 @@ CAPABILITY_LABELS: dict[str, str] = {
     CAP_STOCK_LIST: "股票代码表",
 }
 
+#: 能力 → **更短**的中文（界面那一行"提供：…"用它）。
+#:
+#: 为什么还要一份短的（2026-09-20 用户："压成一句…把罗列压缩到一行内、别换行成墙"）：
+#: `CAPABILITY_LABELS` 是给 tooltip 与文档用的完整说法，界面那一行一长就会折成好几行、
+#: 看着像一段说明文。同一件事只留一套**语义**（都从 capabilities 集合生成），
+#: 只是呈现长度不同 —— 短标签漏了某个能力时，tooltip 里那份完整说法仍能对照。
+CAPABILITY_SHORT_LABELS: dict[str, str] = {
+    CAP_SNAPSHOT: "实时快照",
+    CAP_DAILY_HISTORY: "日线",
+    CAP_STOCK_LIST: "股票列表",
+}
+
 #: `snapshot_map()` 出口的**统一口径**字段（顺序即文档顺序）。
 #: `source`（来源 id）与 `as_of`（取数时刻 unix 秒）由 `snapshot_map` 补上，
 #: 所以不在这份列表里；`eastmoney.UNIFIED_KEYS` 必须与它一致（有测试钉住）。
@@ -143,20 +155,10 @@ REGISTRY: dict[str, SourceInfo] = {
         name="东方财富（公开接口，免 Key）",
         needs_key=False,
         capabilities=frozenset({CAP_SNAPSHOT, CAP_DAILY_HISTORY, CAP_STOCK_LIST}),
-        note=(
-            "免 Key，不用申请就能用：没填同花顺 Key 时靠它也能显示现价/涨幅。"
-            "实测（2026-09-16）：全市场快照 5559 只取得到（批量快照 1 个请求）。"
-            "**当前只有「实时快照」接进了界面**（两张表的现价/涨幅）；历史日K 与代码表"
-            "已经实现、但**还没接进下载流程**（下载历史仍然走同花顺的 dump）——"
-            "所以别把它理解成「不要同花顺 Key 也能下到历史」。"
-            "它的成交量原始单位是**手**（同花顺是股），程序内部已统一换算成股，"
-            "所以两张表上的数字与换来源前口径一致。"
-            "风险：这是**公开但未文档化**的接口，官方可能改字段或限流 —— 实测同一天"
-            "连续取几十次之后，日K 那个域名会直接掐连接（同一时刻快照域名仍正常）；"
-            "真遇到时程序照常降级成「本地最新收盘价 + * 标记」，不会假装有实时价。"
-            "能力边界（它做不到的，这里不写）：**没有**实时涨停池、复权因子、交易日历；"
-            "代码表只有代码与名称、**拿不到行业**；历史只有日线（`klt=101`）。"
-        ),
+        # 2026-09-20（用户："按同一把尺子压成一句…把它现在那段压掉，只留结论；
+        # 实现细节别放界面上"）：原来那一大段（实测条数、单位差异、限流细节、
+        # 能力边界、klt 参数）全部删掉，只留"什么时候轮得到它、有什么风险"。
+        note="兜底源之一：需要【添加来源】才会用到，接口未文档化、会被限流，只作备用。",
         key_config=None,
     ),
 }
@@ -235,9 +237,21 @@ def has_key(cfg: Any, info: SourceInfo) -> bool:
 
 
 def capabilities_text(info: SourceInfo) -> str:
-    """能力的中文一行（按 `CAPABILITIES` 的顺序，认不出的能力原样列出）。"""
+    """能力的**完整**中文一行（给 tooltip 与文档用；按 `CAPABILITIES` 顺序，认不出的原样列）。"""
     labels = [CAPABILITY_LABELS.get(cap, cap) for cap in CAPABILITIES
               if cap in info.capabilities]
+    labels += sorted(cap for cap in info.capabilities if cap not in CAPABILITIES)
+    return "、".join(labels) if labels else "（无）"
+
+
+def capabilities_brief(info: SourceInfo) -> str:
+    """能力的**短**中文一行（界面那个"提供：…"标签用它，保证一行放得下）。
+
+    与 `capabilities_text` 是同一份 `capabilities` 集合的两种长度，语义不会漂移：
+    短标签认不出来时退回完整标签（宁可长一点，也不显示一个内部英文键）。
+    """
+    labels = [CAPABILITY_SHORT_LABELS.get(cap, CAPABILITY_LABELS.get(cap, cap))
+              for cap in CAPABILITIES if cap in info.capabilities]
     labels += sorted(cap for cap in info.capabilities if cap not in CAPABILITIES)
     return "、".join(labels) if labels else "（无）"
 
@@ -278,7 +292,10 @@ def source_states(cfg: Any) -> list[dict]:
             "enabled": info.id in order,
             "needs_key": info.needs_key,
             "has_key": has_key(cfg, info),
+            #: 完整说法（tooltip / 文档用）与**短**说法（界面那一行用）各给一份：
+            #: 同一份 capabilities 集合的两种长度，界面拿短的那份才不会被折成墙
             "capabilities_text": capabilities_text(info),
+            "capabilities_brief": capabilities_brief(info),
             "note": info.note,
             "key_config": info.key_config,
             "capabilities": tuple(sorted(info.capabilities)),
@@ -608,6 +625,8 @@ __all__ = [
     "REGISTRY",
     "SourceInfo",
     "active_sources",
+    "CAPABILITY_SHORT_LABELS",
+    "capabilities_brief",
     "capabilities_text",
     "has_key",
     "hithink_rows_to_map",

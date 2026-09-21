@@ -666,14 +666,13 @@ if QT_AVAILABLE:
         列表里的一格，而不是把 Key 输入框散在页面上：
 
             ┌ 同花顺金融数据服务（内置）  [主来源]                            [✓] 启用 ┐
-            │ 提供：实时快照、历史日K、股票代码表                                     │
+            │ 提供：实时快照、日线、股票列表（换来源会影响这些）                       │
             │ [••••••]（Key 输入框，默认空白）        [测试连接]                     │
             │ 主来源：同花顺金融数据服务（需要 Key，申请地址 fuyao.aicubes.cn）       │
             └────────────────────────────────────────────────────────────────────────┘
             ┌ 公开行情源（腾讯为主，免 Key）  [免 Key]                      [✓] 启用 ┐
-            │ 提供：实时快照                                                         │
-            │ 兜底源（没配同花顺 Key 时）：两张表的行情 + 大盘概览 + 每日增量；        │
-            │ 实测会被限流；完整历史与选股要 Key（自检要求复权事件与行业归属）        │
+            │ 提供：实时快照（换来源会影响这些）                                      │
+            │ 兜底源：免 Key，不用申请、不用填。                                      │
             └────────────────────────────────────────────────────────────────────────┘
 
         三种行的差异全部由**构造参数**表达（不在类里 if 来源名）：
@@ -704,6 +703,9 @@ if QT_AVAILABLE:
             *,
             name: str,
             capability: str = "",
+            #: 完整说法（tooltip 用）。与 `capability` 是同一份能力集合的两种长度：
+            #: 界面上写短的（一行放得下），需要抠细节的人鼠标一停看到完整那份
+            capability_full: str = "",
             note: str = "",
             builtin: bool = False,
             implemented: bool = True,
@@ -781,10 +783,18 @@ if QT_AVAILABLE:
             head.addWidget(self.btn_delete)
             outer.addLayout(head)
 
-            # 能力说明：**换来源会丢掉什么**，用户必须看得见（文案来自 `source_states`）
-            self.capability_label = QLabel(
-                plain_text("提供：" + capability) if capability else
-                ("提供：—" if not implemented else "提供：（未知）")
+            # 能力说明：**换来源会丢掉什么**，用户必须看得见（文案来自 `source_states`）。
+            # 2026-09-20（用户："压成一句…保留"换来源会丢掉什么"这层意思，但把罗列压缩到
+            # 一行内"）：正文只写短列表 + 一句后果；完整说法（`capabilities_text`）进 tooltip，
+            # 需要抠细节的人鼠标一停就能看到 —— 信息没丢，只是不再占满屏幕。
+            brief = plain_text("提供：" + capability) if capability else (
+                "提供：—" if not implemented else "提供：（未知）")
+            if capability:
+                brief += "（换来源会影响这些）"
+            self.capability_label = QLabel(brief)
+            self.capability_label.setToolTip(
+                "这个来源能提供的东西。换来源 / 删来源会影响到它们。"
+                + (f"\n完整说法：{capability_full or capability}" if capability else "")
             )
             self.capability_label.setObjectName("statusTag")
             self.capability_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
@@ -6288,7 +6298,11 @@ if QT_AVAILABLE:
                 row = SourceRow(
                     source,
                     name=str(state.get("name") or source),
-                    capability=str(state.get("capabilities_text") or ""),
+                    # 界面那一行用**短**说法（用户 2026-09-20："压成一句…别换行成墙"）；
+                    # 完整说法进 tooltip（见 SourceRow 的 capability_label）
+                    capability=str(state.get("capabilities_brief")
+                                   or state.get("capabilities_text") or ""),
+                    capability_full=str(state.get("capabilities_text") or ""),
                     note=str(state.get("note") or ""),
                     builtin=builtin,
                     implemented=not unknown,
@@ -7390,6 +7404,36 @@ if QT_AVAILABLE:
                     self.alert_popup.hide_popup()
                 except Exception:  # noqa: BLE001
                     logger.debug("收浮窗失败", exc_info=True)
+            # ── 后台线程也在这里收 ──
+            #
+            # 为什么放在 `shutdown()` 里而不是"让调用方记得先停"：它是所有退出路径
+            # （`_quit` / `aboutToQuit` / 测试收尾）的**唯一入口**，而线程漏收的后果是
+            # 随机顺序下 `QThread: Destroyed while thread '' is still running`，
+            # 再往后就是整个进程中途 `Fatal Python error: Aborted`（CI 上就死在这上面：
+            # 日志停在半路、没有任何用例失败记录）。实测这几条线程都可能在收尾时还在飞：
+            # 概览取数（`_market_worker`）、实时快照（`quotes`）、调度器、以及下载/选股
+            # 那种通用任务线程（`_worker`）。
+            for name, stop in (("quotes", lambda obj: obj.stop()),
+                               ("scheduler", lambda obj: obj.stop())):
+                target = getattr(self, name, None)
+                if target is None:
+                    continue
+                try:
+                    stop(target)
+                except Exception:  # noqa: BLE001 - 收尾失败不该挡住退出
+                    logger.debug(f"收 {name} 失败", exc_info=True)
+            for attr in ("_market_worker", "_worker"):
+                thread = getattr(self, attr, None)
+                if thread is None:
+                    continue
+                try:
+                    if thread.isRunning():
+                        thread.wait(3_000)      # 线程此刻在收尾，等几毫秒到几秒即可
+                except RuntimeError:            # 底层对象已销毁
+                    pass
+                except Exception:  # noqa: BLE001
+                    logger.debug(f"等 {attr} 结束失败", exc_info=True)
+                setattr(self, attr, None)
             # 桌宠：**先停定时器再关窗**（见 `DesktopPet.shutdown` 的注释）
             self._close_pet_safely()
             center = self.message_center
@@ -7400,12 +7444,25 @@ if QT_AVAILABLE:
                 except Exception:  # noqa: BLE001
                     logger.debug("收消息列表失败", exc_info=True)
                 self.message_center = None
+            # 「软件授权」窗口：它虽然挂在主窗口下面（有父窗口），但**对话框在 Qt 里同样是
+            # 顶层窗口**，随机顺序的测试里可能比主窗口活得更久（= 窗口销毁了对话框还在，
+            # 它的控件再被绘制时踩到已析构对象）。收尾统一关掉，别赌"父窗口会带上它"。
+            for attr in ("license_dialog", "about_dialog", "status_dialog"):
+                dialog = getattr(self, attr, None)
+                if dialog is None:
+                    continue
+                try:
+                    dialog.close()
+                    dialog.deleteLater()
+                except Exception:  # noqa: BLE001
+                    logger.debug(f"收 {attr} 失败", exc_info=True)
+                setattr(self, attr, None)
 
         def _quit(self) -> None:
-            try:
-                self.scheduler.stop()
-            except Exception:  # noqa: BLE001
-                pass
+            # 调度线程与两条取数线程都由 `shutdown()` 统一收（它现在是**唯一入口**，
+            # 见那个方法的注释）—— 这里不再单独 `scheduler.stop()`：
+            # 否则退出路径会停两次（`test_tray_menu_quit_still_exits` 正是盯这个的：
+            # "调度线程先停，而且只停一次"）。
             self.shutdown()
             self.tray.hide()
             QApplication.quit()
