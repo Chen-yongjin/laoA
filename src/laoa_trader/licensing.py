@@ -129,6 +129,19 @@ def _ps(query: str) -> str:
     ])
 
 
+#: 一次性问三项硬件指纹的脚本（**一个进程问完**）。
+#:
+#: 为什么不是三条 `-Command`：每起一个 PowerShell 都要几百毫秒（实测冷启动 0.3~0.6s），
+#: 三条就是 1~2 秒 —— 而机器码以前是**每次调用都重算**，于是"点一下策略编辑就卡一下"
+#: （主人 2026-09-21 实报）。合成一条 + 下面的缓存，两层一起才把这条路压到 0。
+_HW_SCRIPT = (
+    "$p=(Get-CimInstance Win32_Processor).ProcessorId;"
+    "$b=(Get-CimInstance Win32_BaseBoard).SerialNumber;"
+    "$u=(Get-CimInstance Win32_ComputerSystemProduct).UUID;"
+    "\"$p|$b|$u\""
+)
+
+
 def _hardware_parts() -> list[str]:
     """三项硬件指纹的**原始取值**（CPU / 主板 / 系统盘；取不到就是空串）。
 
@@ -138,9 +151,10 @@ def _hardware_parts() -> list[str]:
     """
     parts: list[str] = []
     if os.name == "nt":       # pragma: no cover - 只在 Windows 上走
-        parts.append(_ps("(Get-CimInstance Win32_Processor).ProcessorId"))
-        parts.append(_ps("(Get-CimInstance Win32_BaseBoard).SerialNumber"))
-        parts.append(_ps("(Get-CimInstance Win32_ComputerSystemProduct).UUID"))
+        raw = _run_text([
+            "powershell", "-NoProfile", "-NonInteractive", "-Command", _HW_SCRIPT,
+        ])
+        parts = [p.strip() for p in str(raw or "").split("|")]
     else:
         for path in ("/etc/machine-id", "/sys/class/dmi/id/product_uuid",
                      "/sys/class/dmi/id/board_serial"):
@@ -206,19 +220,58 @@ def _normalize(code: Any) -> str:
     return "".join(ch for ch in text.upper() if ch.isalnum())
 
 
+#: 进程内缓存（第一次算完就记住）。`None` = 还没算过。
+#:
+#: 为什么必须缓存：Windows 上算一次要起 PowerShell 问硬件，**几百毫秒到一两秒**；
+#: 而"点【策略编辑】"、刷新授权状态、打开「关于」都会走到这里 —— 以前每次点击都重算，
+#: 表现就是"点策略什么的都会卡一下"（主人 2026-09-21 实报）。授权状态本身不变化，
+#: 没有理由重复问硬件。
+#:
+#: ⚠️ **只缓存在内存里，绝不落盘**（和"启动时后台预热"一起，代替了落盘那份）。
+#: 为什么不落盘：机器码是"授权绑定机器"的唯一依据 —— 一旦把它写进 `license.json`，
+#: 那份文件被拷到别的机器上时，`machine_code()` 会读回**旧机器**的码、与文件里的
+#: `machine` 字段一致 → 于是"拷文件就白用"。落盘省下的那几百毫秒（而且只在启动后
+#: 第一次调用时才有）不值得拿这个换。
+_MACHINE_CACHE: str | None = None
+
+
 def machine_code() -> str:
-    """本机机器码（`XXXX-XXXX-XXXX-XXXX`）。**同一台机器每次都一样**。"""
+    """本机机器码（`XXXX-XXXX-XXXX-XXXX`）。**同一台机器每次都一样**。
+
+    取值顺序（越靠前越省时间）：
+
+    1. **进程内缓存** —— 同一个进程里第二次调用直接返回（这才是"点按钮不卡"的关键）；
+    2. 真的去问硬件（三条 PowerShell → 现在合成**一条**）。
+
+    重启后第一次调用仍要问一次硬件，但那是**启动时后台线程**干的事
+    （`MainWindow._warm_machine_code`），用户点到按钮时已经是缓存值了 ——
+    所以这里不做落盘缓存（原因见 `_MACHINE_CACHE` 那段：落盘会让"拷文件白用"成立）。
+    """
+    global _MACHINE_CACHE
+    if _MACHINE_CACHE:
+        return _MACHINE_CACHE
     try:
         digest = hashlib.sha256("\x1f".join(_fingerprint_parts()).encode("utf-8")).digest()
     except Exception as exc:  # noqa: BLE001 - 极端环境：兜底也失败时给一个稳定占位
         logger.warning(f"算机器码失败，用占位值：{exc}")
         digest = hashlib.sha256(b"laoa-trader-unknown-machine").digest()
-    return _encode(digest, MACHINE_CHARS)
+    _MACHINE_CACHE = _encode(digest, MACHINE_CHARS)
+    return _MACHINE_CACHE
 
 
 # ══════════════════════════════════════════════════════════════════════════
 # 注册码
 # ══════════════════════════════════════════════════════════════════════════
+
+
+def forget_cached_machine_code() -> None:
+    """忘掉进程内缓存的机器码（**测试用**；也用于"换了装机位置想立刻重算"的场景）。
+
+    为什么要显式入口而不是让测试去改 `_MACHINE_CACHE`：缓存是"点按钮不卡"这条性能
+    改进的核心，测试必须能可靠地把它清掉再验算一遍；有个具名函数就不怕改实现时漏掉。
+    """
+    global _MACHINE_CACHE
+    _MACHINE_CACHE = None
 
 
 def expected_code(machine: Any) -> str:

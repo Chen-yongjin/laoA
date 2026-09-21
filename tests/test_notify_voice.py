@@ -481,3 +481,50 @@ def test_no_chinese_voice_still_means_no_speaking(monkeypatch, cfg) -> None:
     assert voice.speak("贵州茅台 600519，止损提醒", cfg=cfg) is False
     assert voice.speak_now("试一条", cfg=cfg, force=True) is False
     assert spoken == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 音色枚举只发生一次（主人 2026-09-21："点策略什么的都会卡一下"）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 枚举音色要起一个 PowerShell（几百毫秒）。设置页打开、保存、刷新说明行都会问
+# "这台机器有哪些音色" —— 每次都重新枚举的话，设置页每点一下都顿一下。
+
+
+def test_voices_are_enumerated_once_per_process(monkeypatch) -> None:
+    """反复问"有哪些音色"只枚举一次（缓存住），失败结果也一样缓存。"""
+    calls = {"n": 0}
+
+    def counting():
+        calls["n"] += 1
+        return [("Huihui", "zh-CN", "Female"), ("Kangkang", "zh-CN", "Male")]
+
+    monkeypatch.setattr(voice, "available", lambda: True)
+    monkeypatch.setattr(voice, "_list_voices_raw", counting)
+    monkeypatch.setattr(voice, "_voices", None, raising=False)
+
+    for _ in range(10):
+        voice.installed_voices()
+        voice.voices_of_gender("male")
+        voice.voices_summary()
+        voice.has_gender("female")
+
+    assert calls["n"] == 1, f"音色被枚举了 {calls['n']} 次（应当只有 1 次）"
+
+
+def test_a_failed_enumeration_is_not_retried_every_time(monkeypatch) -> None:
+    """枚举**失败**也要缓存（否则每次刷新设置页都再起一个进程、再失败一次）。"""
+    calls = {"n": 0}
+
+    def failing():
+        calls["n"] += 1
+        return []                      # 枚举失败时 `_list_voices_raw` 就是返回空
+
+    monkeypatch.setattr(voice, "available", lambda: True)
+    monkeypatch.setattr(voice, "_list_voices_raw", failing)
+    monkeypatch.setattr(voice, "_voices", None, raising=False)
+
+    for _ in range(5):
+        assert voice.installed_voices() == []
+
+    assert calls["n"] == 1, "枚举失败没有被缓存（每次问都重新起进程）"

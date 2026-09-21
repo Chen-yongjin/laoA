@@ -27,6 +27,9 @@ def lic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> L:
     """把授权状态文件指到 tmp_path，并固定一份假指纹（测试不碰真硬件）。"""
     monkeypatch.setattr(L, "state_path", lambda: tmp_path / "license.json")
     monkeypatch.setattr(L, "_fingerprint_parts", lambda: ["CPU-1", "BOARD-1", "DISK-1"])
+    # 机器码现在是**进程内缓存 + 落盘**的（2026-09-21 的性能修复）：
+    # 用例之间必须清掉，否则前一个用例的机器码会留到下一个，指纹改了也看不出区别。
+    L.forget_cached_machine_code()
     return L
 
 
@@ -55,6 +58,7 @@ def test_machine_code_differs_per_machine(lic: L, monkeypatch: pytest.MonkeyPatc
     """换一台机器（指纹不同）必须得到不同的码 —— 否则"绑定机器"就是空的。"""
     a = lic.machine_code()
     monkeypatch.setattr(lic, "_fingerprint_parts", lambda: ["CPU-2", "BOARD-1", "DISK-1"])
+    lic.forget_cached_machine_code()          # 换了机器 = 缓存失效（同一个进程里要显式清）
     b = lic.machine_code()
 
     assert a != b
@@ -124,6 +128,7 @@ def test_code_of_one_machine_does_not_work_on_another(lic: L,
     """给 A 机器算的码，拿到 B 机器上必须无效（这是整套方案的意义）。"""
     code_a = lic.expected_code(lic.machine_code())
     monkeypatch.setattr(lic, "_fingerprint_parts", lambda: ["CPU-9", "BOARD-9", "DISK-9"])
+    lic.forget_cached_machine_code()   # 换了机器 → 缓存的机器码作废
 
     ok, why = lic.verify(lic.machine_code(), code_a)
 
@@ -259,6 +264,7 @@ def test_a_copied_license_file_does_not_license_another_machine(
 
     # 换一台机器（指纹变了）→ 文件里那份注册码不再匹配
     monkeypatch.setattr(lic, "_fingerprint_parts", lambda: ["CPU-7", "BOARD-7", "DISK-7"])
+    lic.forget_cached_machine_code()   # 换了机器 → 缓存的机器码作废
     status = lic.license_status(cfg)
     assert status["registered"] is False            # 授权没有跟过来
 
@@ -289,3 +295,68 @@ def test_broken_state_file_is_treated_as_unregistered(lic: L, cfg: Config,
 def test_contact_text_is_exactly_what_the_user_gave() -> None:
     """联系方式是用户给定要发出去的，一个字都不能改（微信加错人 = 收不到授权）。"""
     assert L.CONTACT_TEXT == "需要授权，请联系作者 wx：q352162"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 性能：机器码只算一次（主人 2026-09-21："点策略什么的都会卡一下"）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 症状是"点一下卡一下"，根因是 `machine_code()` 以前**每次调用都去问硬件**
+# （Windows 上一条 PowerShell 几百毫秒，而以前是三条），而点【策略编辑】、
+# 刷新授权状态、打开「关于」都会走到它。修法两条：进程内缓存 + 首次在启动时后台预热。
+
+
+def test_machine_code_asks_the_hardware_only_once(lic: L, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**一个进程里只问一次硬件**（第二次起直接吃缓存）—— 这条是"点按钮不再卡"的判据。"""
+    asked = {"n": 0}
+
+    def counting():
+        asked["n"] += 1
+        return ["CPU-1", "BOARD-1", "DISK-1"]
+
+    monkeypatch.setattr(lic, "_fingerprint_parts", counting)
+    lic.forget_cached_machine_code()
+
+    first = lic.machine_code()
+    for _ in range(20):                     # 模拟"连点 20 次策略编辑 / 刷新状态"
+        assert lic.machine_code() == first
+
+    assert asked["n"] == 1, f"硬件指纹被问了 {asked['n']} 次（应当只有 1 次）"
+
+
+def test_license_status_does_not_reask_the_hardware(
+        lic: L, cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """点【策略编辑】走的是 `is_licensed()` / `status_text()` —— 它们都不该再问硬件。
+
+    这条直接对着主人报的场景：以前每点一次都要 1 秒多（三条 PowerShell），
+    现在第一次预热完，后面每次都是读缓存。
+    """
+    asked = {"n": 0}
+
+    def counting():
+        asked["n"] += 1
+        return ["CPU-1", "BOARD-1", "DISK-1"]
+
+    monkeypatch.setattr(lic, "_fingerprint_parts", counting)
+    lic.forget_cached_machine_code()
+
+    for _ in range(5):
+        lic.is_licensed(cfg)
+        lic.status_text(cfg)
+
+    assert asked["n"] == 1
+
+
+def test_machine_code_is_not_persisted_to_the_license_file(
+        lic: L, cfg: Config, tmp_path: Path) -> None:
+    """机器码**只缓存在内存里**，绝不写进 `license.json`。
+
+    为什么这条很重要（安全，不只是性能）：机器码是"授权绑定机器"的唯一依据。
+    一旦把它落盘，那份 `license.json` 被拷到别的机器上时，`machine_code()` 会读回
+    **旧机器**的码、与文件里的 `machine` 字段一致 → "拷文件就白用"。
+    所以这里断言文件里没有机器码字段，且换机器（指纹变）后状态立刻变成"未注册"。
+    """
+    lic.machine_code()
+    state = _state(tmp_path / "license.json") if (tmp_path / "license.json").exists() else {}
+
+    assert "machine_code" not in state, "机器码不该落盘（会把授权变成「拷文件白用」）"

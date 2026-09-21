@@ -375,3 +375,51 @@ def test_pet_falls_back_to_a_drawn_face_when_the_asset_is_missing(
 def test_clip_text_keeps_short_text_untouched() -> None:
     assert pet_mod.clip_text("短的") == "短的"
     assert pet_mod.clip_text("x" * 100).endswith("…")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 空闲时不许有周期性定时器（主人 2026-09-21："新版程序好像资源占用变高了"）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 桌宠是个**置顶常驻窗口**：只要它有定时器在跑，就会一直占着 CPU（用户看不到、只觉得"变卡"）。
+# 实测（修前）：空闲 10 秒里蹦跳回调 0 次、活跃定时器 0 个 —— 所以这条用例是**守住现状**：
+# 以后谁给桌宠加个"心跳定时器"，这里会立刻红。
+
+
+def _active_timers(pet) -> list[str]:
+    from PySide6.QtCore import QTimer
+
+    return [t.objectName() or str(t.parent().__class__.__name__)
+            for t in pet.findChildren(QTimer) if t.isActive()]
+
+
+def test_a_pet_that_has_nothing_to_do_runs_no_timer(qapp) -> None:
+    """**没有消息时桌宠不该有任何定时器在跑**（空闲 = 不烧 CPU）。"""
+    pet = DesktopPet()
+    pet.show()
+    qapp.processEvents()
+
+    assert _active_timers(pet) == [], "空闲的桌宠还有定时器在跑（白烧 CPU）"
+    pet.shutdown()
+    pet.close()
+
+
+def test_the_hop_timer_stops_when_the_animation_is_over(qapp) -> None:
+    """蹦跳动画**结束后必须把定时器停掉**（不是一直跑着等下一次）。"""
+    import time
+
+    pet = DesktopPet()
+    pet.show()
+    pet.hop(times=2)
+    qapp.processEvents()
+
+    assert _active_timers(pet), "蹦跳期间应当有定时器（动画没起来？）"
+
+    deadline = time.monotonic() + 5
+    while _active_timers(pet) and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert _active_timers(pet) == [], "动画结束后定时器还在跑"
+    pet.shutdown()
+    pet.close()
