@@ -1651,6 +1651,30 @@ def _num2(fn: Callable[[np.ndarray, np.ndarray], np.ndarray]) -> Callable[..., A
     return impl
 
 
+def _impl_codelike(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """`CODELIKE('300')`：代码是不是以该字符串开头（通达信语义），返回 0/1。
+
+    注意这是**逐票**判定的：一条公式跑的是某一只票的整段序列，而代码不会变，
+    所以整列是同一个值（常量数组）。判据用字符串前缀 —— 与通达信一致
+    （它也是前缀匹配，不是板块判定）。
+    """
+    prefix = str(vals[0] if vals else "").strip()
+    code = str(getattr(ev.series, "symbol", "") or "").strip()
+    hit = bool(prefix) and code.startswith(prefix)
+    return np.full(ev.n, 1.0 if hit else 0.0)
+
+
+def _impl_nameinclude(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """`NAMEINCLUDE('ST')`：名称里是否**包含**该字符串（通达信语义），返回 0/1。
+
+    同样逐票恒定；比较时两边都转大写（`st` 这种小写写法也认，中文不受影响）。
+    """
+    keyword = str(vals[0] if vals else "").strip()
+    name = str(getattr(ev.series, "name", "") or "").strip()
+    hit = bool(keyword) and keyword.upper() in name.upper()
+    return np.full(ev.n, 1.0 if hit else 0.0)
+
+
 def _impl_inblock(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
     """`INBLOCK('板块名')` → 等同本项目的 `热门行业`（最近 3 个交易日上榜次数，0~3）。
 
@@ -1854,6 +1878,11 @@ FUNCTIONS: dict[str, _FuncSpec] = {
     # 否则"热门行业"不会被算、也不会进 Formula.fields（症状同上：永远取不到值）
     "INBLOCK": _FuncSpec(0, 2, _NUM, (_ANY, _ANY), _impl_inblock,
                          uses_fields=("热门行业",)),
+    # 通达信 CODELIKE / NAMEINCLUDE：代码前缀、名称包含（都是逐票恒定的 0/1）。
+    # `result=_BOOL` 很重要：它们要能直接进 `NOT(...)` / `OR` —— 声明成数值的话，
+    # 逻辑运算会当场报"需要条件"（主人那段公式正是 `NOT(CODELIKE(...) OR ...)`）。
+    "CODELIKE": _FuncSpec(1, 1, _BOOL, (_ANY,), _impl_codelike),
+    "NAMEINCLUDE": _FuncSpec(1, 1, _BOOL, (_ANY,), _impl_nameinclude),
     "ZTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_ztprice),
     "DTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_dtprice),
     "CEILING": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_ceiling),
@@ -2040,10 +2069,16 @@ class _Parser:
         """最后一条语句必须是**裸表达式**且是条件（返回 0/1）。"""
         last = self.statements[-1]
         if last.name is not None:
+            # 这一段专门服务"从网上抄来的**片段**"（2026-09-21 主人就贴了这么一段：
+            # 一个横跨 5 行的 `BAN := NOT(...)`，没有最后那行条件）。
+            # 光说"最后一行必须是条件"他知道该做什么，但不知道**用哪个变量** ——
+            # 所以直接把他刚定义的那个名字写进提示里，照抄一行就能跑。
+            name = str(last.name)
             raise FormulaError(
-                "公式最后一行必须是选股条件（返回 0/1 的表达式）",
+                f"这条公式只定义了中间变量 {name}，没有写选股条件",
                 line=last.line, col=last.col, code="not_condition",
-                hint="把最后一行改成条件，例如 `C>MA(C,5)`；`X:=...` 只是定义中间变量",
+                hint=f"在最后再加一行 `{name}`（或者别的条件，例如 `{name} AND C>MA(C,5)`）"
+                     " —— 最后一行才是「选出哪些票」的条件；`X:=...` 只是定义中间变量",
             )
         if last.node.dtype != _BOOL:
             raise FormulaError(

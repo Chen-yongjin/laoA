@@ -484,9 +484,17 @@ def test_last_line_must_be_condition_numeric() -> None:
 
 
 def test_last_line_must_be_condition_not_assignment() -> None:
+    """最后一条语句只定义变量时：报 `not_condition`，而且**提示里点名那个变量**。
+
+    2026-09-21 加强：主人从网上抄来的片段（一个横跨 5 行的 `BAN := NOT(...)`，
+    没有最后那行条件）原来只会收到"最后一行必须是选股条件"—— 他知道该做什么，
+    但不知道该写哪个名字。现在提示直接给出「在最后再加一行 `M5`」，
+    照抄一行就能跑；这条用例按新口径钉住（断言没放宽，反而更严：要出现变量名）。
+    """
     err = compile_error("M5:=MA(C,5)")
-    assert "最后一行必须是选股条件" in str(err)
     assert err.code == "not_condition"
+    assert "没有写选股条件" in str(err)
+    assert "M5" in str(err) and "M5" in (err.hint or ""), "提示里要点名该补的那个变量"
 
 
 def test_middle_statement_must_be_assignment() -> None:

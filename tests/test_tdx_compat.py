@@ -621,3 +621,141 @@ def test_inblock_gets_a_non_blocking_note_about_the_difference() -> None:
     both = lib.tdx_compat_notes(fm.compile_formula(
         "INBLOCK('半导体')>0 AND DYNAINFO(17)>1 AND FINANCE(7)>0"))
     assert len(both) == 3
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 九、CODELIKE / NAMEINCLUDE + 跨行语句（主人 2026-09-21 贴来的那段）
+#
+# 主人贴的是一段**横跨 5 行**的片段：
+#
+#     BAN := NOT(CODELIKE('300') OR CODELIKE('301')     {创业板}
+#             OR CODELIKE('688') OR CODELIKE('689')     {科创板}
+#             ...
+#        AND NOT(NAMEINCLUDE('ST'));
+#
+# 三件事：两个函数要真的有、要能进 `NOT(...)` / `OR`、以及这种跨行写法要能断句。
+# ══════════════════════════════════════════════════════════════════════════
+
+OWNER_SNIPPET = """BAN := NOT(CODELIKE('300') OR CODELIKE('301')     {创业板}
+        OR CODELIKE('688') OR CODELIKE('689')     {科创板}
+        OR CODELIKE('43')  OR CODELIKE('83')      {北交所}
+        OR CODELIKE('87')  OR CODELIKE('88')
+        OR CODELIKE('920'))
+   AND NOT(NAMEINCLUDE('ST'));"""
+
+
+def _one_ticket(symbol: str, name: str) -> fm.Formula:
+    return fm.compile_formula(OWNER_SNIPPET + "\nBAN")
+
+
+@pytest.mark.parametrize(("symbol", "name", "expected"), (
+    ("300750", "宁德时代", False),      # 创业板
+    ("301111", "创业板样本", False),
+    ("688111", "科创板样本", False),
+    ("920000", "北交所样本", False),
+    ("830799", "北交所样本2", False),
+    ("600519", "贵州茅台", True),        # 主板可以
+    ("600001", "*ST样本", False),        # 名字里有 ST
+))
+def test_owner_snippet_excludes_the_boards_and_st(symbol: str, name: str,
+                                                  expected: bool) -> None:
+    """主人那段片段（补一行 `BAN` 之后）选票结果正确：创业板/科创/北交所/ST 全被排除。"""
+    formula = _one_ticket(symbol, name)
+
+    series = make_series([10.0] * 3, symbol=symbol, name=name)
+    assert bool(formula.eval(series)[-1]) is expected
+
+
+def test_owner_snippet_compiles_as_a_multiline_statement() -> None:
+    """跨 5 行的语句能编译（括号没闭合时不能按行断开）。"""
+    formula = fm.compile_formula(OWNER_SNIPPET + "\nBAN")
+
+    assert set(formula.functions) == {"CODELIKE", "NAMEINCLUDE"}
+
+
+def test_a_fragment_that_only_defines_variables_says_what_to_add() -> None:
+    """只定义变量、没写条件的**片段**：错误里要直接点名那个变量（照抄一行就能跑）。
+
+    这就是主人贴来的原始形态（没有最后那行 `BAN`）—— 原来只说"最后一行必须是条件"，
+    他知道该做什么、但不知道该写哪个名字；现在提示里直接给出 `BAN`。
+    """
+    with pytest.raises(fm.FormulaError) as err:
+        fm.compile_formula(OWNER_SNIPPET)
+
+    assert err.value.code == "not_condition"
+    assert "BAN" in str(err.value) and "BAN" in (err.value.hint or "")
+
+
+# ── CODELIKE / NAMEINCLUDE 本身 ──
+
+
+@pytest.mark.parametrize(("symbol", "prefix", "hit"), (
+    ("300750", "300", True), ("301111", "301", True), ("300750", "301", False),
+    ("688111", "688", True), ("689009", "689", True),
+    ("920000", "920", True), ("830799", "83", True), ("430047", "43", True),
+    ("600519", "300", False), ("000001", "300", False),
+))
+def test_codelike_is_a_prefix_match(symbol: str, prefix: str, hit: bool) -> None:
+    series = make_series([10.0] * 3, symbol=symbol, name="样本")
+    got = fm.compile_formula(f"CODELIKE('{prefix}')").eval(series)
+
+    assert list(got) == [1.0 if hit else 0.0] * 3, "逐票恒定：整列都该是同一个值"
+
+
+@pytest.mark.parametrize(("name", "keyword", "hit"), (
+    ("*ST样本", "ST", True), ("ST样本", "st", True),        # 大小写都认
+    ("贵州茅台", "ST", False), ("退市样本", "退", True),
+))
+def test_nameinclude_is_a_substring_match(name: str, keyword: str, hit: bool) -> None:
+    series = make_series([10.0] * 3, symbol="600001", name=name)
+    got = fm.compile_formula(f"NAMEINCLUDE('{keyword}')").eval(series)
+
+    assert list(got) == [1.0 if hit else 0.0] * 3
+
+
+def test_codelike_can_be_used_inside_not_and_or() -> None:
+    """返回类型必须是**条件**：`NOT(CODELIKE(...) OR ...)` 直接能用（声明成数值会被拦）。"""
+    formula = fm.compile_formula("NOT(CODELIKE('300') OR CODELIKE('688'))")
+
+    assert bool(formula.eval(make_series([10.0], symbol="600519", name="贵州茅台"))[-1]) is True
+    assert bool(formula.eval(make_series([10.0], symbol="300750", name="宁德时代"))[-1]) is False
+
+
+def test_codelike_matches_the_board_flags_equivalence() -> None:
+    """文档里给的那条等价写法要真的等价：`NOT(CODELIKE(...))` == 三个板块标记都为 0。"""
+    boards = ("300750", "688111", "920000", "600519", "000001")
+    like = fm.compile_formula(
+        "NOT(CODELIKE('300') OR CODELIKE('301') OR CODELIKE('688') OR CODELIKE('689') "
+        "OR CODELIKE('43') OR CODELIKE('83') OR CODELIKE('87') OR CODELIKE('88') "
+        "OR CODELIKE('920'))")
+    flags = fm.compile_formula("创业板=0 AND 科创=0 AND 北交所=0")
+
+    for symbol in boards:
+        series = make_series([10.0], symbol=symbol, name="样本")
+        assert bool(like.eval(series)[-1]) == bool(flags.eval(series)[-1]), symbol
+
+
+# ── 断句规则：`;` 优先、没 `;` 按行、括号没闭合就接上 ──
+
+
+@pytest.mark.parametrize(("title", "text"), (
+    ("分号一行两条语句", "A:=C; B:=MA(C,5); A>B;"),
+    ("括号未闭合跨行（无分号）", "X:=NOT(\n  CODELIKE('300')\n  OR CODELIKE('688')\n)\nX"),
+    ("语句跨行且夹跨行注释", "A:=O\n {跨行\n 注释}\n +1;\nA>0"),
+    ("定义与条件写在同一行", "BAN:=NOT(CODELIKE('300')); BAN"),
+))
+def test_statement_splitting_variants_compile(title: str, text: str) -> None:
+    """这几种断句写法都要能编译（`;` / 换行 / 括号未闭合续行 / 行内注释）。"""
+    assert fm.compile_formula(text) is not None
+
+
+def test_error_line_points_at_the_original_line_with_multiline_statements() -> None:
+    """跨行之后报错的行号仍指向**原始行**（别因为拼接把行号带偏）。
+
+    这里第 3 行故意写一个错字段，第 2 行是续行 —— 报错必须落在第 3 行。
+    """
+    text = "X:=NOT(\n  CODELIKE('300')\n  OR 不存在字段\n)\nX"
+    with pytest.raises(fm.FormulaError) as err:
+        fm.compile_formula(text)
+
+    assert err.value.line == 3, f"行号应当是 3，实际 {err.value.line}"
