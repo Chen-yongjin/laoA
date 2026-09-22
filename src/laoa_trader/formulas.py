@@ -87,6 +87,14 @@ FINANCE_HINT = (
     "拿它当股本用的公式结果会偏。"
 )
 
+#: 用到 `DYNAINFO(...)` 时的提醒（同样**非阻断**）：它被映射成量比，
+#: 与通达信"取盘中动态行情某字段"完全不是一回事，必须说清。
+DYNAINFO_HINT = (
+    "注意：本程序把 DYNAINFO(...) 按「量比（倍）」处理 —— 与通达信口径不同"
+    "（它本体是盘中动态行情，本地只有收盘后的日线）；"
+    "写成 DYNAINFO(其它编号) 也一样按量比算。"
+)
+
 #: 默认的成交口径（成绩单用）。`B` = D+1 收盘买 → D+2 收盘卖：
 #: 与 `research/scorecard.py` 的默认并列口径一致，也是散户真能执行的那一档。
 DEFAULT_CONVENTION_KEY = "B"
@@ -497,6 +505,8 @@ def tdx_compat_notes(formula: fm.Formula | None) -> list[str]:
     notes: list[str] = []
     if "FINANCE" in used:
         notes.append(FINANCE_HINT)
+    if "DYNAINFO" in used:
+        notes.append(DYNAINFO_HINT)
     return notes
 
 
@@ -951,6 +961,7 @@ __all__ = [
     "formula_path",
     "formula_text",
     "latest_trading_day",
+    "DYNAINFO_HINT",
     "FINANCE_HINT",
     "limit_up_hint",
     "tdx_compat_notes",

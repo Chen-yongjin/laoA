@@ -392,11 +392,6 @@ _FORBIDDEN_WORDS: dict[str, str] = {
 #: 所以这里的每条都要写清"缺什么数据"、能给替代写法的必须给。
 #: 注：`FINANCE` **不在这里** —— 主人 2026-09-21 指定它"等同于流通市值"（见 `_impl_finance`）。
 UNSUPPORTED_FUNCTIONS: dict[str, str] = {
-    "DYNAINFO": (
-        "DYNAINFO 取的是盘中动态行情（实时买卖盘、委比、量比那一类），"
-        "本地只有收盘后的日线，算不出来。"
-        "现价类需求请用 `C`（当日收盘/最新价），放量请用 `量比()`。"
-    ),
     "WINNER": (
         "WINNER 需要筹码分布数据（每个价位的持仓成本），本地没有这份数据。"
         "近似的替代：用换手率与成交密集度自己写条件，例如 `换手率>5 AND V>MA(V,5)*1.5`。"
@@ -1201,9 +1196,16 @@ def _impl_limit_up_cnt(ev: _Evaluator, node: _Call, vals: list) -> Any:  # noqa:
     return ev.series.limit_up_cnt.copy()
 
 
+#: `量比()` 的默认窗口（当日成交额 ÷ 前 N 日均额）。**只此一处定义**。
+#: 为什么抽出来：`DYNAINFO` 要"等同量比"，两边必须以同一个窗口算 ——
+#: 抽之前 DYNAINFO 误用了 spec 的 `hist_default=6`（那是"窗口 5 再多一根"的意思），
+#: 结果两边算出来的量比不一样，而界面上完全看不出来。
+VOL_RATIO_DEFAULT_WINDOW = 5
+
+
 def _impl_vol_ratio(ev: _Evaluator, node: _Call, vals: list) -> Any:
     """量比()：当日成交额 ÷ 前 5 日均额（本项目自定义口径，见 `_vol_ratio`）。"""
-    window = ev.win(vals[0], node.args[0]) if vals else 5
+    window = ev.win(vals[0], node.args[0]) if vals else VOL_RATIO_DEFAULT_WINDOW
     return _vol_ratio(ev.series.amount, window, ev.n)
 
 
@@ -1645,6 +1647,25 @@ def _num2(fn: Callable[[np.ndarray, np.ndarray], np.ndarray]) -> Callable[..., A
     return impl
 
 
+def _impl_dynainfo(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """`DYNAINFO(...)` → 等同本项目的 `量比()`（倍）。
+
+    **口径由主人 2026-09-21 指定**（原话是"也按等同写进去"）：
+    通达信里 `DYNAINFO(17)` 就是量比、`DYNAINFO(3)` 是昨收之类的盘中动态行情字段，
+    而本地只有收盘后的日线，没有那套盘中快照 —— 但写这类公式的人要的基本就是量比，
+    所以直接给量比的值，比报"没有动态行情数据"有用。
+
+    ⚠️ 与 `FINANCE` 同一套处理原则：
+    - 参数怎么写都收下（数字/表达式/不传），一律返回同一个值 —— 不让它成为"跑不起来"的原因；
+    - 口径差异由界面上的**非阻断提醒**（`formulas.tdx_compat_notes()`）说清；
+    - 文档 `docs/通达信兼容性.md` 归到"支持（口径按本项目定义）"。
+    """
+    # **参数一律忽略**：通达信里那个参数是"取哪个动态字段"（17 = 量比、3 = 昨收…），
+    # 而我们把这些字段统一映射到量比，所以写成什么数、写不写，结果都一样 ——
+    # 这正是主人要的"参数随便写、都返回量比的值"。窗口固定 5 日，与 `量比()` 无参时同一口径。
+    return _vol_ratio(ev.series.amount, VOL_RATIO_DEFAULT_WINDOW, ev.n)
+
+
 def _impl_finance(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
     """`FINANCE(...)` → 等同本项目的 `流通市值`（单位：亿元）。
 
@@ -1799,6 +1820,9 @@ FUNCTIONS: dict[str, _FuncSpec] = {
     # `uses_fields` 必须登记 流通市值：否则公式不会去取实时快照那一趟数据（永远取不到值）
     "FINANCE": _FuncSpec(0, 4, _NUM, (_NUM, _NUM), _impl_finance,
                          uses_fields=("流通市值",)),
+    # 通达信 DYNAINFO(动态行情)：本地没有盘中快照，按主人指定的口径**等同 量比()**（倍）
+    "DYNAINFO": _FuncSpec(0, 4, _NUM, (_NUM, _NUM), _impl_dynainfo,
+                          hist_extra=1, hist_default=6),
     "ZTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_ztprice),
     "DTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_dtprice),
     "CEILING": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_ceiling),

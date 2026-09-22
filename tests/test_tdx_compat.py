@@ -313,7 +313,7 @@ def test_unsupported_functions_say_so_in_chinese() -> None:
     原来只断言"有中文"，现在要求错误码是 `unsupported_function`、提示里说清缺什么、
     FINANCE 还要给出「改用流通市值」这条可执行的路。详见下面第四节那组用例。
     """
-    for text, need in (("DYNAINFO(3)>0", "日线"),
+    for text, need in (
                        ("WINNER(C)>0.5", "筹码"),
                        ("COST(50)>C", "筹码")):
         with pytest.raises(fm.FormulaError) as err:
@@ -354,8 +354,6 @@ def _error_of(text: str) -> fm.FormulaError:
 @pytest.mark.parametrize(
     ("text", "keywords"),
     (
-        # DYNAINFO：盘中动态行情 —— 必须说清只有日线，并给现价/量比的替代
-        ("X:=DYNAINFO(3);\nX>0", ("动态行情", "日线", "量比")),
         # WINNER / COST：筹码分布
         ("X:=WINNER(C);\nX>0", ("筹码", "换手率")),
         ("X:=COST(50);\nX>0", ("筹码",)),
@@ -516,3 +514,42 @@ def test_engine_stamp_is_the_single_source_for_the_version_line() -> None:
     # 界面上（无 Qt 环境也能验的部分）：那段文案由 engine_stamp 派生，不另造一份
     source = (ROOT / "src" / "laoa_trader" / "ui" / "app.py").read_text(encoding="utf-8")
     assert "engine_stamp()" in source, "「关于」里那一行要与报错同源（engine_stamp）"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 七、DYNAINFO：主人指定"也按等同写进去" → 本程序按「量比（倍）」处理
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _series_with_volume(n: int = 30) -> fm.Series:
+    rng = np.random.default_rng(11)
+    vol = np.abs(rng.normal(1e6, 2e5, n))
+    return make_series([10.0] * n, vol=vol, amount=vol * 10.0)
+
+
+@pytest.mark.parametrize("text", ("DYNAINFO(17)>0", "DYNAINFO(3)>0", "DYNAINFO()>0", "DYNAINFO(C)>0"))
+def test_dynainfo_is_the_volume_ratio(text: str) -> None:
+    """参数怎么写都收下（连不传也行），值一律等于 `量比()` —— 逐值比较。"""
+    series = _series_with_volume()
+
+    got = fm.compile_formula(text).eval(series)
+    base = fm.compile_formula("量比()>0").eval(series)
+    assert np.array_equal(got, base), f"{text} 与 量比() 不一致"
+
+
+def test_dynainfo_keeps_the_same_history_requirement() -> None:
+    """`DYNAINFO` 要跟 `量比()` 一样"至少 6 根 K 线"（少了会被当成数据不足跳过）。"""
+    assert fm.compile_formula("DYNAINFO(17)>0").min_history \
+        == fm.compile_formula("量比()>0").min_history
+
+
+def test_dynainfo_gets_a_non_blocking_note() -> None:
+    """【校验】里要说明"按量比处理、与通达信口径不同"（非阻断，一条）。"""
+    from laoa_trader import formulas as lib
+
+    notes = lib.tdx_compat_notes(fm.compile_formula("DYNAINFO(17)>0"))
+    assert len(notes) == 1
+    assert "量比" in notes[0] and "通达信" in notes[0] and "动态行情" in notes[0]
+    # 两个函数一起用时，两条提醒都要给（各说各的，不合并成一句）
+    both = lib.tdx_compat_notes(fm.compile_formula("DYNAINFO(17)>0 AND FINANCE(7)>0"))
+    assert len(both) == 2
