@@ -60,15 +60,25 @@ from laoa_trader.config import Config, get_config
 from laoa_trader.data import public_market as pm
 from laoa_trader.data import storage
 from laoa_trader.log import get_logger
+from laoa_trader.price_limits import (
+    LIMIT_BJ,
+    LIMIT_GEM,
+    LIMIT_MAIN,
+    LIMIT_S,
+    board_of,
+    is_s_stock,
+    limit_down_price,
+    limit_pct,
+    limit_up_price,
+)
 
 logger = get_logger(__name__)
 
-#: 各板块的涨跌幅限制（%）。表与实测依据见模块 docstring。
-LIMIT_MAIN = 10.0
-LIMIT_GEM = 20.0        # 创业板/科创板
-LIMIT_BJ = 30.0         # 北交所
-LIMIT_S = 5.0           # 未股改 S 股（极少数）
-
+#: 涨跌幅限制与涨跌停价的**规则只有一处定义**（`laoa_trader/price_limits.py`）：
+#: 日更（判涨停/跌停、攒涨停池）、池子与提醒、以及公式引擎的通达信
+#: `ZTPRICE()`/`DTPRICE()` 都用它。各写一份迟早会出现"日更说涨停、公式说没涨停"
+#: 这种最难查的分歧，所以下面这些名字是**从那里再导出**的（老调用方一行都不用改）。
+#: 各板块的幅度表与实测依据见该模块的 docstring。
 #: 判"这一根是涨停"时允许的绝对误差（元）。价格是两位小数，比值再取整回来
 #: 也可能差半分钱（浮点），所以给半分钱；**不能给更多**：主板一档涨停的相邻
 #: 价位差 10%（几毛钱），放宽到 1 分以上就可能把"接近涨停"误判成涨停。
@@ -81,58 +91,6 @@ EX_RIGHT_EPS = 0.005
 #: 一次拿多少只票的"最后一根日线"（除权检测的基准）。500 是 `storage` 里
 #: 分片查询的既有粒度（见 `dates_for_symbols`），跟着它走省得两处不一样。
 CHUNK = 500
-
-
-def board_of(symbol: str) -> str:
-    """裸 6 位代码 → 板块键（`bj` / `gem` / `main`）。"""
-    code = str(symbol or "").strip()
-    if code.startswith(("92", "8", "4")):
-        return "bj"
-    if code.startswith(("30", "68")):
-        return "gem"
-    return "main"
-
-
-def is_s_stock(name: str) -> bool:
-    """未股改 S 股（`S佳通` 这种）：名称以 `S` 开头但**不是** `ST`。"""
-    text = str(name or "").strip().upper()
-    return text.startswith("S") and not text.startswith("ST")
-
-
-def limit_pct(symbol: str, name: str = "") -> float:
-    """这只票的涨跌幅限制（%）。"""
-    if is_s_stock(name):
-        return LIMIT_S
-    return {"bj": LIMIT_BJ, "gem": LIMIT_GEM, "main": LIMIT_MAIN}[board_of(symbol)]
-
-
-def limit_up_price(prev_close: float | None, symbol: str, name: str = "") -> float | None:
-    """涨停价 = 前收 × (1+幅度)，按板块取整（北交所截断、其余四舍五入）。
-
-    取整方式不是"代码风格"问题：实测北交所 181 只票的涨停价**全部**是截断的结果
-    （例如 49.12×1.3 = 63.856 → 63.85，四舍五入会得 63.86，与腾讯不符）。
-    """
-    if prev_close is None or prev_close <= 0:
-        return None
-    raw = prev_close * (1 + limit_pct(symbol, name) / 100)
-    if board_of(symbol) == "bj":
-        return math.floor(raw * 100 + 1e-9) / 100
-    return round(raw + 1e-9, 2)
-
-
-def limit_down_price(prev_close: float | None, symbol: str, name: str = "") -> float | None:
-    """跌停价。
-
-    ⚠️ 北交所是**向上取整**（不是像涨停那样向下截断）：实测 2026-09-17 全市场里
-    能区分两种取整方式的 294 只北交所票**全部**是向上取整（49.12×0.7 = 34.384 → 34.39）。
-    涨停向下、跌停向上，方向都朝"限制更紧的那一侧"，这是交易所的规则。
-    """
-    if prev_close is None or prev_close <= 0:
-        return None
-    raw = prev_close * (1 - limit_pct(symbol, name) / 100)
-    if board_of(symbol) == "bj":
-        return math.ceil(raw * 100 - 1e-9) / 100
-    return round(raw + 1e-9, 2)
 
 
 def is_limit_up(close: Any, prev_close: Any, symbol: str, name: str = "") -> bool:

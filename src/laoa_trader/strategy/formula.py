@@ -1549,6 +1549,36 @@ def _num2(fn: Callable[[np.ndarray, np.ndarray], np.ndarray]) -> Callable[..., A
     return impl
 
 
+def _limit_price(ev: "_Evaluator", vals: list, *, up: bool) -> Any:
+    """`ZTPRICE` / `DTPRICE` 的共用实现（通达信内置）。
+
+    口径（**与日更/池子用的是同一套规则**，见 `laoa_trader/price_limits.py`）：
+    价格 = 前收 × (1 ± 比例)，再按**这只票所属板块**取整到分 ——
+    北交所涨停向下截断、跌停向上取整，其余板块四舍五入。
+
+    为什么比例默认 0.1：通达信里不写第二个参数时按主板 10% 算，写公式的人
+    （尤其老公式）经常省掉它；给个 0.1 比报错更接近他们预期。
+    比例是**小数**（0.1 = 10%），不是百分数 —— 与通达信一致。
+    """
+    from laoa_trader import price_limits as pl
+
+    prev_close = _as_float(vals[0])
+    ratio = 0.1 if len(vals) < 2 else vals[1]
+    # 比例允许是表达式（TDX 里也常见 `ZTPRICE(REF(C,1), 涨跌幅/100)`）
+    ratio_arr = _as_float(ratio) if not isinstance(ratio, (int, float)) else float(ratio)
+    return pl.limit_price_ratio(
+        prev_close, ratio_arr, str(getattr(ev.series, "symbol", "") or ""), up=up
+    )
+
+
+def _impl_ztprice(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    return _limit_price(ev, vals, up=True)
+
+
+def _impl_dtprice(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    return _limit_price(ev, vals, up=False)
+
+
 def _impl_round(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
     """ROUND(X)：四舍五入到整数（TDX 的口径；要小数请用 `PRECISION` 之类画线属性，我们不支持）。"""
     return np.round(_as_float(vals[0]))
@@ -1646,6 +1676,9 @@ FUNCTIONS: dict[str, _FuncSpec] = {
     "MOD": _FuncSpec(2, 2, _NUM, (_NUM, _NUM), _impl_mod),
     "INTPART": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_intpart),
     "ROUND": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_round),
+    # 通达信内置：涨/跌停价（第二个参数 = 涨跌幅比例，0.1 = 10%，可省 → 按 10%）
+    "ZTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_ztprice),
+    "DTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_dtprice),
     "CEILING": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_ceiling),
     "FLOOR": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_floor),
     "SIGN": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_sign),
