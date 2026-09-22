@@ -87,6 +87,14 @@ FINANCE_HINT = (
     "拿它当股本用的公式结果会偏。"
 )
 
+#: 用到 `INBLOCK(...)` 时的提醒（**非阻断**）：它被映射成"热门行业"，
+#: 而两者语义其实不同（一个是"属于某板块"、一个是"上过几次热门榜"），必须说清。
+INBLOCK_HINT = (
+    "注意：本程序把 INBLOCK('板块') 按「热门行业（最近 3 日上榜次数 0~3）」处理，"
+    "不做具体板块名匹配 —— 与通达信口径不同；写 INBLOCK('xx')>0 就是"
+    "「上过热门榜」，想更严可以写 >1 或 >=2。"
+)
+
 #: 用到 `DYNAINFO(...)` 时的提醒（同样**非阻断**）：它被映射成量比，
 #: 与通达信"取盘中动态行情某字段"完全不是一回事，必须说清。
 DYNAINFO_HINT = (
@@ -507,6 +515,8 @@ def tdx_compat_notes(formula: fm.Formula | None) -> list[str]:
         notes.append(FINANCE_HINT)
     if "DYNAINFO" in used:
         notes.append(DYNAINFO_HINT)
+    if "INBLOCK" in used:
+        notes.append(INBLOCK_HINT)
     return notes
 
 
@@ -962,6 +972,7 @@ __all__ = [
     "formula_text",
     "latest_trading_day",
     "DYNAINFO_HINT",
+    "INBLOCK_HINT",
     "FINANCE_HINT",
     "limit_up_hint",
     "tdx_compat_notes",

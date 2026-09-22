@@ -1080,6 +1080,10 @@ def _str_cmp(op: str, a: Any, b: Any, n: int) -> np.ndarray:
 #: offset 非负整数常数（REF 允许 0）
 _W = "window"
 _OFF = "offset"
+#: `any` = **不检查类型**。给"参数随便写都收"的兼容函数用（例如 `INBLOCK('板块')`：
+#: 通达信那边要字符串，我们只按热门行业处理、参数根本不参与计算）——
+#: 有了它，用户从网上抄来的写法（字符串 / 数字 / 不传）都能直接跑，不会卡在类型错误上。
+_ANY = "any"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1647,6 +1651,28 @@ def _num2(fn: Callable[[np.ndarray, np.ndarray], np.ndarray]) -> Callable[..., A
     return impl
 
 
+def _impl_inblock(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """`INBLOCK('板块名')` → 等同本项目的 `热门行业`（最近 3 个交易日上榜次数，0~3）。
+
+    **口径由主人 2026-09-21 指定**（原话是"这个也按热门行业写进去"）。
+
+    与通达信的差别（必须让用户看到，界面上有一条非阻断提醒）：
+    通达信的 `INBLOCK` 是"这只票**属不属于**某个板块"（0/1，而且板块名要真匹配）；
+    我们手上只有"行业最近上过几次热门榜"这个**次数**，也不做板块名匹配 ——
+    所以**参数一律忽略**，值就是 `热门行业`。
+
+    为什么这样也够用：网上那类公式几乎都写成 `INBLOCK('xxx')>0`（"属于就选中"），
+    而次数 >0 正好就是"上过热门榜"，语义天然对得上。
+    """
+    extra = getattr(ev.series, "extra", None) or {}
+    value = extra.get("热门行业")
+    if value is None:
+        # 没算过热门榜（或库里缺涨停/行业数据）：整列缺值 ⇒ 条件不成立、不产生信号，
+        # 与直接用 `热门行业` 写条件时的行为完全一致。
+        return np.full(ev.n, np.nan)
+    return _as_float(value)
+
+
 def _impl_dynainfo(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
     """`DYNAINFO(...)` → 等同本项目的 `量比()`（倍）。
 
@@ -1823,6 +1849,11 @@ FUNCTIONS: dict[str, _FuncSpec] = {
     # 通达信 DYNAINFO(动态行情)：本地没有盘中快照，按主人指定的口径**等同 量比()**（倍）
     "DYNAINFO": _FuncSpec(0, 4, _NUM, (_NUM, _NUM), _impl_dynainfo,
                           hist_extra=1, hist_default=6),
+    # 通达信 INBLOCK('板块名')：本地没有板块成分匹配，按主人指定的口径**等同 热门行业**（0~3）
+    # `_ANY` = 参数随便写都收（字符串 / 数字 / 不传）；`uses_fields` 必须登记，
+    # 否则"热门行业"不会被算、也不会进 Formula.fields（症状同上：永远取不到值）
+    "INBLOCK": _FuncSpec(0, 2, _NUM, (_ANY, _ANY), _impl_inblock,
+                         uses_fields=("热门行业",)),
     "ZTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_ztprice),
     "DTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_dtprice),
     "CEILING": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_ceiling),
@@ -2502,6 +2533,8 @@ class _Parser:
         return _Call(upper, tuple(args), dtype, tok.line, tok.col)
 
     def _check_arg(self, name: str, index: int, arg: Any, want: str) -> None:
+        if want == _ANY:
+            return                       # 不检查：兼容函数刻意收下任何参数
         if want == "cond":
             # 与 _require_cond 同一套严格标准（COUNT/BARSLAST/IF 的条件位）
             if arg.dtype != _BOOL:

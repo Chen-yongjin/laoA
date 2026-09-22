@@ -553,3 +553,71 @@ def test_dynainfo_gets_a_non_blocking_note() -> None:
     # 两个函数一起用时，两条提醒都要给（各说各的，不合并成一句）
     both = lib.tdx_compat_notes(fm.compile_formula("DYNAINFO(17)>0 AND FINANCE(7)>0"))
     assert len(both) == 2
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 八、INBLOCK：主人说"这个也按热门行业写进去" → 本程序按「热门行业（0~3）」处理
+#
+# 通达信里 `INBLOCK('板块名')` 是"属不属于某板块"（0/1，要真匹配板块名）；
+# 我们手上只有"最近 3 日上过几次热门榜"这个次数，也不做板块名匹配 ——
+# 所以参数一律忽略，值就是 `热门行业`。网上那类公式几乎都写 `INBLOCK('xx')>0`，
+# 而"次数 >0"正好就是"上过热门榜"，语义天然对得上。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _series_with_hot(values: list[float]) -> fm.Series:
+    series = make_series([10.0] * len(values), symbol="600519", name="贵州茅台")
+    series.extra["热门行业"] = np.array(values, dtype="float64")
+    return series
+
+
+@pytest.mark.parametrize("text", (
+    "INBLOCK('半导体')>0",      # 网上最常见的写法
+    "INBLOCK('xx')>0",          # 板块名随便写：反正不做名称匹配
+    "INBLOCK()>0",              # 不传参数
+    "INBLOCK(5)>0",             # 万一有人写数字
+))
+def test_inblock_is_the_hot_industry_count(text: str) -> None:
+    """参数随便写都收，值一律等于 `热门行业`（逐值比较，不是"都大于 0"那种弱断言）。"""
+    series = _series_with_hot([np.nan, 0.0, 1.0, 3.0])
+
+    got = fm.compile_formula(text).eval(series)
+    base = fm.compile_formula("热门行业>0").eval(series)
+    assert np.array_equal(got, base), f"{text} 与 热门行业 不一致"
+
+
+def test_inblock_can_be_assigned_to_a_variable() -> None:
+    """先赋值再比较（真公式的常规写法）：`X:=INBLOCK('半导体'); X>0`。"""
+    series = _series_with_hot([np.nan, 0.0, 2.0, 3.0])
+
+    mask = fm.compile_formula("X:=INBLOCK('半导体');\nX>0").eval(series)
+    assert list(mask) == [False, False, True, True]
+
+
+def test_inblock_registers_the_hot_industry_field() -> None:
+    """必须把 `热门行业` 记进 `formula.fields` —— 否则那条"要不要算热门榜"的判据看不到它。"""
+    formula = fm.compile_formula("INBLOCK('半导体')>0")
+
+    assert formula.fields == ("热门行业",)
+
+
+def test_inblock_without_hot_industry_data_is_all_missing() -> None:
+    """热门榜没算过（库里缺涨停/行业数据）时整列缺值 ⇒ 不产生信号。"""
+    series = make_series([10.0, 10.5], symbol="600519", name="贵州茅台")
+
+    assert not fm.compile_formula("INBLOCK('半导体')>0").eval(series).any()
+
+
+def test_inblock_gets_a_non_blocking_note_about_the_difference() -> None:
+    """【校验】里要说清"按热门行业处理、不做板块名匹配"（一条，不刷屏）。"""
+    from laoa_trader import formulas as lib
+
+    notes = lib.tdx_compat_notes(fm.compile_formula("INBLOCK('半导体')>0"))
+    assert len(notes) == 1
+    assert "热门行业" in notes[0] and "通达信" in notes[0]
+    assert "板块名" in notes[0] or "匹配" in notes[0]
+
+    # 三个兼容函数一起用时，三条提醒各说各的（不合并成一句）
+    both = lib.tdx_compat_notes(fm.compile_formula(
+        "INBLOCK('半导体')>0 AND DYNAINFO(17)>1 AND FINANCE(7)>0"))
+    assert len(both) == 3
