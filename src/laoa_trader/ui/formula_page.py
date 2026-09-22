@@ -92,8 +92,8 @@ from laoa_trader.strategy import formula_group
 logger = get_logger(__name__)
 
 try:  # Qt 缺失时不应该 import 就炸（与 ui/app.py 同一个约定）
-    from PySide6.QtCore import QEvent, Qt, QThread, Signal
-    from PySide6.QtGui import QFont, QTextCursor
+    from PySide6.QtCore import QEvent, QSize, Qt, QThread, Signal
+    from PySide6.QtGui import QFont, QFontMetrics, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -114,6 +114,8 @@ try:  # Qt 缺失时不应该 import 就炸（与 ui/app.py 同一个约定）
         QSizePolicy,
         QSplitter,
         QStackedWidget,
+        QStyle,
+        QStyleOptionButton,
         QTableWidget,
         QTableWidgetItem,
         QVBoxLayout,
@@ -216,6 +218,22 @@ RESULT_ADD_COLUMN = RESULT_COLUMNS.index("加入自选")
 #: 那一格的两个文字（已在自选里的行显示后者、且不可再点）
 RESULT_ADD_TEXT = "加入自选"
 RESULT_ADDED_TEXT = "已在自选"
+
+#: 「加入自选」那一格：**文字每侧至少留这么多像素**（用户 2026-09-21 实报
+#: "加入自选的框体有点小，字显示不全"）。
+#: 为什么是"每侧留多少"而不是"按钮写死多少像素"：这一格的尺寸得按**当前字体**量
+#: （Windows 125% 缩放下同一个字要宽 1.25 倍，写死的像素必然在某一档上切字）；
+#: 量出来的文字宽度 + 这里的两侧留白 = 按钮的最小宽度，见 `_result_add_cell_size`。
+#: 两侧留白的下限比主题 QSS 给的 12 像素略宽一点：主人要的就是"放宽一点"。
+RESULT_ADD_SIDE_PADDING = 20
+#: 上下同理（按钮高度不能小于"文字高度 + 上下留白"，否则字被上下切掉）
+RESULT_ADD_V_PADDING = 8
+
+#: 「本次选股结果」表的 objectName。**只有一个用途**：让主题里那两条"多加一点内边距"
+#: 的规则（`ui/theme.py` 的 `resultTable`）精确命中这一张表 —— 这一页的列宽是按内容算的
+#: （`ResizeToContents`），内边距给得太紧时，换台机器（Windows 的微软雅黑）或系统缩放
+#: 125% 就会出现"字被切掉半个"。别的表不在这条规则的射程内。
+RESULT_TABLE_OBJECT = "resultTable"
 
 #: 结果表每一列的口径（表头只有几个字，说明写这里）
 RESULT_HEADER_TIPS: tuple[str, ...] = (
@@ -935,6 +953,9 @@ if QT_AVAILABLE:
             layout.addWidget(self.result_hint)
 
             self.result_table = QTableWidget(0, len(RESULT_COLUMNS))
+            # objectName 是给主题 QSS 用的：只给**这一张表**多加一点单元格/表头内边距
+            # （见 `ui/theme.py` 的 `resultTable` 规则）—— 别的表一律不动。
+            self.result_table.setObjectName(RESULT_TABLE_OBJECT)
             self.result_table.setHorizontalHeaderLabels(list(RESULT_COLUMNS))
             self.result_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -2435,6 +2456,12 @@ if QT_AVAILABLE:
                     )
                 )
                 holder = button
+            # 尺寸按**当前字体现量**（用户 2026-09-21 实报"框体有点小，字显示不全"）：
+            # ⚠️ 必须放在 `setCellWidget` **之后** —— 控件还没有父窗口时量到的是应用默认字体，
+            # 而它真正的字体来自表格（可能被主题或字号设置改过）；实测 12pt 下差 16 像素，
+            # 先量后放就会把两边的字各切掉一截（这就是那个坑）。
+            # 只给 `setMinimumSize`、不 `setFixedSize`：宽字体/大字号下这一格要能自己长，
+            # 列宽是 `ResizeToContents`，会跟着走。
             # 与其它表格一致：格子居中
             wrapper = QWidget()
             box = QHBoxLayout(wrapper)
@@ -2442,6 +2469,16 @@ if QT_AVAILABLE:
             box.setAlignment(Qt.AlignmentFlag.AlignCenter)
             box.addWidget(holder)
             self.result_table.setCellWidget(index, RESULT_ADD_COLUMN, wrapper)
+            cell_width, cell_height = _result_add_cell_size(holder)
+            holder.setMinimumSize(cell_width, cell_height)
+            # 行高也要够：默认行高 30 像素，而 15pt 时按钮自己就要 32 像素高 ——
+            # 不给的话按钮上下被裁掉一条（同样是"字显示不全"的一种）。
+            if self.result_table.rowHeight(index) < cell_height:
+                self.result_table.setRowHeight(index, cell_height + 4)
+            # 这一列的宽度是 `ResizeToContents` 算的，而它是在**放进去那一刻**算的；
+            # 上面刚把最小尺寸调大，得让列宽重算一次 —— 否则按钮可能比列宽还宽，
+            # 右边缘被列的边界裁掉（实测 10.5pt 时列宽 93、按钮 96，就是这么露出来的）。
+            self.result_table.resizeColumnToContents(RESULT_ADD_COLUMN)
 
         def on_add_one_to_watchlist(self, symbol: str, index: int | None = None) -> None:
             """某一行点【加入自选】：把这一只写进 `watchlist`（**记下加入时的价格**）。
@@ -2680,6 +2717,42 @@ def _one_line(text: Any, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+def _result_add_cell_size(holder: Any) -> tuple[int, int]:
+    """「加入自选」那一格**按当前字体量出来的**最小尺寸 `(宽, 高)`。
+
+    为什么不能直接用 `sizeHint()`（这是用户实报"框体有点小，字显示不全"的根因）：
+    `QPushButton` 的 `sizeHint()` 是**缓存**的，换字号之后不一定跟着长 ——
+    Linux 实测：12pt 时"加入自选"的文字要 64 像素、算上按钮自己的左右内边距要 90，
+    而那时 `sizeHint().width()` 还停在 80（10.5pt 时的值），照它排就把两边各切掉几个像素；
+    高度同理（15pt 时按钮高 30，而文字自己就有 24 高 + 上下内边距）。
+    所以这里每次都**现量**，并且只信"量出来的文字 + 留白"这一个下限：
+    文字宽度取自 `QFontMetrics`，两侧留白见 `RESULT_ADD_SIDE_PADDING`，
+    控件样式自己算出来的尺寸（QSS 的 padding/边框）作为另一个下限一起取大。
+    """
+    holder.ensurePolished()
+    metrics = QFontMetrics(holder.font())
+    # 两种文案都要放得下：没加过的显示「加入自选」、加过的显示「已在自选」，
+    # 取较宽的那个，这样同一列的两种状态宽度一致（列宽不会来回跳）
+    text_width = max(
+        metrics.horizontalAdvance(RESULT_ADD_TEXT),
+        metrics.horizontalAdvance(RESULT_ADDED_TEXT),
+    )
+    text_height = metrics.height()
+    width = text_width + 2 * RESULT_ADD_SIDE_PADDING
+    height = text_height + 2 * RESULT_ADD_V_PADDING
+    if isinstance(holder, QPushButton):
+        # 按钮还有自己的一圈内边距与边框：交给**控件自己的样式**算，别在这儿猜数字
+        option = QStyleOptionButton()
+        holder.initStyleOption(option)
+        styled = holder.style().sizeFromContents(
+            QStyle.ContentsType.CT_PushButton, option,
+            QSize(text_width, text_height), holder,
+        )
+        width = max(width, styled.width())
+        height = max(height, styled.height())
+    return width, height
+
+
 __all__ = [
     "EDITOR_HINT",
     "FUNCTIONS",
@@ -2698,6 +2771,9 @@ __all__ = [
     "PALETTE_BUTTON_OBJECT",
     "PALETTE_COLUMNS",
     "RESULT_ADD_COLUMN",
+    "RESULT_ADD_SIDE_PADDING",
+    "RESULT_ADD_V_PADDING",
+    "RESULT_TABLE_OBJECT",
     "RESULT_ADD_TEXT",
     "RESULT_ADDED_TEXT",
     "RESULT_COLUMNS",

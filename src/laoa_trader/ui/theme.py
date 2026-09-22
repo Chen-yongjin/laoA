@@ -254,6 +254,17 @@ QHeaderView::section {
 QHeaderView::section:hover { color: $text; }
 QTableCornerButton::section { border: none; border-bottom: 1px solid $border; }
 
+/* 「本次选股结果」表（objectName 见 ui/formula_page.py 的 RESULT_TABLE_OBJECT）：
+   **只给这一张表**把单元格与表头的内边距放宽一点。
+   为什么单独给它（用户 2026-09-21 实报"框体有点小，字显示不全"）：这一页的列宽是
+   `ResizeToContents` 按内容算的，而通用规则只有 `padding: 2px 4px` / `4px 6px` ——
+   实测文字与列宽**几乎没有余量**（市值列 28 像素顶着 28 像素的表头），
+   换台机器（Windows 微软雅黑更宽）或系统缩放 125% 就会切字。
+   多给的这几像素会被 `ResizeToContents` 吃进列宽里，所以文字两边真的空出来了；
+   别的表（自选股池、持仓、大盘）**不在这条规则的射程内**，版式不变。 */
+QTableWidget#resultTable::item { padding: 2px 8px; }
+QTableWidget#resultTable QHeaderView::section { padding: 4px 9px; }
+
 /* ── 滚动区与滚动条 ─────────────────────────────────────── */
 QScrollArea { border: none; background-color: transparent; }
 QScrollArea > QWidget > QWidget { background-color: transparent; }

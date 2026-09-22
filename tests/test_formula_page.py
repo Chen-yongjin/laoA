@@ -2438,3 +2438,162 @@ def test_space_button_does_not_break_the_other_palette_buttons(page) -> None:
     _put_caret(page, 1)
     _click(page, " ")
     fm.compile_formula(page.editor.toPlainText())
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 3.9) 结果表最后一列【加入自选】的**尺寸**（用户 2026-09-21：
+#      「选股结果界面的加入自选调整一下大小，框体有点小，字显示不全」）
+# ══════════════════════════════════════════════════════════════════════════
+# 为什么单独有一节：这一格是**表里唯一一个"控件放在单元格里"的地方**，它的宽度不是
+# 表格按文字算的，而是控件自己的最小尺寸决定的 —— 实测过一次真实的切字：
+# 换字号（Windows 125% 缩放就是这一档）之后 `QPushButton.sizeHint()` 没跟着长，
+# 12pt 时"加入自选"文字要 64 像素、算上按钮内边距要 90，而 sizeHint 还停在 80，
+# 于是两边各被切掉几个像素。所以这几条用例的判据统一是"**按渲染出来的尺寸**"。
+
+
+def _result_cell_holder(page, row: int = 0):
+    """那一格里的控件（按钮或"已在自选"标签）—— 不写死类型，两种状态都测。"""
+    cell = page.result_table.cellWidget(row, fp.RESULT_ADD_COLUMN)
+    assert cell is not None, "结果表最后一列没有控件"
+    holder = cell.findChild(QPushButton) or cell.findChild(QLabel)
+    assert holder is not None, "那一格里既没有按钮也没有标签"
+    return holder
+
+
+def _populate_result(page, symbol: str = "600003", name: str = "丙样本") -> None:
+    page.show_pick_result({"data_date": "2026-09-11",
+                           "pool": [{"symbol": symbol, "name": name,
+                                     "strategy": "公式·放量上攻"}]})
+    QApplication.processEvents()
+
+
+def test_add_button_width_is_measured_from_the_text_not_written_down(page) -> None:
+    """按钮的宽度必须**量出来**：文字宽 + 两侧留白（下限），而不是一个写死的像素。
+
+    ⚠️ 判据为什么不是 `sizeHint().width()`：`QPushButton` 的 sizeHint 由样式算，
+    **不理会** `setMinimumWidth` —— 实测 minimumWidth=88 时 sizeHint 仍是 74。
+    真正管用的是 `minimumWidth()`（布局照着它排）与**渲染出来的** `width()`，
+    两个都断言；再加一条"文字本身必须放得下"。
+    """
+    _populate_result(page)
+    button = _result_cell_holder(page)
+    assert button.text() == fp.RESULT_ADD_TEXT
+    metrics = QFontMetrics(button.font())
+    text_width = metrics.horizontalAdvance(button.text())
+    assert text_width > 0, "量不到文字宽度，这条用例就没有意义了"
+
+    need = text_width + 2 * fp.RESULT_ADD_SIDE_PADDING
+    assert button.minimumWidth() >= need, "按钮的最小宽度没有按文字量"
+    assert button.width() >= need, f"渲染出来只有 {button.width()} 像素，放不下 {button.text()!r}"
+    assert button.sizeHint().width() >= text_width      # 文字本身必须放得下
+    # 高度同理（"字显示不全"也可能是上下被切）
+    assert button.minimumHeight() >= metrics.height()
+    assert button.height() >= metrics.height()
+
+
+def test_added_label_fits_its_text_too(page, page_cfg) -> None:
+    """已经加过的行显示「已在自选」：**这一个文案也要完整显示**（不能只照顾按钮）。
+
+    两个文案长度一样（四个汉字），但走的是两条代码路径（标签没有边框与内边距），
+    所以两条都测；用例同时钉住"两种状态的宽度一致"——否则列宽会在加完之后跳一下。
+    """
+    with storage.connect(page_cfg.db_path) as conn:
+        storage.upsert_watchlist(conn, "600003", name="丙样本", price=5.0)
+    _populate_result(page)
+
+    label = _result_cell_holder(page)
+    assert isinstance(label, QLabel) and label.text() == fp.RESULT_ADDED_TEXT
+    metrics = QFontMetrics(label.font())
+    text_width = metrics.horizontalAdvance(label.text())
+
+    assert label.minimumWidth() >= text_width + 2 * fp.RESULT_ADD_SIDE_PADDING
+    assert label.width() >= text_width + 2 * fp.RESULT_ADD_SIDE_PADDING
+    assert label.height() >= metrics.height()
+
+
+def test_add_button_keeps_fitting_when_the_font_is_bigger(page, page_cfg, tmp_path,
+                                                         qapp) -> None:
+    """**回归用例**：字号变大（Windows 125% 缩放就是这一档）之后仍然不切字。
+
+    这一条钉的就是用户实报的那个 bug：尺寸曾经取自 `sizeHint()`，而它换字号后不跟长，
+    于是 12pt 下按钮只有 80 像素、文字却要 64 + 内边距 —— 两边各切一截。
+    现在每次填表都按当前字体现量（`_result_add_cell_size`），字号一变就跟着长。
+
+    为什么**改应用字体 + 另建一页**，而不是 `page.setFont(...)` 了事：
+    那一格的控件是"建好了再塞进单元格"的，`setFont` 往下传的时机在
+    offscreen 平台上跟测试顺序有关（实测跑整包时传不到、单独跑时传得到，
+    于是这条用例时红时绿）。应用字体是**它一出生就带的**那一个，
+    与真机上"系统缩放 125% 时启动程序"是同一条路径，跟顺序无关。
+    当前提不成立（字没变大）时宁可让用例红着报出来，也不要绿得不明不白。
+    """
+    _populate_result(page)
+    base_button = _result_cell_holder(page)
+    base_width = QFontMetrics(base_button.font()).horizontalAdvance(base_button.text())
+    base_height = base_button.height()
+
+    original = qapp.font()
+    bigger = QFont(original)
+    if bigger.pointSizeF() > 0:
+        bigger.setPointSizeF(bigger.pointSizeF() + 3)
+    else:                                   # 字体是按像素定的（pointSizeF() 返回 -1）
+        bigger.setPixelSize(max(bigger.pixelSize(), 12) + 4)
+    fresh = None
+    try:
+        qapp.setFont(bigger)
+        fresh = fp.FormulaPage(page_cfg, directory=tmp_path / "公式-大字号")
+        fresh.resize(1100, 720)
+        fresh.show()
+        qapp.processEvents()
+        _populate_result(fresh)
+
+        button = _result_cell_holder(fresh)
+        metrics = QFontMetrics(button.font())
+        text_width = metrics.horizontalAdvance(button.text())
+        assert text_width > base_width, (
+            f"前提不成立：字并没有变大（{base_width} → {text_width}），"
+            "后面的断言不能说明问题"
+        )
+        assert button.width() >= text_width + 2 * fp.RESULT_ADD_SIDE_PADDING, (
+            f"字号变大后按钮只有 {button.width()} 像素，放不下 {button.text()!r}"
+        )
+        assert button.height() >= metrics.height()
+        assert button.height() > base_height, "字号变大了按钮却一点没长，说明尺寸又被写死了"
+        # 列宽与行高都得跟上（否则按钮虽大，却被列的边界/行高压着）
+        assert fresh.result_table.columnWidth(fp.RESULT_ADD_COLUMN) >= button.width()
+        assert fresh.result_table.rowHeight(0) >= button.height()
+    finally:
+        qapp.setFont(original)
+        if fresh is not None:
+            fresh.close()
+            fresh.deleteLater()
+            qapp.processEvents()
+
+
+def test_result_table_columns_have_room_for_their_text(page) -> None:
+    """顺手查的**同一张表**其它列（用户要求"看看有没有同样被挤压的"）。
+
+    判据：每一列的宽度 ≥ 「表头文字 / 这一格最长的那份文字」里更宽的那个 + 一点余量。
+    这一页的列宽是按内容算的（`ResizeToContents`），而通用 QSS 的内边距很紧，
+    实测最紧的「实时股价」列表头文字 64 像素、列宽 73（只多 9）—— 所以这条用
+    "至少多 4 像素"当水位线（真被挤成负数时立刻红），另外主题里给这张表
+    （`RESULT_TABLE_OBJECT`）单独放宽了内边距，余量就是这么来的。
+    """
+    page.set_quotes_provider(lambda symbol: {
+        "price": 1234.56, "circ_mktcap": 12345.67, "turnover_rate": 12.34,
+    })
+    _populate_result(page, name="丙样本名称长一点")
+    table = page.result_table
+
+    for column, title in enumerate(fp.RESULT_COLUMNS):
+        header_item = table.horizontalHeaderItem(column)
+        header_font = QFontMetrics(table.horizontalHeader().font())
+        need = header_font.horizontalAdvance(header_item.text())
+        cell = table.item(0, column)
+        if cell is not None:
+            need = max(need, QFontMetrics(cell.font()).horizontalAdvance(cell.text()))
+        width = table.columnWidth(column)
+        assert width >= need + 4, f"「{title}」列被挤了：列宽 {width}、文字要 {need}"
+
+    # 最后一列（控件）另算：它的宽度必须放得下那个按钮
+    button = _result_cell_holder(page)
+    assert table.columnWidth(fp.RESULT_ADD_COLUMN) >= button.width()
