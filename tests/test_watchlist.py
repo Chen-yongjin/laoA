@@ -834,27 +834,42 @@ def test_fill_watchlist_source_only_fills_empty_and_touches_nothing_else(wl_db) 
         assert storage.fill_watchlist_source(conn, "600100", "") is False
 
 
-def test_old_database_gets_the_source_column_added(wl_db) -> None:
+def test_old_database_gets_the_source_column_added(tmp_path) -> None:
     """老库升级：`connect()` 会把缺的列补上（与 `added_price` 同一条迁移路径）。
 
     判据不只看"列在不在"，还要看**老行读出来是什么**：老库补的列是 NULL →
     界面显示「自选」（`watchlist_source_strategy()` 返回空串），不是报错。
+
+    造"升级前"的库用的是**旧版建表语句**（没有 `source_strategy` 那一列），
+    而不是 `ALTER TABLE … DROP COLUMN` —— 后者要 SQLite 3.35+，而 Windows 上
+    打包/CI 用的 SQLite 版本不由我们定（这条用例不该因为环境而红），
+    而且"旧版建的库"本来就长这样，测得更真。
     """
     import sqlite3
 
-    # 造一个"升级前"的库：把新列删掉（SQLite 3.35+ 支持 DROP COLUMN）
-    with storage.connect(wl_db.db_path) as conn:
-        storage.upsert_watchlist(conn, "600100", name="冷门样本", note="龙头")
-        conn.execute("ALTER TABLE watchlist DROP COLUMN source_strategy")
+    db = tmp_path / "old-trader.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE watchlist ("
+            "  symbol TEXT PRIMARY KEY, name TEXT, note TEXT,"
+            "  enabled INTEGER NOT NULL DEFAULT 1, added_at TEXT, added_price REAL"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO watchlist (symbol, name, note, enabled, added_at) "
+            "VALUES ('600100', '冷门样本', '龙头', 1, '2026-09-01T09:30:00')"
+        )
         conn.commit()
 
-    with storage.connect(wl_db.db_path) as conn:              # 再开一次 = 走迁移
+    with storage.connect(db) as conn:                          # 这一下 = 走迁移
         columns = {r[1] for r in conn.execute("PRAGMA table_info(watchlist)")}
         rows = storage.load_watchlist(conn, enabled_only=False)
 
     assert "source_strategy" in columns
     assert rows[0]["source_strategy"] is None
-    assert _page_rows(wl_db)["600100"]["source_label"] == "自选"
+    # 老数据（这一列是 NULL）在界面上显示「自选」—— 不崩、不瞎猜
+    assert pool.watchlist_source_strategy(rows[0]) == ""
+    assert pool.watchlist_source_fields(rows[0])["source_label"] == "自选"
 
 
 def test_push_and_pool_table_use_the_same_source_word(wl_db) -> None:
