@@ -1010,13 +1010,13 @@ def test_watch_table_headers_and_source_column(window) -> None:
 
     2026-09-17 改版（用户要求）：在「涨幅」后面加「市值」「换手」两列，
     「提醒」列改成「监控开关」—— 所以列数从 6 变 8；
-    2026-09-21（主人要求）：再加「添加日期」「盈亏」两列 → 10 列，
+    2026-09-21（主人要求）：再加「加入日期」「盈亏」两列 → 10 列，
     「监控开关」仍在**最后一列**（点格子就能切换那一列的老位置没动）。
     """
     assert window.pool_table.columnCount() == 10
     assert _header_texts(window.pool_table) == [
         "名称(代码)", "现价", "涨幅", "市值", "换手", "板块", "来源",
-        "添加日期", "盈亏", "监控开关",
+        "加入日期", "盈亏", "监控开关",
     ]
     assert window.pool_table.columnCount() == len(ui_app.WATCH_HEADERS)
     # seeded 里 600002 是 `低价股` 策略选中的（不是自选）：来源 = **哪条策略**
@@ -4709,7 +4709,7 @@ def test_monitor_column_click_toggles_position_monitor(window, seeded, qapp) -> 
 def test_watch_table_shows_added_date_and_pnl_from_the_added_price(
     window, seeded, qapp
 ) -> None:
-    """「添加日期」+「盈亏」两列（2026-09-21 主人要求："盈亏从加入股池那天算"）。
+    """「加入日期」+「盈亏」两列（2026-09-21 主人要求："盈亏从加入股池那天算"）。
 
     判据：加入价写 5.00，盈亏 =（本地最新收盘价 − 5.00）÷ 5.00（期望值由测试自己从库里
     读收盘价算，不写死数字 —— 换一套 `seeded` 数据也不会假红）；

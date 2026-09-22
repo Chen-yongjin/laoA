@@ -101,13 +101,14 @@ TAB_TITLES: tuple[str, ...] = (TAB_MARKET, TAB_WATCH, TAB_POSITION, TAB_FORMULA,
 #: `提醒` 列改成「监控开关」（显示 开启/关闭，点一格就能切换，提醒内容进 tooltip）。
 WATCH_HEADERS: tuple[str, ...] = (
     "名称(代码)", "现价", "涨幅", "市值", "换手", "板块", "来源",
-    # 2026-09-21（主人要求）：加这两列 —— "添加日期"= 加入股池那天（自选表的 added_at），
-    # "盈亏"= 从**加入时的价格**算到现在的涨跌（口径见 `_pnl_cell`）。
-    "添加日期", "盈亏",
+    # 2026-09-21（主人要求）：加这两列 —— "加入日期"= 加入自选那天（自选表的 added_at），
+    # "盈亏"= 从**加入时的价格**算到现在的**比例**（口径见 `_watch_metrics_cells`）。
+    # 列头文字用"加入日期"（主人最新口径的原话），不是"添加日期"。
+    "加入日期", "盈亏",
     "监控开关",
 )
-#: 「添加日期」「盈亏」两列的下标（同样按列名取，不写数字）
-WATCH_ADDED_COLUMN = WATCH_HEADERS.index("添加日期")
+#: 「加入日期」「盈亏」两列的下标（同样按列名取，不写数字）
+WATCH_ADDED_COLUMN = WATCH_HEADERS.index("加入日期")
 WATCH_PNL_COLUMN = WATCH_HEADERS.index("盈亏")
 #: 「持仓监控」的列。**没有"数量"**：用户给定的字段只有 代码 + 成本价 + 备注
 #: （`quantity` 留在库里做兼容，见 `docs/改版方案.md` 第五节）。
@@ -2132,7 +2133,7 @@ if QT_AVAILABLE:
             )
             self._set_header_tooltip(
                 self.pool_table, WATCH_ADDED_COLUMN,
-                "这一只**加入自选池那天**（北京时间，形如 2026-09-21）。\n"
+                "这一只**加入自选那天**（北京时间，形如 2026-09-21）。\n"
                 "老库里没有记录加入日期的行显示 `—`（当年没存，不拿今天顶替）"
             )
             self._set_header_tooltip(
@@ -4719,10 +4720,10 @@ if QT_AVAILABLE:
             self.pool_empty_label.setVisible(not rows)
 
         def _watch_metrics_cells(self, symbol: str, entry: Any) -> tuple[Any, Any]:
-            """「添加日期」与「盈亏」两格（2026-09-21 主人要求）。
+            """「加入日期」与「盈亏」两格（2026-09-21 主人要求）。
 
             口径：
-            - **添加日期** = 自选表的 `added_at` 那天（北京时间，只显示日期）。
+            - **加入日期** = 自选表的 `added_at` 那天（北京时间，只显示日期）。
               老库里没有这一项的行（迁移之前的自选）显示 `—` ——
               **不拿今天顶替**：那会让"我什么时候加的"变成一个编出来的答案；
             - **盈亏** =（最新价 − `added_price`）÷ `added_price`。最新价取
