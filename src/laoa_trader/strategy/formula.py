@@ -383,6 +383,77 @@ _FORBIDDEN_WORDS: dict[str, str] = {
     )
 }
 #: 会给出**更具体**提示的名字（比"未知字段"更能说明用户想干什么）
+#: **已知、但本地数据上做不到**的通达信函数 → 一句人话（缺什么 + 能换成什么）。
+#:
+#: 为什么要与"未知函数"分开：这两类对用户意味着完全不同的事 ——
+#:   * 未知函数 = "你打错字了"（提示里列可用函数清单就够了）；
+#:   * 已知但不支持 = "这条公式的数据前提本地没有"，列一百个可用函数也没用，
+#:     要告诉他缺什么、以及手上有什么能替代（否则他会一直以为是自己写错了）。
+#: 所以这里的每条都要写清"缺什么数据"，能给替代写法的必须给（例如股本类 → 流通市值）。
+UNSUPPORTED_FUNCTIONS: dict[str, str] = {
+    "FINANCE": (
+        "本地库里没有财务与股本数据（FINANCE 取的是总股本/流通股本/每股收益这类财报项），"
+        "所以这一项算不出来。"
+        "如果你是想按「流通股本 × 价格」筛市值，直接写 `流通市值`（单位：亿元）就行 —— "
+        "例如 `流通市值>=30 AND 流通市值<=500`；"
+        "其它财务项（每股收益、净资产、净利润…）本地没有，只能删掉这条条件。"
+    ),
+    "DYNAINFO": (
+        "DYNAINFO 取的是盘中动态行情（实时买卖盘、委比、量比那一类），"
+        "本地只有收盘后的日线，算不出来。"
+        "现价类需求请用 `C`（当日收盘/最新价），放量请用 `量比()`。"
+    ),
+    "WINNER": (
+        "WINNER 需要筹码分布数据（每个价位的持仓成本），本地没有这份数据。"
+        "近似的替代：用换手率与成交密集度自己写条件，例如 `换手率>5 AND V>MA(V,5)*1.5`。"
+    ),
+    "COST": (
+        "COST 需要筹码分布数据（成本分布），本地没有。"
+        "要「套牢盘/获利盘」这类判断只能自己用价格与均线近似，例如 `C<PRE*0.95`。"
+    ),
+}
+
+#: 通达信的周期关键字（`C#WEEK` 这种写法里 `#` 后面那个词，大小写都认）
+_TDX_PERIOD_WORDS = (
+    "WEEK", "MONTH", "QUARTER", "YEAR", "DAY",
+    "MIN1", "MIN5", "MIN15", "MIN30", "MIN60", "MIN",
+)
+
+
+def _looks_like_tdx_period(text: str, index: int) -> bool:
+    """`text[index]` 是 `#`，后面是不是跟着一个周期关键字（`#WEEK` / `#MIN5`…）。
+
+    为什么要判词边界：本引擎的注释也是 `#` 开头（`# 说明: …`），
+    不能把所有 `#` 都当跨周期 —— 只认后面紧跟周期词、且词后不是字母数字的情况。
+    """
+    rest = text[index + 1: index + 1 + 8].upper()
+    for word in _TDX_PERIOD_WORDS:
+        if rest.startswith(word):
+            tail = rest[len(word): len(word) + 1]
+            if tail == "" or not (tail.isalnum() or tail == "_"):
+                return True
+    return False
+
+
+def _looks_like_formula_reference(value: str) -> bool:
+    """字符串看起来像不像 `"公式名.指标"`（通达信引用别的公式的写法）。
+
+    判据：恰好一个点、两边都是"名字"（字母/数字/下划线/中文），且整体不含空格与引号。
+    这样 `"半导体"`（行业名）不会被误判，而 `"MACD.MACD"` / `"我的公式.输出1"` 会被认出来。
+    """
+    text = str(value or "")
+    if text.count(".") != 1 or not text or " " in text:
+        return False
+    left, right = text.split(".", 1)
+    if not left or not right:
+        return False
+
+    def ok(part: str) -> bool:
+        return all(ch.isalnum() or ch == "_" or "\u4e00" <= ch <= "\u9fff" for ch in part)
+
+    return ok(left) and ok(right)
+
+
 _SPECIAL_WORDS: dict[str, str] = {
     "TRUE": "公式里没有 True/False，条件请写成比较式（例如 C>O）",
     "FALSE": "公式里没有 True/False，条件请写成比较式（例如 C>O）",
@@ -486,6 +557,16 @@ def _tokenize(text: str) -> list[_Token]:
                 )
             i = end + 1
             continue
+        if ch == "#" and _looks_like_tdx_period(text, i):
+            # 通达信的跨周期写法 `C#WEEK` / `C#MONTH`：`#` 在本引擎里是**注释**符号，
+            # 若照注释处理，这一行会被整段吃掉 —— 用户看到的是"公式能编译、结果全不对"，
+            # 那是最难查的一类问题。所以这里专门拦下来，说清"只按日线算"。
+            raise FormulaError(
+                "跨周期写法（`#WEEK` / `#MONTH` 这类）本引擎不支持：只按日线计算",
+                line=line_of[i], col=col_of[i], code="period",
+                hint="把周期条件改写成日线上的等价表达（例如「近 5 日」就写 COUNT(条件,5)）；"
+                     "要真正的周线/月线数据得先做多周期引擎",
+            )
         if ch == "#" or (ch == "/" and i + 1 < n and text[i + 1] == "/"):
             end = text.find("\n", i)
             i = n if end < 0 else end
@@ -2179,6 +2260,18 @@ class _Parser:
         if tok.kind == "str":
             self.next()
             self.bump(tok)
+            # `"公式名.指标"`（通达信引用别的公式）在本引擎里只能是一个字符串常量，
+            # 拿去当数值用时会以"字符串不能参与运算"收场 —— 那种提示会让人以为是引号写错了。
+            # 这里提前认出来：形状是"名字.名字"，且出现在值的位置。
+            value = str(tok.value or "")
+            if _looks_like_formula_reference(value):
+                raise FormulaError(
+                    f'引用其它公式（"{value}"）本引擎不支持：本地没有共享的公式库',
+                    line=tok.line, col=tok.col, code="formula_ref",
+                    hint="把被引用那条公式的算式直接抄进来（例如它算的是 "
+                         "`EMA(C,12)-EMA(C,26)`，就在这条公式里照样写一遍）；"
+                         "要用现成的指标可以直接调 MACD / KDJ / RSI / BOLL 这些内置函数",
+                )
             return _Lit(tok.value, _STR, tok.line, tok.col)
 
         if tok.kind == "lparen":
@@ -2261,6 +2354,14 @@ class _Parser:
 
     def _call(self, tok: _Token, upper: str) -> Any:
         spec = FUNCTIONS.get(upper)
+        if spec is None and upper in UNSUPPORTED_FUNCTIONS:
+            # 已知函数、但本地数据前提不满足：**不要混进"未知函数"那套提示
+            # （列可用函数清单对这种情况毫无帮助 —— 缺的是数据，不是函数名）
+            raise FormulaError(
+                f'"{tok.value}" 这个函数本引擎认识，但本地数据算不出来',
+                line=tok.line, col=tok.col, code="unsupported_function",
+                hint=UNSUPPORTED_FUNCTIONS[upper],
+            )
         if spec is None:
             near = difflib.get_close_matches(upper, list(FUNCTIONS), n=1, cutoff=0.55)
             hint = (f'是不是想写 "{near[0]}"？' if near else "") + (

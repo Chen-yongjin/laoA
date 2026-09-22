@@ -303,20 +303,124 @@ def test_math_helpers() -> None:
 
 
 def test_unsupported_functions_say_so_in_chinese() -> None:
-    """暂时不支持的（跨周期/财务/动态行情那类）要给人话，而不是一句"未知函数"。"""
-    for text in ("DYNAINFO(3)>0", "FINANCE(40)>0", "WINNER(C)>0.5", "COST(50)>C"):
+    """不支持的（财务/动态行情/筹码那类）要给人话 —— **而且不是"未知函数"那一套**。
+
+    这条用例在主人实报「FINANCE 只给了一句干巴巴的未知函数」之后**加强了**：
+    原来只断言"有中文"，现在要求错误码是 `unsupported_function`、提示里说清缺什么、
+    FINANCE 还要给出「改用流通市值」这条可执行的路。详见下面第四节那组用例。
+    """
+    for text, need in (("DYNAINFO(3)>0", "日线"),
+                       ("FINANCE(40)>0", "财务"),
+                       ("WINNER(C)>0.5", "筹码"),
+                       ("COST(50)>C", "筹码")):
         with pytest.raises(fm.FormulaError) as err:
             fm.compile_formula(text)
-        assert "未知函数" in str(err.value)
+        assert err.value.code == "unsupported_function", text
+        assert need in (err.value.hint or ""), text
+        assert "未知函数" not in str(err.value), text
         assert any("\u4e00" <= ch <= "\u9fff" for ch in str(err.value))
 
-    # 引用其它公式（TDX 的 `"公式名.指标"`）：本地没有那套公式库 → 报中文错（不是崩）
+    # 引用其它公式（TDX 的 `"公式名.指标"`）：本地没有那套公式库 → 专门的中文说明
     with pytest.raises(fm.FormulaError) as err:
         fm.compile_formula('"MACD.DIF">0')
-    assert "字符串" in str(err.value)
+    assert err.value.code == "formula_ref"
+    assert "公式" in (err.value.hint or "")
 
 
 def test_a_formula_with_only_drawing_statements_is_rejected() -> None:
     """整条公式只有画图语句 → 没有选股条件，必须报错（而不是"编译通过但什么都不做"）。"""
     with pytest.raises(fm.FormulaError):
         fm.compile_formula("DRAWICON(C>O,10,1);\nDRAWTEXT(C>O,20,'阳');")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 四、"已知但数据上做不到"的函数：要说清缺什么、能换成什么
+#
+# 主人实报：粘了一条用 FINANCE 的公式，只得到一句干巴巴的「未知函数 "FINANCE"」——
+# 那会让人以为是自己打错了字，然后一直在函数名上较劲，而真正的原因是本地没有财务数据。
+# 所以这几条不钉整句文案（文案会改），只钉"关键词必须在"。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _error_of(text: str) -> fm.FormulaError:
+    with pytest.raises(fm.FormulaError) as excinfo:
+        fm.compile_formula(text)
+    return excinfo.value
+
+
+@pytest.mark.parametrize(
+    ("text", "keywords"),
+    (
+        # FINANCE：财务/股本 —— 必须给出"用流通市值代替"这条路
+        ("X:=FINANCE(7);\nX>0", ("财务", "股本", "流通市值")),
+        # DYNAINFO：盘中动态行情 —— 必须说清只有日线，并给现价/量比的替代
+        ("X:=DYNAINFO(3);\nX>0", ("动态行情", "日线", "量比")),
+        # WINNER / COST：筹码分布
+        ("X:=WINNER(C);\nX>0", ("筹码", "换手率")),
+        ("X:=COST(50);\nX>0", ("筹码",)),
+    ),
+)
+def test_known_but_unsupported_functions_have_a_real_explanation(
+        text: str, keywords: tuple[str, ...]) -> None:
+    """这些函数**不是**"未知函数"：要说明缺什么数据、并给出替代写法。"""
+    error = _error_of(text)
+
+    assert error.code == "unsupported_function", "应当与「未知函数」分开（错误码不同）"
+    assert error.line == 1 and error.col is not None, "要有行列号，用户才能定位"
+    blob = str(error) + " " + (error.hint or "")
+    for word in keywords:
+        assert word in blob, f"提示里缺少「{word}」：{blob!r}"
+    # 而且**不许**退回那句干巴巴的"未知函数"（否则用户还是会去改函数名）
+    assert "未知函数" not in str(error)
+
+
+def test_unknown_function_still_lists_the_available_ones() -> None:
+    """真正的"未知函数"照旧：列可用函数清单 + 近似建议（两类提示不能混）。"""
+    error = _error_of("X:=MAA(C,5);\nX>0")
+
+    assert error.code == "unknown_function"
+    assert "未知函数" in str(error)
+    assert "可用函数" in (error.hint or "")
+    assert error.hint and "MA" in error.hint
+
+
+@pytest.mark.parametrize(
+    ("text", "keywords"),
+    (
+        ("X:=C#WEEK;\nX>0", ("跨周期", "日线")),
+        ("X:=C#MONTH;\nX>0", ("跨周期", "日线")),
+    ),
+)
+def test_cross_period_syntax_gets_its_own_message(text: str, keywords: tuple[str, ...]) -> None:
+    """`C#WEEK` 这种跨周期写法必须**专门报错**，不能被当成注释整行吃掉。
+
+    为什么这条特别重要：`#` 在本引擎里是注释符，若照注释处理，这一行会被静默丢掉 ——
+    用户看到的是"公式能编译、结果就是不对"，那是所有问题里最难查的一种。
+    """
+    error = _error_of(text)
+
+    assert error.code == "period"
+    blob = str(error) + " " + (error.hint or "")
+    for word in keywords:
+        assert word in blob
+
+
+def test_hash_comments_still_work() -> None:
+    """反过来钉住：普通的 `#` 注释（公式文件的注释头就是它）照旧能用。"""
+    formula = fm.compile_formula("# 说明: 注释行\nC>MA(C,5)")
+    assert formula.min_history == 5
+
+
+def test_formula_reference_gets_its_own_message() -> None:
+    """`"MACD.MACD"`（通达信引用别的公式）要专门说明，而不是变成「字符串不能参与运算」。"""
+    error = _error_of('X:="MACD.MACD";\nX>0')
+
+    assert error.code == "formula_ref"
+    blob = str(error) + " " + (error.hint or "")
+    assert "公式" in blob and ("抄" in blob or "内置" in blob)
+
+
+def test_an_industry_string_is_not_mistaken_for_a_formula_reference() -> None:
+    """行业名这种字符串**不能**被误判成公式引用（`"半导体"` 没有点、判据要够严）。"""
+    formula = fm.compile_formula('INDUSTRY="半导体"')
+    assert formula is not None
