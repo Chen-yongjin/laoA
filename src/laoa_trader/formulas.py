@@ -78,6 +78,15 @@ LIMIT_UP_HINT = (
     "早期日期会读到 0 —— 历史越早，信号越可能偏少。"
 )
 
+#: 用到 `FINANCE(...)` 时的提醒（**非阻断**：公式照跑，只是口径要讲清）。
+#: 主人 2026-09-21 指定："你直接在程序后台把这个函数等同于流通市值就行了啊" ——
+#: 于是它不再是"不支持"，但**必须**在【校验】里说一句，否则用户会以为它真是通达信那个股本。
+FINANCE_HINT = (
+    "注意：本程序把 FINANCE(...) 按「流通市值（亿元）」处理 —— 与通达信口径不同"
+    "（通达信里它是流通股本/总股本这类财务项，本地没有财报数据）；"
+    "拿它当股本用的公式结果会偏。"
+)
+
 #: 默认的成交口径（成绩单用）。`B` = D+1 收盘买 → D+2 收盘卖：
 #: 与 `research/scorecard.py` 的默认并列口径一致，也是散户真能执行的那一档。
 DEFAULT_CONVENTION_KEY = "B"
@@ -471,6 +480,24 @@ def enabled_names(cfg: Any = None, directory: str | Path | None = None) -> list[
 # ══════════════════════════════════════════════════════════════════════════
 # 连板/涨停天数的历史坑
 # ══════════════════════════════════════════════════════════════════════════
+
+
+def tdx_compat_notes(formula: fm.Formula | None) -> list[str]:
+    """公式里用到"口径与本项目不同"的通达信函数时，返回**非阻断**的中文提醒（可能多条）。
+
+    为什么单独一个入口（而不塞进 `limit_up_hint`）：`limit_up_hint` 说的是"数据攒得够不够"，
+    这里说的是"这个函数我们按另一个口径实现了" —— 两件事的下一步动作完全不同
+    （前者等同步，后者是提醒他核对口径），混在一句话里谁也说不清。
+    目前只有 `FINANCE` 一条；将来再加同类函数（例如有人要求 `DYNAINFO` 也硬映射）
+    就往这里加，界面会把每一条单独列一行。
+    """
+    if formula is None:
+        return []
+    used = set(getattr(formula, "functions", ()) or ())
+    notes: list[str] = []
+    if "FINANCE" in used:
+        notes.append(FINANCE_HINT)
+    return notes
 
 
 def limit_up_hint(formula: fm.Formula | None) -> str:
@@ -924,7 +951,9 @@ __all__ = [
     "formula_path",
     "formula_text",
     "latest_trading_day",
+    "FINANCE_HINT",
     "limit_up_hint",
+    "tdx_compat_notes",
     "name_error",
     "preview_hits",
     "repo_root",

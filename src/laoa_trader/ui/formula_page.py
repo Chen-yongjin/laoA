@@ -1823,6 +1823,10 @@ if QT_AVAILABLE:
             hint = formulas_lib.limit_up_hint(formula)
             if hint:
                 lines.append("⚠️ " + hint)
+            # 口径与本项目不同的通达信函数（目前是 FINANCE → 流通市值）：
+            # **非阻断**提醒，公式照跑，但必须说一句 —— 否则用户会以为它真是通达信那个股本。
+            for note in formulas_lib.tdx_compat_notes(formula):
+                lines.append("⚠️ " + str(note))
             # 通达信兼容层（2026-09-21）：编译时被**忽略**的东西要在这里说出来 ——
             # 用户从网上抄来的公式常带画图语句与样式修饰，不说明的话他会以为
             # "我那句画线生效了"，或者更糟：以为整条公式都跑到了。

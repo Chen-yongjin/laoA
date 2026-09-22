@@ -389,15 +389,9 @@ _FORBIDDEN_WORDS: dict[str, str] = {
 #:   * 未知函数 = "你打错字了"（提示里列可用函数清单就够了）；
 #:   * 已知但不支持 = "这条公式的数据前提本地没有"，列一百个可用函数也没用，
 #:     要告诉他缺什么、以及手上有什么能替代（否则他会一直以为是自己写错了）。
-#: 所以这里的每条都要写清"缺什么数据"，能给替代写法的必须给（例如股本类 → 流通市值）。
+#: 所以这里的每条都要写清"缺什么数据"、能给替代写法的必须给。
+#: 注：`FINANCE` **不在这里** —— 主人 2026-09-21 指定它"等同于流通市值"（见 `_impl_finance`）。
 UNSUPPORTED_FUNCTIONS: dict[str, str] = {
-    "FINANCE": (
-        "本地库里没有财务与股本数据（FINANCE 取的是总股本/流通股本/每股收益这类财报项），"
-        "所以这一项算不出来。"
-        "如果你是想按「流通股本 × 价格」筛市值，直接写 `流通市值`（单位：亿元）就行 —— "
-        "例如 `流通市值>=30 AND 流通市值<=500`；"
-        "其它财务项（每股收益、净资产、净利润…）本地没有，只能删掉这条条件。"
-    ),
     "DYNAINFO": (
         "DYNAINFO 取的是盘中动态行情（实时买卖盘、委比、量比那一类），"
         "本地只有收盘后的日线，算不出来。"
@@ -1092,6 +1086,11 @@ class _FuncSpec:
     hist_extra: int = 0
     #: 不写参数时的隐含根数（`量比()` 内部固定看前 5 日，所以至少要 6 根）
     hist_default: int = 0
+    #: 这个函数**内部用到**的字段（登记进 `Formula.fields`）。
+    #: 为什么需要它：`preview_hits()` / 建池那条路是按 `formula.fields` 判断
+    #: "要不要去取那一趟实时快照"的 —— 函数里偷偷用了字段却不登记，
+    #: 表现就是"公式里明明写了市值条件，却永远取不到数、一只都不出"。
+    uses_fields: tuple[str, ...] = ()
 
 
 def _impl_ma(ev: _Evaluator, node: _Call, vals: list) -> Any:
@@ -1630,6 +1629,28 @@ def _num2(fn: Callable[[np.ndarray, np.ndarray], np.ndarray]) -> Callable[..., A
     return impl
 
 
+def _impl_finance(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """`FINANCE(...)` → 等同本项目的 `流通市值`（单位：亿元）。
+
+    **这是主人 2026-09-21 明确指定的口径**：「你直接在程序后台把这个函数等同于流通市值就行了啊。」
+    原因：通达信里 `FINANCE(7)` 是流通股本、`FINANCE(40)` 是总股本之类的财报项，
+    而本地**根本没有财务数据**；但用户写这类公式的**真实意图几乎都是"按市值筛"**，
+    所以直接给一个能用的值，比报"本地没有财务数据"有用得多。
+
+    ⚠️ 口径与通达信**不同**（股本 ≠ 市值，单位也从股变成亿元），所以：
+    - 参数怎么写都收下（数字/表达式/不传），一律返回同一个值 —— 不让它成为"跑不起来"的原因；
+    - 界面上有一条**非阻断提醒**（`formulas.tdx_compat_notes()`），说明这个差异；
+    - 文档 `docs/通达信兼容性.md` 把它归到"支持（口径按本项目定义）"那一档。
+    """
+    extra = getattr(ev.series, "extra", None) or {}
+    value = extra.get("流通市值")
+    if value is None:
+        # 没配 Key / 非交易时段取不到快照：整列缺值（条件不成立、不产生信号），
+        # 与直接用 `流通市值` 写条件时的行为完全一致。
+        return np.full(ev.n, np.nan)
+    return _as_float(value)
+
+
 def _limit_price(ev: "_Evaluator", vals: list, *, up: bool) -> Any:
     """`ZTPRICE` / `DTPRICE` 的共用实现（通达信内置）。
 
@@ -1758,6 +1779,10 @@ FUNCTIONS: dict[str, _FuncSpec] = {
     "INTPART": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_intpart),
     "ROUND": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_round),
     # 通达信内置：涨/跌停价（第二个参数 = 涨跌幅比例，0.1 = 10%，可省 → 按 10%）
+    # 通达信 FINANCE(财务/股本)：本地没有财务数据，按主人指定的口径**等同流通市值**（亿元）
+    # `uses_fields` 必须登记 流通市值：否则公式不会去取实时快照那一趟数据（永远取不到值）
+    "FINANCE": _FuncSpec(0, 2, _NUM, (_NUM, _NUM), _impl_finance,
+                         uses_fields=("流通市值",)),
     "ZTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_ztprice),
     "DTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_dtprice),
     "CEILING": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_ceiling),
@@ -2371,6 +2396,12 @@ class _Parser:
                 f'未知函数 "{tok.value}"',
                 line=tok.line, col=tok.col, code="unknown_function", hint=hint,
             )
+
+        # 函数**内部**用到的字段也要登记（例如 FINANCE → 流通市值）：
+        # `Formula.fields` 是"要不要取实时快照"的唯一判据，漏登记就会静默取不到值。
+        for name in getattr(spec, "uses_fields", ()) or ():
+            if name not in self.fields:
+                self.fields.append(name)
 
         self.next()                       # (
         args: list[Any] = []

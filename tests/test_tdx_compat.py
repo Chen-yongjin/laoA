@@ -310,7 +310,6 @@ def test_unsupported_functions_say_so_in_chinese() -> None:
     FINANCE 还要给出「改用流通市值」这条可执行的路。详见下面第四节那组用例。
     """
     for text, need in (("DYNAINFO(3)>0", "日线"),
-                       ("FINANCE(40)>0", "财务"),
                        ("WINNER(C)>0.5", "筹码"),
                        ("COST(50)>C", "筹码")):
         with pytest.raises(fm.FormulaError) as err:
@@ -351,8 +350,6 @@ def _error_of(text: str) -> fm.FormulaError:
 @pytest.mark.parametrize(
     ("text", "keywords"),
     (
-        # FINANCE：财务/股本 —— 必须给出"用流通市值代替"这条路
-        ("X:=FINANCE(7);\nX>0", ("财务", "股本", "流通市值")),
         # DYNAINFO：盘中动态行情 —— 必须说清只有日线，并给现价/量比的替代
         ("X:=DYNAINFO(3);\nX>0", ("动态行情", "日线", "量比")),
         # WINNER / COST：筹码分布
@@ -424,3 +421,60 @@ def test_an_industry_string_is_not_mistaken_for_a_formula_reference() -> None:
     """行业名这种字符串**不能**被误判成公式引用（`"半导体"` 没有点、判据要够严）。"""
     formula = fm.compile_formula('INDUSTRY="半导体"')
     assert formula is not None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 五、FINANCE：主人指定"直接等同于流通市值"（2026-09-21）
+#
+# 原话：「你直接在程序后台把这个函数等同于流通市值就行了啊。」
+# 于是它从"不支持"变成"支持（口径按本项目定义）"—— 但界面上必须留一条**非阻断**提醒，
+# 否则用户会以为它真是通达信那个流通股本。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _series_with_mktcap(values: list[float]) -> fm.Series:
+    series = make_series([10.0] * len(values), symbol="600519", name="贵州茅台")
+    series.extra["流通市值"] = np.array(values, dtype="float64")
+    return series
+
+
+@pytest.mark.parametrize("text", ("FINANCE(7)>0", "FINANCE(40)>0", "FINANCE(C)>0", "FINANCE()>0"))
+def test_finance_is_the_float_market_cap(text: str) -> None:
+    """参数怎么写都收下（数字/表达式/不传），值一律等于 `流通市值`（亿元）。"""
+    formula = fm.compile_formula(text)
+    series = _series_with_mktcap([np.nan, np.nan, 123.45])
+
+    mask = formula.eval(series)
+    assert bool(mask[-1]) is True          # 123.45 > 0
+    # 与直接用字段写条件的结果**逐值一致**（这是"等同"的硬证据）
+    direct = fm.compile_formula("流通市值>0").eval(series)
+    assert np.array_equal(np.nan_to_num(mask, nan=-1), np.nan_to_num(direct, nan=-1))
+
+
+def test_finance_registers_the_market_cap_field() -> None:
+    """`FINANCE` 必须把 `流通市值` 记进 `formula.fields`。
+
+    否则那条"要不要去取实时快照"的判据看不到它 —— 症状是公式永远取不到值、一只都不出，
+    而界面上完全看不出原因（这条用例就是守这个坑的）。
+    """
+    assert fm.compile_formula("FINANCE(7)>=30").fields == ("流通市值",)
+
+
+def test_finance_without_snapshot_is_all_missing_values() -> None:
+    """取不到快照（没 Key / 非交易时段）时整列缺值 —— 与直接用 `流通市值` 的行为一致。"""
+    series = make_series([10.0, 10.5], symbol="600519", name="贵州茅台")
+    mask = fm.compile_formula("FINANCE(7)>=30").eval(series)
+
+    assert not mask.any(), "缺值时不该产生信号"
+
+
+def test_finance_gets_a_non_blocking_note_in_validate() -> None:
+    """【校验】里要有一条口径提醒（非阻断：公式照跑，但要说清与通达信不同）。"""
+    from laoa_trader import formulas as lib
+
+    notes = lib.tdx_compat_notes(fm.compile_formula("FINANCE(7)>=30"))
+    assert len(notes) == 1, "恰好一条，别刷屏"
+    blob = notes[0]
+    assert "流通市值" in blob and "通达信" in blob and "财务" in blob
+    # 没用这个函数的公式不该被提醒
+    assert lib.tdx_compat_notes(fm.compile_formula("C>MA(C,5)")) == []
