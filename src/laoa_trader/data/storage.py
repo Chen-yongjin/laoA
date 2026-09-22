@@ -273,7 +273,13 @@ SCHEMA: tuple[str, ...] = (
         -- 「自选股池」的**盈亏**列 =（最新价 − added_price）/ added_price，
         -- 主人 2026-09-21 要求"盈亏从加入股池那天算"。老库里这一列是 NULL（迁移补的），
         -- 那时盈亏显示 `—`：**拿今天当加入日会凭空造出一个 0% 的假盈亏**。
-        added_price REAL
+        added_price REAL,
+        -- **这一只是被哪条策略/公式选出来的**（写法与 `stock_pool.strategy` 一致：
+        -- `公式·尾盘超短策略` / 老内置策略的类名）。2026-09-21 主人实报"从选股列表加入
+        -- 自选的票到股池里的来源都变成自选了"—— 根因就是加入时没把来源存下来。
+        -- 纯手工加的票是 NULL（来源显示「自选」）；老数据也是 NULL，界面上退回「自选」，
+        -- 另外 `pool.watchlist_source_strategy()` 会试着从备注里的 `选股来源：X` 认一次。
+        source_strategy TEXT
     );
     """,
 )
@@ -328,6 +334,10 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # `watchlist.added_price`：加入时的价格（"从加入那天算盈亏"用，见建表那里的说明）。
     # 老库补上这一列后值是 NULL —— 界面显示 `—`，绝不回填成"今天"。
     ("watchlist", "added_price", "REAL"),
+    # `watchlist.source_strategy`：加入时是哪条策略/公式选出来的（2026-09-21 加，
+    # 见建表那里的说明）。老库补上这一列后值是 NULL —— 界面显示「自选」，
+    # 但会先从备注里的 `选股来源：X` 认一次（能救回一部分老数据）。
+    ("watchlist", "source_strategy", "TEXT"),
 )
 
 
@@ -1001,6 +1011,7 @@ def upsert_watchlist(
     note: str = "",
     enabled: bool = True,
     price: float | None = None,
+    source_strategy: str | None = None,
 ) -> dict:
     """添加/更新一只自选股（幂等：同一代码重复添加只会更新名称与备注）。
 
@@ -1012,23 +1023,58 @@ def upsert_watchlist(
             只在**首次插入**时写入；已有记录再 upsert 时**不动它** —— 否则用户今天
             再点一次【加入自选】，盈亏基准就被重置成今天的价，那个数就没意义了
             （`COALESCE(watchlist.added_price, excluded.added_price)` 只补空值）。
+        source_strategy: **这一只是被哪条策略/公式选出来的**（写法与
+            `stock_pool.strategy` 一致，见建表那里的说明）。界面【加入自选】时传
+            `公式·X` / 老内置策略的类名；**手工添加不传**（None → 来源显示「自选」）。
+            与 `price` 同一条口径：**只补空值**，已有来源不会被后来的某次添加改写 ——
+            "当初为什么把它加进来"才是这一列要回答的问题（见
+            `tests/test_watchlist.py` 里那两条用例）。
     """
     now = _now()
     conn.execute(
-        "INSERT INTO watchlist (symbol, name, note, enabled, added_at, added_price) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
+        "INSERT INTO watchlist "
+        "(symbol, name, note, enabled, added_at, added_price, source_strategy) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(symbol) DO UPDATE SET "
         "  name = COALESCE(excluded.name, watchlist.name), "
         "  note = CASE WHEN excluded.note != '' THEN excluded.note ELSE watchlist.note END, "
         "  enabled = excluded.enabled, "
         # 已有基准价就保留（老库里是 NULL 时补上这次的价）
-        "  added_price = COALESCE(watchlist.added_price, excluded.added_price)",
+        "  added_price = COALESCE(watchlist.added_price, excluded.added_price), "
+        # 同理：已有来源就保留（老库里是 NULL 时补上这次的来源）
+        "  source_strategy = COALESCE(watchlist.source_strategy, excluded.source_strategy)",
         (symbol, name, note, 1 if enabled else 0, now,
-         float(price) if price else None),
+         float(price) if price else None, (source_strategy or None)),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM watchlist WHERE symbol = ?", (symbol,)).fetchone()
     return dict(row)
+
+
+def fill_watchlist_source(
+    conn: sqlite3.Connection, symbol: str, source_strategy: str | None,
+) -> bool:
+    """给一只**已经在自选里**的票补上"当初是哪条策略选的"—— **只补空值**。
+
+    为什么单独有这么一个函数（而不是再 upsert 一次）：用户在结果页对一个**已经在自选里**
+    的票点【加入自选】时，界面的口径是"已经在自选里了，没有重复添加、也没改你的备注"
+    —— 那就不能顺手把他**停用**的票重新启用、也不能动加入价。可他要的信息
+    （"这只是公式选出来的"）又确实该记下来：老数据里这一列是空的，只有等他再点一次
+    才有机会补上。所以这里只做一件事：`source_strategy IS NULL` 时写进去，其余一律不碰。
+
+    Returns:
+        真的补上了才返回 True（已经有来源 / 没这只票 → False）。
+    """
+    value = str(source_strategy or "").strip()
+    if not value:
+        return False
+    cur = conn.execute(
+        "UPDATE watchlist SET source_strategy = ? "
+        "WHERE symbol = ? AND (source_strategy IS NULL OR source_strategy = '')",
+        (value, symbol),
+    )
+    conn.commit()
+    return bool(cur.rowcount)
 
 
 def remove_watchlist(conn: sqlite3.Connection, symbol: str) -> bool:

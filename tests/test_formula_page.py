@@ -2597,3 +2597,76 @@ def test_result_table_columns_have_room_for_their_text(page) -> None:
     # 最后一列（控件）另算：它的宽度必须放得下那个按钮
     button = _result_cell_holder(page)
     assert table.columnWidth(fp.RESULT_ADD_COLUMN) >= button.width()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 3.10) 【加入自选】之后股池里的「来源」不能变成「自选」（2026-09-21 主人实报：
+#       「新版本从选股列表加入自选的票到股池里的来源都变成自选了，需要改一下」）
+# ══════════════════════════════════════════════════════════════════════════
+# 修的是"加入时没把来源存下来"：结果页那一格知道它是被哪条公式选出来的
+# （`row["strategy"]`），但加进自选表时只写进了备注，股池那一列读的是
+# `pool.watchlist_only_rows()` —— 它对不在池子里的自选行写死「自选」。
+# 现在来源进了 `watchlist.source_strategy`，显示照旧走 `source_label()`（同一套函数）。
+
+
+def _pool_row(page_cfg, symbol: str) -> dict:
+    """「自选股池」页那一行（主窗口刷新表格读的就是这个函数）。"""
+    rows = {r["symbol"]: r for r in fp.pool_mod.pool_page_rows(page_cfg.db_path)}
+    assert symbol in rows, f"股池页里没有 {symbol}：{sorted(rows)}"
+    return rows[symbol]
+
+
+def test_add_to_watchlist_keeps_the_pick_source_in_the_pool_page(page, page_cfg) -> None:
+    """点【加入自选】→ 股池那一行的来源是 `公式·X+自选`（**不是**「自选」）。"""
+    page.show_pick_result({"data_date": "2026-09-11",
+                           "pool": [{"symbol": "600003", "name": "丙样本",
+                                     "strategy": "公式·尾盘超短策略"}]})
+
+    page.result_table.cellWidget(0, fp.RESULT_ADD_COLUMN).findChild(QPushButton).click()
+
+    row = _pool_row(page_cfg, "600003")
+    assert row["source_label"] == "公式·尾盘超短策略+自选"
+    assert row["strategy"] == "公式·尾盘超短策略"
+    # 表格用的就是 `source_label`（`ui/app.py` 那一列），所以这里断言的就是**屏幕上那个词**
+    with storage.connect(page_cfg.db_path) as conn:
+        assert storage.watchlist_map(conn)["600003"]["source_strategy"] == "公式·尾盘超短策略"
+
+
+def test_one_click_add_keeps_the_pick_source_too(page, page_cfg) -> None:
+    """【一键加入自选】走的是另一条代码路径，来源一样要带上（别只修一条）。"""
+    page.show_pick_result({"data_date": "2026-09-11",
+                           "pool": [{"symbol": "600003", "name": "丙样本",
+                                     "strategy": "公式·尾盘超短策略"},
+                                    {"symbol": "600001", "name": "甲样本",
+                                     "strategy": "公式·放量上攻"}]})
+
+    page.btn_add_all.click()
+
+    assert _pool_row(page_cfg, "600003")["source_label"] == "公式·尾盘超短策略+自选"
+    assert _pool_row(page_cfg, "600001")["source_label"] == "公式·放量上攻+自选"
+
+
+def test_adding_an_existing_symbol_fills_the_missing_source_only(page, page_cfg) -> None:
+    """已经在自选里（老数据、来源为空）的票再点一次【加入自选】→ **只补来源**。
+
+    为什么单独一条：这一条路界面说的是"已经在自选里了（没有重复添加）"——
+    所以补来源时**不能**顺手把用户停用的票启用回来、也不能动加入价与他自己写的备注
+    （见 `storage.fill_watchlist_source()`）。手工加过的票从此显示 `公式·X+自选`。
+    """
+    with storage.connect(page_cfg.db_path) as conn:
+        storage.upsert_watchlist(conn, "600003", name="丙样本", note="龙头",
+                                 price=5.0, enabled=False)
+    page.show_pick_result({"data_date": "2026-09-11",
+                           "pool": [{"symbol": "600003", "name": "丙样本",
+                                     "strategy": "公式·尾盘超短策略"}]})
+
+    page.on_add_one_to_watchlist("600003", 0)
+
+    with storage.connect(page_cfg.db_path) as conn:
+        row = storage.watchlist_map(conn)["600003"]
+    assert row["source_strategy"] == "公式·尾盘超短策略"     # 来源补上了
+    assert row["enabled"] == 0                              # 停用状态没被动过
+    assert row["note"] == "龙头"                            # 用户写的备注没被动过
+    assert float(row["added_price"]) == pytest.approx(5.0)  # 加入价没被重置
+    assert "已经在自选里了" in page.hint_text
+    assert _pool_row(page_cfg, "600003")["source_label"] == "公式·尾盘超短策略+自选（已停用）"

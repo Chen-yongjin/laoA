@@ -2318,7 +2318,13 @@ if QT_AVAILABLE:
                     if r.get("symbol") and str(r.get("strategy") or r.get("strategies") or "")]
             self.result_rows = [
                 {"symbol": str(r["symbol"]), "name": str(r.get("name") or ""),
-                 "label": self._result_label(r)}
+                 # `label` 是**给人看的那个词**（`公式·尾盘超短策略`），进编辑框上方的
+                 # 「来源」列与备注（`选股来源：X`）；`strategy` 是**引擎那份策略名**
+                 # （与 `stock_pool.strategy` 同一种写法），加入自选时存进
+                 # `watchlist.source_strategy` —— 股池那一列靠它才能显示成
+                 # `公式·X+自选`（2026-09-21 主人实报"来源都变成自选了"就是少了这一份）。
+                 "label": self._result_label(r),
+                 "strategy": _first_strategy_name(r)}
                 for r in rows
             ]
             self.result_date = data_date
@@ -2498,6 +2504,11 @@ if QT_AVAILABLE:
                 with storage.connect(self.cfg.db_path) as conn:
                     existing = storage.load_watchlist(conn, enabled_only=False)
                     if any(str(r["symbol"]) == symbol for r in existing):
+                        # 已经在自选里的票：**不重复添加、不动备注、不重新启用**，
+                        # 但如果它的来源是空的（老数据、或当初是手工加的），
+                        # 顺手把"这次是哪条公式选出来的"补上 —— 他只在这里点得到，
+                        # 补的是他正要看的那条信息（见 `fill_watchlist_source`）。
+                        storage.fill_watchlist_source(conn, symbol, row.get("strategy"))
                         if index is not None:
                             self._set_result_add_cell(index, symbol, already=True)
                         self._set_hint(f"「{name}」已经在自选里了（没有重复添加）")
@@ -2514,6 +2525,9 @@ if QT_AVAILABLE:
                     storage.upsert_watchlist(
                         conn, symbol, name=name,
                         note=f"选股来源：{row['label']}", price=price,
+                        # 来源同时**结构化存一份**：股池那一列读它才能显示成
+                        # `公式·尾盘超短策略+自选`（2026-09-21 主人实报的"来源都变成自选了"）
+                        source_strategy=row.get("strategy"),
                     )
             except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，不让按钮把界面带走
                 self._set_hint(f"❌ 加自选失败：{type(exc).__name__}: {exc}")
@@ -2575,8 +2589,17 @@ if QT_AVAILABLE:
                         storage.upsert_watchlist(
                             conn, row["symbol"], name=row["name"],
                             note=f"选股来源：{row['label']}",
+                            # 来源也**结构化存一份**（股池那一列的 `公式·X+自选` 靠它）
+                            source_strategy=row.get("strategy"),
                         )
                         added.append(row)
+                    # 本来就在自选里的那几只：不重复添加、不动备注、不重新启用，
+                    # 只把空着的来源补上（老数据里这一列是空的，他点这一次才有机会补）
+                    for row in self.result_rows:
+                        if str(row["symbol"]) in known:
+                            storage.fill_watchlist_source(
+                                conn, str(row["symbol"]), row.get("strategy")
+                            )
             except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，不让按钮把界面带走
                 self._set_hint(f"❌ 加自选失败：{type(exc).__name__}: {exc}")
                 return
@@ -2709,6 +2732,22 @@ if QT_AVAILABLE:
                 QMessageBox.StandardButton.No,
             )
             return answer == QMessageBox.StandardButton.Yes
+
+
+def _first_strategy_name(row: dict) -> str:
+    """结果行 → **引擎那份策略名**（`strategy` 优先，退回 `strategies` 的第一条）。
+
+    与「来源」列那个**给人看的词**（`pool.source_label()`）刻意分开：
+    存进自选表的是这一份（写法与 `stock_pool.strategy` 一致），
+    将来显示时再走同一套 `source_label()`，股池表/推送/桌面文件才不会各说各话。
+    """
+    primary = str(row.get("strategy") or "").strip()
+    if primary:
+        return primary
+    for name in str(row.get("strategies") or "").split(","):
+        if name.strip():
+            return name.strip()
+    return ""
 
 
 def _one_line(text: Any, limit: int) -> str:

@@ -293,13 +293,15 @@ def merge_watchlist(
         merged.append({
             "symbol": symbol,
             "name": entry.get("name") or symbol,
-            "strategy": "",
-            "strategies": "",
             "score": 0.0,
             "reason": "自选" + (f"（{note}）" if note else ""),
-            "source": "自选",
             "note": note,
             "watchlist": True,
+            # 从选股结果页加入自选的票带着"当初是哪条策略/公式选出来的"
+            # （`watchlist.source_strategy`）—— 推送正文、桌面文件、盘中提醒都读这一份，
+            # 所以这里必须把它带上，否则同一只票在股池表里写 `公式·X+自选`、
+            # 在推送里写「自选」，两处对不上（2026-09-21 主人实报的那个 bug）。
+            **watchlist_source_fields(entry),
         })
     return merged
 
@@ -922,6 +924,81 @@ def export_pick_file(
 #: 散着写迟早会出现"一处 `策略：`、一处 `策略·`"这种对不上的情况。
 STRATEGY_SOURCE_PREFIX = "策略·"
 
+#: 老版本把选中它的那条策略**写在备注里**时用的前缀（`选股来源：公式·尾盘超短策略`）。
+#: 现在来源有自己的列（`watchlist.source_strategy`），这个前缀只用来**救老数据**：
+#: 认得出就显示出来，认不出就当没有（宁可显示「自选」，也不瞎猜）。
+WATCH_SOURCE_NOTE_PREFIX = "选股来源："
+
+
+def watchlist_source_strategy(entry: dict) -> str:
+    """自选表的一行 → **当初是哪条策略/公式把它选进来的**（没有就返回空串）。
+
+    两条来源，越靠前越权威：
+
+    1. `watchlist.source_strategy` 这一列（2026-09-21 加）—— **加入那一刻**写下来的，
+       用户后来怎么改备注都改不掉它。写法与 `stock_pool.strategy` 一致
+       （`公式·尾盘超短策略` / 老内置策略的类名）。
+    2. 备注里的 `选股来源：X` —— 老版本（来源列还不存在时）把来源写在备注里，
+       这里认一次能把那一批老数据救回来。X 是**给人看的那个词**，所以：
+       `公式·X` 原样就是策略名；`策略·X` 要去掉前缀（`strategy_label()` 认不出的名字
+       原样返回，显示时前缀会被 `source_label()` 补回来）。
+
+    为什么"从备注里解析"只是退路、不是主路：备注是**用户自己的字段**（"龙头""消息面"），
+    他随时可以改掉、也可以把别处粘来的文字写进去 —— 拿它当权威数据源，
+    迟早会出现"来源被用户改备注改没了"。所以新数据一律走那一列。
+    """
+    stored = str(entry.get("source_strategy") or "").strip()
+    if stored:
+        return stored
+    note = str(entry.get("note") or "")
+    index = note.find(WATCH_SOURCE_NOTE_PREFIX)
+    if index < 0:
+        return ""
+    value = note[index + len(WATCH_SOURCE_NOTE_PREFIX):].strip()
+    # 备注是自由文本：取到行尾/第一个分隔符为止（老版本的写法是"这一行只有它"）
+    for stop in ("\n", "；", ";", "，"):
+        cut = value.find(stop)
+        if cut >= 0:
+            value = value[:cut].strip()
+    if not value or value == "—":       # 「没有值」的占位符（与 `_export_source` 同一个字面量）
+        return ""
+    if value.startswith(STRATEGY_SOURCE_PREFIX):
+        value = value[len(STRATEGY_SOURCE_PREFIX):].strip()
+    return value
+
+
+def watchlist_source_fields(entry: dict) -> dict:
+    """自选行 → 池子行里那几个**来源字段**（`strategy` / `strategies` / `source` /
+    `source_label` / `label`），全部走与池子行**同一套函数**算出来。
+
+    为什么要有这一层：自选表里存着"当初是哪条公式选出来的"，而界面上那一列、推送正文、
+    桌面文件都要说**同一个词**。把这一行的 `strategy` 填成那条公式名之后，
+    `source_label()` / `source_kind()` / `strategy_names()` 全都不用改 ——
+    它们本来就是按 `strategy` 说话的（见 `source_label()` 的说明）。
+    来源为空的纯手工自选行：`strategy` 仍是空串，显示就是「自选」（与以前一模一样）。
+
+    `enabled=False` 的行照样显示，只是来源里点明状态：`自选（已停用）` /
+    `公式·X+自选（已停用）`（用户要能看见自己停用过的票并把它打开）。
+    """
+    key = watchlist_source_strategy(entry)
+    row = {"strategy": key, "strategies": key, "watchlist": True}
+    # 「+自选」这一截说的是"它在不在自选表里"，与"启用/停用"无关 ——
+    # 所以算 kind/label 时统一按"启用"那一份算（停用只影响后面补的那个尾巴）。
+    # 为什么不直接把停用的 entry 传进去：`source_kind()` 会把停用的票判成"不是自选"，
+    # 界面上那一行的说明就会变成"策略选中的标的"（停用状态反而看不见了）。
+    in_watch = dict(entry or {})
+    in_watch["enabled"] = 1
+    fields = {
+        "strategy": key,
+        "strategies": key,
+        "label": legacy.strategy_label(key) if key else "",
+        "source": source_kind(row, in_watch),
+        "source_label": source_label(row, in_watch),
+    }
+    if not int(entry.get("enabled", 1) or 0):
+        fields["source_label"] = f"{fields['source_label']}（已停用）"
+    return fields
+
 
 def strategy_names(row: dict) -> list[str]:
     """这一行被哪些策略/公式选中 → **中文名列表**（按库里的顺序，去重）。
@@ -1109,22 +1186,21 @@ def watchlist_only_rows(db_path: str, day: str | None = None) -> list[dict]:
         if not symbol or symbol in in_pool:
             continue
         enabled = int(entry.get("enabled", 1)) == 1
+        # 「来源」列（2026-09-21 修）：这一只是**从选股结果页加入自选**的，就显示
+        # `公式·尾盘超短策略+自选` —— 以前这里写死成「自选」，于是"从选股列表加入的票
+        # 到股池里全变成自选了"（主人实报）。纯手工加的票没有来源，仍是「自选」。
+        source_fields = watchlist_source_fields(entry)
         out.append({
             "symbol": symbol,
             "name": str(entry.get("name") or names.get(symbol) or ""),
-            "strategy": "",
-            "strategies": "",
             "score": None,
             "reason": "自选股",
-            "label": "",
             "group": "",
             "group_label": "—",
             "horizon": 0,
-            "is_formula": False,
-            "source": "自选",
+            "is_formula": is_formula_strategy(source_fields["strategy"]),
             # 停用的自选**照样显示**（用户要能看见自己停用过的票并把它打开），
-            # 所以来源里点明状态：`自选（已停用）`
-            "source_label": "自选" if enabled else "自选（已停用）",
+            # 所以来源里点明状态：`自选（已停用）`（见 `watchlist_source_fields`）
             "note": str(entry.get("note") or ""),
             "watchlist_enabled": enabled,
             "evidence": "",
@@ -1133,6 +1209,7 @@ def watchlist_only_rows(db_path: str, day: str | None = None) -> list[dict]:
             "is_limit_up": symbol in limit_up,
             "continue_day_text": (limit_up.get(symbol) or {}).get("continue_day_text", ""),
             "limit_up_reason": (limit_up.get(symbol) or {}).get("reason", ""),
+            **source_fields,
         })
     return out
 

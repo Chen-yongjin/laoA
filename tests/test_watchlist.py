@@ -703,3 +703,173 @@ def test_push_lines_mark_strategy_plus_watchlist(wl_db) -> None:
         "source": "策略", "reason": "低价股",
     }])
     assert plain == ["1. 半导体甲(600002)低价股｜低价股"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 9) 自选表里的「来源」：从结果页加入自选的票要记得**当初是哪条公式选出来的**
+#    （2026-09-21 主人实报："新版本从选股列表加入自选的票到股池里的来源都变成自选了"）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 根因：加入自选时只把来源写进了**备注**（`选股来源：公式·X`），而「自选股池」那一列
+# 读的是 `watchlist_only_rows()` —— 那里对不在池子里的自选行**写死**成「自选」。
+# 结果：票只要不在今天的池子里（从结果页刚加的票就是这种），来源列永远显示「自选」。
+#
+# 修法：给自选表加一列 `source_strategy`（写法与 `stock_pool.strategy` 一致），
+# 加入时写进去；显示时**照旧走 `source_label()` / `source_kind()`**（不另拼一套）。
+# 老数据没有这一列：先从备注里的 `选股来源：X` 认一次，认不出就当没有 → 显示「自选」。
+
+
+def _watch_add(cfg, symbol: str, *, name: str = "", note: str = "",
+               source_strategy: str = "") -> None:
+    """加一只自选（模拟界面两条路：手工【添加自选】/ 结果页【加入自选】）。"""
+    with storage.connect(cfg.db_path) as conn:
+        storage.upsert_watchlist(conn, symbol, name=name or None, note=note,
+                                 source_strategy=source_strategy or None)
+
+
+def _page_rows(cfg) -> dict[str, dict]:
+    return {r["symbol"]: r for r in pool.pool_page_rows(cfg.db_path)}
+
+
+def test_watchlist_source_is_persisted_and_shown_with_the_watchlist_suffix(wl_db) -> None:
+    """从结果页加入自选的票：股池那一列是 `公式·X+自选`（**不是**「自选」）。"""
+    _watch_add(wl_db, "600100", name="冷门样本",
+               note="选股来源：公式·尾盘超短策略",
+               source_strategy="公式·尾盘超短策略")
+
+    row = _page_rows(wl_db)["600100"]
+
+    assert row["source_label"] == "公式·尾盘超短策略+自选"
+    assert row["source"] == "公式+自选"          # 与池子行同一套 `source_kind()`
+    assert row["strategy"] == "公式·尾盘超短策略"
+    # 行 tooltip 的来源明细也是同一个词（界面不自己拼一套）
+    assert pool.source_detail_lines(row)[0] == "来源：公式·尾盘超短策略+自选"
+
+
+def test_manually_added_watchlist_row_still_says_only_self_selected(wl_db) -> None:
+    """**手工**加的票（没有来源）仍然只显示「自选」—— 不瞎猜、也不硬塞一个来源。"""
+    _watch_add(wl_db, "600100", name="冷门样本", note="龙头")
+
+    row = _page_rows(wl_db)["600100"]
+
+    assert row["source_label"] == "自选"
+    assert row["source"] == "自选"
+    assert row["strategy"] == ""
+
+
+def test_old_watchlist_row_recovers_the_source_from_the_note(wl_db) -> None:
+    """老数据：来源写在备注里（`选股来源：策略·短期反转`）→ 认出来并显示成 `…+自选`。
+
+    这一条救的是"升级之前加的自选"：那时还没有 `source_strategy` 这一列。
+    备注里的 `策略·` 前缀要去掉再当策略名用（显示时 `source_label()` 会补回来）。
+    """
+    _watch_add(wl_db, "600200", name="自选二号", note="选股来源：策略·短期反转")
+
+    row = _page_rows(wl_db)["600200"]
+
+    assert row["strategy"] == "短期反转"                  # 去掉前缀的那一份
+    assert row["source_label"] == "策略·短期反转+自选"    # 显示时前缀补回来（同一个词）
+    assert row["source"] == "策略+自选"
+
+
+def test_old_watchlist_row_without_any_source_shows_self_selected(wl_db) -> None:
+    """最老的那批数据：备注里也没有来源 → 显示「自选」，**不许崩、不许瞎猜**。
+
+    备注是用户自己的字段（"龙头""消息面"），随便写的那些字不该被当成来源。
+    """
+    _watch_add(wl_db, "600100", name="冷门样本", note="龙头")
+
+    assert _page_rows(wl_db)["600100"]["source_label"] == "自选"
+    # 备注里出现了"来源"两个字但**不是**那个前缀 → 一样不当来源
+    _watch_add(wl_db, "600200", name="自选二号", note="消息面来源不明")
+    assert _page_rows(wl_db)["600200"]["source_label"] == "自选"
+
+
+def test_disabled_row_keeps_both_the_source_and_the_disabled_mark(wl_db) -> None:
+    """停用的自选照样显示，来源里两头都在：`公式·X+自选（已停用）`。"""
+    _watch_add(wl_db, "600100", name="冷门样本",
+               source_strategy="公式·尾盘超短策略")
+    with storage.connect(wl_db.db_path) as conn:
+        storage.set_watchlist_enabled(conn, "600100", False)
+
+    assert _page_rows(wl_db)["600100"]["source_label"] == "公式·尾盘超短策略+自选（已停用）"
+
+
+def test_upsert_keeps_the_first_source_and_price(wl_db) -> None:
+    """重复加入 **不改写**已经记下来的来源与加入价（"当初为什么在这"才有意义）。
+
+    这一条与 `added_price` 是同一条口径（`COALESCE` 只补空值）。
+    """
+    _watch_add(wl_db, "600100", name="冷门样本", source_strategy="公式·A")
+    with storage.connect(wl_db.db_path) as conn:
+        storage.upsert_watchlist(conn, "600100", source_strategy="公式·B", price=9.9)
+        row = storage.watchlist_map(conn)["600100"]
+
+    assert row["source_strategy"] == "公式·A"
+
+
+def test_fill_watchlist_source_only_fills_empty_and_touches_nothing_else(wl_db) -> None:
+    """`fill_watchlist_source()`：只补空来源，**不重新启用、不动加入价/备注**。
+
+    为什么需要它：用户对一个**已经在自选里**的票点【加入自选】时，界面说的是
+    "没有重复添加、也没改你的备注"—— 那就不能顺手把他停用的票启用回来；
+    但"这只是哪条公式选的"这条信息又该记下来（老数据里它是空的）。
+    """
+    with storage.connect(wl_db.db_path) as conn:
+        storage.upsert_watchlist(conn, "600100", name="冷门样本", note="龙头",
+                                 price=5.0, enabled=False)
+        assert storage.fill_watchlist_source(conn, "600100", "公式·尾盘超短策略") is True
+        row = storage.watchlist_map(conn)["600100"]
+
+        assert row["source_strategy"] == "公式·尾盘超短策略"
+        assert row["enabled"] == 0                       # 停用状态没被改
+        assert row["note"] == "龙头"                     # 用户写的备注没被改
+        assert float(row["added_price"]) == pytest.approx(5.0)
+
+        # 已有来源 → 不再改写；不存在的票 → False（都不是错误）
+        assert storage.fill_watchlist_source(conn, "600100", "公式·另一条") is False
+        assert storage.watchlist_map(conn)["600100"]["source_strategy"] == "公式·尾盘超短策略"
+        assert storage.fill_watchlist_source(conn, "999999", "公式·X") is False
+        # 空来源 → 什么都不做（不会把已有的值清掉）
+        assert storage.fill_watchlist_source(conn, "600100", "") is False
+
+
+def test_old_database_gets_the_source_column_added(wl_db) -> None:
+    """老库升级：`connect()` 会把缺的列补上（与 `added_price` 同一条迁移路径）。
+
+    判据不只看"列在不在"，还要看**老行读出来是什么**：老库补的列是 NULL →
+    界面显示「自选」（`watchlist_source_strategy()` 返回空串），不是报错。
+    """
+    import sqlite3
+
+    # 造一个"升级前"的库：把新列删掉（SQLite 3.35+ 支持 DROP COLUMN）
+    with storage.connect(wl_db.db_path) as conn:
+        storage.upsert_watchlist(conn, "600100", name="冷门样本", note="龙头")
+        conn.execute("ALTER TABLE watchlist DROP COLUMN source_strategy")
+        conn.commit()
+
+    with storage.connect(wl_db.db_path) as conn:              # 再开一次 = 走迁移
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(watchlist)")}
+        rows = storage.load_watchlist(conn, enabled_only=False)
+
+    assert "source_strategy" in columns
+    assert rows[0]["source_strategy"] is None
+    assert _page_rows(wl_db)["600100"]["source_label"] == "自选"
+
+
+def test_push_and_pool_table_use_the_same_source_word(wl_db) -> None:
+    """推送正文与股池表**同一个词**：加了自选之后推送那一行也是 `公式·X+自选`。"""
+    _watch_add(wl_db, "600100", name="冷门样本", note="选股来源：公式·尾盘超短策略",
+               source_strategy="公式·尾盘超短策略")
+
+    table_label = _page_rows(wl_db)["600100"]["source_label"]
+    with storage.connect(wl_db.db_path) as conn:
+        entries = storage.load_watchlist(conn)
+    merged = pool.merge_watchlist(engine, [], settings=wl_db, watchlist=entries)
+    lines = pool.format_pool_lines(merged)
+
+    assert table_label == "公式·尾盘超短策略+自选"
+    assert lines and lines[0].startswith("1. 冷门样本(600100)公式·尾盘超短策略+自选")
+    # 桌面文件那一列也是同一个词（`pick_export_text` 走 `_export_source`）
+    text = pool.pick_export_text([{**merged[0], "source_label": table_label}])
+    assert "来源：公式·尾盘超短策略+自选" in text
