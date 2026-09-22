@@ -78,6 +78,14 @@ NOFOLLOW = (
     "PySide6.QtWebEngineWidgets",
     "PySide6.QtQml",
     "PySide6.QtQuick",
+    # 下面几条是 **Nuitka 专有**的：Nuitka 会顺着导入图把第三方包里那些
+    # `...tests` / `examples` 子包也编译一遍 —— 纯属浪费（在 2 核 runner 上很贵），
+    # 而且它们从来不会被运行到。PyInstaller 侧不需要（它只分析真实引用）。
+    "pandas.tests",
+    "numpy.tests",
+    "pyarrow.tests",
+    "PySide6.examples",
+    "PySide6.scripts",
 )
 
 ICON_ICO = SRC / "laoa_trader" / "assets" / "icon.ico"

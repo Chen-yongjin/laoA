@@ -84,9 +84,16 @@ def test_excludes_and_nofollow_stay_in_sync(builder) -> None:
     spec_excludes = set(re.findall(r'"([^"]+)"', excludes_block))
 
     missing = {name for name in spec_excludes if name not in builder.NOFOLLOW}
-    # 两条路径**逐项一致**：这份清单是"体积/构建时间"的取舍，漂移的症状是
-    # "Nuitka 版莫名比 PyInstaller 版大几百 MB"，而且没人会想到去比对两份清单。
+    # spec 排掉的，Nuitka 这边**必须也排**（漂移的症状是"Nuitka 版莫名比 PyInstaller 版
+    # 大几百 MB、构建也慢一截"，而没人会想到去比对两份清单）。
+    # 反过来允许 Nuitka 多排几条：它比 PyInstaller 多编译那些第三方 `...tests` 子包，
+    # 多排几条是省时间，不是不一致。
     assert not missing, f"spec 排掉了但这些没在 Nuitka 里排：{sorted(missing)}"
+    extras = set(builder.NOFOLLOW) - spec_excludes
+    for name in extras:
+        assert "tests" in name or name.endswith(("examples", "scripts")), (
+            f"{name} 是 Nuitka 侧多排的条目，但没有说明理由（只允许排第三方测试/示例包）"
+        )
 
 
 def test_stage_into_dist_moves_the_payload_and_renames_the_exe(builder, tmp_path: Path) -> None:

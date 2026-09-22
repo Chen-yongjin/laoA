@@ -240,19 +240,34 @@ jobs:
         run: |
           # 独立的临时数据目录：自检报告落到这里，路径可预测
           $cfg = Join-Path $PWD "ci-smoke-config.toml"
-          $content = "data_dir = `"$($PWD.Path -replace '\\','/')/ci-smoke-data`"`n"
           # ⚠️ 用 .NET 显式写「UTF-8 无 BOM」：PowerShell 5.1 的 `Set-Content -Encoding utf8` 会加 BOM，
           # 而本项目的配置读取按无 BOM 处理（BOM 会让第一个键名变成 \ufeffdata_dir、data_dir 被
           # 当成未知键忽略 —— 表现是「自检报告写到了别处」，排查极费时间）。
+          $content = "data_dir = `"$($PWD.Path -replace '\\','/')/ci-smoke-data`"`n"
           [System.IO.File]::WriteAllText($cfg, $content, (New-Object System.Text.UTF8Encoding($false)))
+
           $exe = "dist/LaoniuTrader/老牛选股.exe"
-          & $exe --cli --doctor --config $cfg
-          $code = $LASTEXITCODE
-          $report = "ci-smoke-data/logs/自检报告.txt"
-          if (-not (Test-Path $report)) { throw "编译产物没写出自检报告（$report）—— 说明它起来就崩了" }
-          Write-Host "----- 自检报告（前 12 行）-----"
-          Get-Content $report | Select-Object -First 12
-          $text = Get-Content $report -Raw
+          # ⚠️⚠️ 必须用 `Start-Process -Wait`：这是**GUI 子系统**的 exe（构建时关掉了控制台），
+          # 而 PowerShell 调用 GUI 程序时**不会等它结束**就返回 —— 第一版就是这么红的：
+          # 检查跑在"报告还没写出来"之前，报的错是"产物没写出自检报告（以为它起来就崩了）"。
+          $proc = Start-Process -FilePath $exe -ArgumentList @("--cli", "--doctor", "--config", $cfg) -Wait -PassThru -NoNewWindow
+          $code = $proc.ExitCode
+
+          # 报告文件名是中文（自检报告.txt），这里**不写死名字**：
+          # 列 logs/ 下第一个 .txt，既避免编码坑，也顺带证明"报告真的生成了"。
+          $report = $null
+          for ($i = 0; $i -lt 20 -and -not $report; $i++) {
+            Start-Sleep -Milliseconds 500
+            $report = (Get-ChildItem "ci-smoke-data/logs" -Filter *.txt -ErrorAction SilentlyContinue | Select-Object -First 1)
+          }
+          if (-not $report) {
+            Write-Host "----- ci-smoke-data 里有什么 -----"
+            Get-ChildItem -Recurse -Force "ci-smoke-data" -ErrorAction SilentlyContinue | Select-Object -First 30 | ForEach-Object { $_.FullName }
+            throw "编译产物没写出自检报告（数据目录 ci-smoke-data/logs 下没有 .txt）—— 要么它起来就崩了，要么 --config 没被认"
+          }
+          Write-Host "----- 自检报告：$($report.Name)（前 14 行）-----"
+          Get-Content $report.FullName | Select-Object -First 14
+          $text = Get-Content $report.FullName -Raw
           if ($text -notmatch "运行形态\s*:\s*Nuitka") { throw "自检报告里没有 Nuitka 形态：$($text.Substring(0, [Math]::Min(200, $text.Length)))" }
           # 随包策略目录必须找得到：换成 Nuitka 后这是最容易漏的一处（漏了用户列表是空的）
           if ($text -notmatch "随包策略\s*:\s*[^\r\n]*formulas") { throw "随包策略目录没解析出来（编译版的 --include-data-dir 没生效？）" }
