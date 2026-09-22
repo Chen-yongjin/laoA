@@ -1,17 +1,20 @@
 """打包配置的守卫用例：**注册机不许混进主程序产物**。
 
-用户 2026-09-20 的补充要求：「注册机做成可执行文件。不随包分发。」
+口径变过两次，都记在这里（免得下一个人以为哪一版是漏改）：
+* 2026-09-20 用户：「注册机做成可执行文件。不随包分发。」→ 钉"主产物里不许出现 keygen"；
+* 2026-09-21 用户：「直接把注册机打包到程序包里也可以的」→ CI 里刻意放一个（刺眼命名）；
+* **2026-09-21 当天稍后又改回**：「下面的包不要带注册机了，我已经保存了」→
+  包必须**干净**（没有注册机），作者要用时走手动 keygen job（产物挂 Release 的 `keygen.zip`）。
 
 这条要求靠"文档里写一句"是拦不住的 —— 将来谁顺手把 `build/keygen.py` 或它的产物
-加进主 spec 的 `DATAS`，用户拿到的包里就带着**签发密钥的算法**（谁能拿到它，
-谁就能给任意机器码算出注册码，整套授权等于送人）。所以这里用用例把它钉死：
+放进 spec/DATAS，用户包里就带着签发算法，授权等于形同虚设。所以这里从四个层面钉住：
 
 * 主 spec（`build/laoa_trader.spec`）里**不许出现** keygen；
 * 注册机自己的 spec（`build/keygen.spec`）必须存在，且入口就是 `build/keygen.py`、
-  产物名固定（文档里写的是 `dist/keygen.exe`）；
-* CI 里注册机是**独立的 artifact 名**（`keygen`），并且主 job 有"产物里不许出现
-  keygen"的检查（workflow 文本层面钉住，免得有人删掉那段）；
-* 主程序的运行代码里**不许**导入注册机（注册机只给作者用，不该被主程序引用）。
+  产物名固定（`dist/keygen.exe`）；
+* CI 的主 job 有"**产物里不许出现 keygen**"的检查（workflow 文本层面钉住，免得有人删掉那段），
+  注册机则是**独立 job + 独立 artifact**，并且挂到同一个 Release 的 `keygen.zip`；
+* 主程序的运行代码里**不许**导入注册机（注册机只给作者用）。
 """
 
 from __future__ import annotations
@@ -70,38 +73,30 @@ def test_application_code_never_imports_the_keygen() -> None:
     assert hits == [], f"这些源码引用了 keygen：{hits}"
 
 
-def test_ci_ships_exactly_one_keygen_in_the_author_package() -> None:
-    """CI 的**作者包**里带**恰好一个**注册机文件，名字固定、而且刺眼（2026-09-21 反转）。
+def test_ci_packages_never_contain_the_keygen() -> None:
+    """CI 打出来的**主程序包里必须没有注册机**（2026-09-21 主人："下面的包不要带注册机了"）。
 
-    口径变过一次，两个日期都记着：
-    * 2026-09-20 用户说"注册机做成可执行文件。不随包分发" → 当时钉的是"主产物里不许出现 keygen"；
-    * 2026-09-21 用户说"直接把注册机打包到程序包里也可以的"（理由：他正式分发时会**重新打包**）
-      → 于是 CI 的包里**刻意**放一个，文件名写成「注册机-作者专用-别分发给用户.exe」，
-      分发前删掉即可。
-
-    所以这条用例现在钉三件事：① 包里确实有那一个文件；② 名字就是那个刺眼的名字
-    （不能悄悄换成 `keygen.exe` 混在里面）；③ **主程序自己**打进的东西里仍然不许混进 keygen
-    （spec/DATAS 层面的泄漏拦截）。
+    钉四件事：① 主 job 里有"产物里不许出现 keygen"的**检查**（不是只写文档）；
+    ② 写包那一步不许再把注册机复制进去（`keygen_in_pkg` 那一步已删）；
+    ③ 注册机仍是独立 job + 独立 artifact 名（`keygen`），主 artifact 名仍 `LaoniuTrader`；
+    ④ 主程序的 Release 附件里不许出现 keygen。
     """
     text = WORKFLOW.read_text(encoding="utf-8")
 
-    # 独立 job + 独立 artifact 名
+    # ① 主 job 的产物检查：出现 keygen 就报错
+    assert "*注册机*" in text and "包里不该有注册机" in text, \
+        "主 job 少了「产物里不许出现注册机」的检查"
+    # ② 复制进包的那一步必须已经删掉（连同它那句刺眼文件名）
+    assert "keygen_in_pkg" not in text, "「把注册机放进包」那一步应当已经删除"
+    assert "注册机-作者专用-别分发给用户.exe" not in text, "包里不该再有注册机文件"
+    # ③ 注册机自己的 job / artifact 仍在，主 artifact 名不变
     assert re.search(r"^\s{2}keygen:", text, re.M), "workflow 里没有独立的 keygen job"
     assert re.search(r"name:\s*keygen\b", text), "注册机 artifact 名必须是 keygen"
     assert re.search(r"name:\s*LaoniuTrader\b", text), "主 artifact 名仍是 LaoniuTrader"
-    # 注册机 job：手动触发时跑；另外**只在改动注册机相关文件时**才额外跑一次
-    # （2026-09-21 起：主人手动跑过一次却没拿到产物 —— 因为那一步走的是 artifact，
-    #   撞上私有仓库的存储额度。现在注册机也挂 Release，改动 spec/算法时自动重发一次。）
     assert "github.event_name == 'workflow_dispatch'" in text
     assert "contains(github.event.head_commit.modified, 'build/keygen.spec')" in text, \
         "改动 keygen.spec 时应当自动重发注册机"
-    # 主 job：刻意放进一个注册机 + 命名固定 + 分发前删掉（写进 CI 而不是只写文档）
-    assert "keygen_in_pkg" in text, "主 job 少了「把注册机放进包」的那一步"
-    assert "注册机-作者专用-别分发给用户.exe" in text, "包里那个注册机的文件名必须是那个刺眼的名字"
-    assert "分发给用户前" in text, "少了「分发前删掉」的提醒"
-    # 而且不许出现"随便叫 keygen 的文件混进产物"（交给 CI 里那条 stray 检查）
-    assert "注册机文件命名不对" in text, "主 job 少了「命名不对就报错」的检查"
-    # 主程序的 Release 附件仍只有主程序 zip（注册机是**另一个附件**，不走这个 files:）
+    # ④ Release 附件里只有主程序 zip（注册机是**另一个 job** 传的独立附件）
     release_zip = re.search(r"files:\s*(.+)", text)
     assert release_zip is not None and "keygen" not in release_zip.group(1)
 

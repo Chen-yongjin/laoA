@@ -1283,9 +1283,12 @@ PYTHONPATH=src python -m pytest tests -q \
       （用户要求"注册机…不随包分发"：它带着签发密钥的算法，谁拿到谁能给任意机器码算注册码）。
       判据：解压 `LaoniuTrader` 目录 → 搜 `keygen` / 注册机 → 一个都没有；
       CI 里主 job 也有一条硬检查（混进去直接报错）
-- [ ] **注册机自己有独立的 exe 与独立的 artifact**：`pyinstaller --noconfirm --clean build\keygen.spec`
-      → `dist\keygen.exe`（单文件）；或 CI 手动触发后下载 artifact **`keygen`**（与 `LaoniuTrader` 分开）
-- [ ] **发 Release（打 tag）时只挂主程序 exe**，注册机**不进 Release**
+- [ ] **注册机自己有独立的 exe**：`pyinstaller --noconfirm --clean build\keygen.spec` → `dist\keygen.exe`（单文件）；
+      或 CI **手动触发**后从同一个 Release 页面拿 `keygen.zip`
+      （`https://github.com/Chen-yongjin/laoA/releases/download/latest/keygen.zip`）
+- [ ] **主程序包里没有注册机（2026-09-21 用户改回"不要带"）**，而注册机**挂在 Release 的 `keygen.zip`** 上：
+      两者是分开的两条下载通道 —— 判据：主 zip 里搜 `keygen`/注册机没有任何结果；
+      Release 页面的 Assets 里能看到 `LaoniuTrader.zip` 与 `keygen.zip` 两个附件
 - [ ] 文档里写了"将来"要做的事：**加壳**（等版本成熟）与**注册码升级成 Ed25519 长码**
       （README 的「将来」一节 / `docs/打包教程.md` 八·五 / `build/keygen.spec` 的 docstring）
 

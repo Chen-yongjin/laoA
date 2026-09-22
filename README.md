@@ -1292,7 +1292,9 @@ t_low_rebound_pct = 1.0      # 低吸：从今日最低至少反弹这么多
   - **打成 exe 用**（用户的补充要求："注册机做成可执行文件。不随包分发。"）：
     本地 `pyinstaller --noconfirm --clean build\keygen.spec` → 产出 `dist\keygen.exe`；
     或者走 CI 的**手动触发**：Actions → build-windows → Run workflow，
-    跑完下载 artifact **`keygen`**（与用户拿的 `LaoniuTrader` 是两个分开的 artifact）。
+    跑完到 Release 页面拿 `keygen.zip`（直链
+    `https://github.com/Chen-yongjin/laoA/releases/download/latest/keygen.zip`）——
+    artifact 那条路在私有仓库上会因存储额度失败，所以**以 Release 附件为准**。
   - ⚠️ **注册机绝不随包分发**：它带着签发密钥的算法 —— 谁拿到它，谁就能给任意机器码算出
     注册码。所以主程序包里不会有它（`laoa_trader.spec` 的随包数据里没有 `build/`），
     CI 里还有一条"主产物里混进注册机就报错"的检查，`tests/test_packaging.py` 也钉着这件事。
