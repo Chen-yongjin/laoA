@@ -268,7 +268,12 @@ SCHEMA: tuple[str, ...] = (
         name     TEXT,
         note     TEXT,
         enabled  INTEGER NOT NULL DEFAULT 1,
-        added_at TEXT
+        added_at TEXT,
+        -- 加入当天的价格（不复权收盘价或当时的实时价）：
+        -- 「自选股池」的**盈亏**列 =（最新价 − added_price）/ added_price，
+        -- 主人 2026-09-21 要求"盈亏从加入股池那天算"。老库里这一列是 NULL（迁移补的），
+        -- 那时盈亏显示 `—`：**拿今天当加入日会凭空造出一个 0% 的假盈亏**。
+        added_price REAL
     );
     """,
 )
@@ -320,6 +325,9 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # `position.monitor`：持仓的"监控"开关（界面右键可开关；默认 1 = 与改动前完全一致，
     # 关掉的持仓不再进做T提示，见 `intraday.held_positions`）
     ("position", "monitor", "INTEGER NOT NULL DEFAULT 1"),
+    # `watchlist.added_price`：加入时的价格（"从加入那天算盈亏"用，见建表那里的说明）。
+    # 老库补上这一列后值是 NULL —— 界面显示 `—`，绝不回填成"今天"。
+    ("watchlist", "added_price", "REAL"),
 )
 
 
@@ -992,21 +1000,31 @@ def upsert_watchlist(
     name: str | None = None,
     note: str = "",
     enabled: bool = True,
+    price: float | None = None,
 ) -> dict:
     """添加/更新一只自选股（幂等：同一代码重复添加只会更新名称与备注）。
 
     名称用 `COALESCE` 保护：添加时库里查得到就用库里的名字，
     但**不能**因为这次传了空名字就把已缓存的名字冲掉。
+
+    Args:
+        price: **加入时的价格**（"从加入那天算盈亏"的基准，见建表那里的说明）。
+            只在**首次插入**时写入；已有记录再 upsert 时**不动它** —— 否则用户今天
+            再点一次【加入自选】，盈亏基准就被重置成今天的价，那个数就没意义了
+            （`COALESCE(watchlist.added_price, excluded.added_price)` 只补空值）。
     """
     now = _now()
     conn.execute(
-        "INSERT INTO watchlist (symbol, name, note, enabled, added_at) "
-        "VALUES (?, ?, ?, ?, ?) "
+        "INSERT INTO watchlist (symbol, name, note, enabled, added_at, added_price) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(symbol) DO UPDATE SET "
         "  name = COALESCE(excluded.name, watchlist.name), "
         "  note = CASE WHEN excluded.note != '' THEN excluded.note ELSE watchlist.note END, "
-        "  enabled = excluded.enabled",
-        (symbol, name, note, 1 if enabled else 0, now),
+        "  enabled = excluded.enabled, "
+        # 已有基准价就保留（老库里是 NULL 时补上这次的价）
+        "  added_price = COALESCE(watchlist.added_price, excluded.added_price)",
+        (symbol, name, note, 1 if enabled else 0, now,
+         float(price) if price else None),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM watchlist WHERE symbol = ?", (symbol,)).fetchone()

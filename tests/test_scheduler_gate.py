@@ -534,8 +534,10 @@ def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_pa
     assert "1. 反转样本(600001)" in lines[2]
     assert "现价" in lines[2]                        # 库里有收盘价 → 写上现价
     assert lines[-1] == pool.EXPORT_FOOTER
-    # 池子本身照旧落库（导出只是附赠产物，不是"改成只写文件"）
-    assert set(pool.pool_symbols(cfg.db_path)) == {row["symbol"] for row in report["pool"]}
+    # 2026-09-21（主人要求"选股结果不自动加入股池"）：**选出来的票不再落库** ——
+    # 导出是附赠产物，池子只留自选。所以这里断言"库里是空的、而导出的文件里是有的"。
+    assert set(pool.pool_symbols(cfg.db_path)) == set()
+    assert {row["symbol"] for row in report["pool"]} == {"600001"}
 
 
 def test_export_failure_does_not_break_the_pipeline(cfg, monkeypatch, tmp_path,
@@ -558,7 +560,8 @@ def test_export_failure_does_not_break_the_pipeline(cfg, monkeypatch, tmp_path,
                              with_data=False, export_dir=tmp_path / "桌面")
 
     assert report["pool"], "导出失败不该影响建池"
-    assert pool.pool_symbols(cfg.db_path), "池子还是要落库"
+    # 选股结果不再自动进池，所以"库里有行"这件事要靠自选；这里只要求建池本身没被影响
+    assert {row["symbol"] for row in report["pool"]} == {"600001"}
     assert report["export_path"] is None
     errors = "\n".join(report["errors"])
     assert "导出桌面文件" in errors and "RuntimeError" in errors

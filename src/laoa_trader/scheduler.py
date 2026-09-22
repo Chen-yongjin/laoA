@@ -375,9 +375,16 @@ def run_daily(
             logger.warning(f"数据更新失败：{exc}")
 
     # 2) 建池（候选由 `build_pool()` 里的「公式」组现算 —— 这是唯一的候选来源）
+    #
+    # 2026-09-21（主人要求）：**选股结果不再自动进股池** —— 所以这里传
+    # `save_picks=False`：`stock_pool` 只落**自选股**（用户自己加的、或在结果页面点
+    # 【加入自选】加进来的）。选出来的票仍然会：① 显示在「策略选股」的结果页面
+    # （每行一个【加入自选】）；② 导出到桌面那份文本文件；③ 进 `signal` 表。
+    # 为什么不是"整条建池都不做"：`stock_pool` 同时是**盘中监控的盯盘清单**
+    # （`intraday` 读它），自选股必须继续被盯着。
     try:
         _stage("建池")
-        report["pool"] = pool.build_pool(engine, cfg, report=report)
+        report["pool"] = pool.build_pool(engine, cfg, report=report, save_picks=False)
 
         # 信号落库（`signal` 表，供盘中风控观察池）：用**这一轮真正跑的公式**的候选。
         # 候选行由建池写进 `report["formulas"]["rows"]`（它在建池里已经算过一遍，

@@ -81,16 +81,25 @@ def _enable_formulas(monkeypatch, tmp_path, cfg, formulas: dict[str, str]) -> No
 # ── 幂等 ──
 
 
-def test_run_twice_is_idempotent_for_signals_and_pool(ready_db, tmp_path, monkeypatch) -> None:
-    """同一天跑两次：`signal` / `stock_pool` 不产生重复行。"""
+def test_run_twice_is_idempotent_for_signals_and_watchlist_rows(
+        ready_db, tmp_path, monkeypatch) -> None:
+    """同一天跑两次：`signal` 不产生重复行；`stock_pool` 里也**只有自选那一行**。
+
+    2026-09-21（主人要求"选股结果不自动加入股池"）：选出来的票不再写进 `stock_pool`，
+    所以"池子行不重复"这件事现在由**自选股**那条路来验 —— 先加一只自选，再跑两轮，
+    库里应当恰好一行（不是两行、也不是三行）。
+    """
     cfg = ready_db
     _enable_formulas(monkeypatch, tmp_path, cfg, {"低价": "C<5", "反转": "C>10"})
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
+    with storage.connect(cfg.db_path) as conn:      # 用户自己加的自选（会被盯、会落库）
+        storage.upsert_watchlist(conn, "600001", name="甲样本")
     first = _run(cfg, monkeypatch, notify=False, with_data=False)
-    assert first["pool"], "第一次就该有池子"
+    assert first["pool"], "第一次就该有候选"
     with storage.connect(cfg.db_path) as conn:
         signals_1 = conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0]
         pool_1 = conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0]
+        pool_rows = [r["symbol"] for r in conn.execute("SELECT symbol FROM stock_pool")]
 
     second = _run(cfg, monkeypatch, notify=False, with_data=False)
     with storage.connect(cfg.db_path) as conn:
@@ -98,7 +107,8 @@ def test_run_twice_is_idempotent_for_signals_and_pool(ready_db, tmp_path, monkey
         pool_2 = conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0]
 
     assert signals_1 == signals_2 > 0      # 不产生重复信号行
-    assert pool_1 == pool_2 > 0             # 不产生重复池子行
+    assert pool_1 == pool_2 == 1            # 只落自选那一行，且不重复
+    assert pool_rows == ["600001"]          # 选出来的票**没有**进池
     assert first["pool"] == second["pool"]
     assert not second["errors"]
 
@@ -198,12 +208,28 @@ def test_enabled_formula_flows_to_pool_signals_and_watch(
 
     with storage.connect(cfg.db_path) as conn:
         strategies = {r[0] for r in conn.execute("SELECT DISTINCT strategy FROM signal")}
+        stored = [r["symbol"] for r in conn.execute("SELECT symbol FROM stock_pool")]
     assert strategies == {"公式·反转"}          # 信号表里的正是这一轮跑的公式
+    # ⚠️ 2026-09-21（主人要求）：**选股结果不再自动进股池** —— 库里一行都不该有
+    assert stored == [], "选出来的票不该自动写进 stock_pool"
 
-    # 观察池：盯的就是池子里那只（600001 没被任何公式选中，不该出现）
+    # 观察池：`stock_pool` 是空的（没进池），所以它走"池子为空 → 退回近期信号"那条兜底
+    # ——兜底命中的是**信号表**（source="signal"），不是"池内标的"，两者别混：
     targets, pool_symbols = intraday.watch_targets(cfg.db_path)
-    assert pool_symbols == {"600003"}
-    assert set(targets) == {"600003"}
+    assert pool_symbols == set()                     # 池内符号：空
+    assert set(targets) == {"600003"}                # 来源是信号兜底
+    assert targets["600003"]["source"] == "signal"
+
+    # 用户在结果页面点【加入自选】之后（= 写进 watchlist），它才进池、才被盯
+    with storage.connect(cfg.db_path) as conn:
+        storage.upsert_watchlist(conn, "600003", name="丙样本", note="选股来源：公式·反转")
+    report2 = _run(cfg, monkeypatch, notify=False, with_data=False)
+    assert [row["symbol"] for row in report2["pool"]] == ["600003"]
+    with storage.connect(cfg.db_path) as conn:
+        stored2 = [r["symbol"] for r in conn.execute("SELECT symbol FROM stock_pool")]
+    assert stored2 == ["600003"]
+    targets2, pool_symbols2 = intraday.watch_targets(cfg.db_path)
+    assert pool_symbols2 == {"600003"} and set(targets2) == {"600003"}
 
 
 def test_watch_targets_watches_every_stored_pool_row(cfg, monkeypatch) -> None:

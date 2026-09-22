@@ -1006,14 +1006,17 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
         type(window.save_settings_button)) if b.text() == "保存设置"]) == 0  # 只在页脚
 
 def test_watch_table_headers_and_source_column(window) -> None:
-    """「自选股池」的列**就是用户给定的那 8 列**（顺序也一致），「来源」列区分策略与自选。
+    """「自选股池」的列**就是用户给定的那几列**（顺序也一致），「来源」列区分策略与自选。
 
     2026-09-17 改版（用户要求）：在「涨幅」后面加「市值」「换手」两列，
-    「提醒」列改成「监控开关」—— 所以列数从 6 变 8，`板块/来源` 的下标从 3/4 挪到 5/6。
+    「提醒」列改成「监控开关」—— 所以列数从 6 变 8；
+    2026-09-21（主人要求）：再加「添加日期」「盈亏」两列 → 10 列，
+    「监控开关」仍在**最后一列**（点格子就能切换那一列的老位置没动）。
     """
-    assert window.pool_table.columnCount() == 8
+    assert window.pool_table.columnCount() == 10
     assert _header_texts(window.pool_table) == [
-        "名称(代码)", "现价", "涨幅", "市值", "换手", "板块", "来源", "监控开关",
+        "名称(代码)", "现价", "涨幅", "市值", "换手", "板块", "来源",
+        "添加日期", "盈亏", "监控开关",
     ]
     assert window.pool_table.columnCount() == len(ui_app.WATCH_HEADERS)
     # seeded 里 600002 是 `低价股` 策略选中的（不是自选）：来源 = **哪条策略**
@@ -1873,6 +1876,7 @@ def test_window_title_is_just_the_app_name(window, qapp) -> None:
     【关于软件】与【显示详情】两个正经去处 —— 两条都要真的能看到版本号。
     """
     import laoa_trader
+    from PySide6.QtWidgets import QLabel
 
     assert window.windowTitle() == ui_app.APP_NAME == "老牛选股"   # 软件名（2026-09-20 改名）
     assert "v" not in window.windowTitle()                 # 不再挂版本号
@@ -1882,7 +1886,7 @@ def test_window_title_is_just_the_app_name(window, qapp) -> None:
     window.on_about()
     qapp.processEvents()
     blob = "\n".join(lb.text() for lb in window.about_dialog.findChildren(
-        type(window.market_title)))
+        QLabel))
     assert f"版本：{laoa_trader.__version__}" in blob
     assert "版权所有" in blob
     window.about_dialog.close()
@@ -3133,12 +3137,14 @@ def test_market_page_is_a_tab_of_its_own(window) -> None:
     assert page.isAncestorOf(window.btn_market_refresh) is True
     assert window.btn_market_refresh.text() == "立即刷新"
 
-    # 页面自上而下：标题行 / 可滚动的内容区 / 提示 / **最后一行**页脚
+    # 页面自上而下：可滚动的内容区 / 提示 / **最后一行**页脚。
+    # 2026-09-21（主人要求）：最上面那行大字「大盘概览」**已删除** —— 与页签文字重复，
+    # 字号预算让给了四个分区标题（见 `MARKET_SECTION_TITLE_DELTA`）。
+    assert not hasattr(window, "market_title"), "那行大字标题应该已经删掉"
     layout = page.layout()
-    assert layout.itemAt(0).layout().indexOf(window.market_title) >= 0
-    assert layout.itemAt(1).widget() is window.market_scroll
-    assert layout.itemAt(2).widget() is window.market_hint
-    assert layout.itemAt(3).widget() is window.market_footer
+    assert layout.itemAt(0).widget() is window.market_scroll
+    assert layout.itemAt(1).widget() is window.market_hint
+    assert layout.itemAt(2).widget() is window.market_footer
     assert layout.itemAt(layout.count() - 1).widget() is window.market_footer
 
     # 内容区可滚动：窗口变矮时它自己吸收高度变化，页脚不会被顶出窗口
@@ -3499,8 +3505,11 @@ def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp
         assert market_window.market_hint.isVisible() is False       # 一切正常不留提示
 
         # 「热门板块」：**两张表**（上涨前五 / 下跌前五），表头就是用户给定的那四列
-        for title in (ui_app.SECTOR_UP_TITLE, ui_app.SECTOR_DOWN_TITLE):
-            assert _sector_headers(market_window, title) == list(ui_app.SECTOR_TABLE_HEADERS)
+        assert _sector_headers(market_window, ui_app.SECTOR_UP_TITLE) \
+            == list(ui_app.SECTOR_TABLE_HEADERS)
+        # 下跌前五：第 2 列是**跌停数量**（不是涨停数量）
+        assert _sector_headers(market_window, ui_app.SECTOR_DOWN_TITLE) \
+            == list(ui_app.SECTOR_TABLE_HEADERS_DOWN)
         assert list(market_window.market_sections[
             ui_app.MARKET_SECTION_HOT].tables) == [ui_app.SECTOR_UP_TITLE,
                                                    ui_app.SECTOR_DOWN_TITLE]
@@ -3785,11 +3794,10 @@ def _assert_market_fonts_and_alignment(win) -> None:
 
     from laoa_trader.ui import app as ui_app
 
-    title_font = win.market_title.font()
     sections = win.market_sections
+    # 2026-09-21：页面里不再有"页标题"那一层，**四个分区标题升到最大一档**（黑体大字）
     group_font = sections[ui_app.MARKET_SECTION_WIDE].title_label.font()
-    assert title_font.bold() is True
-    assert title_font.pointSize() > group_font.pointSize()          # 页面标题最大
+    assert group_font.bold() is True
     from laoa_trader import market
 
     item = sections[ui_app.MARKET_SECTION_FLOW].stats[ui_app.MARKET_STAT_AMOUNT]
@@ -4370,9 +4378,13 @@ def test_market_hot_block_is_two_real_tables_with_clear_headers(market_window, q
         assert section.title_label.text() == ui_app.MARKET_SECTION_HOT
         assert list(section.tables) == [ui_app.SECTOR_UP_TITLE, ui_app.SECTOR_DOWN_TITLE]
         assert (ui_app.SECTOR_UP_TITLE, ui_app.SECTOR_DOWN_TITLE) == ("上涨前五", "下跌前五")
+        # 表头就是用户给的那四个字，**但两张表只有第 2 列不同**：
+        # 上涨前五数涨停、下跌前五数跌停（2026-09-21 主人指出"下跌那张表里放涨停数说不通"）
+        assert ui_app.SECTOR_TABLE_HEADERS == ("板块名称", "涨停数量", "涨幅", "主力净额")
+        assert ui_app.SECTOR_TABLE_HEADERS_DOWN == ("板块名称", "跌停数量", "涨幅", "主力净额")
+        assert _sector_headers(win, ui_app.SECTOR_UP_TITLE) == list(ui_app.SECTOR_TABLE_HEADERS)
+        assert _sector_headers(win, ui_app.SECTOR_DOWN_TITLE) == list(ui_app.SECTOR_TABLE_HEADERS_DOWN)
         for title, block in section.tables.items():
-            # 表头就是用户给的那四个字（"现在的数据都没写什么意思" → 现在写清了）
-            assert _sector_headers(win, title) == ["板块名称", "涨停数量", "涨幅", "主力净额"]
             assert block.title_label.text() == title
             # 每张表各 5 行（本次数据只有 2 个行业 → 就 2 行；上限是 5）
             assert 0 < block.table.rowCount() <= ui_app.SECTOR_TOP == 5
@@ -4692,6 +4704,51 @@ def test_monitor_column_click_toggles_position_monitor(window, seeded, qapp) -> 
 
     assert table.item(0, column).foreground().color().name() \
         == QColor(Qt.GlobalColor.gray).name()        # 关掉的那一格变灰
+
+
+def test_watch_table_shows_added_date_and_pnl_from_the_added_price(
+    window, seeded, qapp
+) -> None:
+    """「添加日期」+「盈亏」两列（2026-09-21 主人要求："盈亏从加入股池那天算"）。
+
+    判据：加入价写 5.00，盈亏 =（本地最新收盘价 − 5.00）÷ 5.00（期望值由测试自己从库里
+    读收盘价算，不写死数字 —— 换一套 `seeded` 数据也不会假红）；
+    日期那一格是加入那天（`added_at` 的日期部分）；**老数据（没有加入价）显示 `—`**。
+    """
+    from laoa_trader.data import storage as st
+
+    table = window.pool_table
+    with st.connect(seeded.db_path) as conn:
+        st.upsert_watchlist(conn, "600001", name="低价样本", price=5.0)
+        st.upsert_watchlist(conn, "600003", name="老数据样本")     # 没给价 → added_price 为空
+    window._pool_signature = None
+    window._refresh_pool_table()
+    qapp.processEvents()
+    rows = {_symbols_of(table)[i]: i for i in range(table.rowCount())}
+    added_col = ui_app.WATCH_ADDED_COLUMN
+    pnl_col = ui_app.WATCH_PNL_COLUMN
+
+    # 加入日期：`added_at` 是北京时间的时间戳，这一格只要日期（形如 2026-09-21）
+    added_text = table.item(rows["600001"], added_col).text()
+    assert len(added_text) == 10 and added_text[4] == "-" and added_text[7] == "-"
+    # 盈亏：按加入价 5.00 与本地最新收盘价算（期望值现算，不写死）
+    with st.connect(seeded.db_path) as conn:
+        close = conn.execute(
+            "SELECT close FROM stock_daily_raw WHERE symbol = '600001' "
+            "ORDER BY date DESC LIMIT 1"
+        ).fetchone()[0]
+    expected = (float(close) - 5.0) / 5.0 * 100
+    pnl_text = table.item(rows["600001"], pnl_col).text()
+    assert pnl_text.endswith("%")
+    assert abs(float(pnl_text.rstrip("%")) - expected) < 0.01
+    assert "加入价 5.00" in table.item(rows["600001"], pnl_col).toolTip()
+    # 颜色沿用红涨绿跌：这只票是亏的 → 绿
+    assert table.item(rows["600001"], pnl_col).foreground().color().name() \
+        == ui_app.QColor(ui_app.market.COLOR_DOWN).name()
+
+    # 老数据：两格都是 `—`（不拿今天顶替、也不假装 0%）
+    assert table.item(rows["600003"], pnl_col).text() == ui_app.market.DASH
+    assert "算不出盈亏" in table.item(rows["600003"], pnl_col).toolTip()
 
 
 def test_monitor_column_click_toggles_watchlist_and_explains_for_strategy_rows(

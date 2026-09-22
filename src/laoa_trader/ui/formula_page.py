@@ -82,6 +82,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from laoa_trader import formulas as formulas_lib
+from laoa_trader import market as market_mod
 from laoa_trader import pool as pool_mod
 from laoa_trader.config import get_config
 from laoa_trader.log import get_logger
@@ -207,7 +208,25 @@ MAX_NOTE_CHARS = formulas_lib.MAX_DESC_CHARS
 #: 「本次选股结果」表的列（用户 2026-09-18 要求把结果界面加回来）。
 #: 来源列与「自选股池」那一列**同一个词**（`策略·短期反转` / `公式·放量上攻`）——
 #: 两处说法不一样的话，用户没法拿它对账。
-RESULT_COLUMNS: tuple[str, ...] = ("名称", "代码", "来源")
+RESULT_COLUMNS: tuple[str, ...] = (
+    "名称(代码)", "实时股价", "市值", "换手率", "来源", "加入自选",
+)
+#: 「加入自选」列的下标（不放数字字面量：列顺序改了也不会错位）
+RESULT_ADD_COLUMN = RESULT_COLUMNS.index("加入自选")
+#: 那一格的两个文字（已在自选里的行显示后者、且不可再点）
+RESULT_ADD_TEXT = "加入自选"
+RESULT_ADDED_TEXT = "已在自选"
+
+#: 结果表每一列的口径（表头只有几个字，说明写这里）
+RESULT_HEADER_TIPS: tuple[str, ...] = (
+    "标的写法：名称(代码)",
+    "实时股价：取实时快照；没有快照时用库里最近的收盘价并标注，都没有就显示 —",
+    "流通市值，单位**亿**（取实时快照；取不到显示 —，不是 0）",
+    "实时换手率，单位 %（取实时快照；取不到显示 —，不是 0）",
+    "是哪条公式/策略选出来的（与「自选股池」那一列同一个词）",
+    "点这一格把这只票加进「自选股池」：之后它会一直留在池子里被盯盘，"
+    "并记下加入时的价格用来算盈亏",
+)
 
 #: 结果页在**还没跑过选股**时那句话
 RESULT_HINT_IDLE = (
@@ -240,7 +259,10 @@ EDITOR_HINT = (
     "写完点【校验】→【运行】→【保存】；想留一份结果就点【导出选股结果】。"
 )
 
-#: 【载入示例】在没有示例文件时用的兜底公式（保证"小白第一步"一定走得通）
+#: 【新策略】按钮上的字（旧名【载入示例】，2026-09-21 主人要求改名；行为不变）。
+SAMPLE_BUTTON_TEXT = "新策略"
+
+#: 【新策略】在没有示例文件时用的兜底公式（保证"小白第一步"一定走得通）
 SAMPLE_NAME = "放量上攻"
 SAMPLE_TEXT = "M5:=MA(C,5)\nV5:=MA(V,5)\nC>M5 AND C>O AND V>V5*1.5"
 
@@ -749,6 +771,8 @@ if QT_AVAILABLE:
             self._auction_box: Any = None
             #: **本次选股结果**（结果页那张表的行）：`[{"symbol","name","label"}...]`。
             #: 平时是空的；点【开始选股】跑完由主窗口调 `show_pick_result()` 填进来。
+            #: 取实时快照的函数（主窗口注入 `QuotesService.quote`；没注入时实时列显示 —）
+            self.quotes_provider: Any = None
             self.result_rows: list[dict] = []
             #: 本次结果的行情日（导出文件与结论那句都用它）
             self.result_date: Any = None
@@ -914,9 +938,20 @@ if QT_AVAILABLE:
                 "完整的池子看「自选股池」页"
             )
             header = self.result_table.horizontalHeader()
-            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            for column, mode in enumerate((
+                QHeaderView.ResizeMode.ResizeToContents,      # 名称(代码)
+                QHeaderView.ResizeMode.ResizeToContents,      # 实时股价
+                QHeaderView.ResizeMode.ResizeToContents,      # 市值
+                QHeaderView.ResizeMode.ResizeToContents,      # 换手率
+                QHeaderView.ResizeMode.Stretch,               # 来源（最长，吃掉余宽）
+                QHeaderView.ResizeMode.ResizeToContents,      # 加入自选（按钮）
+            )):
+                header.setSectionResizeMode(column, mode)
+            # 每一列的意思写进表头 tooltip（列头只有几个字，放不下口径）
+            for column, tip in enumerate(RESULT_HEADER_TIPS):
+                item = self.result_table.horizontalHeaderItem(column)
+                if item is not None:
+                    item.setToolTip(tip)
             layout.addWidget(self.result_table, 1)
 
             row = QHBoxLayout()
@@ -971,8 +1006,11 @@ if QT_AVAILABLE:
             self.editor_hint.setObjectName("statusTag")
             self.editor_hint.setWordWrap(True)
             head.addWidget(self.editor_hint, 1)
-            self.btn_sample = QPushButton("载入示例")
-            self.btn_sample.setToolTip("把一条能跑通的示例公式放进编辑框，照着改就行")
+            # 2026-09-21（主人要求）：按钮文字从【载入示例】改成【新策略】——
+            # **行为一个字都没变**（还是把一条能跑通的公式放进编辑框），
+            # 只是"载入示例"这四个字让新用户以为是"看示例"而不是"开始写一条新的"。
+            self.btn_sample = QPushButton(SAMPLE_BUTTON_TEXT)
+            self.btn_sample.setToolTip("新建一条策略：把一条能跑通的公式放进编辑框，照着改就行")
             self.btn_sample.clicked.connect(self.on_load_sample)
             head.addWidget(self.btn_sample)
             self.btn_close_editor = QPushButton("收起编辑器")
@@ -1711,7 +1749,8 @@ if QT_AVAILABLE:
             elif not self.editor.toPlainText().strip() and not self.name_edit.text().strip():
                 # 头一次打开且编辑框是空的：给一句"下一步做什么"，不要让用户面对白板
                 self._set_hint(
-                    "照着示例改最快：点【载入示例】；右边按钮点一下就插到光标那里。"
+                    f"照着示例改最快：点【{SAMPLE_BUTTON_TEXT}】；"
+                    "右边按钮点一下就插到光标那里。"
                 )
             self.bottom_stack.setCurrentWidget(self.editor_page)
             self.bottom_stack.setVisible(True)
@@ -1747,7 +1786,9 @@ if QT_AVAILABLE:
             text = self.editor.toPlainText()
             if not text.strip():
                 if not quiet:
-                    self._set_hint("❌ 公式还是空的：点右边的按钮就能插入，或者点【载入示例】")
+                    self._set_hint(
+                        f"❌ 公式还是空的：点右边的按钮就能插入，或者点【{SAMPLE_BUTTON_TEXT}】"
+                    )
                 return None
             try:
                 return fm.compile_formula(text, name=self.name_edit.text().strip())
@@ -2154,7 +2195,11 @@ if QT_AVAILABLE:
                 self._clear_hint()
 
         def on_load_sample(self) -> None:
-            """【载入示例】：给小白一个**能跑通**的起点。"""
+            """【新策略】（旧名【载入示例】）：给小白一个**能跑通**的起点。
+
+            名字与行为分开：主人在 2026-09-21 只要求改按钮文字，所以
+            "载入哪条公式、填哪些框、给什么提示"这些**一个字都没动**。
+            """
             self.bottom_stack.setCurrentWidget(self.editor_page)
             self.bottom_stack.setVisible(True)
             sample = None
@@ -2242,18 +2287,33 @@ if QT_AVAILABLE:
                 for r in rows
             ]
             self.result_date = data_date
+            # 已经在自选里的票：那一格显示「已在自选」并置灰（不能重复加）
+            in_watch = self._watchlist_symbols()
             self.result_table.setRowCount(len(self.result_rows))
             for index, row in enumerate(self.result_rows):
-                for column, text in enumerate((row["name"], row["symbol"], row["label"])):
+                label_text = f"{row['name']}({row['symbol']})"
+                cells = (
+                    label_text,
+                    self._result_price_text(row["symbol"])[0],
+                    self._result_quote_text(row["symbol"], "circ_mktcap", "亿"),
+                    self._result_quote_text(row["symbol"], "turnover_rate", "%"),
+                    row["label"],
+                )
+                for column, text in enumerate(cells):
                     item = QTableWidgetItem(text)
-                    if column == 2:
-                        item.setToolTip(f"{row['name']}（{row['symbol']}）· 来源：{row['label']}")
+                    # `—` 那一格：tooltip 讲清"这一列是什么、为什么是 —"；
+                    # 有值的格子：讲清"是哪只票的哪个数"
+                    tip = (RESULT_HEADER_TIPS[column] if text == market_mod.DASH
+                           else f"{label_text} · {RESULT_HEADER_TIPS[column]}")
+                    item.setToolTip(tip)
                     self.result_table.setItem(index, column, item)
+                self._set_result_add_cell(index, row["symbol"], already=row["symbol"] in in_watch)
             day = str(data_date or "未知")
             if self.result_rows:
                 self.result_hint.setText(
                     f"本次选股结果：共 {len(self.result_rows)} 只（行情日 {day}）。"
-                    "它们已经进了「自选股池」，这里可以再【一键加入自选】或【导出结果到桌面】。"
+                    "**结果不会自动进股池**：要留下哪只就点它那一行的【加入自选】"
+                    "（加进去之后才会被盯盘、并记下加入价算盈亏），也可以【导出结果到桌面】。"
                 )
             else:
                 self.result_hint.setText(
@@ -2265,6 +2325,155 @@ if QT_AVAILABLE:
                 # 出错的那几条（数据闸门拦住、公式出错…）直接说在结论下面 ——
                 # 用户点完【开始选股】最想知道的就是"为什么没结果"
                 self.result_hint.setText(self.result_hint.text() + "\n❌ " + message)
+
+        # ── 结果表：实时数据 + 每一行的【加入自选】 ──────────────────
+
+        def set_quotes_provider(self, provider: Any) -> None:
+            """注入"取实时快照"的函数（主窗口把 `QuotesService.quote` 接进来）。
+
+            为什么用注入、而不是让这一页自己建一个快照服务：快照是**整个窗口一份缓存**
+            （主窗口每 5 秒刷一次，自选股池/持仓两张表都在用）。这一页再建一个，
+            就会有两套缓存、两个刷新节奏，同一个数在两张表里还可能不一样。
+            没注入时（单测里直接建这一页）所有实时列显示 `—` —— 不编数。
+            """
+            self.quotes_provider = provider
+
+        def _quote(self, symbol: str) -> dict:
+            """取这一只的实时快照（没有 provider / 取不到 → 空字典）。"""
+            provider = getattr(self, "quotes_provider", None)
+            if not callable(provider):
+                return {}
+            try:
+                data = provider(symbol)
+            except Exception:  # noqa: BLE001 - 快照取不到只影响这几列
+                logger.debug("取实时快照失败", exc_info=True)
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        def _watchlist_symbols(self) -> set[str]:
+            """当前自选里的代码（决定那一格显示【加入自选】还是【已在自选】）。"""
+            from laoa_trader.data import storage
+
+            try:
+                with storage.connect(self.cfg.db_path) as conn:
+                    rows = storage.load_watchlist(conn, enabled_only=False)
+            except Exception:  # noqa: BLE001 - 读不出来就当没有自选（按钮仍可点，会再判一次）
+                logger.debug("读自选表失败", exc_info=True)
+                return set()
+            return {str(row["symbol"]) for row in rows}
+
+        def _last_close(self, symbol: str) -> float | None:
+            """库里最近的**不复权收盘价**（没有实时快照时的兜底，界面会标 `*`）。"""
+            from laoa_trader.data import storage
+
+            try:
+                with storage.connect(self.cfg.db_path) as conn:
+                    row = conn.execute(
+                        "SELECT close FROM stock_daily_raw WHERE symbol = ? "
+                        "ORDER BY date DESC LIMIT 1",
+                        (symbol,),
+                    ).fetchone()
+            except Exception:  # noqa: BLE001
+                logger.debug("读本地收盘价失败", exc_info=True)
+                return None
+            if row and row[0]:
+                return float(row[0])
+            return None
+
+        def _result_price_text(self, symbol: str) -> tuple[str, float | None]:
+            """「实时股价」那一格：**实时快照优先**，没有就用本地最近收盘（标 `*`）。
+
+            Returns:
+                `(显示文字, 用于"加入时的价格"的数值)`；两样都没有时是 `("—", None)`。
+            """
+            price = self._quote(symbol).get("price")
+            if price:
+                return f"{float(price):.2f}", float(price)
+            close = self._last_close(symbol)
+            if close is not None:
+                return f"{close:.2f}*", close
+            return market_mod.DASH, None
+
+        def _result_quote_text(self, symbol: str, key: str, unit: str) -> str:
+            """「市值」「换手率」两格：取不到一律 `—`（**不显示 0** —— 0 是真实的值）。"""
+            value = self._quote(symbol).get(key)
+            if value is None:
+                return market_mod.DASH
+            return f"{float(value):.2f}{unit}"
+
+        def _set_result_add_cell(self, index: int, symbol: str, *, already: bool) -> None:
+            """「加入自选」那一格：没加过的给一个可点的按钮，加过的显示【已在自选】且置灰。"""
+            if already:
+                label = QLabel(RESULT_ADDED_TEXT)
+                label.setObjectName("statusTag")
+                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                label.setToolTip("这只票已经在「自选股池」里了，不用重复加")
+                holder = label
+            else:
+                button = QPushButton(RESULT_ADD_TEXT)
+                button.setToolTip(
+                    "把这只票加进「自选股池」：之后它会一直留在池子里被盯盘，"
+                    "并记下加入时的价格用来算盈亏（不重复添加、也不改你写过的备注）"
+                )
+                button.clicked.connect(
+                    lambda _checked=False, sym=symbol, i=index: self.on_add_one_to_watchlist(
+                        sym, i
+                    )
+                )
+                holder = button
+            # 与其它表格一致：格子居中
+            wrapper = QWidget()
+            box = QHBoxLayout(wrapper)
+            box.setContentsMargins(2, 0, 2, 0)
+            box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            box.addWidget(holder)
+            self.result_table.setCellWidget(index, RESULT_ADD_COLUMN, wrapper)
+
+        def on_add_one_to_watchlist(self, symbol: str, index: int | None = None) -> None:
+            """某一行点【加入自选】：把这一只写进 `watchlist`（**记下加入时的价格**）。
+
+            与【一键加入自选】走同一条口径（不重复添加、不动用户备注、尊重上限），
+            多做的一件事是**记住加入价** —— 「自选股池」的盈亏列要从那个价算起。
+            """
+            from laoa_trader.data import storage
+
+            row = next((r for r in self.result_rows if r["symbol"] == symbol), None)
+            if row is None:
+                return
+            name = row["name"] or symbol
+            _, price = self._result_price_text(symbol)
+            limit = max(int(getattr(self.cfg, "watchlist_max", 0) or 0), 0)
+            try:
+                with storage.connect(self.cfg.db_path) as conn:
+                    existing = storage.load_watchlist(conn, enabled_only=False)
+                    if any(str(r["symbol"]) == symbol for r in existing):
+                        if index is not None:
+                            self._set_result_add_cell(index, symbol, already=True)
+                        self._set_hint(f"「{name}」已经在自选里了（没有重复添加）")
+                        return
+                    enabled_count = sum(
+                        1 for r in existing if int(r.get("enabled", 1)) == 1
+                    )
+                    if limit and enabled_count >= limit:
+                        self._set_hint(
+                            f"❌ 自选已达上限 {limit} 只，没有加进去"
+                            "（去「自选股池」删几只，或把「系统设置」里的自选上限调大）"
+                        )
+                        return
+                    storage.upsert_watchlist(
+                        conn, symbol, name=name,
+                        note=f"选股来源：{row['label']}", price=price,
+                    )
+            except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，不让按钮把界面带走
+                self._set_hint(f"❌ 加自选失败：{type(exc).__name__}: {exc}")
+                return
+            if index is not None:
+                self._set_result_add_cell(index, symbol, already=True)
+            price_text = f"（加入价 {price:.2f}）" if price else "（没有取到价格，盈亏先不显示）"
+            self._set_hint(
+                f"✅ 已把「{name}」加入「自选股池」{price_text}。\n"
+                "它会一直留在池子里被盯盘，盈亏从加入这天算起。"
+            )
 
         def show_result_page(self) -> None:
             """切到结果页（【开始选股】按下时与跑完时都走这里）。"""
@@ -2474,7 +2683,11 @@ __all__ = [
     "PAGE_HINT",
     "PALETTE_BUTTON_OBJECT",
     "PALETTE_COLUMNS",
+    "RESULT_ADD_COLUMN",
+    "RESULT_ADD_TEXT",
+    "RESULT_ADDED_TEXT",
     "RESULT_COLUMNS",
+    "RESULT_HEADER_TIPS",
     "RESULT_HINT_IDLE",
     "PANEL_WIDTH",
     "PREVIEW_LIMIT",
@@ -2483,6 +2696,7 @@ __all__ = [
     "ROW_AUCTION",
     "ROW_FORMULA",
     "RowMenu",
+    "SAMPLE_BUTTON_TEXT",
     "SAMPLE_NAME",
     "SAMPLE_TEXT",
     "StrategyRow",

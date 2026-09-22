@@ -76,6 +76,7 @@ def build_pool(
     hot_only: bool = True,
     *,
     save: bool = True,
+    save_picks: bool = True,
     day: str | None = None,
     picks: dict[str, list[dict]] | None = None,
     selection: Any | None = None,
@@ -96,6 +97,12 @@ def build_pool(
         hot_only: 是否只保留热门行业（用户要求：池子只选热门行业，数量少、盯得过来）。
             **自定义公式不参与这道收敛**（条件本身就是用户写明的，见下面的说明）。
         save: 是否落库 `stock_pool`。
+        save_picks: **选股结果（公式选出来的票）要不要一起落库**。
+            2026-09-21 主人要求"策略选股结果改成不自动加入股池" —— 所以【开始选股】
+            这条路传 `False`：`stock_pool` 里只留**自选股**（用户自己加的、以及在结果
+            页面点【加入自选】加进来的），选出来的票只在结果页面显示，要不要留下由用户点。
+            为什么不是整条建池都不做：`stock_pool` 同时是**盘中监控的盯盘清单**
+            （`intraday` 读它），而自选股必须继续被盯着 —— 见 `merge_watchlist()`。
         day: 池子日期，默认按库里最新行情日期。
         picks: 已算好的候选（`{"公式·X": [...]}`）。调用方已经算过就直接传，
             免得再跑一遍（`run_enabled_formulas` 要扫全库，跑两遍纯浪费）。
@@ -205,8 +212,13 @@ def build_pool(
                 f"（策略 {sum(1 for r in pool if r.get('strategy'))} 只 / "
                 f"自选 {sum(1 for r in pool if r.get('source') in ('自选', '策略+自选'))} 只）")
     if save and pool:
-        day = day or engine.get_latest_data_date() or datetime.now().strftime("%Y-%m-%d")
-        save_pool(engine.db_path, pool, day)
+        rows_to_save = pool if save_picks else [r for r in pool if r.get("watchlist")]
+        if rows_to_save:
+            day = (day or engine.get_latest_data_date()
+                   or datetime.now().strftime("%Y-%m-%d"))
+            save_pool(engine.db_path, rows_to_save, day)
+        else:
+            logger.info("这一轮没有自选股要落库（选股结果不再自动进池）")
     return pool
 
 
@@ -439,6 +451,53 @@ def hot_industries(
     }
 
 
+def limit_down_industries(db_path: str, day: str | None = None) -> dict[str, int]:
+    """当日**各行业跌停家数**（「大盘概览 → 下跌前五」那一列用）。
+
+    为什么要有它：那两张表原来是同一套列头（`板块名称 | 涨停数量 | 涨幅 | 主力净额`），
+    而"下跌前五"里放涨停家数是**说不通**的（主人 2026-09-21 指出）。跌停家数本地
+    本来没有现成的：`limit_up_pool` 只有涨停池，跌停池没落库。
+
+    口径：取库里**最近两个交易日**的**不复权**收盘价，按 `public_sync.is_limit_down()`
+    判跌停（那个函数里的板块规则是本项目实测过的唯一一份：主板/创业板/科创板 10%/20%、
+    北交所 30% 且**向上取整**、ST 同幅度），再按 `stock_basic.industry` 归组计数。
+
+    Returns:
+        `{行业名: 跌停家数}`；库里不足两个交易日（或读不出来）时返回 `{}` ——
+        宁可让界面显示 `—`，也不要拿"全市场跌停数"冒充某个板块的数。
+    """
+    from laoa_trader.data import public_sync      # 跌停价规则只此一份，别在这里重写
+
+    try:
+        with storage.connect(db_path) as conn:
+            days = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT DISTINCT date FROM stock_daily_raw ORDER BY date DESC LIMIT 2"
+                )
+            ]
+            if len(days) < 2:
+                return {}
+            latest, previous = days[0], days[1]
+            rows = conn.execute(
+                "SELECT d.symbol, d.close, p.close, b.industry, b.name "
+                "FROM stock_daily_raw d "
+                "JOIN stock_daily_raw p ON p.symbol = d.symbol AND p.date = ? "
+                "JOIN stock_basic b ON b.symbol = d.symbol "
+                "WHERE d.date = ? AND b.industry IS NOT NULL AND b.industry != ''",
+                (previous, latest),
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - 这一列取不到就显示 —，不影响别的块
+        logger.warning(f"读跌停家数失败（这一列会显示 —）：{exc}")
+        return {}
+    counts: dict[str, int] = {}
+    for symbol, close, prev_close, industry, name in rows:
+        if public_sync.is_limit_down(close, prev_close, str(symbol), str(name or "")):
+            key = str(industry)
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def save_pool(db_path: str, pool: list[dict], day: str | None = None) -> int:
     """把股票池写入 `stock_pool`（幂等 upsert，同一天重复跑只会覆盖同代码的行）。"""
     # 用**北京日期**：池子是按"行情日"存的，机器在 UTC（NAS/Docker/CI）时
@@ -548,6 +607,12 @@ EXPORT_FOOTER = (
 #: 桌面目录的候选写法：Windows 英文系统叫 `Desktop`、中文系统叫 `桌面`；
 #: 后两条覆盖"桌面被 OneDrive 接管"那类机器。自己拼路径一定会猜错几台机器，
 #: 所以 `_standard_desktop()` 还会**先**问 Qt/系统要一次答案（见那里的说明）。
+#: 桌面上的**子目录**：导出文件落在 `桌面/老牛选股/` 里（2026-09-21 主人要求）。
+#: 为什么要有这一层：以前直接扔在桌面根目录，用久了桌面上会散着一堆
+#: `老牛选股助手-选股结果-*.txt`（每天一个），桌面本身就是用户摆东西的地方 ——
+#: 收进一个以软件命名的文件夹里，找起来反而更快。
+EXPORT_FOLDER_NAME = "老牛选股"
+
 DESKTOP_SUBDIRS: tuple[tuple[str, ...], ...] = (
     ("Desktop",),
     ("桌面",),
@@ -789,6 +854,10 @@ def export_pick_file(
     所以这是**附赠**产物：它绝不能影响选股/建池/推送（调用方 `run_daily` 另有兜底
     try，这里自己也不再往外抛）。
 
+    落点（2026-09-21 主人要求）：`桌面/老牛选股/老牛选股助手-选股结果-<日期>.txt` ——
+    桌面根目录不再散着文件，都收进以软件命名的那个文件夹里；找不到桌面时退回数据目录，
+    同样套一层 `老牛选股`。
+
     Args:
         pool_rows: 池子行（`build_pool()` 的返回值）。
         data_date: 行情日（写进标题括号里；来自 `run_daily` 的 `report["data_date"]`）。
@@ -819,6 +888,10 @@ def export_pick_file(
             if dest_dir is not None
             else desktop_dir(home=home, fallback_dir=fallback_dir)
         )
+        if target is not None and dest_dir is None:
+            # 只有"自己找桌面/回退目录"这条路上才套子目录：调用方**显式**给了
+            # `dest_dir`（测试、定制部署）时不多加一层 —— 那时目录是调用方说了算。
+            target = target / EXPORT_FOLDER_NAME
         if target is None:
             logger.warning(
                 "找不到桌面目录、也没有可用的回退目录：本次选股结果没有导出"

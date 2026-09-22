@@ -17,6 +17,7 @@ NAS/Docker 常常也是 UTC。曾经踩过的两个真实事故：
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 #: 北京时间（UTC+8，中国不实行夏令时）
 TZ_SHANGHAI = timezone(timedelta(hours=8))
@@ -43,4 +44,21 @@ def stamp_cn(now: datetime | None = None) -> str:
     return now_cn(now).strftime(STAMP_FORMAT)
 
 
-__all__ = ["DATE_FORMAT", "STAMP_FORMAT", "TZ_SHANGHAI", "now_cn", "stamp_cn", "today_cn"]
+def day_text(value: Any) -> str:
+    """时间戳/日期字符串 → `YYYY-MM-DD`（空值/认不出来 → 空串）。
+
+    为什么要有它：`added_at` 存的是 `YYYY-MM-DD HH:MM:SS`（北京时间），而界面上
+    「添加日期」那一列只要日期。直接 `str[:10]` 也行，但那样就绕过了"这个字段
+    到底是什么格式"的唯一出处 —— 格式一变就会静默截出错的东西。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    head = text[: len("YYYY-MM-DD")]           # noqa: SLF001 - 就是字面量长度
+    return head if len(head) == 10 and head[4] == "-" and head[7] == "-" else ""
+
+
+__all__ = [
+    "DATE_FORMAT", "STAMP_FORMAT", "TZ_SHANGHAI",
+    "day_text", "now_cn", "stamp_cn", "today_cn",
+]

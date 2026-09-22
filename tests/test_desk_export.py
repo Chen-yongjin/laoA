@@ -172,7 +172,10 @@ def test_desktop_directory_is_used_when_it_exists(tmp_path) -> None:
 
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  fallback_dir=fallback, day="2026-09-18")
-    assert path == home / "Desktop" / "老牛选股助手-选股结果-2026-09-18.txt"
+    # 2026-09-21（主人要求）：桌面根目录不再散着文件，收进 `桌面/老牛选股/` 里
+    assert pool.EXPORT_FOLDER_NAME == "老牛选股"
+    assert path == (home / "Desktop" / pool.EXPORT_FOLDER_NAME
+                    / "老牛选股助手-选股结果-2026-09-18.txt")
     assert not list(fallback.iterdir())                      # 没有重复写进数据目录
 
 
@@ -184,7 +187,8 @@ def test_chinese_desktop_name_is_found(tmp_path) -> None:
     assert pool.desktop_dir(home=home) == home / "桌面"
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  day="2026-09-18")
-    assert path == home / "桌面" / "老牛选股助手-选股结果-2026-09-18.txt"
+    assert path == (home / "桌面" / pool.EXPORT_FOLDER_NAME
+                    / "老牛选股助手-选股结果-2026-09-18.txt")
 
 
 def test_onedrive_desktop_is_found(tmp_path) -> None:
@@ -204,7 +208,9 @@ def test_falls_back_to_the_data_dir_when_no_desktop_exists(tmp_path) -> None:
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  fallback_dir=fallback, day="2026-09-18")
 
-    assert path == fallback / "老牛选股助手-选股结果-2026-09-18.txt"
+    # 回退目录里也套一层「老牛选股」（口径与桌面那条一致：文件永远收在一个文件夹里）
+    assert path == (fallback / pool.EXPORT_FOLDER_NAME
+                    / "老牛选股助手-选股结果-2026-09-18.txt")
     assert path.exists()
 
 

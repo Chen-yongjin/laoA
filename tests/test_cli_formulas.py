@@ -112,8 +112,9 @@ def _enable_formulas(monkeypatch, tmp_path, cfg, config_path, formulas: dict[str
 def test_formula_decides_the_picks(capsys, seeded, tmp_path, monkeypatch) -> None:
     """候选由**勾选的公式**决定；配置里那两行退役键（`enabled_groups` 等）不参与。
 
-    勾一条 `C>10`（小库里只有 600003 在 10 元以上）：票进池、来源写 `公式·反转`，
-    信号表里也正是这一轮跑的公式。
+    勾一条 `C>10`（小库里只有 600003 在 10 元以上）：票出现在这一轮的结果里、来源写
+    `公式·反转`，信号表里也正是这一轮跑的公式；但**不再自动落进 stock_pool**
+    （2026-09-21 起：要不要留下由用户在结果页面点【加入自选】）。
     """
     _enable_formulas(monkeypatch, tmp_path, seeded["cfg"], seeded["config"], {"反转": "C>10"})
     args = ["--cli", "--once", "--no-notify", "--config", str(seeded["config"])]
@@ -127,7 +128,8 @@ def test_formula_decides_the_picks(capsys, seeded, tmp_path, monkeypatch) -> Non
         pool_strategies = {r[0] for r in conn.execute(
             "SELECT DISTINCT strategy FROM stock_pool")}
     assert strategies == {"公式·反转"}            # 信号表里就是这一轮跑的公式
-    assert pool_strategies == {"公式·反转"}
+    # 2026-09-21（主人要求"选股结果不自动加入股池"）：`stock_pool` 里**不再有它**
+    assert pool_strategies == set()
     # 老配置里的退役键**原样留着**（用户文件不被改坏），文件字节不变
     assert seeded["config"].read_text(encoding="utf-8") == before
 
@@ -149,26 +151,42 @@ def test_config_groups_no_longer_decide_the_picks(capsys, seeded,
     assert cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"])]) == 0
     out = capsys.readouterr().out
     assert "本次按勾选的公式选股：低价" in out
+    # 候选由勾的公式决定：库里 signal 表记着这一轮的结果（stock_pool 不再自动落它）
     with storage.connect(seeded["cfg"].db_path) as conn:
+        picked = {r[0] for r in conn.execute("SELECT DISTINCT symbol FROM signal")}
         pool_symbols = {r[0] for r in conn.execute("SELECT symbol FROM stock_pool")}
-    assert pool_symbols == {"600001"}
+    assert picked == {"600001"}
+    assert pool_symbols == set()
 
 
 def test_pool_command_shows_the_source_column(capsys, seeded,
                                              tmp_path, monkeypatch) -> None:
-    """`--pool` 打出池子表；2026-09-18 起来源列是 `公式·<公式名>`。"""
+    """`--pool` 打出池子表；来源列现在是 `自选`（选股结果不再自动进池，见下）。
+
+    2026-09-21（主人要求"选股结果不自动加入股池"）：`stock_pool` 里只剩**自选** ——
+    所以这条用例先加一只自选（这一只既是自选、又恰好被勾的公式选中 → 来源是
+    `公式·反转+自选`），再断言 `--pool` 打得出来源列。
+    """
     _enable_formulas(monkeypatch, tmp_path, seeded["cfg"], seeded["config"], {"反转": "C>10"})
+    with storage.connect(seeded["cfg"].db_path) as conn:
+        storage.upsert_watchlist(conn, "600003", name="反转样本")
     assert cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"])]) == 0
     capsys.readouterr()
     assert cli(["--cli", "--pool", "--config", str(seeded["config"])]) == 0
     out = capsys.readouterr().out
     assert "股票池" in out
-    assert "公式·反转" in out
+    assert "600003" in out
+    assert "自选" in out                      # 来源列里写着它是自选
 
 
 def test_once_is_idempotent_via_cli(capsys, seeded, tmp_path, monkeypatch) -> None:
-    """连续两次 `--once`：信号/池子行数不变（CLI 与定时任务同口径）。"""
+    """连续两次 `--once`：信号行数不变、不产生重复行（CLI 与定时任务同口径）。
+
+    2026-09-21 起"池子行"由自选决定，所以这里加一只自选来盯住"不重复落库"这件事。
+    """
     _enable_formulas(monkeypatch, tmp_path, seeded["cfg"], seeded["config"], {"反转": "C>10"})
+    with storage.connect(seeded["cfg"].db_path) as conn:
+        storage.upsert_watchlist(conn, "600003", name="反转样本")
     args = ["--cli", "--once", "--no-notify", "--config", str(seeded["config"])]
     assert cli(args) == 0
     capsys.readouterr()
@@ -181,4 +199,4 @@ def test_once_is_idempotent_via_cli(capsys, seeded, tmp_path, monkeypatch) -> No
         second = (conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0],
                   conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0])
     assert first == second
-    assert first[0] > 0 and first[1] > 0
+    assert first[0] > 0 and first[1] == 1        # 信号有；池子里就是那一只自选

@@ -42,6 +42,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QGroupBox,
+    QLabel,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -1813,13 +1814,94 @@ def test_result_page_replaces_the_list_while_picking(page) -> None:
                                     {"symbol": "600001", "name": "甲样本",
                                      "strategy": "公式·放量上攻"}]})
     assert page.result_table.rowCount() == 2
-    assert page.result_table.item(0, 1).text() == "600003"
-    assert "公式·放量上攻" in page.result_table.item(0, 2).text()
+    # 六列、顺序就是主人给的那六项（2026-09-21）
+    assert list(fp.RESULT_COLUMNS) == ["名称(代码)", "实时股价", "市值", "换手率",
+                                       "来源", "加入自选"]
+    assert page.result_table.item(0, 0).text() == "丙样本(600003)"
+    assert "公式·放量上攻" in page.result_table.item(0, 4).text()
+    # 没有实时快照时：股价退回本地最近收盘价（带 `*` 标注）、市值/换手显示 —（不是 0）
+    assert page.result_table.item(0, 1).text() == "6.74*"
+    assert page.result_table.item(0, 2).text() == "—"
+    assert page.result_table.item(0, 3).text() == "—"
+    # 最后一列是**每行一个**【加入自选】按钮
+    assert page.result_table.cellWidget(0, fp.RESULT_ADD_COLUMN) is not None
     assert "共 2 只" in page.result_hint.text() and "2026-09-11" in page.result_hint.text()
+    # 结论里要写明"结果不会自动进股池"（主人 2026-09-21 的新口径）
+    assert "不会自动进股池" in page.result_hint.text()
 
     # 能切回列表
     page.btn_back_to_list.click()
     assert page.list_stack.currentWidget() is page.list_page
+
+
+def test_each_result_row_has_an_add_button_that_records_the_price(page, page_cfg) -> None:
+    """结果表每一行的【加入自选】：写进自选表、**记下加入价**、按完变成"已在自选"。
+
+    2026-09-21（主人要求）：选股结果**不再自动进股池**，所以"要不要留下这一只"
+    由用户在这一列点。加入价是「自选股池」盈亏列的基准（见 storage 建表那里的说明）。
+    """
+    page.show_pick_result({"data_date": "2026-09-11",
+                           "pool": [{"symbol": "600003", "name": "丙样本",
+                                     "strategy": "公式·放量上攻"}]})
+    cell = page.result_table.cellWidget(0, fp.RESULT_ADD_COLUMN)
+    button = cell.findChild(QPushButton)
+    assert button.text() == fp.RESULT_ADD_TEXT == "加入自选"
+
+    button.click()
+
+    with storage.connect(page_cfg.db_path) as conn:
+        rows = storage.load_watchlist(conn, enabled_only=False)
+    assert [r["symbol"] for r in rows] == ["600003"]
+    assert "选股来源" in str(rows[0]["note"])
+    # 加入价记下来了（本地最近收盘价 —— 显示时四舍五入成 6.74，存的是原值），
+    # 盈亏才有基准
+    assert float(rows[0]["added_price"]) == pytest.approx(6.7392445766645315)
+    assert "已把「丙样本」加入" in page.hint_text
+
+    # 那一格变成"已在自选"（再点也加不进去）
+    after = page.result_table.cellWidget(0, fp.RESULT_ADD_COLUMN)
+    assert after.findChild(QPushButton) is None
+    assert fp.RESULT_ADDED_TEXT in after.findChild(QLabel).text()
+
+
+def test_add_button_keeps_the_first_added_price(page, page_cfg) -> None:
+    """已经在自选里的票：那一格直接显示【已在自选】，**不会**把加入价改成今天的价。"""
+    with storage.connect(page_cfg.db_path) as conn:
+        storage.upsert_watchlist(conn, "600003", name="丙样本", price=5.0)
+    page.show_pick_result({"data_date": "2026-09-11",
+                           "pool": [{"symbol": "600003", "name": "丙样本",
+                                     "strategy": "公式·放量上攻"}]})
+
+    cell = page.result_table.cellWidget(0, fp.RESULT_ADD_COLUMN)
+    assert cell.findChild(QPushButton) is None                    # 直接是"已在自选"
+    page.on_add_one_to_watchlist("600003", 0)                     # 硬调也不能重复加/改基准
+
+    with storage.connect(page_cfg.db_path) as conn:
+        rows = storage.load_watchlist(conn, enabled_only=False)
+    assert len(rows) == 1
+    assert float(rows[0]["added_price"]) == pytest.approx(5.0)     # 基准价没被改写
+    assert "已经在自选里了" in page.hint_text
+
+
+def test_quotes_provider_fills_price_cap_and_turnover(page) -> None:
+    """主窗口注入快照后：股价/市值/换手三列都用快照的数（取不到才是 —）。"""
+    page.set_quotes_provider(lambda symbol: {
+        "price": 12.34, "circ_mktcap": 88.5, "turnover_rate": 3.21,
+    })
+    page.show_pick_result({"data_date": "2026-09-11",
+                           "pool": [{"symbol": "600003", "name": "丙样本",
+                                     "strategy": "公式·放量上攻"}]})
+
+    assert page.result_table.item(0, 1).text() == "12.34"          # 不带 `*`（实时价）
+    assert page.result_table.item(0, 2).text() == "88.50亿"
+    assert page.result_table.item(0, 3).text() == "3.21%"
+    # 快照里没有这两项时回到 —（不是 0）
+    page.set_quotes_provider(lambda symbol: {"price": 12.34})
+    page.show_pick_result({"data_date": "2026-09-11",
+                           "pool": [{"symbol": "600003", "name": "丙样本",
+                                     "strategy": "公式·放量上攻"}]})
+    assert page.result_table.item(0, 2).text() == "—"
+    assert page.result_table.item(0, 3).text() == "—"
 
 
 def test_result_view_only_lists_picks_not_my_own_watchlist(page) -> None:
@@ -2037,8 +2119,19 @@ def test_overlong_note_is_rejected_not_truncated(page) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 15) 载入示例
+# 15) 【新策略】（旧名【载入示例】，2026-09-21 只改名字、行为一字未变）
 # ══════════════════════════════════════════════════════════════════════════
+
+
+def test_sample_button_is_named_new_strategy(page) -> None:
+    """按钮上的字是【新策略】（主人 2026-09-21 要求改名），工具提示说清它是"新建一条"。"""
+    assert fp.SAMPLE_BUTTON_TEXT == "新策略"
+    assert page.btn_sample.text() == "新策略"
+    assert "载入示例" not in page.btn_sample.text()
+    tip = page.btn_sample.toolTip()
+    assert "新建" in tip
+    # 行为没变：点它照样是把一条能跑通的公式放进编辑框（下面那些用例守着）
+    assert callable(page.on_load_sample)
 
 
 def test_load_sample_falls_back_to_builtin_when_dir_empty(page) -> None:
