@@ -7715,6 +7715,15 @@ if QT_AVAILABLE:
                 if dialog is None:
                     continue
                 try:
+                    # 授权对话框里有一条**后台线程在读机器码**（Windows 上要起 PowerShell，
+                    # 一两秒）：先等它结束再销毁窗口 —— 否则它会活过自己服务的那个窗口，
+                    # 随后往已析构的对象发信号，表现就是 CI "跑到半路中止、没有失败记录"。
+                    stop_dialog = getattr(dialog, "shutdown", None)
+                    if callable(stop_dialog):
+                        stop_dialog()
+                except Exception:  # noqa: BLE001
+                    logger.debug(f"收 {attr} 的后台线程失败", exc_info=True)
+                try:
                     dialog.close()
                     dialog.deleteLater()
                 except Exception:  # noqa: BLE001

@@ -53,6 +53,10 @@ DEFAULT_TITLE = "软件授权"
 #: 机器码还没算出来时那一栏显示的占位（主人 2026-09-21："客户要注册的时候再去读"）
 MACHINE_PLACEHOLDER = "正在读取…"
 
+#: 收尾时等机器码线程的上限（秒）。Windows 上那道查询要起 PowerShell，
+#: 给足 5 秒；这是**退出/测试收尾**路径，多等一会儿不影响用户手感。
+MACHINE_JOIN_SECONDS = 5.0
+
 #: 顶部说明的两句话（按状态二选一）——**一眼看出"我该怎么办"**
 INTRO_TRIAL = "本软件免费试用 {days} 天。把下面的机器码发给作者，可以换成永久授权。"
 INTRO_EXPIRED = "免费试用已到期。把下面的机器码发给作者换取注册码，填进下面就能继续用。"
@@ -84,6 +88,8 @@ if QT_AVAILABLE:
             # 后台线程算完再填上（同一进程里只算一次，`licensing.machine_code` 自己缓存）。
             # 校验"这份注册码是不是本机的"也放在拿到机器码之后做。
             self.status = status if isinstance(status, dict) else licensing.license_status(cfg)
+            #: 读机器码那条线程（收尾要 join；见 `shutdown()`）
+            self._machine_thread: Any = None
             self.machine = str(self.status.get("machine") or "")
             self._machine_ready.connect(self._on_machine_ready)
 
@@ -186,9 +192,16 @@ if QT_AVAILABLE:
             if self.machine:
                 return                       # 已经有值（调用方传进来的状态里带了机器码）
             try:
-                threading.Thread(
+                # 线程引用**必须留着**：收尾时要 join 它。
+                # 2026-09-21 的教训：Windows 上这道查询要起 PowerShell（一两秒），
+                # 而用例/退出路径可能在它还在飞的时候就把对话框销毁 —— 线程随后
+                # `self._machine_ready.emit(...)` 打到已析构的 C++ 对象上，
+                # 表现就是 CI "跑到半路中止、没有任何用例失败记录"（Linux 上算得飞快，
+                # 永远碰不到）。见 `LicenseDialog.shutdown()`。
+                self._machine_thread = threading.Thread(
                     target=self._lookup_machine, daemon=True, name="license-machine"
-                ).start()
+                )
+                self._machine_thread.start()
             except Exception as exc:  # noqa: BLE001 - 起不了线程就退回同步算（宁可顿一下）
                 logger.debug(f"机器码查询线程没起来，改为同步：{exc}")
                 self._on_machine_ready(licensing.machine_code())
@@ -199,7 +212,7 @@ if QT_AVAILABLE:
                 machine = licensing.machine_code()
             except Exception as exc:  # noqa: BLE001 - 算不出来也要给个说法
                 logger.warning(f"机器码算不出来：{exc}")
-                self._machine_ready.emit("")
+                self._emit_machine("")
                 return
             # 拿到机器码之后才校验注册码与本机是否匹配（`verify_machine=True`）：
             # 这正是"要注册的时候才读机器码"的落点 —— 平时那条路一次都不读。
@@ -207,7 +220,37 @@ if QT_AVAILABLE:
                 self.status = licensing.license_status(self.cfg, verify_machine=True)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"校验授权状态失败：{exc}")
-            self._machine_ready.emit(machine)
+            self._emit_machine(machine)
+
+        def _emit_machine(self, machine: str) -> None:
+            """线程侧发信号（**对象可能已经被销毁**，所以这里必须兜住）。
+
+            对话框是"用完即弃"的顶层窗口：用户点关闭、或者测试收尾把它收掉之后，
+            那条还在跑的机器码线程会走到这里 —— `RuntimeError: Internal C++ object
+            already deleted` 不吞掉的话，线程会带着 traceback 退出，运气不好就是
+            "跑到半路中止、没有失败记录"。
+            """
+            try:
+                self._machine_ready.emit(machine)
+            except RuntimeError:            # 底层 C++ 对象已销毁：安静退出
+                logger.debug("授权对话框已销毁，机器码结果丢弃")
+
+        def shutdown(self) -> None:
+            """确定性收尾：**等那条读机器码的线程结束**（可重复调用）。
+
+            为什么必须等（2026-09-21 CI 实测）：Windows 上算机器码要起 PowerShell
+            （几百毫秒到一两秒），而退出路径/测试收尾可能在它还在飞的时候就销毁对话框 ——
+            于是线程活过了"它服务的那个窗口"，成为那种"日志停在半路、没有任何失败记录"
+            的中途崩溃。Linux 上算得快，永远看不到这个现象。
+            """
+            thread = getattr(self, "_machine_thread", None)
+            if thread is None:
+                return
+            try:
+                if thread.is_alive():
+                    thread.join(timeout=MACHINE_JOIN_SECONDS)
+            except Exception:  # noqa: BLE001 - 收尾失败不该挡住退出
+                logger.debug("等机器码线程结束失败", exc_info=True)
 
         @Slot(str)
         def _on_machine_ready(self, machine: str) -> None:
