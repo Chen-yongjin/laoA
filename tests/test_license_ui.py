@@ -110,6 +110,10 @@ def test_dialog_shows_machine_code_and_register_controls(window, qapp, cfg) -> N
     dialog = window.license_dialog
 
     assert dialog is not None
+    # 机器码是**打开对话框时在后台线程里读**的（为了"点一下不卡"，见 licensing 那段注释），
+    # 所以这里必须等它落地再断言 —— 不等就是个竞态：本机（Linux，快）常绿，
+    # Windows runner 上偶发红（2026-09-21 就是这么红的）。
+    _wait_machine(dialog, qapp)
     assert dialog.machine == L.machine_code()
     assert dialog.machine_label.text() == dialog.machine
     assert dialog.code_edit.placeholderText() == "XXXX-XXXX-XXXX-XXXX"
@@ -136,6 +140,7 @@ def test_dialog_register_unlocks_immediately(window, qapp, cfg) -> None:
     """填对：当场生效（不用重启），状态行立刻变成"已注册"。"""
     window.on_open_license()
     dialog = window.license_dialog
+    _wait_machine(dialog, qapp)
     dialog.code_edit.setText(L.expected_code(dialog.machine))
 
     dialog.btn_register.click()
@@ -153,6 +158,8 @@ def test_dialog_copy_machine_puts_it_in_the_clipboard(window, qapp) -> None:
     window.on_open_license()
     dialog = window.license_dialog
 
+    # 先等机器码读出来再点复制：那一栏是后台线程填的，机器码还没到手时复制到的是空串
+    _wait_machine(dialog, qapp)
     dialog.btn_copy_machine.click()
 
     assert QGuiApplication.clipboard().text() == dialog.machine
@@ -214,6 +221,7 @@ def test_editor_unlocks_after_registering(window, qapp, cfg) -> None:
     page = window.formula_page
     window.on_open_license()
     dialog = window.license_dialog
+    _wait_machine(dialog, qapp)
     dialog.code_edit.setText(L.expected_code(dialog.machine))
     dialog.btn_register.click()
     qapp.processEvents()
