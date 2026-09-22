@@ -1570,8 +1570,15 @@ if QT_AVAILABLE:
             if rank:
                 up, down = sector_rank_tables(rank, industries, limit_down=down_counts)
                 if up or down:
+                    # ⚠️ 要按**每张表实际显示的那一列**判"没对上"：上涨表看
+                    # `limit_up`、下跌表看 `limit_down`。原来两张表都查 `limit_up`，
+                    # 于是下跌那五个板块（本来就没有涨停）永远被判成"没对应行业"，
+                    # 页脚会挂一句"数量列显示 —：交通运输、钢铁…"——**而它们的分明显示了数字**。
+                    # 这行小字是给用户解释"为什么有空列"的，说错比不说更糟（2026-09-23 截图时发现）。
                     unmatched = [
-                        row["name"] for row in up + down if row["limit_up"] is None
+                        row["name"] for row in up if row["limit_up"] is None
+                    ] + [
+                        row["name"] for row in down if row["limit_down"] is None
                     ]
                     note = ("口径：涨幅 = 板块**当天**涨跌幅；涨停数量 = 当日该板块涨停家数"
                             "（本地涨停池，与选股同一套）；跌停数量 = 当日该板块跌停家数"

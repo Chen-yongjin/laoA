@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import types
 import threading
 import time
 from datetime import datetime, timedelta
@@ -4340,6 +4341,55 @@ def test_sector_payload_uses_the_sector_module_when_available(monkeypatch) -> No
     payload = ui_app.sector_payload(object(), industries)
     assert payload["source"] == "local"
     assert "没返回数据" in payload["note"]
+
+
+def test_the_unmatched_note_checks_the_column_each_table_actually_shows(monkeypatch) -> None:
+    """页脚那句"哪些板块没对上"要按**每张表显示的那一列**判，不能两张表都查涨停家数。
+
+    起因（2026-09-23 抓分发截图时发现的真 bug）：原来 `unmatched` 只查 `limit_up`，
+    而"下跌前五"显示的是**跌停家数** —— 下跌那几个板块本来就没有涨停，于是页脚永远挂着
+    "这些板块名在本地行业表里没有对应行业，数量列显示 —：交通运输、钢铁…"，
+    **可它们的数字明明显示了**。这行小字是给用户解释"为什么有空列"的，说错比不说更糟。
+    """
+    from laoa_trader.ui import app as ui_app
+
+    # 11 个板块：涨的 6 个 + 跌的 5 个 —— 这样两张表**不重叠**，
+    # "上涨表看涨停家数、下跌表看跌停家数"这件事才验得出来
+    up_names = [f"涨{i}" for i in range(6)]
+    down_names = [f"跌{i}" for i in range(5)]
+    rank = (
+        [{"name": name, "pct": 3.0 - 0.1 * i, "main_net": 1e8} for i, name in enumerate(up_names)]
+        + [{"name": name, "pct": -1.0 - 0.1 * i, "main_net": -1e8}
+           for i, name in enumerate(down_names)]
+    )
+
+    class FakeSectors:
+        def fetch_sector_rank(self, *args, **kwargs):
+            return rank
+
+    monkeypatch.setattr(ui_app, "sectors_module", lambda: FakeSectors())
+    # 传一个带 `db_path` 的假配置：`sector_payload` 会拿它去算跌停家数
+    cfg = types.SimpleNamespace(db_path="演示.db")
+    industries = {name: {"limit_up": 3, "mom": 0.03} for name in up_names}
+    down_counts = {name: 2 for name in down_names}
+
+    monkeypatch.setattr(ui_app.pool, "limit_down_industries",
+                        lambda *a, **k: down_counts, raising=False)
+    payload = ui_app.sector_payload(cfg, industries)
+    assert [row["name"] for row in payload["up"]] == up_names[:5]
+    # 下跌前五按涨幅**升序**（跌得最狠的在最上面）
+    assert [row["name"] for row in payload["down"]] == list(reversed(down_names))
+    assert payload["up"][0]["limit_up"] == 3
+    assert payload["down"][0]["limit_down"] == 2
+    # 两列都有数 → 页脚**不许**再说"没对应行业"
+    assert "没有对应行业" not in payload["note"]
+
+    # 反过来：真有一列对不上（本地没有跌停家数）→ 这句话要出现，并且点名是哪个板块
+    monkeypatch.setattr(ui_app.pool, "limit_down_industries",
+                        lambda *a, **k: {}, raising=False)
+    payload = ui_app.sector_payload(cfg, industries)
+    assert "没有对应行业" in payload["note"] and down_names[-1] in payload["note"]
+    assert payload["up"][0]["limit_up"] == 3          # 上涨那一列照样有数
 
 
 def test_sectors_module_import_is_defensive(monkeypatch) -> None:
