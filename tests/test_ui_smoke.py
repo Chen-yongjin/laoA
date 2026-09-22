@@ -1936,11 +1936,15 @@ def test_about_copy_version_info_to_clipboard(window, qapp) -> None:
     qapp.processEvents()
 
     lines = QApplication.clipboard().text().splitlines()
+    # 2026-09-21 起多了「公式引擎」那一行：用户报障贴这份文本时，
+    # 一行就能看出他跑的是哪个版本、引擎认识多少函数（旧包是短清单）。
     assert lines == [
         "老牛选股",
         f"版本：{laoa_trader.__version__}",
+        window.about_lines()[2],
         "版权所有 © 2026 async-chen，保留所有权利。",
     ]
+    assert lines[2].startswith("公式引擎：") and "支持" in lines[2]
     assert "已复制版本信息" in window.status_label.fullText()
 
 

@@ -414,6 +414,22 @@ _TDX_PERIOD_WORDS = (
 )
 
 
+def engine_stamp() -> str:
+    """一句话的"引擎自报家门"：`（本程序 v1.1.0，公式引擎支持 70 个函数）`。
+
+    用途只有一个：**用户贴报错原文时，我们能立刻分清"他打错了"还是"他在用旧包"**。
+    旧包的可用函数清单是短清单（19 个那种），与这里报的数字一比就清楚，
+    不必再来回问他版本。取不到版本号时只报函数个数（绝不让它抛异常 ——
+    这句话本身只是给排查用的，不能成为新的报错来源）。
+    """
+    try:
+        from laoa_trader import __version__ as version
+    except Exception:  # noqa: BLE001 - 兜底：版本取不到就不写版本
+        version = ""
+    head = f"（本程序 v{version}，" if version else "（"
+    return head + f"公式引擎支持 {len(SUPPORTED_FUNCTIONS)} 个函数）"
+
+
 def _looks_like_tdx_period(text: str, index: int) -> bool:
     """`text[index]` 是 `#`，后面是不是跟着一个周期关键字（`#WEEK` / `#MIN5`…）。
 
@@ -1781,7 +1797,7 @@ FUNCTIONS: dict[str, _FuncSpec] = {
     # 通达信内置：涨/跌停价（第二个参数 = 涨跌幅比例，0.1 = 10%，可省 → 按 10%）
     # 通达信 FINANCE(财务/股本)：本地没有财务数据，按主人指定的口径**等同流通市值**（亿元）
     # `uses_fields` 必须登记 流通市值：否则公式不会去取实时快照那一趟数据（永远取不到值）
-    "FINANCE": _FuncSpec(0, 2, _NUM, (_NUM, _NUM), _impl_finance,
+    "FINANCE": _FuncSpec(0, 4, _NUM, (_NUM, _NUM), _impl_finance,
                          uses_fields=("流通市值",)),
     "ZTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_ztprice),
     "DTPRICE": _FuncSpec(1, 2, _NUM, (_NUM, _NUM), _impl_dtprice),
@@ -2391,7 +2407,12 @@ class _Parser:
             near = difflib.get_close_matches(upper, list(FUNCTIONS), n=1, cutoff=0.55)
             hint = (f'是不是想写 "{near[0]}"？' if near else "") + (
                 "可用函数：" + "、".join(SUPPORTED_FUNCTIONS)
-            )
+            ) + engine_stamp()
+            # 上面这句 `engine_stamp()` 是**排查用**的：用户把报错原文贴过来时，
+            # 这句话直接告诉我们他跑的是哪个版本、引擎认识多少函数 ——
+            # 2026-09-21 就靠这个才不用反复猜"你是不是还在用旧包"。
+            # 版本号是懒加载的（`laoa_trader/__init__` 会 import config，
+            # 引擎在导入期不依赖它，只能在这里按需取）。
             raise FormulaError(
                 f'未知函数 "{tok.value}"',
                 line=tok.line, col=tok.col, code="unknown_function", hint=hint,
@@ -3246,6 +3267,7 @@ __all__ = [
     "MAX_FORMULA_LINES",
     "MAX_WINDOW",
     "SUPPORTED_FUNCTIONS",
+    "engine_stamp",
     "Formula",
     "FormulaDataError",
     "FormulaError",

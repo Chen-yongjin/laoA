@@ -7387,6 +7387,10 @@ if QT_AVAILABLE:
             return [
                 APP_NAME,
                 f"版本：{laoa_trader.__version__}",
+                # 公式引擎的"自报家门"：用户报障时贴这一份，就能立刻分清
+                # "公式写错了"还是"他在用旧包"（旧包的可用函数是短清单）。
+                # 与报错里的那句同源（`formula.engine_stamp()`），不另造一份。
+                "公式引擎：" + self._engine_stamp_plain(),
                 "作者 / 版权所有人：async-chen",
                 COPYRIGHT_TEXT,
                 SOURCE_TEXT,
@@ -7395,10 +7399,30 @@ if QT_AVAILABLE:
                 self.license_status_line(),
             ]
 
+        @staticmethod
+        def _engine_stamp_plain() -> str:
+            """「关于」里那一行（不带括号、去掉"本程序"）：`v1.1.0，支持 71 个函数`。
+
+            与报错里那句同源（`strategy.formula.engine_stamp()`）—— 这里**局部导入**，
+            免得为了「关于」这一行把公式引擎拉进模块级的导入链。
+            """
+            from laoa_trader.strategy import formula as formula_mod
+
+            stamp = formula_mod.engine_stamp()
+            return stamp.strip("（）").replace("本程序 ", "").replace("公式引擎支持", "支持")
+
         def version_info_text(self) -> str:
-            """报障时要贴给作者的三行：名称 / 版本 / 版权。"""
-            lines = self.about_lines()
-            return "\n".join((lines[0], lines[1], lines[3]))
+            """报障时要贴给作者的几行：名称 / 版本 / 公式引擎 / 版权。
+
+            **按前缀挑行、不按下标**：正文行会变（2026-09-21 就加过"公式引擎"那一行），
+            写死下标会让"复制版本信息"悄悄复制到隔壁那一句 —— 而这份文本正是用户报障时
+            贴出来的东西，复制错了等于把排查线索换成了噪音。
+            公式引擎那一行是刻意放进去的：**它一眼就能分清"公式写错了"还是"在用旧包"**。
+            """
+            wanted = ("版本：", "公式引擎：", "版权所有")
+            picked = [line for line in self.about_lines()
+                      if line.startswith(wanted) or line == APP_NAME]
+            return "\n".join(picked)
 
         @staticmethod
         def _about_icon_label() -> Any:

@@ -18,12 +18,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from laoa_trader.strategy import formula as fm
 
 from tests.test_formula import make_series
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _eval(text: str, series: fm.Series) -> np.ndarray:
@@ -478,3 +482,37 @@ def test_finance_gets_a_non_blocking_note_in_validate() -> None:
     assert "流通市值" in blob and "通达信" in blob and "财务" in blob
     # 没用这个函数的公式不该被提醒
     assert lib.tdx_compat_notes(fm.compile_formula("C>MA(C,5)")) == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 六、报错里带上"引擎自报家门"（版本 + 函数个数）
+#
+# 为什么加这一句：主人两次贴来 `未知函数 "FINANCE"`，而 main 上它明明已经支持了 ——
+# 每次都靠猜"他是不是还在用旧包"。把版本与函数个数写进报错原文之后，
+# 他下次贴过来的那句话本身就能回答这个问题（旧包的清单短得多）。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_unknown_function_hint_carries_version_and_function_count() -> None:
+    """未知函数的提示里必须有"本程序 vX.Y.Z + 支持 N 个函数"。"""
+    import laoa_trader
+
+    with pytest.raises(fm.FormulaError) as err:
+        fm.compile_formula("X:=MAA(C,5);\nX>0")
+
+    hint = err.value.hint or ""
+    assert laoa_trader.__version__ in hint, "提示里要带版本号（用来分辨旧包）"
+    assert f"支持 {len(fm.SUPPORTED_FUNCTIONS)} 个函数" in hint, "提示里要带函数个数"
+
+
+def test_engine_stamp_is_the_single_source_for_the_version_line() -> None:
+    """`engine_stamp()` 一句话里同时有版本与函数个数；「关于」那一行与它同源。"""
+    import laoa_trader
+
+    stamp = fm.engine_stamp()
+    assert laoa_trader.__version__ in stamp
+    assert str(len(fm.SUPPORTED_FUNCTIONS)) in stamp
+
+    # 界面上（无 Qt 环境也能验的部分）：那段文案由 engine_stamp 派生，不另造一份
+    source = (ROOT / "src" / "laoa_trader" / "ui" / "app.py").read_text(encoding="utf-8")
+    assert "engine_stamp()" in source, "「关于」里那一行要与报错同源（engine_stamp）"
