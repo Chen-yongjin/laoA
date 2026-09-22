@@ -1823,6 +1823,11 @@ if QT_AVAILABLE:
             hint = formulas_lib.limit_up_hint(formula)
             if hint:
                 lines.append("⚠️ " + hint)
+            # 通达信兼容层（2026-09-21）：编译时被**忽略**的东西要在这里说出来 ——
+            # 用户从网上抄来的公式常带画图语句与样式修饰，不说明的话他会以为
+            # "我那句画线生效了"，或者更糟：以为整条公式都跑到了。
+            for note in getattr(formula, "notes", ()) or ():
+                lines.append("ℹ️ " + str(note))
             self._set_hint("\n".join(lines))
 
         def on_preview(self) -> None:

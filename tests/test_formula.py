@@ -555,7 +555,9 @@ def test_unsupported_syntax_gives_chinese_errors() -> None:
     cases = {
         "C[0]": "下标",
         '"a"+"b"': "字符串",
-        "C>0;": "分号",
+        # 2026-09-21 起 `;` 是**合法的语句分隔符**（通达信写法，见 test_tdx_compat.py），
+        # 所以这里改用真正不支持的字符来钉"报错要说人话"这条
+        "C>0 ? 1 : 0": "不认识的字符",
         "C&O": "不认识的字符",
         "C^2": "不认识的字符",
         "C%2": "不认识的字符",
@@ -603,11 +605,18 @@ def test_window_argument_must_be_constant_at_runtime() -> None:
     assert excinfo.value.code == "window"
 
 
-def test_variable_name_cannot_shadow_field_or_function() -> None:
+def test_variable_name_cannot_shadow_field_but_may_shadow_function() -> None:
+    """字段名不许覆盖；**函数名允许被赋值覆盖**（2026-09-21，通达信兼容）。
+
+    为什么改了这条：通达信的经典 KDJ 写法就是 `RSV:=…; K:=SMA(RSV,3,1);`，
+    而 RSV/K/D/J 同时也是我们的函数名 —— 一律拒绝等于"最经典的公式一条都跑不了"。
+    字段名（C/O/H/L/V…）仍然禁止：那会让后面的 `C` 突然变成用户自己的变量。
+    """
     err = compile_error("C:=1\nC>0")
     assert "与内置字段同名" in str(err)
-    err2 = compile_error("MA:=1\nMA>0")
-    assert "与内置函数同名" in str(err2)
+
+    formula = fm.compile_formula("MA:=1\nMA>0")      # 函数名当变量：允许
+    assert formula is not None
 
 
 def test_logic_requires_real_conditions() -> None:
@@ -667,10 +676,10 @@ def test_every_bad_input_raises_formula_error() -> None:
         "C", "MA(C,5)", "V", "C+1", "M5:=MA(C,5)",
         "C>0\nD:=1", "import os", "from os import path", "def f()", "class A",
         "lambda x: x", "__class__", "__import__", "_x>0", "C.x", "C[0]", "C[0:1]",
-        '"a"+"b"', "INDUSTRY+'a'", "C>0;", "C&O", "C|O", "C^2", "C%2", "C@O", "C$O",
+        '"a"+"b"', "INDUSTRY+'a'", "C>0 ? 1 : 0", "C&O", "C|O", "C^2", "C%2", "C@O", "C$O",
         "C~O", "?", "1<C<5", "MA(C)", "MA(C,5,6)", "MA()", "CROSS(C)", "IF(C>0,1)",
         "MA(C,0)", "MA(C,-1)", "MA(C,1.5)", "MA(C,100000)", "REF(C,-1)",
-        "C:=1\nC>0", "MA:=1\nMA>0", "MA", "NOT C", "C AND O", "COUNT(V,10)>0",
+        "C:=1\nC>0", "MA", "NOT C", "C AND O", "COUNT(V,10)>0",
         "TRUE", "FALSE", "NONE", "INDUSTRY IN ()", "INDUSTRY IN (1,2)",
         "INDUSTRY IN \"a\"", "INDUSTRY>\"a\"", "C>" + "(" * 80 + "0" + ")" * 80,
         ";", "}", "{ 未闭合", '"未闭合', "C>0 AND " + "C>0 AND " * 300 + "C>0",

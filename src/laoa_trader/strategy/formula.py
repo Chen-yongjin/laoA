@@ -325,10 +325,38 @@ _FULLWIDTH = {
 }
 
 #: 双字符运算符（**必须先于单字符匹配**，否则 `>=` 会被拆成 `>` `=`）
-_TWO_CHAR_OPS = (">=", "<=", "!=", "&&", "||")
+_TWO_CHAR_OPS = (">=", "<=", "!=", "&&", "||", "<>")
 #: 符号写法 → 规范写法。求值器只认规范名，所以归一化必须在**词法期**做一次，
 #: 否则 `&&` 会一路以自身的形式流到解析器（表现为一句莫名其妙的"一行只能写一条语句"）。
-_SYMBOL_ALIASES = {"&&": "AND", "||": "OR"}
+_SYMBOL_ALIASES = {"&&": "AND", "||": "OR", "<>": "!="}
+#: `<>` 是通达信/易语言的"不等于"，内部只有 `!=` —— 词法期就归一，
+#: 解析器与求值器一处都不用改。
+
+#: 通达信的输出样式修饰符（写在表达式后面、用逗号引出）：`MA5:MA(C,5),COLORRED;`
+#: 它们只影响**画线外观**，对选股没有任何意义 —— 一律**吃掉、不报错**，
+#: 但会记一条 note（`Formula.notes`），界面上告诉用户"样式修饰已被忽略"。
+_STYLE_MODS: frozenset[str] = frozenset({
+    "COLOR", "COLORRED", "COLORGREEN", "COLORBLUE", "COLORYELLOW", "COLORWHITE",
+    "COLORBLACK", "COLORCYAN", "COLORMAGENTA", "COLORGRAY", "COLORLIGRAY",
+    "COLORLIRED", "COLORLIGREEN", "COLORLIBLUE",
+    "LINETHICK", "LINETHICK1", "LINETHICK2", "LINETHICK3", "LINETHICK4",
+    "LINETHICK5", "LINETHICK6", "LINETHICK7",
+    "STICK", "VOLSTICK", "COLORSTICK", "LINESTICK", "CROSSDOT", "CIRCLEDOT",
+    "POINTDOT", "DOTLINE", "NODRAW", "NOAXIS", "PRECISION", "PRECIS",
+    "SHIFT", "LAYER", "MOVE", "VAR", "ALIGN",
+})
+
+#: 画图类语句（整句跳过）：它们产出的是图形而不是序列，选股用不到。
+#: 为什么"忽略"而不是"报错"：通达信的选股公式里常顺手带一句画线/标记，
+#: 报错就等于"网上下来的公式一条都跑不了"；忽略它并在界面上说明，
+#: 用户拿到的才是"能用的那部分条件"。
+_DRAWING_FUNCS: frozenset[str] = frozenset({
+    "DRAWICON", "DRAWTEXT", "DRAWNUMBER", "DRAWLINE", "DRAWKLINE", "DRAWGBK",
+    "DRAWBAND", "DRAWNULL", "DRAWRECTREL", "DRAWSL", "DRAWCHANNEL",
+    "POLYLINE", "PLOYLINE", "STICKLINE", "VERTLINE", "HORLINE", "PARTLINE",
+    "DRAWTEXT_FIX", "DRAWICON_FIX", "DRAWNUMBER_FIX", "DRAWLINE_FIX",
+    "SETTEXT", "DRAWBK", "FILLRGN", "RGB",
+})
 #: 单字符运算符（`=` 也是相等比较；`:=` 在赋值里单独处理）
 _ONE_CHAR_OPS = ("+", "-", "*", "/", ">", "<", "=")
 #: 比较运算符（"连续比较"拦截用）
@@ -1084,6 +1112,461 @@ def _impl_vol_ratio(ev: _Evaluator, node: _Call, vals: list) -> Any:
 
 
 #: 函数白名单：**只有这里的名字能被调用**（解析期查表，表外一律报错）
+# ══════════════════════════════════════════════════════════════════════════
+# 通达信（TDX）兼容层：补齐选股公式里高频出现的函数
+#
+# 为什么要有这一块：主人要求"通达信公式进来直接能跑"。下面这些函数在 TDX 的选股
+# 公式里出现率极高（KDJ/RSI/BOLL、EXIST/EVERY/BETWEEN、SMA/DMA……），
+# 缺一个就整条公式报错。实现口径**照 TDX 官方定义**，关键几处写在各自的注释里：
+#   * `SMA(X,N,M)` 是**加权递推**，与 `MA` 不是一回事（这是最常见的误用）；
+#   * 滚动窗口一律"窗口不足 → NaN"（与本模块一贯口径一致，缺值不产生信号）；
+#   * 有状态函数（SMA/DMA/FILTER/VALUEWHEN/SUMBARS/OBV）用手写循环，
+#     因为它们的定义本身就是逐根递推的，用向量化改写反而容易算错。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _cond_window(cond: Any, window: int, n: int, mode: str) -> np.ndarray:
+    """条件型窗口统计（EXIST / EVERY / UPNDAY / NDAY 共用）。
+
+    `mode="any"` = 窗口内出现过；`"all"` = 窗口内全部成立。
+    窗口里有**缺值**（不知道那天算不算）时整格 NaN —— 与本模块 `COUNT` 同一口径：
+    缺数据不能下结论。
+    """
+    flags = _as_cond_float(cond, n)
+    known = _roll_sum(np.where(np.isnan(flags), 0.0, 1.0), window, n)
+    total = _roll_sum(np.nan_to_num(flags, nan=0.0), window, n)
+    with np.errstate(all="ignore"):
+        full = known == float(window)
+        val = (total > 0.0) if mode == "any" else (total == float(window))
+        return np.where(full, val.astype("float64"), np.nan)
+
+
+def _impl_exist(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    return _cond_window(vals[0], ev.win(vals[1], node.args[1]), ev.n, "any")
+
+
+def _impl_every(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    return _cond_window(vals[0], ev.win(vals[1], node.args[1]), ev.n, "all")
+
+
+def _impl_between(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """BETWEEN(X,A,B)：X 在 A、B 之间（**谁大谁小都认**，照 TDX 的"介于两者之间"）。"""
+    x, a, b = (_as_float(v) for v in vals[:3])
+    lo, hi = np.minimum(a, b), np.maximum(a, b)
+    with np.errstate(all="ignore"):
+        ok = (x >= lo) & (x <= hi)
+    return np.where(np.isnan(x) | np.isnan(lo) | np.isnan(hi), np.nan, ok.astype("float64"))
+
+
+def _impl_upnday(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """UPNDAY(X,N)：X 连续 N 根上涨（逐根比上一根高）。"""
+    x = _broadcast(vals[0], ev.n)
+    up = x > _ref(x, 1, ev.n)
+    return _cond_window(up, ev.win(vals[1], node.args[1]), ev.n, "all")
+
+
+def _impl_downnday(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    x = _broadcast(vals[0], ev.n)
+    down = x < _ref(x, 1, ev.n)
+    return _cond_window(down, ev.win(vals[1], node.args[1]), ev.n, "all")
+
+
+def _impl_nday(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """NDAY(X,Y,N)：X 连续 N 根大于 Y。"""
+    ge = _as_float(vals[0]) > _as_float(vals[1])
+    return _cond_window(ge, ev.win(vals[2], node.args[2]), ev.n, "all")
+
+
+def _impl_filter(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """FILTER(COND,N)：COND 成立后，**紧接着的 N-1 根不再输出**（信号去重）。
+
+    逐根递推实现（TDX 的定义就是这个语义）；缺值当"不成立"处理。
+    """
+    flags = _as_cond_float(vals[0], ev.n)
+    window = ev.win(vals[1], node.args[1])
+    out = np.full(ev.n, np.nan, dtype="float64")
+    mute_until = -1
+    for i in range(ev.n):
+        f = flags[i]
+        if np.isnan(f):
+            out[i] = np.nan
+            continue
+        out[i] = 0.0
+        if i <= mute_until:
+            continue
+        if f == 1.0:
+            out[i] = 1.0
+            mute_until = i + window - 1
+    return out
+
+
+def _impl_bars_since(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """BARSSINCE(COND)：COND 首次成立到现在的根数（之前是 NaN）。"""
+    flags = _as_cond_float(vals[0], ev.n)
+    out = np.full(ev.n, np.nan, dtype="float64")
+    first = -1
+    for i in range(ev.n):
+        if first < 0 and flags[i] == 1.0:
+            first = i
+        if first >= 0:
+            out[i] = float(i - first)
+    return out
+
+
+def _impl_barscount(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """BARSCOUNT(X)：到当前为止**有效**（非缺值）的根数。"""
+    x = _broadcast(vals[0], ev.n)
+    valid = ~np.isnan(x)
+    return np.cumsum(valid).astype("float64")
+
+
+def _impl_longcross(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """LONGCROSS(A,B,N)：前 N 根 A 都小于 B，本根 A 上穿 B（"长期压制后的金叉"）。"""
+    a, b = _as_float(vals[0]), _as_float(vals[1])
+    n_back = ev.win(vals[2], node.args[2])
+    below = a < b
+    kept = _cond_window(below, n_back, ev.n, "all")
+    crossed = _cross(a, b, ev.n)
+    with np.errstate(all="ignore"):
+        return np.where(np.isnan(kept) | np.isnan(crossed), np.nan,
+                        ((kept == 1.0) & (crossed == 1.0)).astype("float64"))
+
+
+def _impl_valuewhen(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """VALUEWHEN(COND,X)：取**最近一次** COND 成立那根的 X（往后一直沿用）。
+
+    用途很典型：`VALUEWHEN(CROSS(MA(C,5),MA(C,10)),C)` = "上次金叉时的价格"。
+    在第一次成立之前是 NaN（那时候这个值还不存在，不能拿当前值凑）。
+    """
+    flags = _as_cond_float(vals[0], ev.n)
+    x = _as_float(vals[1])
+    out = np.full(ev.n, np.nan, dtype="float64")
+    last = np.nan
+    for i in range(ev.n):
+        if flags[i] == 1.0 and not np.isnan(x[i]):
+            last = x[i]
+        out[i] = last
+    return out
+
+
+def _impl_last(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """LAST(COND,A,B)：从 A 根前到 B 根前，COND 一直成立（A>B，B 常写 0）。"""
+    flags = _as_cond_float(vals[0], ev.n)
+    a = ev.win(vals[1], node.args[1], minimum=0, code="window")
+    b = ev.win(vals[2], node.args[2], minimum=0, code="window")
+    lo, hi = min(a, b), max(a, b)
+    out = np.full(ev.n, np.nan, dtype="float64")
+    for i in range(ev.n):
+        if i - hi < 0:
+            continue
+        seg = flags[i - hi: i - lo + 1]
+        if np.any(np.isnan(seg)):
+            out[i] = np.nan
+        else:
+            out[i] = 1.0 if np.all(seg == 1.0) else 0.0
+    return out
+
+
+def _impl_hhvbars(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """HHVBARS(X,N)：近 N 根里最高值出现在**多少根之前**（0 = 就是本根）。"""
+    x = _broadcast(vals[0], ev.n)
+    window = ev.win(vals[1], node.args[1])
+    out = np.full(ev.n, np.nan, dtype="float64")
+    if window < 1 or ev.n < window:
+        return out
+    for i in range(window - 1, ev.n):
+        seg = x[i - window + 1: i + 1]
+        if np.all(np.isnan(seg)):
+            continue
+        out[i] = float(window - 1 - int(np.nanargmax(seg)))
+    return out
+
+
+def _impl_llvbars(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    x = _broadcast(vals[0], ev.n)
+    window = ev.win(vals[1], node.args[1])
+    out = np.full(ev.n, np.nan, dtype="float64")
+    if window < 1 or ev.n < window:
+        return out
+    for i in range(window - 1, ev.n):
+        seg = x[i - window + 1: i + 1]
+        if np.all(np.isnan(seg)):
+            continue
+        out[i] = float(window - 1 - int(np.nanargmin(seg)))
+    return out
+
+
+def _impl_sumbars(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """SUMBARS(X,N)：向前累加 X，达到 N 需要多少根（含当前根）。
+
+    典型用法：`SUMBARS(V, MA(V,20)*5)` = "几天才凑够 5 日均量"。
+    向后最多找 250 根（再远没意义，也避免长循环）；找不到就 NaN。
+    """
+    x = _broadcast(vals[0], ev.n)
+    target = _as_float(vals[1])
+    out = np.full(ev.n, np.nan, dtype="float64")
+    for i in range(ev.n):
+        need = target[i]
+        if np.isnan(need):
+            continue
+        acc = 0.0
+        for j in range(i, max(-1, i - 250), -1):
+            v = x[j]
+            if np.isnan(v):
+                break
+            acc += v
+            if acc >= need:
+                out[i] = float(i - j)
+                break
+    return out
+
+
+def _sma_tdx(x: Any, window: int, weight: int, n: int) -> np.ndarray:
+    """TDX 的 `SMA(X,N,M)`：`Y = (M*X + (N-M)*Y_prev) / N`，首值 = 第一根有效 X。
+
+    **它与 `MA`（简单平均）不是一回事**，这是粘通达信公式时最容易算错的一处：
+    `SMA(C,3,1)` 是"权重 1/3 的指数式平滑"，不是"3 日均价"。
+    """
+    arr = _broadcast(x, n)
+    m = float(weight)
+    nn = float(window)
+    out = np.full(n, np.nan, dtype="float64")
+    prev = np.nan
+    for i in range(n):
+        xi = arr[i]
+        if np.isnan(xi):
+            out[i] = prev
+            continue
+        prev = xi if np.isnan(prev) else (m * xi + (nn - m) * prev) / nn
+        out[i] = prev
+    return out
+
+
+def _impl_sma(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    # 第三个参数是权重 M（通达信里总是字面量），用 `ev.win` 取整数：它同时管住
+    # "必须是正整数常量"这条检查，省得自己再写一遍（M 大于 N 属于写法错误，也一并报出来）。
+    weight = ev.win(vals[2], node.args[2], minimum=1, code="weight")
+    return _sma_tdx(vals[0], ev.win(vals[1], node.args[1]), weight, ev.n)
+
+
+def _impl_dma(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """DMA(X,A)：动态移动平均 `Y = A*X + (1-A)*Y_prev`（A 可以是序列）。"""
+    x, a = _as_float(vals[0]), _as_float(vals[1])
+    out = np.full(ev.n, np.nan, dtype="float64")
+    prev = np.nan
+    for i in range(ev.n):
+        if np.isnan(x[i]) or np.isnan(a[i]):
+            out[i] = prev
+            continue
+        prev = x[i] if np.isnan(prev) else a[i] * x[i] + (1.0 - a[i]) * prev
+        out[i] = prev
+    return out
+
+
+def _impl_wma(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """WMA(X,N)：加权平均，越近权重越大（权重 N、N-1、…、1）。"""
+    x = _broadcast(vals[0], ev.n)
+    window = ev.win(vals[1], node.args[1])
+    w = np.arange(1, window + 1, dtype="float64")
+    total_w = float(w.sum())
+
+    def reducer(win: np.ndarray) -> np.ndarray:
+        return (win * w).sum(axis=1) / total_w
+
+    return _roll(x, window, reducer, ev.n)
+
+
+def _impl_var(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """VAR(X,N)：样本方差（除以 N-1，照 TDX 定义）。"""
+    x = _broadcast(vals[0], ev.n)
+    window = ev.win(vals[1], node.args[1])
+    if window < 2:
+        return np.full(ev.n, np.nan, dtype="float64")
+    return _roll(x, window, lambda w: np.nanvar(w, axis=1, ddof=1), ev.n)
+
+
+def _impl_stdp(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """STDP(X,N)：总体标准差（除以 N）。"""
+    x = _broadcast(vals[0], ev.n)
+    window = ev.win(vals[1], node.args[1])
+    return _roll(x, window, lambda w: np.nanstd(w, axis=1, ddof=0), ev.n)
+
+
+def _impl_avedev(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """AVEDEV(X,N)：平均绝对偏差（CCI 的分子要用它）。"""
+    x = _broadcast(vals[0], ev.n)
+    window = ev.win(vals[1], node.args[1])
+
+    def reducer(w: np.ndarray) -> np.ndarray:
+        mean = np.nanmean(w, axis=1, keepdims=True)
+        return np.nanmean(np.abs(w - mean), axis=1)
+
+    return _roll(x, window, reducer, ev.n)
+
+
+def _impl_slope(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """SLOPE(X,N)：N 根线性回归的斜率（每根 K 线变化多少）。"""
+    x = _broadcast(vals[0], ev.n)
+    window = ev.win(vals[1], node.args[1])
+    t = np.arange(window, dtype="float64")
+    t_mean = t.mean()
+    denom = float(((t - t_mean) ** 2).sum())
+
+    def reducer(w: np.ndarray) -> np.ndarray:
+        return ((w - np.nanmean(w, axis=1, keepdims=True)) * (t - t_mean)).sum(axis=1) / denom
+
+    return _roll(x, window, reducer, ev.n)
+
+
+def _impl_forcast(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """FORCAST(X,N)：线性回归在**本根**的预测值（回归线延长到今天）。"""
+    slope = _impl_slope(ev, node, vals)
+    mean = _roll(vals[0], ev.win(vals[1], node.args[1]), lambda w: np.nanmean(w, axis=1), ev.n)
+    window = ev.win(vals[1], node.args[1])
+    # 回归线：y = mean + slope * (t - t_mean)，本根的 t = N-1，t_mean = (N-1)/2
+    return mean + slope * ((window - 1) - (window - 1) / 2.0)
+
+
+def _impl_rsi(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """RSI(X,N)：TDX 口径 `SMA(MAX(X-REF(X,1),0),N,1) / SMA(ABS(X-REF(X,1)),N,1) * 100`。"""
+    x = _broadcast(vals[0], ev.n)
+    window = ev.win(vals[1], node.args[1])
+    diff = x - _ref(x, 1, ev.n)
+    up = np.where(np.isnan(diff), np.nan, np.maximum(diff, 0.0))
+    absd = np.abs(diff)
+    num = _sma_tdx(up, window, 1, ev.n)
+    den = _sma_tdx(absd, window, 1, ev.n)
+    with np.errstate(all="ignore"):
+        return np.where((den == 0.0) | np.isnan(den), np.nan, num / den * 100.0)
+
+
+def _impl_boll(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """BOLL(X,N)：中轨 = MA(X,N)（通达信里上下轨是另两条线 UB/LB）。"""
+    return _roll_mean(vals[0], ev.win(vals[1], node.args[1]), ev.n)
+
+
+def _impl_ub(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """UB(X,N,P)：上轨 = 中轨 + P × 标准差。"""
+    window = ev.win(vals[1], node.args[1])
+    mult = float(_as_float(vals[2])[0]) if np.ndim(vals[2]) else float(vals[2])
+    mid = _roll_mean(vals[0], window, ev.n)
+    std = _roll(vals[0], window, lambda w: np.nanstd(w, axis=1, ddof=0), ev.n)
+    return mid + mult * std
+
+
+def _impl_lb(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    window = ev.win(vals[1], node.args[1])
+    mult = float(_as_float(vals[2])[0]) if np.ndim(vals[2]) else float(vals[2])
+    mid = _roll_mean(vals[0], window, ev.n)
+    std = _roll(vals[0], window, lambda w: np.nanstd(w, axis=1, ddof=0), ev.n)
+    return mid - mult * std
+
+
+def _impl_rsv(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """RSV()：`(C-LLV(L,9))/(HHV(H,9)-LLV(L,9))*100`（KDJ 的第一步，默认 9 日）。"""
+    high, low = ev.series.high, ev.series.low
+    hh, ll = _roll_max(high, 9, ev.n), _roll_min(low, 9, ev.n)
+    with np.errstate(all="ignore"):
+        span = hh - ll
+        return np.where(span == 0.0, np.nan, (ev.series.close - ll) / span * 100.0)
+
+
+def _impl_k(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """K()：`SMA(RSV,3,1)`。"""
+    return _sma_tdx(_impl_rsv(ev, node, vals), 3, 1, ev.n)
+
+
+def _impl_d(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """D()：`SMA(K,3,1)`。"""
+    return _sma_tdx(_impl_k(ev, node, vals), 3, 1, ev.n)
+
+
+def _impl_j(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """J()：`3*K - 2*D`。"""
+    return 3.0 * _impl_k(ev, node, vals) - 2.0 * _impl_d(ev, node, vals)
+
+
+def _impl_obv(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """OBV()：能量潮（收盘涨就加成交量、跌就减），首根从 0 开始。"""
+    close, vol = ev.series.close, ev.series.vol
+    out = np.full(ev.n, np.nan, dtype="float64")
+    acc = 0.0
+    for i in range(ev.n):
+        if i == 0:
+            out[i] = 0.0
+            continue
+        if np.isnan(close[i]) or np.isnan(close[i - 1]) or np.isnan(vol[i]):
+            out[i] = acc
+            continue
+        if close[i] > close[i - 1]:
+            acc += vol[i]
+        elif close[i] < close[i - 1]:
+            acc -= vol[i]
+        out[i] = acc
+    return out
+
+
+def _impl_wr(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """WR(N)：威廉指标 `100*(HHV(H,N)-C)/(HHV(H,N)-LLV(L,N))`（数值越小越强）。"""
+    window = ev.win(vals[0], node.args[0]) if vals else 9
+    high, low = ev.series.high, ev.series.low
+    hh, ll = _roll_max(high, window, ev.n), _roll_min(low, window, ev.n)
+    with np.errstate(all="ignore"):
+        span = hh - ll
+        return np.where(span == 0.0, np.nan, (hh - ev.series.close) / span * 100.0)
+
+
+def _impl_cci(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """CCI(N)：`(TP-MA(TP,N)) / (0.015*AVEDEV(TP,N))`，TP=(H+L+C)/3。"""
+    window = ev.win(vals[0], node.args[0]) if vals else 14
+    tp = (ev.series.high + ev.series.low + ev.series.close) / 3.0
+    mean = _roll_mean(tp, window, ev.n)
+
+    def reducer(w: np.ndarray) -> np.ndarray:
+        m = np.nanmean(w, axis=1, keepdims=True)
+        return np.nanmean(np.abs(w - m), axis=1)
+
+    dev = _roll(tp, window, reducer, ev.n)
+    with np.errstate(all="ignore"):
+        return np.where(dev == 0.0, np.nan, (tp - mean) / (0.015 * dev))
+
+
+def _num1(fn: Callable[[np.ndarray], np.ndarray]) -> Callable[..., Any]:
+    """单参数数学函数的包装（POW/SQRT/LOG…）：保持缺值为缺值。"""
+
+    def impl(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+        with np.errstate(all="ignore"):
+            return fn(_as_float(vals[0]))
+
+    return impl
+
+
+def _num2(fn: Callable[[np.ndarray, np.ndarray], np.ndarray]) -> Callable[..., Any]:
+    def impl(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+        with np.errstate(all="ignore"):
+            return fn(_as_float(vals[0]), _as_float(vals[1]))
+
+    return impl
+
+
+def _impl_round(ev: "_Evaluator", node: "_Call", vals: list) -> Any:  # noqa: ARG001
+    """ROUND(X)：四舍五入到整数（TDX 的口径；要小数请用 `PRECISION` 之类画线属性，我们不支持）。"""
+    return np.round(_as_float(vals[0]))
+
+
+_impl_pow = _num2(np.power)
+_impl_sqrt = _num1(np.sqrt)
+_impl_log = _num1(np.log10)
+_impl_ln = _num1(np.log)
+_impl_exp = _num1(np.exp)
+_impl_abs2 = _num1(np.abs)
+_impl_sign = _num1(np.sign)
+_impl_intpart = _num1(np.trunc)
+_impl_ceiling = _num1(np.ceil)
+_impl_floor = _num1(np.floor)
+_impl_mod = _num2(np.mod)
+
+
 FUNCTIONS: dict[str, _FuncSpec] = {
     "MA": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_ma, hist_arg=1),
     "EMA": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_ema, hist_arg=1),
@@ -1111,6 +1594,61 @@ FUNCTIONS: dict[str, _FuncSpec] = {
     "连板": _FuncSpec(0, 0, _NUM, (), _impl_limit_up_cnt, hist_default=1),
     "量比": _FuncSpec(0, 1, _NUM, (_W,), _impl_vol_ratio, hist_arg=0,
                    hist_extra=1, hist_default=6),
+    # ── 通达信（TDX）兼容层：选股公式里的高频函数 ──
+    # 参数种类沿用本模块的 `_NUM`（数值序列）/`_W`（窗口，正整数）/`_OFF`（偏移，可为 0）/
+    # `"cond"`（条件序列）；`hist_arg`/`hist_default` 决定"最少需要多少根 K 线"的估算 —— 
+    # 写少了会让试算/回测拿不够长的序列去算，得到的曲线"看着有值、其实没收敛"。
+    "SMA": _FuncSpec(3, 3, _NUM, (_NUM, _W, _NUM), _impl_sma, hist_default=20),
+    "DMA": _FuncSpec(2, 2, _NUM, (_NUM, _NUM), _impl_dma, hist_default=20),
+    "WMA": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_wma, hist_arg=1),
+    "EXPMA": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_ema, hist_arg=1),
+    "EXIST": _FuncSpec(2, 2, _BOOL, ("cond", _W), _impl_exist, hist_arg=1),
+    "EVERY": _FuncSpec(2, 2, _BOOL, ("cond", _W), _impl_every, hist_arg=1),
+    "BETWEEN": _FuncSpec(3, 3, _BOOL, (_NUM, _NUM, _NUM), _impl_between),
+    "RANGE": _FuncSpec(3, 3, _BOOL, (_NUM, _NUM, _NUM), _impl_between),
+    "FILTER": _FuncSpec(2, 2, _BOOL, ("cond", _W), _impl_filter, hist_arg=1),
+    "UPNDAY": _FuncSpec(2, 2, _BOOL, (_NUM, _W), _impl_upnday, hist_arg=1, hist_extra=1),
+    "DOWNNDAY": _FuncSpec(2, 2, _BOOL, (_NUM, _W), _impl_downnday, hist_arg=1, hist_extra=1),
+    "NDAY": _FuncSpec(3, 3, _BOOL, (_NUM, _NUM, _W), _impl_nday, hist_arg=2),
+    "BARSCOUNT": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_barscount),
+    "BARSSINCE": _FuncSpec(1, 1, _NUM, ("cond",), _impl_bars_since, hist_default=1),
+    "LONGCROSS": _FuncSpec(3, 3, _BOOL, (_NUM, _NUM, _W), _impl_longcross, hist_arg=2,
+                           hist_extra=1),
+    # `VALUEWHEN` 的返回值就是 X 的类型（数值），所以用 `_NUM` 而不是 `"same"`：
+    # `"same"` 那套是给 `IF` 这种"两边类型要一致"的函数用的，只有两个参数时会越界。
+    "VALUEWHEN": _FuncSpec(2, 2, _NUM, ("cond", _NUM), _impl_valuewhen, hist_default=1),
+    "LAST": _FuncSpec(3, 3, _BOOL, ("cond", _OFF, _OFF), _impl_last, hist_default=1),
+    "HHVBARS": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_hhvbars, hist_arg=1),
+    "LLVBARS": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_llvbars, hist_arg=1),
+    "SUMBARS": _FuncSpec(2, 2, _NUM, (_NUM, _NUM), _impl_sumbars, hist_default=1),
+    "VAR": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_var, hist_arg=1),
+    "STDP": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_stdp, hist_arg=1),
+    "AVEDEV": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_avedev, hist_arg=1),
+    "SLOPE": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_slope, hist_arg=1),
+    "FORCAST": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_forcast, hist_arg=1),
+    "RSI": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_rsi, hist_arg=1, hist_extra=1),
+    "BOLL": _FuncSpec(2, 2, _NUM, (_NUM, _W), _impl_boll, hist_arg=1),
+    "UB": _FuncSpec(3, 3, _NUM, (_NUM, _W, _NUM), _impl_ub, hist_arg=1),
+    "LB": _FuncSpec(3, 3, _NUM, (_NUM, _W, _NUM), _impl_lb, hist_arg=1),
+    "RSV": _FuncSpec(0, 0, _NUM, (), _impl_rsv, hist_default=9),
+    "K": _FuncSpec(0, 0, _NUM, (), _impl_k, hist_default=15),
+    "D": _FuncSpec(0, 0, _NUM, (), _impl_d, hist_default=18),
+    "J": _FuncSpec(0, 0, _NUM, (), _impl_j, hist_default=18),
+    "OBV": _FuncSpec(0, 0, _NUM, (), _impl_obv, hist_default=2),
+    "WR": _FuncSpec(0, 1, _NUM, (_W,), _impl_wr, hist_arg=0, hist_default=9),
+    "CCI": _FuncSpec(0, 1, _NUM, (_W,), _impl_cci, hist_arg=0, hist_default=14),
+    "IFF": _FuncSpec(3, 3, "same", ("cond", _NUM, _NUM), _impl_if),
+    "POW": _FuncSpec(2, 2, _NUM, (_NUM, _NUM), _impl_pow),
+    "SQRT": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_sqrt),
+    "LOG": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_log),
+    "LN": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_ln),
+    "EXP": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_exp),
+    "MOD": _FuncSpec(2, 2, _NUM, (_NUM, _NUM), _impl_mod),
+    "INTPART": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_intpart),
+    "ROUND": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_round),
+    "CEILING": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_ceiling),
+    "FLOOR": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_floor),
+    "SIGN": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_sign),
 }
 
 #: 展示给用户的"可用函数"清单（界面提示与错误提示共用，避免两处写法漂移）
@@ -1145,6 +1683,10 @@ class _Parser:
         self.min_history = 1
         self.depth = 0
         self.statements: list[_Statement] = []
+        #: 编译期的"已知忽略项"（通达信兼容层：画图语句、样式修饰）。
+        #: 界面【校验】会列给用户 —— 他得知道"我那句画线没生效"，
+        #: 而不是以为整条公式都跑到了。
+        self.notes: list[str] = []
 
     # ── token 流 ──
 
@@ -1190,13 +1732,22 @@ class _Parser:
                     line=start.line, col=start.col, code="syntax",
                     hint="每条语句独占一行（`:=` 定义变量，最后一行写选股条件）",
                 )
+            if start.kind == "ident" and start.value.upper() in _DRAWING_FUNCS:
+                # 通达信兼容层：画图语句整句跳过（选股用不到图形），只记一条 note。
+                # 放在**最前面**判断：它的参数里可能有逗号/字符串，交给普通解析会报一堆假错。
+                self._skip_line(start)
+                last_line = self.toks[self.pos - 1].line
+                continue
             if not self._is_assignment():
                 node = self.expr()
+                self._eat_style()          # `,COLORRED` 之类要**先**吃掉，否则会被当成多余 token
                 if self.pos < len(self.toks):
                     self._raise_leftover(start, node)
                 self.statements.append(_Statement(None, node, False, start.line, start.col))
             else:
-                self.statements.append(self._assignment())
+                stmt = self._assignment()
+                self._eat_style()
+                self.statements.append(stmt)
             last_line = self.toks[self.pos - 1].line
 
         if not self.statements:
@@ -1211,6 +1762,39 @@ class _Parser:
             )
         condition = self._final_condition()
         return self.statements, condition
+
+    def _skip_line(self, start: _Token) -> None:
+        """跳过一整行（画图语句）并记一条 note。"""
+        line = start.line
+        while self.pos < len(self.toks) and self.toks[self.pos].line == line:
+            self.pos += 1
+        self._note(f"第 {line} 行的画图语句 {start.value}(…) 已忽略（画图对选股没有影响）")
+
+    def _eat_style(self) -> None:
+        """吃掉通达信的输出样式修饰：`,COLORRED` / `,LINETHICK2` / `,NODRAW` / `,SHIFT3` …"""
+        eaten: list[str] = []
+        while True:
+            if self.peek().kind != "comma":
+                break
+            nxt = self.peek(1)
+            if nxt.kind != "ident":
+                break
+            name = nxt.value.upper()
+            if name in _STYLE_MODS or name.startswith(
+                ("COLOR", "LINETHICK", "SHIFT", "PRECISION", "LAYER", "MOVE", "ALIGN")
+            ):
+                eaten.append(nxt.value)
+                self.next()
+                self.next()
+                continue
+            break
+        if eaten:
+            self._note("已忽略样式修饰：" + "、".join(dict.fromkeys(eaten)))
+
+    def _note(self, text: str) -> None:
+        """记一条"已知忽略项"（同一句只记一次，避免重复刷屏）。"""
+        if text not in self.notes:
+            self.notes.append(text)
 
     def _raise_leftover(self, start: _Token, node: Any) -> None:
         """裸表达式后面还剩 token。
@@ -1297,12 +1881,17 @@ class _Parser:
                 line=tok.line, col=tok.col, code="syntax",
                 hint=f"{upper} 已经是行情字段，请换一个名字（例如 MY{upper}）",
             )
-        if upper in FUNCTIONS:
+        if upper in FUNCTIONS and not as_variable:
             raise FormulaError(
                 f'变量名 "{name}" 与内置函数同名',
                 line=tok.line, col=tok.col, code="syntax",
                 hint="请换一个名字（例如 M5、A1）",
             )
+        # ⚠️ **赋值时允许与函数同名**（2026-09-21，通达信兼容）：
+        # 通达信公式里 `RSV:=...`、`K:=SMA(RSV,3,1)`、`D:=SMA(K,3,1)` 是标准写法，
+        # 而 RSV/K/D/J 恰好也都是我们的函数名 —— 一律拒绝就等于"最经典的 KDJ 选股公式
+        # 一条都跑不了"。字段名（C/O/H/L/V…）仍然禁止覆盖：那会让后面的 `C` 突然变成
+        # 用户自己的变量，属于最难排查的一类坑。
 
     def _check_forbidden(self, tok: _Token) -> None:
         name = tok.value
@@ -1579,14 +2168,19 @@ class _Parser:
             if self.peek().kind == "lparen":
                 return self._call(tok, upper)
             if upper in FUNCTIONS:
-                spec = FUNCTIONS[upper]
-                example = _FUNCTION_EXAMPLE.get(upper, f"{upper}(...)")
-                raise FormulaError(
-                    f'函数 "{upper}" 后面要跟括号',
-                    line=tok.line, col=tok.col, code="syntax",
-                    hint=f"例如 {example}"
-                    + ("" if spec.min_args else f"；{upper} 也可以写成 {upper}()"),
-                )
+                # 通达信兼容（2026-09-21）：用户**先赋值**过的名字优先当变量。
+                # 典型：`RSV:=...` 然后又写 `SMA(RSV,3,1)` —— RSV 同时是我们的函数名，
+                # 若在这里就报"函数后面要跟括号"，最经典的 KDJ 选股公式直接跑不了。
+                # 只对"已经被赋值过"的名字放行，没赋值过的仍然按"忘写括号"提示。
+                if upper not in self.vars:
+                    spec = FUNCTIONS[upper]
+                    example = _FUNCTION_EXAMPLE.get(upper, f"{upper}(...)")
+                    raise FormulaError(
+                        f'函数 "{upper}" 后面要跟括号',
+                        line=tok.line, col=tok.col, code="syntax",
+                        hint=f"例如 {example}"
+                        + ("" if spec.min_args else f"；{upper} 也可以写成 {upper}()"),
+                    )
             return self._field_or_var(tok, upper)
 
         if tok.kind == "rparen":
@@ -2211,6 +2805,9 @@ class Formula:
     name: str = ""
     description: str = ""
     source_path: str | None = None
+    #: 编译时的"已知忽略项"（通达信兼容层）：画图语句、样式修饰。
+    #: 界面【校验】把它们列出来，用户才知道"那句画线没生效"，而不是以为整条公式都跑了。
+    notes: tuple[str, ...] = ()
 
     @property
     def label(self) -> str:
@@ -2244,6 +2841,33 @@ class Formula:
         return "；".join(parts)
 
 
+def _semicolons_to_newlines(text: str) -> str:
+    """把**引号外**的分号换成换行（通达信公式几乎每行都以 `;` 结尾）。
+
+    为什么要做这一步：通达信、同花顺、以及网上抄来的公式，语句分隔符就是 `;`，
+    甚至一整条公式可以写在一行里（`A:=1; B:=2; A>B;`）。我们内部只按换行分语句，
+    所以在这里先归一化 —— 之后解析器一行一句的规则一条都不用改。
+    引号内的分号（`INDUSTRY="银行;保险"` 这种）保持原样，不能动。
+    代价：`;` 后面的内容会被算到下一行，报错行号对"分号在同一行"的写法会偏，
+    但这对"分号结尾"的通行写法是**更准**的（内容本来就在下一行）。
+    """
+    if ";" not in text:
+        return text
+    out: list[str] = []
+    quote = ""
+    for ch in text:
+        if quote:
+            out.append(ch)
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+            continue
+        out.append("\n" if ch == ";" else ch)
+    return "".join(out)
+
 def compile_formula(
     text: str,
     *,
@@ -2273,6 +2897,7 @@ def compile_formula(
         raise FormulaError("公式必须是文本", code="type")
     # Windows 记事本存的文件带 BOM、换行是 \r\n —— 都要先归一化，否则第一行会莫名其妙报错
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    cleaned = _semicolons_to_newlines(cleaned)     # 通达信写法：分号 = 语句分隔
     if len(cleaned) > MAX_FORMULA_CHARS:
         raise FormulaError(
             f"公式太长了（{len(cleaned)} 个字符，上限 {MAX_FORMULA_CHARS}）",
@@ -2292,6 +2917,7 @@ def compile_formula(
         name=name,
         description=description,
         source_path=source_path,
+        notes=tuple(parser.notes),
     )
     logger.debug(
         f"公式编译通过：字段 {formula.fields}，函数 {formula.functions}，"
