@@ -5,7 +5,7 @@
     build\\build.bat                       # 一键：建 venv → 装依赖 → 打包
     pyinstaller --noconfirm --clean build\\laoa_trader.spec
 
-产出：`dist\\LaoniuTrader\\LaoniuTrader.exe`（**onedir** 目录版）。
+产出：`dist\LaoniuTrader\老牛选股.exe`（**onedir** 目录版；目录名 ASCII、exe 名中文）。
 
 为什么是 onedir 而不是 onefile
 ------------------------------
@@ -195,7 +195,11 @@ exe = EXE(  # noqa: F821
     a.scripts,
     [],
     exclude_binaries=True,
-    name="LaoniuTrader",   # exe 名（用户 2026-09-20 定：产物用 ASCII 名 LaoniuTrader）
+    # exe 名：**中文「老牛选股」**（主人 2026-09-21 要求：包里那个可执行文件叫老牛选股.exe）。
+    # 目录名（COLLECT）与压缩包名仍是 ASCII 的 LaoniuTrader —— 那两个是"下载/解压/命令行"
+    # 上会用到的东西，中文名在别的机器或工具里可能变成乱码；exe 名是用户在资源管理器里
+    # 双击的那一个，中文更合适。
+    name="老牛选股",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -216,7 +220,7 @@ coll = COLLECT(  # noqa: F821
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="LaoniuTrader",   # 产出 dist/LaoniuTrader/LaoniuTrader.exe
+    name="LaoniuTrader",   # 产出 dist/LaoniuTrader/老牛选股.exe（目录名保持 ASCII，见上）
 )
 
 if sys.platform != "win32":

@@ -5,7 +5,7 @@
 #   2. 构建完成后，**优先去 Release 页面下载**（固定链接，不受 artifact 额度影响）：
 #      https://github.com/Chen-yongjin/laoA/releases/tag/latest
 #      直链：https://github.com/Chen-yongjin/laoA/releases/download/latest/LaoniuTrader.zip
-#   3. 解压后双击 LaoniuTrader.exe 即可（首次运行会走数据自检 → 下载向导）
+#   3. 解压后双击 老牛选股.exe 即可（首次运行会走数据自检 → 下载向导）
 #   注：该次运行页面底部的 Artifacts 里也有一份（LaoniuTrader），但 artifact 有额度限制，
 #       额度满了那一步会失败 —— 所以 Release 才是主下载通道（见下面 step_release）。
 #   注册机（作者专用）也在**同一个 Release 页面**的 Assets 里：``keygen.exe``。
@@ -190,7 +190,7 @@ jobs:
         name: 检查产物
         shell: pwsh
         run: |
-          if (-not (Test-Path "dist/LaoniuTrader/LaoniuTrader.exe")) { throw "没找到 dist/LaoniuTrader/LaoniuTrader.exe" }
+          if (-not (Test-Path "dist/LaoniuTrader/老牛选股.exe")) { throw "没找到 dist/LaoniuTrader/老牛选股.exe" }
           $size = (Get-ChildItem -Recurse 'dist/LaoniuTrader' | Measure-Object -Property Length -Sum).Sum / 1MB
           Write-Host ("产物大小：{0:N1} MB" -f $size)
           # ⚠️ 注册机与主产物的关系（2026-09-21 起**反转**了，两边都钉住）：
@@ -299,7 +299,7 @@ jobs:
 
           - 提交：``$env:GITHUB_SHA``
           - 构建：run $env:GITHUB_RUN_ID
-          - 下载：``LaoniuTrader.zip``（解压 → 进 LaoniuTrader 目录 → 双击 LaoniuTrader.exe）
+          - 下载：``LaoniuTrader.zip``（解压 → 进 LaoniuTrader 目录 → 双击 老牛选股.exe）
           - 注册机（作者专用，**别发给用户**）：同一个 Assets 里的 ``keygen.exe``
           "@
           # 先看 Release 在不在（不在就建一个，tag 指向默认分支即可 —— 我们要的是附件，不是 tag 本身）

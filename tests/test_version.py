@@ -42,8 +42,12 @@ LEGACY_NAME = "老牛选股法师"
 #: 而通知、导出文件名、"助手"自称仍用 `ASSISTANT_NAME`（见 `ui/app.py`）。
 NEW_NAME = "老牛选股"
 ASSISTANT_NAME = "老牛选股助手"
-#: 打包产物用的 ASCII 名（dist 目录 / exe / artifact；用户 2026-09-20 定）
+#: 打包产物**目录/压缩包/artifact** 用的 ASCII 名（用户 2026-09-20 定）。
+#: ⚠️ 压缩包名**不要**改成中文：下载直链里带着它，改了会让已经发出去的链接失效。
 ARTIFACT_NAME = "LaoniuTrader"
+#: 包里那个可执行文件的名字：**中文**（主人 2026-09-21 要求改名成 老牛选股.exe）。
+#: exe 名是用户在资源管理器里双击的那一个，中文更直观；目录名保持 ASCII。
+EXE_NAME = "老牛选股"
 
 
 def test_user_visible_names_use_the_new_product_name() -> None:
@@ -97,18 +101,23 @@ def test_repo_text_files_do_not_mention_the_legacy_name() -> None:
 
 
 def test_executable_is_named_after_the_product() -> None:
-    """产物名 = **LaoniuTrader**（用户 2026-09-20 定：文件夹/exe/压缩包都用 ASCII 名）。
+    """**目录/压缩包**用 ASCII `ARTIFACT_NAME`，**exe** 用中文 `EXE_NAME`（主人 2026-09-21）。
 
-    与界面里的中文名分开是刻意的：
-    * **界面**（标题栏、托盘、关于页）用中文 `NEW_NAME` = 老牛选股 / 老牛选股助手；
-    * **产物**（dist 目录、exe、artifact）用 ASCII `ARTIFACT_NAME` = LaoniuTrader ——
-      ASCII 名在命令行、压缩包、别的机器上都不会有编码麻烦。
+    三层口径（别再混起来）：
+    * **界面**（标题栏、托盘、关于页）= 中文 `NEW_NAME` / `ASSISTANT_NAME`；
+    * **目录与压缩包/artifact** = ASCII `LaoniuTrader` —— 命令行、下载链接、别的机器上
+      都不会有编码麻烦；而且**改 zip 名会让已经发出去的下载链接失效**；
+    * **exe** = 中文 `老牛选股.exe` —— 用户在资源管理器里双击的就是它。
     """
     from laoa_trader.ui import app as ui_app
 
     spec = (ROOT / "build" / "laoa_trader.spec").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "build-windows.yml").read_text(encoding="utf-8")
-    assert f'name="{ARTIFACT_NAME}"' in spec
-    assert f"dist/{ARTIFACT_NAME}/{ARTIFACT_NAME}.exe" in workflow
-    # 界面里仍然是中文名（别为了改产物名把中文名一起换掉）
+    assert f'name="{ARTIFACT_NAME}"' in spec                 # 目录名仍是 ASCII
+    assert f'name="{EXE_NAME}"' in spec                      # exe 名是中文
+    assert f"dist/{ARTIFACT_NAME}/{EXE_NAME}.exe" in workflow
+    # 旧的 exe 名不许在 CI 里残留（漏一处就是"打包成功但检查找不到产物"）
+    assert f"dist/{ARTIFACT_NAME}/{ARTIFACT_NAME}.exe" not in workflow
+    # 压缩包与 artifact 名**没跟着变**（改了会让下载链接失效）
+    assert f"{ARTIFACT_NAME}.zip" in workflow
     assert ui_app.APP_NAME == NEW_NAME
