@@ -84,7 +84,7 @@ LIMIT_UP_HINT = (
 FINANCE_HINT = (
     "注意：本程序把 FINANCE(...) 按「流通市值（亿元）」处理 —— 与通达信口径不同"
     "（通达信里它是流通股本/总股本这类财务项，本地没有财报数据）；"
-    "拿它当股本用的公式结果会偏。"
+    "拿它当股本用的策略结果会偏。"
 )
 
 #: 用到 `INBLOCK(...)` 时的提醒（**非阻断**）：它被映射成"热门行业"，
@@ -171,7 +171,7 @@ def _read_seed_state(target: Path) -> set[str]:
     except FileNotFoundError:
         return set()
     except (OSError, ValueError) as exc:
-        logger.debug(f"读随包公式播种记录失败（当作没播过）：{exc}")
+        logger.debug(f"读随包策略播种记录失败（当作没播过）：{exc}")
         return set()
     if not isinstance(data, list):
         return set()
@@ -185,7 +185,7 @@ def _write_seed_state(target: Path, seeded: set[str]) -> None:
             json.dumps(sorted(seeded), ensure_ascii=False, indent=1), encoding="utf-8"
         )
     except OSError as exc:
-        logger.warning(f"写随包公式播种记录失败（不影响使用）：{exc}")
+        logger.warning(f"写随包策略播种记录失败（不影响使用）：{exc}")
 
 
 def _retire_bundled_formulas(target: Path, seeded: set[str]) -> None:
@@ -212,20 +212,20 @@ def _retire_bundled_formulas(target: Path, seeded: set[str]) -> None:
         try:
             data = path.read_bytes()
         except OSError as exc:            # 权限/占用：留着，下次启动再试
-            logger.warning(f"读退役公式 {name} 失败（这次不处理）：{exc}")
+            logger.warning(f"读退役策略 {name} 失败（这次不处理）：{exc}")
             continue
         if hashlib.sha256(data).hexdigest() != digest:
             # 用户改过（或本来就是他自己写的同名文件）→ 那是他的东西，绝不删
-            logger.info(f"退役公式 {name} 与随包版本不一致，按用户自己的公式保留")
+            logger.info(f"退役策略 {name} 与随包版本不一致，按用户自己的策略保留")
             seeded.add(name)
             continue
         try:
             path.unlink()
         except OSError as exc:
-            logger.warning(f"删退役公式 {name} 失败（下次启动再试）：{exc}")
+            logger.warning(f"删退役策略 {name} 失败（下次启动再试）：{exc}")
             continue
         seeded.add(name)
-        logger.info(f"已清理退役的随包公式：{name}（它对应「连板回踩低吸」，用户要求删掉）")
+        logger.info(f"已清理退役的随包策略：{name}（它对应「连板回踩低吸」，用户要求删掉）")
 
 
 def _seed_samples(target: Path, seeded: set[str]) -> None:
@@ -267,12 +267,12 @@ def _seed_samples(target: Path, seeded: set[str]) -> None:
         try:
             shutil.copyfile(path, target / path.name)
         except OSError as exc:      # 权限/只读盘：示例没到位不该影响启动
-            logger.warning(f"随包公式 {path.name} 复制失败：{exc}")
+            logger.warning(f"随包策略 {path.name} 复制失败：{exc}")
             continue
         seeded.add(path.name)
         copied += 1
     if copied:
-        logger.info(f"已把 {copied} 条随包公式放进 {target}")
+        logger.info(f"已把 {copied} 条随包策略放进 {target}")
 
 
 def _sync_bundled_formulas(target: Path) -> None:
@@ -321,7 +321,7 @@ def formula_dir() -> Path:
         target.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         # 只读盘 / 权限不足：**不抛异常**（界面照开），保存时再给中文错误
-        logger.warning(f"公式目录建不出来：{target}（{exc}）")
+        logger.warning(f"策略目录建不出来：{target}（{exc}）")
         return target
     _sync_bundled_formulas(target)
     return target
@@ -361,7 +361,7 @@ def name_error(name: Any) -> str:
     """名称能不能用：可用返回空串，否则返回中文原因（界面直接显示）。"""
     raw = "" if name is None else str(name)
     if not raw.strip():
-        return "请先填公式名称（例如：5日线上放量）"
+        return "请先填策略名称（例如：5日线上放量）"
     if not safe_name(raw):
         return f"这个名字不能当文件名：{raw!r}（请换成中文或字母数字）"
     return ""
@@ -433,7 +433,7 @@ def save_formula(
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
-    logger.info(f"公式已保存：{path.name}（{len(body)} 字符）")
+    logger.info(f"策略已保存：{path.name}（{len(body)} 字符）")
     return path
 
 
@@ -444,7 +444,7 @@ def delete_formula(name: str, directory: str | Path | None = None) -> bool:
         path.unlink()
     except FileNotFoundError:
         return False
-    logger.info(f"公式已删除：{path.name}")
+    logger.info(f"策略已删除：{path.name}")
     return True
 
 
@@ -481,12 +481,12 @@ def enabled_names(cfg: Any = None, directory: str | Path | None = None) -> list[
         spec = by_name.get(name)
         if spec is None:
             logger.warning(
-                f"公式选股：config.toml 里的 enabled_formulas 写着 {name!r}，"
-                f"但公式目录里没有这条公式，已忽略"
+                f"策略选股：config.toml 里的 enabled_formulas 写着 {name!r}，"
+                f"但策略目录里没有这条策略，已忽略"
             )
             continue
         if not spec.ok:
-            logger.warning(f"公式选股：{name} 语法有错（{spec.error_text}），本次不参与")
+            logger.warning(f"策略选股：{name} 语法有错（{spec.error_text}），本次不参与")
             continue
         if name not in picked:
             picked.append(name)
@@ -806,7 +806,7 @@ def run_scorecard(
     for series in series_iter:
         scanned += 1
         if progress_cb is not None and (scanned % 25 == 0 or scanned == total):
-            progress_cb("公式成绩单", min(scanned, total or scanned), total or scanned)
+            progress_cb("策略成绩单", min(scanned, total or scanned), total or scanned)
         if len(series.date) < formula.min_history:
             continue
         try:
@@ -917,7 +917,7 @@ def _scorecard_text(result: dict) -> str:
         return "—" if value is None else f"{value * 100:+.2f}%"
 
     lines = [
-        f"📊 公式成绩单：{result['formula']}",
+        f"📊 策略成绩单：{result['formula']}",
         f"口径：{result['conv']}（与策略成绩单同一套规则；**绝对收益**，这里不算 α）",
         f"样本：{result['samples']} 笔 / {result['days']} 个交易日"
         f"（扫了 {result['symbols']} 只，买不进剔除 {result['dropped']} 笔）",
@@ -936,7 +936,7 @@ def _scorecard_text(result: dict) -> str:
     if result["samples"] < 30:
         lines.append("⚠️ 样本太少（不到 30 笔），结论只能当参考 —— 多攒些数据再跑一次。")
     elif result["t"] is not None and abs(result["t"]) < 2:
-        lines.append("⚠️ t 值不到 2：这条公式的收益和「随机选」很难区分开，别急着上真金白银。")
+        lines.append("⚠️ t 值不到 2：这条策略的收益和「随机选」很难区分开，别急着上真金白银。")
     if result["hint"]:
         # 用到连板()/涨停天数()：历史越早数据越可能缺 —— 必须写在成绩单里
         lines.append("⚠️ " + result["hint"])

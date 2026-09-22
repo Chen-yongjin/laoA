@@ -2146,7 +2146,7 @@ if QT_AVAILABLE:
                 self.pool_table, WATCH_MONITOR_COLUMN,
                 "监控开关：`开启` / `关闭`（**点这一格就能切换**，与右键【关闭监控】/"
                 "【打开监控】是同一件事）。\n"
-                "自选可以开关；策略/公式选中的票不是自选，没有「停用」这一说"
+                "自选可以开关；策略选中的票不是自选，没有「停用」这一说"
                 "（点它会给一句指路的话）。\n"
                 "鼠标停在这一格上可以看到**今天最新一条提醒**的完整内容。"
             )
@@ -2299,7 +2299,7 @@ if QT_AVAILABLE:
                 self.btn_run = QPushButton(BTN_START_TEXT)
                 self.btn_run.setObjectName("primaryAction")
                 self.btn_run.setToolTip(
-                    "开始选股：增量数据 → 跑启用的策略与公式 → 结果直接进「自选股池」"
+                    "开始选股：增量数据 → 跑启用的策略 → 结果直接进「自选股池」"
                     " → 按「系统设置」里的通知方式推送一条"
                 )
                 # **走信号**（有的话）：与页面自己的按钮同一条路 —— 一处逻辑、两个入口，
@@ -2311,7 +2311,7 @@ if QT_AVAILABLE:
                 row.addWidget(self.btn_run)
                 # `ElidedLabel` 而不是 QLabel：这行说明很长，普通 QLabel 的**最小宽度**
                 # 就是整句话的宽度 —— 它会一路把整窗的最小宽度顶上去（同上）
-                hint = ElidedLabel("结果直接进「自选股池」；策略与公式的启停在下面的列表里勾")
+                hint = ElidedLabel("结果直接进「自选股池」；策略的启停在下面的列表里勾")
                 hint.setObjectName("statusTag")
                 hint.setForegroundRole(QPalette.ColorRole.PlaceholderText)
                 row.addWidget(hint, 1)
@@ -3707,7 +3707,7 @@ if QT_AVAILABLE:
             self.act_messages = act_recent
             # 【开始选股】：与「策略选股」页那个按钮**同一个回调**（一处逻辑两处入口）
             act_pool = QAction(BTN_START_TEXT, self)
-            act_pool.setToolTip("跑启用的策略与公式，结果直接进「自选股池」")
+            act_pool.setToolTip("跑启用的策略，结果直接进「自选股池」")
             act_pool.triggered.connect(self.on_run_pipeline)
             # 【暂停提醒】：盯盘时窗口多半收在托盘里，这个开关必须在托盘上够得着。
             # 用可勾选项（`setCheckable`）而不是"点了就切换文字"：勾选框一眼能看出当前状态
@@ -4679,7 +4679,7 @@ if QT_AVAILABLE:
                 if entry is None:
                     monitor_item = self._monitor_cell(
                         symbol, True, alert, togglable=False,
-                        why="这只票是策略/公式选中的（不是自选）：要停止盯它在"
+                        why="这只票是策略选中的（不是自选）：要停止盯它在"
                             "「策略选股」里关掉对应策略，或右键【删除】这一行",
                     )
                 else:
@@ -4822,7 +4822,7 @@ if QT_AVAILABLE:
                 entry = self._watchlist_map().get(symbol)
                 if entry is None:
                     self._toast(
-                        "这只票是策略/公式选中的（不是自选）：不能在这里单独关掉监控 ——"
+                        "这只票是策略选中的（不是自选）：不能在这里单独关掉监控 ——"
                         "在「策略选股」里关掉对应策略，或右键【删除】这一行"
                     )
                     return
@@ -4879,7 +4879,7 @@ if QT_AVAILABLE:
                     act_toggle = QAction("关闭监控", menu)
                     act_toggle.setEnabled(False)
                     act_toggle.setToolTip(
-                        "这只票是策略/公式选中的（不是自选）。要停止盯它，"
+                        "这只票是策略选中的（不是自选）。要停止盯它，"
                         "去「策略选股」关掉对应策略，或直接【删除】这一行"
                     )
                 else:
@@ -6317,7 +6317,7 @@ if QT_AVAILABLE:
             if formulas.get("ran"):
                 # 「公式」组的运行结果也要说出来：不然用户勾了公式却"什么都看不到"
                 picked = sum((formulas.get("picks") or {}).values())
-                bits.append(f"公式 {len(formulas['ran'])} 条选出 {picked} 只")
+                bits.append(f"策略 {len(formulas['ran'])} 条选出 {picked} 只")
             # 公式的运行期错误（某只票算不出来之类）会显示在公式列表里（标红），
             # 顺手刷一次那张表，用户切过去就能看到原因
             page = getattr(self, "formula_page", None)
@@ -6325,7 +6325,7 @@ if QT_AVAILABLE:
                 try:
                     page.reload()
                 except Exception:  # noqa: BLE001 - 刷新列表失败不该影响结论显示
-                    logger.debug("公式列表刷新失败", exc_info=True)
+                    logger.debug("策略列表刷新失败", exc_info=True)
                 # 把**这一轮**的结果直接喂给「策略选股」页的「本次选股结果」区
                 # （不喂它也能从 `stock_pool` 兜底读最近一次建池，但那是"库里那一份"：
                 # 遇到"没建成池 / 同一天跑了两次"时，直接给 report 才是刚跑完的这一批）。
@@ -6354,8 +6354,8 @@ if QT_AVAILABLE:
             if not pool_count and not errors:
                 # 2026-09-18 起候选只来自勾选的公式（内置策略已改成随包公式），
                 # 所以"没候选"最常见的原因就是"一条公式都没勾" —— 把它写在第一位
-                text += ("（今日没有候选：没勾任何公式 / 非交易日 / 数据不足；"
-                         "在「策略选股」页勾上公式即可参与选股）")
+                text += ("（今日没有候选：没勾任何策略 / 非交易日 / 数据不足；"
+                         "在「策略选股」页勾上策略即可参与选股）")
             self._toast(text)
 
         def _on_worker_failed(self, label: str, msg: str) -> None:
@@ -7390,7 +7390,7 @@ if QT_AVAILABLE:
                 # 公式引擎的"自报家门"：用户报障时贴这一份，就能立刻分清
                 # "公式写错了"还是"他在用旧包"（旧包的可用函数是短清单）。
                 # 与报错里的那句同源（`formula.engine_stamp()`），不另造一份。
-                "公式引擎：" + self._engine_stamp_plain(),
+                "策略引擎：" + self._engine_stamp_plain(),
                 "作者 / 版权所有人：async-chen",
                 COPYRIGHT_TEXT,
                 SOURCE_TEXT,
@@ -7409,7 +7409,7 @@ if QT_AVAILABLE:
             from laoa_trader.strategy import formula as formula_mod
 
             stamp = formula_mod.engine_stamp()
-            return stamp.strip("（）").replace("本程序 ", "").replace("公式引擎支持", "支持")
+            return stamp.strip("（）").replace("本程序 ", "").replace("策略引擎支持", "支持")
 
         def version_info_text(self) -> str:
             """报障时要贴给作者的几行：名称 / 版本 / 公式引擎 / 版权。
@@ -7419,7 +7419,7 @@ if QT_AVAILABLE:
             贴出来的东西，复制错了等于把排查线索换成了噪音。
             公式引擎那一行是刻意放进去的：**它一眼就能分清"公式写错了"还是"在用旧包"**。
             """
-            wanted = ("版本：", "公式引擎：", "版权所有")
+            wanted = ("版本：", "策略引擎：", "版权所有")
             picked = [line for line in self.about_lines()
                       if line.startswith(wanted) or line == APP_NAME]
             return "\n".join(picked)
@@ -7507,7 +7507,7 @@ if QT_AVAILABLE:
             if button is not None:
                 if licensed:
                     button.setToolTip(
-                        "打开公式编辑器：左边写公式、右边点按钮插入（点列表里的公式行也会打开它）"
+                        "打开策略编辑器：左边写策略、右边点按钮插入（点列表里的策略行也会打开它）"
                     )
                 else:
                     button.setToolTip(

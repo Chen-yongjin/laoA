@@ -25,6 +25,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from laoa_trader import wording
 from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
@@ -43,14 +44,19 @@ LEGACY_STRATEGY_LABELS: dict[str, str] = {
 
 
 def strategy_label(class_name: str) -> str:
-    """类名 → 中文名（老数据的显示口径）。
+    """类名 / 合成名 → **界面上显示的那个词**（老数据的显示口径）。
 
     认不出的名字**原样返回**（只去掉 `Strategy` 后缀，与服务器版一致）——
-    今天传进来的绝大多数是 `公式·xxx` 这种合成名或用户自己的公式名，原样返回正是要的。
+    今天传进来的绝大多数是 `公式·xxx` 这种合成名或用户自己的名字，原样返回正是要的。
+
+    2026-09-22 起多做一件事：合成名前缀显示成 `策略·`（`wording.display_strategy`）——
+    主人要求"把公式都改成策略"，于是自定义的那条与内置策略的 `策略·短期反转`
+    在「来源」列里长得一样了。**只换前缀**，库里的值 `公式·xxx` 一个字没动。
     """
-    return LEGACY_STRATEGY_LABELS.get(class_name) or str(class_name or "").replace(
+    label = LEGACY_STRATEGY_LABELS.get(class_name) or str(class_name or "").replace(
         "Strategy", ""
     )
+    return wording.display_strategy(label)
 
 
 def save_signals(

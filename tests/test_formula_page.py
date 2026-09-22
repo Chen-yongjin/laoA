@@ -568,7 +568,7 @@ def test_validate_empty_formula_tells_what_to_do(page) -> None:
 
     page.btn_validate.click()
 
-    assert "公式还是空的" in page.hint_text
+    assert "策略还是空的" in page.hint_text
     assert "点右边的按钮" in page.hint_text
 
 
@@ -905,7 +905,7 @@ def test_export_after_run_writes_every_hit_to_the_desktop(
     for symbol in ("600001", "600002", "600003"):
         assert f"({symbol})" in text, f"{symbol} 没写进文件（提示区截断不能影响导出）"
     # 「来源」列与「自选股池」表格同一个词：公式选中 → `公式·<公式名>`
-    assert "来源：公式·尾盘选股策略" in text
+    assert "来源：策略·尾盘选股策略" in text
     assert "行情日 2026-09-11" in text
     assert "现价" in text                    # 库里有两个交易日 → 现价与涨跌幅都算得出来
     # 导出是**成功操作**：按 2026-09-18 的新口径**不再弹提示**，
@@ -1007,7 +1007,7 @@ def test_export_source_says_unnamed_when_the_formula_has_no_name(
 
     files = sorted((tmp_path / "desktop-export").glob("*.txt"))
     assert len(files) == 1
-    assert "来源：公式·未命名公式" in files[0].read_text(encoding="utf-8-sig")
+    assert "来源：策略·未命名策略" in files[0].read_text(encoding="utf-8-sig")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1044,7 +1044,7 @@ def test_save_requires_a_name(page) -> None:
 
     page.btn_save.click()
 
-    assert "请先填公式名称" in page.hint_text
+    assert "请先填策略名称" in page.hint_text
     assert lib.formula_files(page.directory) == []
     assert page.editor.toPlainText() == "C>MA(C,5)"      # 公式还在，用户不用重打
 
@@ -1599,7 +1599,7 @@ def test_row_menu_has_no_builtin_entry_anymore(page, page_cfg) -> None:
     picked = page.row_menu(page.row_of("放量上攻"))
     assert picked.delete.text() == fp.MENU_DELETE
     assert picked.delete.isEnabled() is True
-    assert "公式文件" in picked.delete.toolTip()
+    assert "策略文件" in picked.delete.toolTip()
     # 触发删除项**不会**顺手动配置（老那条用例正是这么验的）
     before = page_cfg.source_path.read_text(encoding="utf-8")
     assert page_cfg.source_path.read_text(encoding="utf-8") == before
@@ -1825,7 +1825,7 @@ def test_result_page_replaces_the_list_while_picking(page) -> None:
     assert list(fp.RESULT_COLUMNS) == ["名称(代码)", "实时股价", "市值", "换手率",
                                        "来源", "加入自选"]
     assert page.result_table.item(0, 0).text() == "丙样本(600003)"
-    assert "公式·放量上攻" in page.result_table.item(0, 4).text()
+    assert "策略·放量上攻" in page.result_table.item(0, 4).text()
     # 没有实时快照时：股价退回本地最近收盘价（带 `*` 标注）、市值/换手显示 —（不是 0）
     assert page.result_table.item(0, 1).text() == "6.74*"
     assert page.result_table.item(0, 2).text() == "—"
@@ -2008,7 +2008,7 @@ def test_export_result_writes_the_desktop_file(page, page_cfg, tmp_path) -> None
     files = sorted((tmp_path / "desktop-export").glob("*.txt"))    # conftest 的桌面守卫
     assert len(files) == 1
     text = files[0].read_text(encoding="utf-8-sig")
-    assert "甲样本(600001)" in text and "公式·放量上攻" in text
+    assert "甲样本(600001)" in text and "策略·放量上攻" in text
     assert "已导出选股结果" in page.hint_text
 
 
@@ -2267,7 +2267,7 @@ def test_saving_a_broken_formula_saves_it_as_a_draft(page, page_cfg, qapp) -> No
     assert page_cfg.enabled_formulas == []
     # "存下去了但跑不了"算**有问题**，要说一句（不然用户看着那把灰勾不知道原因）——
     # 这句话里带着引擎给的中文原因与行列号
-    assert "公式有错" in page.hint_text and "流通市值X" in page.hint_text
+    assert "策略有错" in page.hint_text and "流通市值X" in page.hint_text
 
 
 def test_save_failure_shows_the_formula_dir(
@@ -2625,7 +2625,7 @@ def test_add_to_watchlist_keeps_the_pick_source_in_the_pool_page(page, page_cfg)
     page.result_table.cellWidget(0, fp.RESULT_ADD_COLUMN).findChild(QPushButton).click()
 
     row = _pool_row(page_cfg, "600003")
-    assert row["source_label"] == "公式·尾盘超短策略+自选"
+    assert row["source_label"] == "策略·尾盘超短策略+自选"
     assert row["strategy"] == "公式·尾盘超短策略"
     # 表格用的就是 `source_label`（`ui/app.py` 那一列），所以这里断言的就是**屏幕上那个词**
     with storage.connect(page_cfg.db_path) as conn:
@@ -2642,8 +2642,8 @@ def test_one_click_add_keeps_the_pick_source_too(page, page_cfg) -> None:
 
     page.btn_add_all.click()
 
-    assert _pool_row(page_cfg, "600003")["source_label"] == "公式·尾盘超短策略+自选"
-    assert _pool_row(page_cfg, "600001")["source_label"] == "公式·放量上攻+自选"
+    assert _pool_row(page_cfg, "600003")["source_label"] == "策略·尾盘超短策略+自选"
+    assert _pool_row(page_cfg, "600001")["source_label"] == "策略·放量上攻+自选"
 
 
 def test_adding_an_existing_symbol_fills_the_missing_source_only(page, page_cfg) -> None:
@@ -2669,4 +2669,4 @@ def test_adding_an_existing_symbol_fills_the_missing_source_only(page, page_cfg)
     assert row["note"] == "龙头"                            # 用户写的备注没被动过
     assert float(row["added_price"]) == pytest.approx(5.0)  # 加入价没被重置
     assert "已经在自选里了" in page.hint_text
-    assert _pool_row(page_cfg, "600003")["source_label"] == "公式·尾盘超短策略+自选（已停用）"
+    assert _pool_row(page_cfg, "600003")["source_label"] == "策略·尾盘超短策略+自选（已停用）"

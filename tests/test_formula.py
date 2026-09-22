@@ -508,7 +508,7 @@ def test_middle_statement_must_be_assignment() -> None:
 
 def test_too_long_formula() -> None:
     err = compile_error("C>0 AND " + "C>0 AND " * 300 + "C>0")
-    assert "公式太长" in str(err)
+    assert "策略太长" in str(err)
     assert err.code == "too_long"
 
 
@@ -657,7 +657,7 @@ def test_in_list_errors() -> None:
 def test_empty_formula() -> None:
     for text in ("", "   ", "\n\n", "{ 只有注释 }"):
         err = compile_error(text)
-        assert "公式是空的" in str(err)
+        assert "策略是空的" in str(err)
         assert err.code == "empty"
 
 

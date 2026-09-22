@@ -69,7 +69,7 @@ def test_file_name_carries_the_date_and_content_is_the_agreed_layout(tmp_path) -
         "共 3 只（策略 2 · 自选 1）",
         "1. 贵州茅台(600519)  现价 1266.98 +0.71%  来源：策略·短期反转",
         "2. 平安银行(000001)  来源：自选",
-        "3. 半导体甲(600002)  来源：公式·放量上攻",
+        "3. 半导体甲(600002)  来源：策略·放量上攻",
         pool.EXPORT_FOOTER,
     ]
 

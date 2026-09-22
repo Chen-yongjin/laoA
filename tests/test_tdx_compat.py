@@ -327,7 +327,7 @@ def test_unsupported_functions_say_so_in_chinese() -> None:
     with pytest.raises(fm.FormulaError) as err:
         fm.compile_formula('"MACD.DIF">0')
     assert err.value.code == "formula_ref"
-    assert "公式" in (err.value.hint or "")
+    assert "策略" in (err.value.hint or "")
 
 
 def test_a_formula_with_only_drawing_statements_is_rejected() -> None:
@@ -416,7 +416,7 @@ def test_formula_reference_gets_its_own_message() -> None:
 
     assert error.code == "formula_ref"
     blob = str(error) + " " + (error.hint or "")
-    assert "公式" in blob and ("抄" in blob or "内置" in blob)
+    assert "策略" in blob and ("抄" in blob or "内置" in blob)
 
 
 def test_an_industry_string_is_not_mistaken_for_a_formula_reference() -> None:

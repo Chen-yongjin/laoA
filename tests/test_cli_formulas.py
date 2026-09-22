@@ -150,7 +150,7 @@ def test_config_groups_no_longer_decide_the_picks(capsys, seeded,
     )
     assert cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"])]) == 0
     out = capsys.readouterr().out
-    assert "本次按勾选的公式选股：低价" in out
+    assert "本次按勾选的策略选股：低价" in out
     # 候选由勾的公式决定：库里 signal 表记着这一轮的结果（stock_pool 不再自动落它）
     with storage.connect(seeded["cfg"].db_path) as conn:
         picked = {r[0] for r in conn.execute("SELECT DISTINCT symbol FROM signal")}

@@ -272,14 +272,15 @@ def test_pool_table_rows_source_labels(engine, wl_db, tmp_path, monkeypatch) -> 
     rows = {r["symbol"]: r for r in pool.pool_table_rows(wl_db.db_path)}
     assert rows["600001"]["source"] == "公式+自选"
     assert rows["600001"]["strategy"] == "公式·低价"
-    assert rows["600001"]["source_label"] == "公式·低价+自选"
+    assert rows["600001"]["source_label"] == "策略·低价+自选"    # 显示：前缀是「策略·」
+    assert rows["600001"]["strategy"] == "公式·低价"             # 数据：库里的值没被动过
     assert rows["600001"]["note"] == "老朋友"
     assert rows["600100"]["source"] == "自选"
     assert rows["600100"]["source_label"] == "自选"
     assert rows["600100"]["note"] == "龙头"
     # 一行 tooltip 的来源明细（界面用的就是这一份）
     detail = pool.source_detail_lines(rows["600001"])
-    assert detail[0] == "来源：公式·低价+自选"
+    assert detail[0] == "来源：策略·低价+自选"
     # 纯自选的行没有组别那一行（不留一个空壳）
     assert pool.source_detail_lines(rows["600100"]) == ["来源：自选"]
 
@@ -649,7 +650,7 @@ def test_cli_once_without_formulas_pools_watchlist(wl_db, tmp_path, capsys, monk
     )
     assert cli(["--cli", "--once", "--no-notify", "--config", str(config)]) == 0
     out = capsys.readouterr().out
-    assert "没有勾选任何公式" in out
+    assert "没有勾选任何策略" in out
     assert "冷门样本(600100)" in out
     assert "没有启用任何策略" not in out
 
@@ -675,7 +676,7 @@ def test_cli_once_ignores_a_typo_in_the_config_groups(wl_db, tmp_path, capsys,
     )
     assert cli(["--cli", "--once", "--no-notify", "--config", str(config)]) == 0
     out = capsys.readouterr().out
-    assert "没有勾选任何公式" in out
+    assert "没有勾选任何策略" in out
     assert "未知策略组" not in out          # 配置里的键不再解析，也就没有这条报错
 
 
@@ -689,7 +690,7 @@ def test_push_lines_mark_strategy_plus_watchlist(wl_db) -> None:
         "name": "低价样本", "symbol": "600001", "strategies": "公式·低价",
         "source": "公式+自选", "note": "老朋友", "reason": "低价",
     }])
-    assert both == ["1. 低价样本(600001)公式·低价+自选（老朋友）｜低价"]
+    assert both == ["1. 低价样本(600001)策略·低价+自选（老朋友）｜低价"]
 
     only_watch = pool.format_pool_lines([{
         "name": "冷门样本", "symbol": "600100", "strategies": "",
@@ -739,11 +740,11 @@ def test_watchlist_source_is_persisted_and_shown_with_the_watchlist_suffix(wl_db
 
     row = _page_rows(wl_db)["600100"]
 
-    assert row["source_label"] == "公式·尾盘超短策略+自选"
+    assert row["source_label"] == "策略·尾盘超短策略+自选"
     assert row["source"] == "公式+自选"          # 与池子行同一套 `source_kind()`
     assert row["strategy"] == "公式·尾盘超短策略"
     # 行 tooltip 的来源明细也是同一个词（界面不自己拼一套）
-    assert pool.source_detail_lines(row)[0] == "来源：公式·尾盘超短策略+自选"
+    assert pool.source_detail_lines(row)[0] == "来源：策略·尾盘超短策略+自选"
 
 
 def test_manually_added_watchlist_row_still_says_only_self_selected(wl_db) -> None:
@@ -792,7 +793,7 @@ def test_disabled_row_keeps_both_the_source_and_the_disabled_mark(wl_db) -> None
     with storage.connect(wl_db.db_path) as conn:
         storage.set_watchlist_enabled(conn, "600100", False)
 
-    assert _page_rows(wl_db)["600100"]["source_label"] == "公式·尾盘超短策略+自选（已停用）"
+    assert _page_rows(wl_db)["600100"]["source_label"] == "策略·尾盘超短策略+自选（已停用）"
 
 
 def test_upsert_keeps_the_first_source_and_price(wl_db) -> None:
@@ -883,8 +884,8 @@ def test_push_and_pool_table_use_the_same_source_word(wl_db) -> None:
     merged = pool.merge_watchlist(engine, [], settings=wl_db, watchlist=entries)
     lines = pool.format_pool_lines(merged)
 
-    assert table_label == "公式·尾盘超短策略+自选"
-    assert lines and lines[0].startswith("1. 冷门样本(600100)公式·尾盘超短策略+自选")
+    assert table_label == "策略·尾盘超短策略+自选"
+    assert lines and lines[0].startswith("1. 冷门样本(600100)策略·尾盘超短策略+自选")
     # 桌面文件那一列也是同一个词（`pick_export_text` 走 `_export_source`）
     text = pool.pick_export_text([{**merged[0], "source_label": table_label}])
-    assert "来源：公式·尾盘超短策略+自选" in text
+    assert "来源：策略·尾盘超短策略+自选" in text

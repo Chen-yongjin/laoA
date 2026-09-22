@@ -354,8 +354,8 @@ def run_daily(
     enabled_formulas = [str(n) for n in (getattr(cfg, "enabled_formulas", None) or [])]
     strategies_off = not enabled_formulas
     if strategies_off:
-        logger.info("没有勾选任何公式：本次只处理自选股"
-                    "（在「策略选股」页勾上公式即可参与选股）")
+        logger.info("没有勾选任何策略：本次只处理自选股"
+                    "（在「策略选股」页勾上策略即可参与选股）")
         report["strategies_off"] = True
 
     def _stage(name: str) -> None:
@@ -475,7 +475,7 @@ def run_daily(
 
             names = "、".join(formula_name_of(key) for key in picked_formulas[:2])
             more = f" 等 {len(picked_formulas)} 条" if len(picked_formulas) > 2 else ""
-            title += f"｜公式：{names}{more}"
+            title += f"｜策略：{names}{more}"
         lines = pool.format_pool_lines(push_rows)
         lines.extend(_pool_plan_lines(push_rows, cfg))
         day = report["data_date"] or intraday.now_shanghai().strftime("%Y-%m-%d")

@@ -295,13 +295,13 @@ def test_safe_name_replaces_illegal_chars() -> None:
 
 
 def test_name_error_rejects_empty() -> None:
-    assert "请先填公式名称" in lib.name_error("   ")
+    assert "请先填策略名称" in lib.name_error("   ")
     assert lib.name_error(None)
     assert lib.name_error("正常名字") == ""
 
 
 def test_save_formula_rejects_empty_name(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="请先填公式名称"):
+    with pytest.raises(ValueError, match="请先填策略名称"):
         lib.save_formula("  ", "C>MA(C,5)", directory=tmp_path)
 
 
@@ -408,7 +408,7 @@ def test_enabled_names_ignores_missing_and_broken(formulas_cfg: Config, tmp_path
 
     assert picked == ["好公式"]              # 去重、只留能跑的那条
     log = messages(log_records)
-    assert "根本不存在的公式" in log and "没有这条公式" in log
+    assert "根本不存在的公式" in log and "没有这条策略" in log
     assert "坏公式" in log and "语法有错" in log
 
 
@@ -475,12 +475,12 @@ def test_scorecard_reports_progress_and_numbers(formula_db: str) -> None:
     result = lib.run_scorecard(formula, formula_db, progress_cb=lambda *a: seen.append(a))
 
     assert seen, "成绩单必须回报进度（界面的进度条靠它）"
-    assert all(stage == "公式成绩单" and total >= 1 and done >= 0 for stage, done, total in seen)
+    assert all(stage == "策略成绩单" and total >= 1 and done >= 0 for stage, done, total in seen)
     assert result["samples"] > 0
     assert result["days"] > 0
     assert isinstance(result["avg"], float)
     assert result["conv_key"] == lib.DEFAULT_CONVENTION_KEY
-    assert "公式成绩单" in result["text"]
+    assert "策略成绩单" in result["text"]
     assert "绝对收益" in result["text"]          # 口径写清楚（与策略成绩单的 α 不是一回事）
 
 
@@ -522,7 +522,7 @@ def test_run_enabled_formulas_picks_expected_symbols(formula_db: str, formulas_c
 
     assert list(run.picks) == ["公式·收盘在5日线上"]
     assert {pick["symbol"] for pick in run.picks["公式·收盘在5日线上"]} == set(RISING)
-    assert run.picks["公式·收盘在5日线上"][0]["reason"] == "公式：收盘在5日线上"
+    assert run.picks["公式·收盘在5日线上"][0]["reason"] == "策略：收盘在5日线上"
     assert run.status == {} and run.errors == []
     assert run.ran == ["收盘在5日线上"]
 
@@ -625,15 +625,15 @@ def test_enabled_formula_enters_pool_with_formula_source(engine, formulas_cfg: C
 
     table_rows = {row["symbol"]: row for row in pool.pool_table_rows(formulas_cfg.db_path)}
     row = table_rows[formula_rows[0]["symbol"]]
-    assert row["label"] == "公式·收盘在5日线上"          # 「来源策略」列
-    assert row["source_label"] == "公式·收盘在5日线上"   # 「来源」列
+    assert row["label"] == "策略·收盘在5日线上"          # 「来源策略」列
+    assert row["source_label"] == "策略·收盘在5日线上"   # 「来源」列
     assert row["source"] == "公式"
     assert row["is_formula"] is True
     # 自定义公式**不打**证据标记（那是内置策略的边际证据，不是用户公式的）
     assert row["evidence_text"] == ""
 
     lines = "\n".join(pool.format_pool_lines(rows))
-    assert "公式·收盘在5日线上" in lines
+    assert "策略·收盘在5日线上" in lines
 
 
 def test_not_enabled_formula_does_not_change_pool(engine, formulas_cfg: Config, tmp_path: Path,
@@ -671,7 +671,7 @@ def test_formula_pool_row_is_also_monitored_intraday(engine, formulas_cfg: Confi
     targets, symbols = intraday.watch_targets(formulas_cfg.db_path, cfg=formulas_cfg)
 
     assert symbol in symbols
-    assert targets[symbol]["strategy"] == "公式·收盘在5日线上"
+    assert targets[symbol]["strategy"] == "公式·收盘在5日线上"      # 数据：库里存的还是公式前缀
 
 
 def test_push_title_mentions_formula_group(engine, formulas_cfg: Config, tmp_path: Path,
@@ -698,9 +698,9 @@ def test_push_title_mentions_formula_group(engine, formulas_cfg: Config, tmp_pat
     report = scheduler.run_daily(formulas_cfg, engine, notify=True)
 
     assert report["pool"]
-    assert "公式：收盘在5日线上" in captured["title"]
+    assert "策略：收盘在5日线上" in captured["title"]
     body = "\n".join(captured["lines"])
-    assert "公式·收盘在5日线上" in body
+    assert "策略·收盘在5日线上" in body
 
 
 def test_formula_opt_in_writes_config_and_keeps_comments(formulas_cfg: Config,

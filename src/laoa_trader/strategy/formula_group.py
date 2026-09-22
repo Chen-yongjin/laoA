@@ -194,18 +194,18 @@ def run_enabled_formulas(
                     first_error.setdefault(label, str(exc))
                     if count == 1:
                         logger.warning(
-                            f"公式 {label} 在 {series.name}({series.symbol}) 上算不出来：{exc}"
+                            f"策略 {label} 在 {series.name}({series.symbol}) 上算不出来：{exc}"
                         )
                     continue
                 if bool(mask[-1]):
                     hits[label].append({
                         "symbol": series.symbol,
                         "name": series.name,
-                        "reason": f"公式：{label}",
+                        "reason": f"策略：{label}",
                     })
     except fm.FormulaDataError as exc:
         # 库不存在 / 读不出来这类**环境**问题：说清楚原因就返回，绝不让整轮建池失败
-        message = f"公式选股：{exc}"
+        message = f"策略选股：{exc}"
         logger.warning(message)
         result.errors.append(message)
         for name in result.ran:
@@ -221,8 +221,8 @@ def run_enabled_formulas(
             # 但状态里必须有原因 —— 否则用户只会看到"命中变少了"，猜不到为什么
             reason = (f"{failures[label]} 只票算不出来：{first_error.get(label, '')}")
             result.status[label] = reason
-            result.errors.append(f"公式 {label}：{reason}")
-            logger.warning(f"公式 {label}：{reason}")
+            result.errors.append(f"策略 {label}：{reason}")
+            logger.warning(f"策略 {label}：{reason}")
         if not picks:
             continue
         # 公式内按代码排序（`load_series` 本身就是代码升序，这里显式排一次，
@@ -233,7 +233,7 @@ def run_enabled_formulas(
     _remember(result.status)
     if result.picks:
         logger.info(
-            "公式选股：" + "、".join(
+            "策略选股：" + "、".join(
                 f"{formula_name_of(key)} {len(value)} 只"
                 for key, value in result.picks.items()
             )

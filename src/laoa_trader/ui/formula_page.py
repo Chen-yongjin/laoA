@@ -241,7 +241,7 @@ RESULT_HEADER_TIPS: tuple[str, ...] = (
     "实时股价：取实时快照；没有快照时用库里最近的收盘价并标注，都没有就显示 —",
     "流通市值，单位**亿**（取实时快照；取不到显示 —，不是 0）",
     "实时换手率，单位 %（取实时快照；取不到显示 —，不是 0）",
-    "是哪条公式/策略选出来的（与「自选股池」那一列同一个词）",
+    "是哪条策略选出来的（与「自选股池」那一列同一个词）",
     "点这一格把这只票加进「自选股池」：之后它会一直留在池子里被盯盘，"
     "并记下加入时的价格用来算盈亏",
 )
@@ -256,8 +256,8 @@ RESULT_HINT_IDLE = (
 #: **必须写明结果去哪了**：这一页不再显示选股结果（用户要求），
 #: 不写的话用户点完【开始选股】会以为"什么都没发生"。
 PAGE_HINT = (
-    "勾「策略选取」列 = 这条策略/公式参与选股（只有「竞价策略」那一行例外：它开关的是盘中"
-    "竞价扫描，不参与选股）；单击一行看详情（公式会载入编辑器）；右键 = 启用 / 关闭 / 删除；"
+    "勾「策略选取」列 = 这条策略参与选股（只有「竞价策略」那一行例外：它开关的是盘中"
+    "竞价扫描，不参与选股）；单击一行看详情（策略会载入编辑器）；右键 = 启用 / 关闭 / 删除；"
     "点【开始选股】跑一轮 —— 这一块会变成【本次选股结果】，可以一键加入自选、导出到桌面，"
     "结果同时也会进「自选股池」并自动导出一份到桌面。"
 )
@@ -267,8 +267,8 @@ PAGE_HINT = (
 #: 那 5 条内置策略改成了随包公式，所以现在列表就是"竞价策略 + 公式"两段。
 LIST_HINT = (
     "策略列表：最上面那条「竞价策略」开关的是盘中竞价扫描（只做提示、不参与选股）；"
-    "下面全是公式 —— 随包预置的那几条与你自己写的一条待遇相同（都能改、能删、能勾选），"
-    "「说明」列来自公式文件里的「# 说明:」。"
+    "下面全是策略 —— 随包预置的那几条与你自己写的一条待遇相同（都能改、能删、能勾选），"
+    "「说明」列来自策略文件里的「# 说明:」。"
 )
 
 #: 编辑器里那行灰字说明（小白第一眼看的就是它）
@@ -396,7 +396,7 @@ OPERATORS: tuple[tuple[str, str, int | None, str], ...] = (
     # 插进去的就是一个空格字符，写在最后是因为它不属于"运算符"的语法，只是排版用。
     # 放在这一组而不是别处的原因：与前几个一样是"往光标处塞一个字符"，
     # 而变量/函数那两组都是有语义的字段与调用。
-    (" ", "插入一个空格（公式里空格只影响可读性，不影响计算）", None, "空格"),
+    (" ", "插入一个空格（策略里空格只影响可读性，不影响计算）", None, "空格"),
 )
 
 #: 需要"前后补空格"的运算符（否则 `A>1` 之后点 AND 会粘成 `A>1AND B`）。
@@ -582,7 +582,7 @@ def auction_detail(cfg: Any) -> str:
         "  9:25 那一枪拿到的是**竞价终态**，命中直接推到浮窗/托盘（点详情看全部命中）。",
         "· 不是：**选股策略**。它**不参与选股** —— 勾上不会往「自选股池」加票，"
         "也不会改变【开始选股】的结果；",
-        "  要按自己的条件选股，就勾上列表里那几条公式（随包的也在里面），或自己写一条。",
+        "  要按自己的条件选股，就勾上列表里那几条策略（随包的也在里面），或自己写一条。",
         "",
         "── 两条硬限制 ──",
         "1. 竞价数据**没有历史**（接口只给当天 stage=live/final，不接受日期）→ **无法回测**，",
@@ -626,7 +626,7 @@ def formula_row_note(spec: Any, runtime_error: str = "") -> tuple[str, str]:
     if not spec.ok:
         full = str(spec.error_text or "").strip()
         note = (note + " ｜" if note else "") + "⛔ 语法错：" + _one_line(full, 60)
-        tip = (tip + "\n\n" if tip else "") + "⛔ 这条公式现在编译不过：\n" + full
+        tip = (tip + "\n\n" if tip else "") + "⛔ 这条策略现在编译不过：\n" + full
     if runtime_error:
         note = (note + " ｜" if note else "") + "⚠️ 运行时出错：" + _one_line(runtime_error, 40)
         tip = (tip + "\n\n" if tip else "") + "⚠️ 上一次选股时出错：\n" + str(runtime_error)
@@ -707,7 +707,7 @@ if QT_AVAILABLE:
                     kwargs["progress_cb"] = self.progress.emit
                 result = self._fn(*self._args, **kwargs)
             except Exception as exc:  # noqa: BLE001 - 后台异常必须回主线程说人话
-                logger.exception("公式后台任务失败")
+                logger.exception("策略后台任务失败")
                 self.failed.emit(exc)
             else:
                 self.finished_ok.emit(result)
@@ -821,7 +821,7 @@ if QT_AVAILABLE:
             top = QHBoxLayout()
             self.btn_edit = QPushButton("策略编辑")
             self.btn_edit.setToolTip(
-                "打开公式编辑器：左边写公式、右边点按钮插入（点列表里的公式行也会打开它）"
+                "打开策略编辑器：左边写策略、右边点按钮插入（点列表里的策略行也会打开它）"
             )
             # 用 lambda 吞掉 `clicked` 带来的 checked 参数：直接接 `on_open_editor`
             # 的话那个 `False` 会被当成 spec 传进去（Qt 的经典坑，本文件里所有
@@ -832,7 +832,7 @@ if QT_AVAILABLE:
             self.btn_start_pick = QPushButton("开始选股")
             self.btn_start_pick.setObjectName("primaryAction")   # 主操作按钮（主题精确命中）
             self.btn_start_pick.setToolTip(
-                "按上面勾选的策略与公式跑一轮：结果直接进「自选股池」"
+                "按上面勾选的策略跑一轮：结果直接进「自选股池」"
                 "（在那一页右键删除、或手工再添加），并同时往桌面导出一个结果文本文件，"
                 "最后按「系统设置」里的通知方式发一条消息"
             )
@@ -918,8 +918,8 @@ if QT_AVAILABLE:
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-            self._set_header_tooltip(0, "策略/公式的名字（就是公式文件的名字）")
-            self._set_header_tooltip(1, "说明：来自公式文件里的「# 说明:」，或者在编辑器里填的备注")
+            self._set_header_tooltip(0, "策略的名字（就是策略文件的名字）")
+            self._set_header_tooltip(1, "说明：来自策略文件里的「# 说明:」，或者在编辑器里填的备注")
             self._set_header_tooltip(2, "勾上 = 参与选股（写回 config.toml 的 enabled_formulas）；"
                                         "竞价策略那一行例外：它开关的是盘中竞价扫描")
             self.table.itemSelectionChanged.connect(self.on_row_selected)
@@ -1036,11 +1036,11 @@ if QT_AVAILABLE:
             # **行为一个字都没变**（还是把一条能跑通的公式放进编辑框），
             # 只是"载入示例"这四个字让新用户以为是"看示例"而不是"开始写一条新的"。
             self.btn_sample = QPushButton(SAMPLE_BUTTON_TEXT)
-            self.btn_sample.setToolTip("新建一条策略：把一条能跑通的公式放进编辑框，照着改就行")
+            self.btn_sample.setToolTip("新建一条策略：把一条能跑通的策略放进编辑框，照着改就行")
             self.btn_sample.clicked.connect(self.on_load_sample)
             head.addWidget(self.btn_sample)
             self.btn_close_editor = QPushButton("收起编辑器")
-            self.btn_close_editor.setToolTip("收起这一块（公式已经保存的不会丢）")
+            self.btn_close_editor.setToolTip("收起这一块（策略已经保存的不会丢）")
             self.btn_close_editor.clicked.connect(self.on_close_panel)
             head.addWidget(self.btn_close_editor)
             layout.addLayout(head)
@@ -1095,7 +1095,7 @@ if QT_AVAILABLE:
 
             # ── 名称 + 备注 + 三个文件按钮 ──
             name_row = QHBoxLayout()
-            name_row.addWidget(QLabel("公式名称："))
+            name_row.addWidget(QLabel("策略名称："))
             self.name_edit = QLineEdit()
             self.name_edit.setPlaceholderText("例如：5日线上放量")
             self.name_edit.setToolTip("这就是保存后的文件名，也是池子/推送里显示的名字")
@@ -1103,7 +1103,7 @@ if QT_AVAILABLE:
 
             self.btn_save = QPushButton("保存")
             self.btn_save.setObjectName("primaryAction")     # 主操作按钮（主题里精确命中）
-            self.btn_save.setToolTip("把编辑框里的公式存到公式目录（重名会先问一句）")
+            self.btn_save.setToolTip("把编辑框里的策略存到策略目录（重名会先问一句）")
             self.btn_save.clicked.connect(self.on_save)
             name_row.addWidget(self.btn_save)
 
@@ -1113,7 +1113,7 @@ if QT_AVAILABLE:
             name_row.addWidget(self.btn_save_as)
 
             self.btn_delete = QPushButton("删除")
-            self.btn_delete.setToolTip("删掉当前这条公式文件（会先问一句；内置策略不能删）")
+            self.btn_delete.setToolTip("删掉当前这条策略文件（会先问一句；内置策略不能删）")
             self.btn_delete.clicked.connect(self.on_delete)
             name_row.addWidget(self.btn_delete)
             layout.addLayout(name_row)
@@ -1121,9 +1121,9 @@ if QT_AVAILABLE:
             note_row = QHBoxLayout()
             note_row.addWidget(QLabel("备注："))
             self.note_edit = QLineEdit()
-            self.note_edit.setPlaceholderText("这条公式是干什么的（可留空 —— 留空则自动填「用到的字段/函数」）")
+            self.note_edit.setPlaceholderText("这条策略是干什么的（可留空 —— 留空则自动填「用到的字段/函数」）")
             self.note_edit.setToolTip(
-                "会写进公式文件的「# 说明:」注释头，列表的「说明」列显示的就是它；"
+                "会写进策略文件的「# 说明:」注释头，列表的「说明」列显示的就是它；"
                 f"最长 {MAX_NOTE_CHARS} 字，不能换行（注释头只有一行）"
             )
             note_row.addWidget(self.note_edit, 1)
@@ -1132,7 +1132,7 @@ if QT_AVAILABLE:
             # ── 编辑框 ──
             self.editor = QPlainTextEdit()
             self.editor.setPlaceholderText(
-                "在这里写公式，例如：\nM5:=MA(C,5)\nC>M5 AND V>MA(V,5)*1.5"
+                "在这里写策略，例如：\nM5:=MA(C,5)\nC>M5 AND V>MA(V,5)*1.5"
             )
             self.editor.setMinimumHeight(EDITOR_MIN_HEIGHT)
             self.editor.setTabChangesFocus(False)
@@ -1149,7 +1149,7 @@ if QT_AVAILABLE:
             # ── 动作行 ──
             action_row = QHBoxLayout()
             self.btn_validate = QPushButton("校验")
-            self.btn_validate.setToolTip("检查公式写得对不对；通过时会告诉你用到哪些字段/函数")
+            self.btn_validate.setToolTip("检查策略写得对不对；通过时会告诉你用到哪些字段/函数")
             self.btn_validate.clicked.connect(self.on_validate)
             action_row.addWidget(self.btn_validate)
 
@@ -1158,7 +1158,7 @@ if QT_AVAILABLE:
             # 为一个文案做机械重命名只会制造噪音（见模块 docstring 的同一段说明）。
             self.btn_preview = QPushButton("运行：当前库能选出几只")
             self.btn_preview.setToolTip(
-                "在当前库上跑一遍这条公式，看看最近一个交易日命中几只。\n"
+                "在当前库上跑一遍这条策略，看看最近一个交易日命中几只。\n"
                 "不推送、不写库（结果不会进「自选股池」）"
             )
             self.btn_preview.clicked.connect(self.on_preview)
@@ -1386,7 +1386,7 @@ if QT_AVAILABLE:
                         "自动扫全市场并推送，写回 config.toml 的 intraday_auction"
                     )
                 else:
-                    name_item.setToolTip(f"公式文件：{getattr(row.spec, 'path', '')}")
+                    name_item.setToolTip(f"策略文件：{getattr(row.spec, 'path', '')}")
                 self.table.setItem(index, 0, name_item)
 
                 note_item = QTableWidgetItem(row.note)
@@ -1433,8 +1433,8 @@ if QT_AVAILABLE:
                     "参数在「系统设置 → 竞价扫描」那一组里改"
                 )
             return (
-                "勾上 = 这条公式参与选股（写回 config.toml 的 enabled_formulas）；"
-                "默认不勾 —— 你自己的公式要不要用，由你决定"
+                "勾上 = 这条策略参与选股（写回 config.toml 的 enabled_formulas）；"
+                "默认不勾 —— 你自己的策略要不要用，由你决定"
             )
 
         def _update_list_hint(self) -> None:
@@ -1451,7 +1451,7 @@ if QT_AVAILABLE:
             missing = sorted(name for name in known if name not in files)
             if missing:
                 self.list_hint.setText(
-                    "⚠️ config.toml 里勾了这几条公式，但公式目录里找不到（这会让勾选与实跑"
+                    "⚠️ config.toml 里勾了这几条策略，但策略目录里找不到（这会让勾选与实跑"
                     "不一致）：" + "、".join(missing)
                     + "　改完点【开始选股】前先看一眼勾选是否与预期一致。"
                 )
@@ -1608,7 +1608,7 @@ if QT_AVAILABLE:
                     # 什么都看不到（那会变成"我勾了公式，池子里却没有"这种最难查的现象）
                     toggle.setEnabled(False)
                     toggle.setToolTip(
-                        "这条公式现在编译不过，勾上也不会参与选股：先在编辑器里改好、"
+                        "这条策略现在编译不过，勾上也不会参与选股：先在编辑器里改好、"
                         "点【校验】通过，再右键启用"
                     )
             toggle.triggered.connect(
@@ -1624,7 +1624,7 @@ if QT_AVAILABLE:
                     "只能启用/关闭，不能删除"
                 )
             else:
-                delete.setToolTip(f"删掉公式文件「{row.key}」（会先问一句）")
+                delete.setToolTip(f"删掉策略文件「{row.key}」（会先问一句）")
                 delete.triggered.connect(
                     lambda _checked=False, r=row: self.on_delete_formula(r.key)
                 )
@@ -1661,8 +1661,8 @@ if QT_AVAILABLE:
             if checked:
                 self._set_hint(
                     f"✅ 「{name}」已加入选股（写回 {path.name}）。\n"
-                    "下次【开始选股】时它会作为「公式」组参与：进池的票来源会标成"
-                    f"「公式·{name}」。"
+                    "下次【开始选股】时它会作为「策略」组参与：进池的票来源会标成"
+                    f"「策略·{name}」。"
                 )
                 # 成功**不弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）；
                 # 列表里那个勾 + 提示区那句话本身就是反馈
@@ -1802,7 +1802,7 @@ if QT_AVAILABLE:
                     text += "\n⚠️ " + hint
                 self._set_hint(text)
             elif not spec.ok:
-                self._set_hint(f"❌ 这条公式现在有问题：{spec.error_text}\n"
+                self._set_hint(f"❌ 这条策略现在有问题：{spec.error_text}\n"
                                "改完再点【校验】；点【保存】就会覆盖原文件。")
             else:
                 self._set_hint(f"已载入「{spec.name}」")
@@ -1813,7 +1813,7 @@ if QT_AVAILABLE:
             if not text.strip():
                 if not quiet:
                     self._set_hint(
-                        f"❌ 公式还是空的：点右边的按钮就能插入，或者点【{SAMPLE_BUTTON_TEXT}】"
+                        f"❌ 策略还是空的：点右边的按钮就能插入，或者点【{SAMPLE_BUTTON_TEXT}】"
                     )
                 return None
             try:
@@ -1950,7 +1950,7 @@ if QT_AVAILABLE:
             所以这就是"按下【运行】那一刻的名字"），没有名字时写「未命名公式」——
             宁可写一个诚实的占位词，也不要在来源列里留一段空白。
             """
-            return str(getattr(formula, "name", "") or "").strip() or "未命名公式"
+            return str(getattr(formula, "name", "") or "").strip() or "未命名策略"
 
         def _on_preview_done(self, result: Any) -> None:
             """运行回来了（回主线程执行）：先收起"正在跑"的样子，再写结果。"""
@@ -2097,7 +2097,7 @@ if QT_AVAILABLE:
             note = " ".join(self.note_edit.text().split())
             if len(note) > MAX_NOTE_CHARS:
                 return (f"备注太长了（{len(note)} 字，最多 {MAX_NOTE_CHARS} 字）："
-                        "它写在公式文件第一行的「# 说明:」注释头里，太长会把公式挤到看不见。")
+                        "它写在策略文件第一行的「# 说明:」注释头里，太长会把策略挤到看不见。")
             return ""
 
         def on_save(self) -> None:
@@ -2117,16 +2117,16 @@ if QT_AVAILABLE:
                 return
             name = formulas_lib.safe_name(raw)
             path = formulas_lib.formula_path(name, self.directory)
-            if path.exists() and not self._confirm(f"公式「{name}」已存在，要覆盖它吗？\n"
+            if path.exists() and not self._confirm(f"策略「{name}」已存在，要覆盖它吗？\n"
                                                    f"（原来的内容会被替换，不可撤销）"):
-                self._set_hint(f"已取消保存：公式「{name}」保持原样（没有被改动）")
+                self._set_hint(f"已取消保存：策略「{name}」保持原样（没有被改动）")
                 return
             self._write(name)
 
         def on_save_as(self) -> None:
             """【另存为】：换个名字再存一份（原文件不动）。"""
-            default = formulas_lib.safe_name(self.name_edit.text()) or "新公式"
-            text, ok = QInputDialog.getText(self, "另存为", "新公式名称：", text=default)
+            default = formulas_lib.safe_name(self.name_edit.text()) or "新策略"
+            text, ok = QInputDialog.getText(self, "另存为", "新策略名称：", text=default)
             if not ok:
                 return
             problem = formulas_lib.name_error(text)
@@ -2139,8 +2139,8 @@ if QT_AVAILABLE:
                 return
             name = formulas_lib.safe_name(text)
             path = formulas_lib.formula_path(name, self.directory)
-            if path.exists() and not self._confirm(f"公式「{name}」已存在，要覆盖它吗？"):
-                self._set_hint(f"已取消另存为：公式「{name}」保持原样")
+            if path.exists() and not self._confirm(f"策略「{name}」已存在，要覆盖它吗？"):
+                self._set_hint(f"已取消另存为：策略「{name}」保持原样")
                 return
             self._write(name)
 
@@ -2148,7 +2148,7 @@ if QT_AVAILABLE:
             """【删除】按钮：删掉**当前**这条公式（先确认）。"""
             name = self.current_name()
             if not name:
-                self._set_hint("❌ 请先在上面列表里选一条公式（或填上名称）——内置策略不能删")
+                self._set_hint("❌ 请先在上面列表里选一条策略（或填上名称）——内置策略不能删")
                 return
             self.on_delete_formula(name)
 
@@ -2156,8 +2156,8 @@ if QT_AVAILABLE:
             """删除一条公式文件（右键菜单与【删除】按钮共用，**先二次确认**）。"""
             if not name:
                 return
-            if not self._confirm(f"确定删除公式「{name}」吗？\n（公式文件会被删掉，不可撤销）"):
-                self._set_hint(f"已取消删除：公式「{name}」还在")
+            if not self._confirm(f"确定删除策略「{name}」吗？\n（策略文件会被删掉，不可撤销）"):
+                self._set_hint(f"已取消删除：策略「{name}」还在")
                 return
             try:
                 deleted = formulas_lib.delete_formula(name, self.directory)
@@ -2165,7 +2165,7 @@ if QT_AVAILABLE:
                 self._set_hint(f"❌ 删除失败：{exc}（文件可能正被其它程序占用）")
                 return
             if not deleted:
-                self._set_hint(f"❌ 没找到公式「{name}」的文件")
+                self._set_hint(f"❌ 没找到策略「{name}」的文件")
                 return
             if self.current_name() == name:
                 # 删掉的正是编辑区里这条：把编辑区清空，免得用户以为"它还在、只是没保存"
@@ -2177,7 +2177,7 @@ if QT_AVAILABLE:
                 finally:
                     self._loading = False
             self.reload()
-            self._set_hint(f"🗑 已删除公式「{name}」（文件已从公式目录移除）")
+            self._set_hint(f"🗑 已删除策略「{name}」（文件已从策略目录移除）")
 
         def _write(self, name: str) -> None:
             """真正落盘（名称已安全化、覆盖已确认）。"""
@@ -2197,8 +2197,8 @@ if QT_AVAILABLE:
                 # 目录写的是**这一页实际用的**那个（可能是 `LAOA_TRADER_FORMULAS`
                 # 或调用方传进来的），不是默认值 —— 打默认值会让人找错地方。
                 folder = self.directory or formulas_lib.formula_dir()
-                self._set_hint(f"❌ 没存上：{exc}（公式目录：{folder}）")
-                self._toast("❌ 公式没存上（公式目录可能不可写）")
+                self._set_hint(f"❌ 没存上：{exc}（策略目录：{folder}）")
+                self._toast("❌ 策略没存上（策略目录可能不可写）")
                 return
             # 把安全化后的名字、最终写进文件的备注都回显：用户填 `涨/跌` 时看到的是
             # `涨_跌`，备注留空时看到的是自动生成的那句"用到的字段/函数" ——
@@ -2223,7 +2223,7 @@ if QT_AVAILABLE:
                 # **存下去了，但这条公式跑不了**（语法/字段错）—— 这算"有问题"，必须说：
                 # 文件躺在列表里、勾选框是灰的，用户不看那把灰勾是不会知道原因的。
                 # 一句话、带行列号（引擎给的就是中文），别写小作文。
-                self._set_hint("❌ 公式有错，跑不了：" + (saved.error_text or "语法错误"))
+                self._set_hint("❌ 策略有错，跑不了：" + (saved.error_text or "语法错误"))
             else:
                 # 保存成功**一个字都不说**（用户要求"成功不需要提示"）：
                 # 列表最下面多出的那一行就是反馈；上一次失败留下的红字顺手收掉。
@@ -2248,7 +2248,7 @@ if QT_AVAILABLE:
                 self.note_edit.setText(getattr(sample, "description", "") or "")
                 self.editor.setPlainText(sample.source)
                 self._set_hint(
-                    f"已载入示例公式「{sample.name}」。\n"
+                    f"已载入示例策略「{sample.name}」。\n"
                     "点【校验】看看它用到什么，点【运行】看它在你的库里能选出几只。"
                 )
             else:
@@ -2256,8 +2256,8 @@ if QT_AVAILABLE:
                 self.note_edit.clear()
                 self.editor.setPlainText(SAMPLE_TEXT)
                 self._set_hint(
-                    "已载入内置示例公式（公式目录里还没有示例文件，这是兜底的那条）。\n"
-                    "点【校验】→【运行】，再点【保存】就存到你的公式目录里了。"
+                    "已载入内置示例策略（策略目录里还没有示例文件，这是兜底的那条）。\n"
+                    "点【校验】→【运行】，再点【保存】就存到你的策略目录里了。"
                 )
             self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
 
@@ -2359,7 +2359,7 @@ if QT_AVAILABLE:
             else:
                 self.result_hint.setText(
                     f"本次选股没有选到票（行情日 {day}）。"
-                    "常见原因：勾选的策略/公式没有命中、或数据还没更新；"
+                    "常见原因：勾选的策略没有命中、或数据还没更新；"
                     "可以点【返回策略列表】改一改再跑一轮。"
                 )
             for message in (errors or []):
@@ -2689,7 +2689,7 @@ if QT_AVAILABLE:
                 try:
                     self.status_cb(text)
                 except Exception:  # noqa: BLE001 - 回调出错不该影响这一页
-                    logger.debug("公式页状态回调出错", exc_info=True)
+                    logger.debug("策略页状态回调出错", exc_info=True)
 
         def on_start_pick(self) -> None:
             """【开始选股】：**只举手**（emit `start_pick_requested`）。
@@ -2709,14 +2709,14 @@ if QT_AVAILABLE:
             self.result_hint.setText("正在选股…（跑完结果就出现在这里，不用再点别的）")
             self.result_table.setRowCount(0)
             self.show_result_page()
-            self._toast("开始选股：正在按勾选的策略与公式跑一轮…"
+            self._toast("开始选股：正在按勾选的策略跑一轮…"
                         "（结果会显示在这一页，并同时进「自选股池」+ 导出到桌面）")
             self.start_pick_requested.emit()
 
         def on_copy_detail(self) -> None:
             """【复制】：把内置策略详情放进剪贴板（贴到记事本/群里都行）。"""
             if not self.detail_text:
-                self._toast("还没有可复制的详情：先在列表里点一行（公式或竞价策略）")
+                self._toast("还没有可复制的详情：先在列表里点一行（策略或竞价策略）")
                 return
             clipboard = QApplication.clipboard()
             if clipboard is not None:

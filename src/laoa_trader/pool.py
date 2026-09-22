@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from laoa_trader import clock
+from laoa_trader import wording
 from laoa_trader.config import get_config
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
@@ -166,7 +167,7 @@ def build_pool(
     # 用户看着它却找不到对应的策略行（那是最难解释的一种现象）。
     stale = [k for k in picks_by_strategy if not is_formula_strategy(k)]
     if stale:
-        logger.info(f"丢弃非公式候选（内置策略已改成随包公式）：{stale}")
+        logger.info(f"丢弃不是自定义策略的候选（内置策略已改成随包策略）：{stale}")
         picks_by_strategy = {
             k: v for k, v in picks_by_strategy.items() if is_formula_strategy(k)
         }
@@ -752,11 +753,13 @@ def _export_source(row: dict) -> str:
     为什么留第 3 条：第 2 条在"纯自选行没有 `watchlist` 标记"时会给一个 `—`
     （`source_label` 的兜底值）—— 给人看的文件里写"来源：—"等于什么都没说。
     """
-    label = str(row.get("source_label") or "").strip()
+    label = wording.display_strategy(str(row.get("source_label") or "").strip())
     if not label:
         label = source_label(row, None)
     if not label or label == "—":
-        label = str(row.get("source") or "").strip() or "—"
+        # 第 3 条退路拿到的是内部短标签（`公式` / `公式+自选`），照样要说人话
+        # （2026-09-22 起界面上不用"公式"这个词，见 `wording`）
+        label = wording.display_words(str(row.get("source") or "").strip()) or "—"
     return label
 
 
@@ -1059,16 +1062,20 @@ def source_kind(row: dict, watch_entry: dict | None) -> str:
 
 
 def source_label(row: dict, watch_entry: dict | None) -> str:
-    """界面「来源」列 / CLI 那一列的文本：**是哪条策略选出来的** / 公式名 / 自选 / 组合。
+    """界面「来源」列 / CLI 那一列的文本：**是哪条策略选出来的** / 自选 / 组合。
 
     用户明确要求这一列回答"是哪条策略"，而不是只写组别（`波段·T+10（T+10）`
     回答不了"凭什么选它"）。所以：
 
-        公式标的 → `公式·放量上攻`（合成名，见 `formula_group`）；老库里的内置策略行
-        仍按 `legacy.strategy_label` 显示中文名（`策略·短期反转`）
-        自定义公式   → `公式·放量上攻`（合成名本身就是这个意思，原样显示）
-        纯自选       → `自选`
-        策略 + 自选  → `策略·短期反转+自选`
+        自定义策略标的 → `策略·放量上攻`（**显示**成策略前缀，见下面的说明）
+        老库里的内置策略行 → `策略·短期反转`（`legacy.strategy_label` 翻中文名）
+        纯自选           → `自选`
+        策略 + 自选      → `策略·短期反转+自选`
+
+    ⚠️ **2026-09-22 起自定义的那条也显示 `策略·`**（主人："把公式都改成策略吧 这样好看点"）：
+    库里存的还是 `公式·放量上攻`（**历史值一个字节都没改**），只有显示时换前缀 ——
+    换的地方是 `wording.display_strategy()`（`legacy.strategy_label()` 会调它），
+    所以升级前后同一只票在界面上是同一个写法，不会一会儿 `公式·X` 一会儿 `策略·X`。
 
     **组别与持有期不再进这一列**：它们回答的是"这条策略属于哪一组"，
     而"来源"要回答的是"哪条策略"。两者都在行 tooltip 里（`source_detail_lines`）。
@@ -1084,7 +1091,8 @@ def source_label(row: dict, watch_entry: dict | None) -> str:
     parts: list[str] = []
     if strategy:
         if is_formula_strategy(strategy):
-            parts.append(strategy)
+            # 显示时把前缀换成「策略·」（`wording` 只换前缀，不动用户自己起的名字）
+            parts.append(wording.display_strategy(strategy))
         else:
             name = primary_strategy_name(row)
             parts.append(f"{STRATEGY_SOURCE_PREFIX}{name}" if name else "策略")
@@ -1101,7 +1109,10 @@ def source_detail_lines(row: dict) -> list[str]:
     - `同批选中：放量上攻` —— 只在这一行被**多条**公式选中时出现（写公式名）。
     """
     lines: list[str] = []
-    label = str(row.get("source_label") or "").strip() or "—"
+    # 这一行可能是调用方**自己拼的行**（只带 `source_label` 没有 `strategy`）——
+    # 照样把内部前缀换成「策略·」，否则同一只票在 tooltip 里写 `公式·X`、
+    # 在「来源」列里写 `策略·X`（2026-09-22 起界面上不用"公式"这个词）
+    label = wording.display_strategy(str(row.get("source_label") or "").strip()) or "—"
     lines.append(f"来源：{label}")
     group_label = str(row.get("group_label") or "")
     horizon = int(row.get("horizon") or 0)

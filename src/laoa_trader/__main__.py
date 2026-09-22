@@ -535,9 +535,9 @@ def cli(argv: list[str] | None = None) -> int:
             print(f"  {i:>2}. {row['name']}({row['symbol']})｜"
                   f"来源 {row.get('source_label') or '—'}｜组别 {group_text}｜"
                   f"{row.get('industry') or '—'}｜{row.get('reason') or ''}{note}")
-        print("来源说明：公式·xxx=你勾选参与选股的公式（随包公式与自写的都在这里）；"
+        print("来源说明：策略·xxx=这条策略选出来的（随包策略与你自写的都在这里）；"
               "自选=手工加的；带 +自选 = 两者都有（只出现一行）；"
-              "策略·xxx=老版本（2026-09-18 之前）内置策略留下的历史行")
+              "策略·xxx 也可能是老版本（2026-09-18 之前）内置策略留下的历史行")
         return 0
 
     # 只有"要写数据"的命令才因为目录不可用而终止；
@@ -581,9 +581,9 @@ def cli(argv: list[str] | None = None) -> int:
         # 那是**默认的正常状态**。
         enabled = [str(n) for n in (getattr(cfg, "enabled_formulas", None) or [])]
         if enabled:
-            print("本次按勾选的公式选股：" + "、".join(enabled))
+            print("本次按勾选的策略选股：" + "、".join(enabled))
         else:
-            print("没有勾选任何公式（enabled_formulas 为空）：本次只处理自选股")
+            print("没有勾选任何策略（enabled_formulas 为空）：本次只处理自选股")
 
         report = run_daily(cfg, DataEngine(cfg.db_path), notify=not args.no_notify)
         print(f"数据日期：{report['data_date']}")

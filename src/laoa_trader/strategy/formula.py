@@ -372,7 +372,7 @@ _IDENT_START_EXTRA = "_"
 #: 结果 `OPEN>PRE_CLOSE` 会被当成"注入"拒绝，而 OPEN 明明是开盘价的合法长名。
 #: 加条目时请先和 `FIELD_ALIASES` / `FUNCTIONS` 对一遍。
 _FORBIDDEN_WORDS: dict[str, str] = {
-    name: "公式只能写赋值与选股条件，不支持导入模块、定义函数/类、循环、异常处理"
+    name: "策略只能写赋值与选股条件，不支持导入模块、定义函数/类、循环、异常处理"
     for name in (
         "IMPORT", "FROM", "DEF", "CLASS", "LAMBDA", "RETURN", "YIELD", "GLOBAL",
         "NONLOCAL", "DEL", "ASSERT", "RAISE", "TRY", "EXCEPT", "FINALLY", "WITH",
@@ -422,7 +422,7 @@ def engine_stamp() -> str:
     except Exception:  # noqa: BLE001 - 兜底：版本取不到就不写版本
         version = ""
     head = f"（本程序 v{version}，" if version else "（"
-    return head + f"公式引擎支持 {len(SUPPORTED_FUNCTIONS)} 个函数）"
+    return head + f"策略引擎支持 {len(SUPPORTED_FUNCTIONS)} 个函数）"
 
 
 def _looks_like_tdx_period(text: str, index: int) -> bool:
@@ -460,9 +460,9 @@ def _looks_like_formula_reference(value: str) -> bool:
 
 
 _SPECIAL_WORDS: dict[str, str] = {
-    "TRUE": "公式里没有 True/False，条件请写成比较式（例如 C>O）",
-    "FALSE": "公式里没有 True/False，条件请写成比较式（例如 C>O）",
-    "NONE": "公式里没有 None，缺值直接用字段本身即可（缺值不会产生信号）",
+    "TRUE": "策略里没有 True/False，条件请写成比较式（例如 C>O）",
+    "FALSE": "策略里没有 True/False，条件请写成比较式（例如 C>O）",
+    "NONE": "策略里没有 None，缺值直接用字段本身即可（缺值不会产生信号）",
 }
 
 
@@ -615,7 +615,7 @@ def _tokenize(text: str) -> list[_Token]:
                 raise FormulaError(
                     "不支持属性访问（`.`）",
                     line=tok_line, col=tok_col, code="forbidden",
-                    hint="公式里没有对象属性；字段请直接写名字（如 CLOSE）",
+                    hint="策略里没有对象属性；字段请直接写名字（如 CLOSE）",
                 )
 
         # ── 名字（含中文）──
@@ -678,7 +678,7 @@ def _tokenize(text: str) -> list[_Token]:
             raise FormulaError(
                 "不认识的字符 `;`",
                 line=tok_line, col=tok_col, code="syntax",
-                hint="公式按行分隔语句，不需要分号",
+                hint="策略按行分隔语句，不需要分号",
             )
         if ch == "}":
             raise FormulaError(
@@ -688,7 +688,7 @@ def _tokenize(text: str) -> list[_Token]:
 
         raise FormulaError(
             f"不认识的字符 `{raw}`", line=tok_line, col=tok_col, code="syntax",
-            hint="公式只支持 + - * / 比较运算、AND/OR/NOT、括号和已经列出的函数",
+            hint="策略只支持 + - * / 比较运算、AND/OR/NOT、括号和已经列出的函数",
         )
     return toks
 
@@ -1954,7 +1954,7 @@ class _Parser:
         self.nodes += 1
         if self.nodes > MAX_AST_NODES:
             raise FormulaError(
-                f"公式太复杂（AST 节点超过 {MAX_AST_NODES}）",
+                f"策略太复杂（AST 节点超过 {MAX_AST_NODES}）",
                 line=tok.line, col=tok.col, code="too_complex",
                 hint="拆成多条 `:=` 中间变量，或者简化条件",
             )
@@ -1991,12 +1991,12 @@ class _Parser:
 
         if not self.statements:
             raise FormulaError(
-                "公式是空的", line=1, col=1, code="empty",
+                "策略是空的", line=1, col=1, code="empty",
                 hint="至少要写一行选股条件，例如 `C>MA(C,5)`",
             )
         if len(self.statements) > MAX_FORMULA_LINES:
             raise FormulaError(
-                f"公式行数太多（{len(self.statements)} 行，上限 {MAX_FORMULA_LINES} 行）",
+                f"策略行数太多（{len(self.statements)} 行，上限 {MAX_FORMULA_LINES} 行）",
                 line=self.statements[MAX_FORMULA_LINES].line, code="too_long",
             )
         condition = self._final_condition()
@@ -2057,7 +2057,7 @@ class _Parser:
         if leftover.kind == "comma":
             raise FormulaError(
                 "多余的逗号", line=leftover.line, col=leftover.col, code="syntax",
-                hint="公式按行分隔语句，行尾和中间都不需要逗号（参数之间才用）",
+                hint="策略按行分隔语句，行尾和中间都不需要逗号（参数之间才用）",
             )
         raise FormulaError(
             "一行只能写一条语句",
@@ -2075,14 +2075,14 @@ class _Parser:
             # 所以直接把他刚定义的那个名字写进提示里，照抄一行就能跑。
             name = str(last.name)
             raise FormulaError(
-                f"这条公式只定义了中间变量 {name}，没有写选股条件",
+                f"这条策略只定义了中间变量 {name}，没有写选股条件",
                 line=last.line, col=last.col, code="not_condition",
                 hint=f"在最后再加一行 `{name}`（或者别的条件，例如 `{name} AND C>MA(C,5)`）"
                      " —— 最后一行才是「选出哪些票」的条件；`X:=...` 只是定义中间变量",
             )
         if last.node.dtype != _BOOL:
             raise FormulaError(
-                "公式最后一行必须是选股条件（返回 0/1 的表达式），"
+                "策略最后一行必须是选股条件（返回 0/1 的表达式），"
                 f"现在是{_KIND_LABEL[last.node.dtype]}序列",
                 line=last.line, col=last.col, code="not_condition",
                 hint="加一个比较，例如 `C>MA(C,5)`、`量比()>1.5`",
@@ -2145,9 +2145,9 @@ class _Parser:
             # `__class__` / `__import__` / `_x` 一律拒绝：公式没有任何理由访问
             # 以下划线开头的名字，而这些名字正是绕过白名单的常用入口
             raise FormulaError(
-                f'公式里不允许使用 "{name}" 这类下划线名字',
+                f'策略里不允许使用 "{name}" 这类下划线名字',
                 line=tok.line, col=tok.col, code="forbidden",
-                hint="公式不能访问程序的内部对象，只能使用字段和上面列出的函数",
+                hint="策略不能访问程序的内部对象，只能使用字段和上面列出的函数",
             )
         if upper in _SPECIAL_WORDS:
             raise FormulaError(
@@ -2155,7 +2155,7 @@ class _Parser:
             )
         if upper in _FORBIDDEN_WORDS:
             raise FormulaError(
-                f'公式里不允许使用 "{name}"',
+                f'策略里不允许使用 "{name}"',
                 line=tok.line, col=tok.col, code="forbidden",
                 hint=_FORBIDDEN_WORDS[upper],
             )
@@ -2349,7 +2349,7 @@ class _Parser:
                 raise FormulaError(
                     f'运算符 "{op}" 需要数值，但{label}是字符串',
                     line=tok.line, col=tok.col, code="type",
-                    hint="公式不支持字符串拼接；字符串只能做 = / != 和 IN 比较",
+                    hint="策略不支持字符串拼接；字符串只能做 = / != 和 IN 比较",
                 )
         self.bump(tok)
         return _Binary(op, left, right, _NUM, tok.line, tok.col)
@@ -2397,10 +2397,10 @@ class _Parser:
             value = str(tok.value or "")
             if _looks_like_formula_reference(value):
                 raise FormulaError(
-                    f'引用其它公式（"{value}"）本引擎不支持：本地没有共享的公式库',
+                    f'引用其它策略（"{value}"）本引擎不支持：本地没有共享的策略库',
                     line=tok.line, col=tok.col, code="formula_ref",
-                    hint="把被引用那条公式的算式直接抄进来（例如它算的是 "
-                         "`EMA(C,12)-EMA(C,26)`，就在这条公式里照样写一遍）；"
+                    hint="把被引用那条策略的算式直接抄进来（例如它算的是 "
+                         "`EMA(C,12)-EMA(C,26)`，就在这条策略里照样写一遍）；"
                          "要用现成的指标可以直接调 MACD / KDJ / RSI / BOLL 这些内置函数",
                 )
             return _Lit(tok.value, _STR, tok.line, tok.col)
@@ -2756,7 +2756,7 @@ class _Evaluator:
             else:
                 self.env[statement.name] = value
         if result is None:  # pragma: no cover - 解析期保证存在
-            raise FormulaError("公式里没有选股条件（内部错误）", code="internal")
+            raise FormulaError("策略里没有选股条件（内部错误）", code="internal")
         return _as_cond_array(result, self.n)
 
     def eval_node(self, node: Any) -> Any:
@@ -2787,7 +2787,7 @@ class _Evaluator:
             return flags
         # 白名单兜底：不认识的节点**不执行**，报错收场
         raise FormulaError(
-            "公式里有不支持的表达式（内部错误）", code="internal",
+            "策略里有不支持的表达式（内部错误）", code="internal",
         )
 
     def _field(self, node: _FieldRef) -> Any:
@@ -3104,8 +3104,8 @@ class Formula:
         except Exception as exc:      # noqa: BLE001 - 分发产品：宁可给中文错误也不要崩栈
             # 兜底：真的出了意料之外的 numpy/内部异常，也要变成可读的中文错误
             raise FormulaError(
-                f"公式求值失败（{type(exc).__name__}: {exc}）", code="eval",
-                hint="请检查公式里用到的字段与函数；数据不足的股票会被跳过",
+                f"策略求值失败（{type(exc).__name__}: {exc}）", code="eval",
+                hint="请检查策略里用到的字段与函数；数据不足的股票会被跳过",
             ) from exc
 
     def describe(self) -> str:
@@ -3172,14 +3172,14 @@ def compile_formula(
         (('C', 'VOL'), ('MA',))
     """
     if not isinstance(text, str):
-        raise FormulaError("公式必须是文本", code="type")
+        raise FormulaError("策略必须是文本", code="type")
     # Windows 记事本存的文件带 BOM、换行是 \r\n —— 都要先归一化，否则第一行会莫名其妙报错
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
     cleaned = _semicolons_to_newlines(cleaned)     # 通达信写法：分号 = 语句分隔
     if len(cleaned) > MAX_FORMULA_CHARS:
         raise FormulaError(
-            f"公式太长了（{len(cleaned)} 个字符，上限 {MAX_FORMULA_CHARS}）",
-            code="too_long", hint="拆成几条公式，或者用 `:=` 减少重复书写",
+            f"策略太长了（{len(cleaned)} 个字符，上限 {MAX_FORMULA_CHARS}）",
+            code="too_long", hint="拆成几条策略，或者用 `:=` 减少重复书写",
         )
 
     parser = _Parser(cleaned)
@@ -3198,7 +3198,7 @@ def compile_formula(
         notes=tuple(parser.notes),
     )
     logger.debug(
-        f"公式编译通过：字段 {formula.fields}，函数 {formula.functions}，"
+        f"策略编译通过：字段 {formula.fields}，函数 {formula.functions}，"
         f"{len(formula.statements)} 条语句"
     )
     return formula
@@ -3299,7 +3299,7 @@ def load_formula_files(directory: str | Path) -> list[FormulaSpec]:
     """
     folder = Path(directory)
     if not folder.is_dir():
-        logger.debug(f"公式目录不存在：{folder}")
+        logger.debug(f"策略目录不存在：{folder}")
         return []
 
     paths = sorted(
@@ -3336,7 +3336,7 @@ def load_formula_files(directory: str | Path) -> list[FormulaSpec]:
             )
         except FormulaError as exc:
             # 逐文件报错：一条公式写错不影响别的公式被加载进来
-            logger.warning(f"公式文件 {path.name} 解析失败：{exc}")
+            logger.warning(f"策略文件 {path.name} 解析失败：{exc}")
             specs.append(FormulaSpec(
                 name=name, description=description, path=str(path), source=body,
                 error=exc,
@@ -3347,7 +3347,7 @@ def load_formula_files(directory: str | Path) -> list[FormulaSpec]:
             formula=formula,
         ))
     good = sum(1 for s in specs if s.ok)
-    logger.info(f"公式目录 {folder}：载入 {good}/{len(specs)} 条公式")
+    logger.info(f"策略目录 {folder}：载入 {good}/{len(specs)} 条策略")
     return specs
 
 

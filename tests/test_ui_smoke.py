@@ -1944,7 +1944,7 @@ def test_about_copy_version_info_to_clipboard(window, qapp) -> None:
         window.about_lines()[2],
         "版权所有 © 2026 async-chen，保留所有权利。",
     ]
-    assert lines[2].startswith("公式引擎：") and "支持" in lines[2]
+    assert lines[2].startswith("策略引擎：") and "支持" in lines[2]
     assert "已复制版本信息" in window.status_label.fullText()
 
 
