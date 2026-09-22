@@ -5,9 +5,15 @@
 "图标在哪"这件事有三种运行形态，各不一样：
 
 1. **源码运行**（`PYTHONPATH=src python -m laoa_trader`）：就在本文件旁边 `assets/`；
-2. **`pip install -e .` + 打包**：PyInstaller 把 `datas` 解到 `_MEIPASS` 下，
-   目录结构与源码一致（见 `build/laoa_trader.spec` 的 `DATAS`）；
-3. **onedir 产物**：`__file__` 指向解包后的包目录，第 1 条同样成立。
+2. **PyInstaller onedir**：`datas` 被解到 `_MEIPASS` 下，目录结构与源码一致
+   （见 `build/laoa_trader.spec` 的 `DATAS`）；
+3. **Nuitka standalone**（2026-09-22 起的默认构建方式）：`--include-data-dir` 把
+   `assets/` 放在 **exe 同级**的 `laoa_trader/assets/`，于是第 1 条照样成立
+   （`__file__` 指向产物目录里的那个路径）。
+
+"我是哪种形态、随包数据在哪"由 `laoa_trader.runtime` 一处回答（见那个模块的说明）——
+换成 Nuitka 时这里差点成为漏网之鱼：`_MEIPASS` 在 Nuitka 下不存在，
+写死它就会"程序起来了、图标全没了"。
 
 如果界面、托盘、打包脚本各写一份查找逻辑，改目录时就一定会漏掉一处（图标"在开发机上有、
 到用户机器上没了"是这类代码的经典毛病）。所以集中在这里，并且**找不到就返回 None**，
@@ -18,24 +24,27 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+
+from laoa_trader import runtime
 
 #: 资源目录名（与本文件同级）
 _ASSETS_NAME = "assets"
 
 
 def assets_dir() -> Path:
-    """资源目录（可能不存在 —— 调用方要自己判断）。"""
+    """资源目录（可能不存在 —— 调用方要自己判断）。
+
+    查找顺序（两者都在就先用"本文件旁边"那个，它与源码目录结构一致）：
+    1. 本文件旁边 `assets/`（源码运行、Nuitka 产物都命中）；
+    2. `runtime.bundle_dir()/laoa_trader/assets/`（PyInstaller 的 `_MEIPASS` 落点）。
+    """
     beside = Path(__file__).resolve().parent / _ASSETS_NAME
     if beside.is_dir():
         return beside
-    # onefile / 自定义 datas 目标路径时，PyInstaller 会把资源解到 _MEIPASS
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        packed = Path(meipass) / "laoa_trader" / _ASSETS_NAME
-        if packed.is_dir():
-            return packed
+    packed = runtime.bundle_dir() / "laoa_trader" / _ASSETS_NAME
+    if packed.is_dir():
+        return packed
     return beside
 
 

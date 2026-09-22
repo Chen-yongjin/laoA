@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from laoa_trader import pool as pool_mod
+from laoa_trader import runtime
 from laoa_trader.config import get_config, load_config
 from laoa_trader.data import sync
 from laoa_trader.data.engine import DataEngine
@@ -38,6 +39,35 @@ def _mask(secret: str) -> str:
     if not secret:
         return "（未配置）"
     return f"{secret[:4]}…{secret[-2:]}（长度 {len(secret)}）" if len(secret) > 8 else "（已配置）"
+
+
+class _Tee:
+    """把 stdout 同时写到"控制台 + 文件"（自检报告落盘用）。
+
+    为什么要它：Windows 的**桌面程序没有控制台**（`--noconsole` / Nuitka 的
+    `--windows-console-mode=disable`），用户双击 exe 时看不到任何输出。
+    而自检报告正是"报障时要给我的那段文字" —— 所以顺手写进日志目录一份，
+    让用户直接发那个文件（CI 也是这样验证编译产物的：GUI 子系统的 exe，
+    重定向 stdout 不一定拿得到内容，读文件最稳）。
+    """
+
+    def __init__(self, *streams) -> None:
+        self._streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self._streams:
+            try:
+                stream.write(text)
+            except Exception:  # noqa: BLE001 - 其中一个流坏了不该影响另一个
+                pass
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            try:
+                stream.flush()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _doctor(cfg, startup_problem: str = "") -> None:
@@ -58,6 +88,19 @@ def _doctor(cfg, startup_problem: str = "") -> None:
     print("老牛选股助手 —— 自检")
     print("=" * 56)
     print(f"程序版本    : {laoa_trader.__version__}")
+    # 运行形态与两条关键路径：换成 Nuitka 之后，"图标/随包公式找没找到"是最容易出问题的地方
+    # （源码运行永远绿、编译版可能整个目录都没进去），所以自检里必须直接打出来。
+    for line in runtime.summary_lines():
+        print(line)
+    try:
+        from laoa_trader import assets as assets_mod
+        from laoa_trader import formulas as formulas_mod
+
+        print(f"资源目录    : {assets_mod.assets_dir()}")
+        bundled = formulas_mod.bundled_formula_dir()
+        print(f"随包策略    : {bundled if bundled else '（没找到：随包策略一个都不会出现）'}")
+    except Exception as exc:  # noqa: BLE001 - 自检本身不该因为这里失败
+        print(f"资源检查    : ⚠️ {type(exc).__name__}: {exc}")
     print(f"Python      : {sys.version.split()[0]}（{platform.system()} {platform.release()}）")
     print(f"配置来源    : {cfg.source_path or '内置默认值（未找到 config.toml）'}")
     if cfg.config_warning():
@@ -460,6 +503,10 @@ def cli(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--note", default="", help="配合 --watchlist add：备注（例如 龙头）")
     parser.add_argument("--serve", action="store_true", help="常驻：定时日更 + 盘中提醒")
+    parser.add_argument(
+        "--version", action="store_true",
+        help="打印版本号与构建形态后退出（报障时先跑这个，一眼看出是不是旧包）",
+    )
     parser.add_argument("--doctor", action="store_true",
                         help="自检：打印路径/依赖/凭据/数据概况，排障时先跑它")
     parser.add_argument("--no-notify", action="store_true", help="不推送通知（只落库）")
@@ -506,8 +553,37 @@ def cli(argv: list[str] | None = None) -> int:
         if code is not None:
             return code
 
+    if getattr(args, "version", False):
+        # 为什么单独给一个 --version（而不是让人翻关于页）：报障时最需要回答的两个问题是
+        # "你装的是哪个版本"和"哪个构建形态"（PyInstaller 还是 Nuitka 编译版）。
+        # CI 也用它做编译产物的冒烟检查（见 build/nuitka_build.py 与 workflow）。
+        import laoa_trader
+
+        from laoa_trader.strategy import formula as fm
+
+        print(f"老牛选股助手 {laoa_trader.__version__}")
+        print(f"构建形态：{runtime.describe()}")
+        print(f"程序位置：{runtime.exe_dir()}")
+        print(f"策略引擎：支持 {len(fm.SUPPORTED_FUNCTIONS)} 个函数")
+        return 0
+
     if args.doctor:
-        _doctor(cfg, startup_problem=problem)
+        # 自检报告同时落盘一份（见 `_Tee` 的说明）：桌面版看不到控制台，
+        # 而"出问题时把这段发我"是最省事的排查方式。
+        report_path = Path(cfg.data_dir) / "logs" / "自检报告.txt"
+        try:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(report_path, "w", encoding="utf-8") as handle:
+                original = sys.stdout
+                sys.stdout = _Tee(original, handle)
+                try:
+                    _doctor(cfg, startup_problem=problem)
+                finally:
+                    sys.stdout = original
+            print(f"\n自检报告已写入：{report_path}")
+        except OSError as exc:      # 目录不可写时不该让自检本身失败
+            print(f"（自检报告没能写入 {report_path}：{exc}）")
+            _doctor(cfg, startup_problem=problem)
         return 0
 
     if args.market:
@@ -623,7 +699,7 @@ def main(argv: list[str] | None = None) -> int:
         for a in ("--download", "--once", "--pool", "--serve", "--doctor",
                   "--watchlist", "--note", "--config", "--auto-download",
                   "--force-download", "--run-at", "--run-at-fallback",
-                  "--no-auto-run", "--market",
+                  "--no-auto-run", "--market", "--version",
                   "--help", "-h")
     )
     if wants_cli:

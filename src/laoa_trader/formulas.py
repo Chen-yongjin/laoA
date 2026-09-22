@@ -42,6 +42,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from laoa_trader import runtime
 from laoa_trader.data.engine import HFQ_TABLE
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import formula as fm
@@ -129,15 +130,17 @@ def repo_root() -> Path:
 def bundled_formula_dir() -> Path | None:
     """**随包分发**的示例公式目录（只读，找不到返回 None）。
 
-    两种形态：
-    * 打包后：PyInstaller 把 spec 里 `DATAS` 的 `formulas/` 解到 `_MEIPASS/formulas`；
-    * 源码运行：就是仓库根的 `formulas/`。
+    三种形态都由 `runtime.bundle_dir()` 回答：
+    * PyInstaller：spec 的 `DATAS` 把 `formulas/` 解到 `_MEIPASS/formulas`；
+    * Nuitka standalone：`--include-data-dir` 落在 **exe 同级的 `formulas/`**；
+    * 源码运行：仓库根的 `formulas/`。
+
+    ⚠️ 这里同时也是"Nuitka 换构时最容易漏掉"的一处：写死 `_MEIPASS` 的话，
+    Nuitka 版**随包公式一个都找不到**（用户打开策略列表是空的、还没有任何报错）。
     """
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        packed = Path(meipass) / FORMULA_DIR_NAME
-        if packed.is_dir():
-            return packed
+    packaged = runtime.bundle_dir() / FORMULA_DIR_NAME
+    if packaged.is_dir():
+        return packaged
     root = repo_root() / FORMULA_DIR_NAME
     return root if root.is_dir() else None
 
@@ -285,6 +288,12 @@ def _sync_bundled_formulas(target: Path) -> None:
     源码运行 / 随包目录就是目标目录时**什么都不做**（`source == target`）：
     那种情况下"用户的公式目录"就是随包目录本身（开发时是仓库里的 `formulas/`），
     既没有"要补齐的随包公式"，也不该往仓库里写状态文件、更不该去删仓库里的文件。
+
+    同样"什么都不做"的还有 **Nuitka 编译版**（2026-09-22 起的主构建方式）：
+    `--include-data-dir=formulas=formulas` 把随包策略放在 **exe 同级**，
+    而用户目录也解析到那里 —— 两者本来就是同一个目录，于是用户直接看到那些策略
+    （可改可删），不需要"复制一份给他"。**PyInstaller 版不一样**（随包那份在
+    `_MEIPASS` 只读目录里），所以下面这段补齐/退役逻辑必须留着。
     """
     source = bundled_formula_dir()
     if source is None or source == target:
@@ -305,6 +314,10 @@ def formula_dir() -> Path:
        备份、发给别人、用记事本改都最直观；
     3. **源码运行**：仓库根 `laoA/formulas/`（就是仓库里那份，随包分发的也是它）。
 
+    产物形态由 `runtime.is_frozen()` 判（PyInstaller 与 Nuitka 都算），
+    不是只看 `sys.frozen` —— Nuitka 上那条判据不一定为真，漏判就会把用户公式
+    写进"程序自己的目录"里（下次覆盖安装即丢）。
+
     随包公式会**逐条补齐**进来：缺哪条补哪条、同名的绝不覆盖、用户删掉的不再补，
     退役的那几条（`RETIRED_BUNDLED_FORMULAS`）还会顺手清掉他没改过的那一份
     （见 `_sync_bundled_formulas`）—— 所以"内置公式"这件事就是"仓库里那个 `formulas/` 目录"。
@@ -312,8 +325,9 @@ def formula_dir() -> Path:
     override = (os.environ.get(FORMULA_DIR_ENV) or "").strip()
     if override:
         target = Path(override).expanduser()
-    elif getattr(sys, "frozen", False):
-        target = Path(sys.executable).resolve().parent / FORMULA_DIR_NAME
+    elif runtime.is_frozen():
+        # 产物形态（PyInstaller / Nuitka）：用户公式放 **exe 同级**（见 runtime.exe_dir）
+        target = runtime.exe_dir() / FORMULA_DIR_NAME
     else:
         target = repo_root() / FORMULA_DIR_NAME
 

@@ -1944,7 +1944,7 @@ laoA/
 到"不用填 Key 就能看到行情、下数据、选股入池、右键与单击、关窗进托盘、一键保存"，
 按顺序点一遍就知道能不能用。**没配 Key** 的话直接看那一份里的
 「一·五、没 Key 的完整验收路径（从零开始）」—— 每一步都写清了要在界面上指认什么。
-完整版（376 条，按页签分组、含边界情况）是 `docs/WINDOWS-验收清单.md`。
+完整版（381 条，按页签分组、含边界情况）是 `docs/WINDOWS-验收清单.md`。
 
 ## 出问题了先看哪里（按"最可能先有用"排）
 
@@ -2162,8 +2162,9 @@ CLI 入口（`--doctor` / `--pool` / `--once` / `--download` / `--market` / `--w
   `≤64px` **只留图形** —— 四个汉字缩到 20px 以下就是一坨，谁都认不出。
 - 产物在 `src/laoa_trader/assets/`：`icon.png`(256，窗口图标/关于页)、
   `icon.ico`(16/24/32/48/64/128/256 七档，Windows exe 用)、`icon-16/24/32/…png`（各档单图）；
-  定位只认一个模块 `src/laoa_trader/assets.py`（源码运行 / `pip install` / PyInstaller 打包三种形态
-  都在这里解析，**拿不到图标就返回 None，界面优雅降级**而不是崩）。
+  定位只认一个模块 `src/laoa_trader/assets.py`（源码运行 / PyInstaller / **Nuitka 编译版**
+  三种形态都由 `src/laoa_trader/runtime.py` 一处回答"我是哪种形态、随包数据在哪"，
+  `assets.py` 只是调用它；**拿不到图标就返回 None，界面优雅降级**而不是崩）。
 - **要换图标**：把新设计稿覆盖 `build/logo/source-logo.jpg`（或 `.png`/`.webp`），然后
   `python build/import_logo.py`（需要 Pillow + numpy，**只有改图标时才装**；产物是位图，运行时不需要）。
   想要"白底圆角卡片"风格就加 `--background white`；想让人肉眼比对就加
@@ -2186,16 +2187,27 @@ CLI 入口（`--doctor` / `--pool` / `--once` / `--download` / `--market` / `--w
 ```bat
 cd laoA
 build\build.bat
-:: 产出 dist\LaoATrader\LaoATrader.exe（目录版，启动快）
-:: 想做成单文件加 --onefile（启动慢、杀软误报多，不推荐）
+:: 产出 dist\LaoniuTrader\老牛选股.exe（目录版，启动快）
+
+:: 2026-09-22 起默认用 Nuitka **编译**成原生 exe（源码不能被解包还原）；
+:: 首次 20~60 分钟属正常。要退回 PyInstaller 打包（3~8 分钟，但源码可被还原）：
+.venv\Scripts\pyinstaller --noconfirm --clean build\laoa_trader.spec
 ```
+
+> **怎么确认自己拿到的是编译版**：命令行走一次 `老牛选股.exe --cli --doctor`，
+> 报告最上面会写"运行形态：Nuitka 编译版（原生 exe）"，同时列出"程序位置 / 随包资源 /
+> 资源目录 / 随包策略"四行路径 —— 这五行是"随包数据有没有真的进到产物里"的直接证据
+> （换成编译方式时最容易静默出错的正是这里：程序起来了、图标和随包策略却一个都没有）。
 
 首次运行 exe 时同样要在「系统设置 → 数据来源」里点【下载数据】建库
 （标题区会挂着那一行提示，没有向导弹窗）。
 
-> 打包细节见 `build/laoa_trader.spec` 顶部注释：onedir（启动快、杀软误报少）、
-> `--noconsole`（不弹黑框，日志写到 `<数据目录>\logs\laoa-trader.log`）、
-> `config.example.toml` 随包分发。exe 旁边的 `config.toml` 就是它的配置。
+> 打包细节：主路径见 `build/nuitka_build.py` 顶部注释（Nuitka `--standalone`、
+> `--enable-plugin=pyside6`、随包数据与 `laoa_trader.spec` 的 `DATAS` 逐项对应、
+> 构建完搬成 `dist/LaoniuTrader/老牛选股.exe`）；备用路径见 `build/laoa_trader.spec`。
+> 两条路都是 onedir（启动快、杀软误报少）、都不弹黑框
+> （日志写到 `<数据目录>\logs\laoa-trader.log`）、都把 `config.example.toml` 与
+> `formulas/` 随包分发。exe 旁边的 `config.toml` 就是它的配置。
 
 ## 与 NAS 版的关系
 

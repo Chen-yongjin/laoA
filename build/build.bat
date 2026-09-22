@@ -32,10 +32,14 @@ if not exist .venv\Scripts\python.exe (
 echo [2/3] 安装依赖...
 .venv\Scripts\pip install -U pip >nul
 .venv\Scripts\pip install -e ".[dev]" || goto :err
-echo [3/3] PyInstaller 打包...
-.venv\Scripts\pyinstaller --noconfirm --clean build\laoa_trader.spec || goto :err
+echo [3/3] Nuitka 构建（编译成原生 exe）...
 echo.
-echo 完成！产物在 dist\老牛选股助手\老牛选股助手.exe
+echo   注意：Nuitka 是"编译"而不是"打包"，第一次会下载编译器组件、耗时可能 20~60 分钟
+echo   （比 PyInstaller 慢得多，属正常）。中断了可以重跑。
+.venv\Scripts\python build\nuitka_build.py || goto :err
+echo.
+echo 完成！产物在 dist\LaoniuTrader\老牛选股.exe
+echo   （备用：要退回去用 PyInstaller 打包，执行 .venv\Scripts\pyinstaller --noconfirm --clean build\laoa_trader.spec）
 pause
 exit /b 0
 :err

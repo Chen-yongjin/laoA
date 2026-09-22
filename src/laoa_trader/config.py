@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from laoa_trader import runtime
 from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
@@ -175,8 +176,9 @@ def user_config_path() -> Path:
 def _legacy_config_candidates() -> list[Path]:
     """老版本可能放着 config.toml 的位置（迁移的**来源**，只在用户位置还没有时才看）。"""
     out: list[Path] = [Path.cwd() / "config.toml"]
-    if getattr(sys, "frozen", False):
-        out.append(Path(sys.executable).parent / "config.toml")
+    if runtime.is_frozen():
+        # 产物形态（PyInstaller / Nuitka）都是"exe 同级那份"，由 runtime 一处判
+        out.append(runtime.exe_dir() / "config.toml")
     else:
         out.append(Path(__file__).resolve().parents[2] / "config.toml")
     return out

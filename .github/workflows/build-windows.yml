@@ -13,6 +13,9 @@
 #
 # 说明：
 # - 测试不过就不出包（pytest 失败即整轮失败），避免把坏版本发出去
+# - **默认用 Nuitka 编译**（2026-09-22 主人拍板）：编译成原生 exe，源码不能被解包还原；
+#   手动触发时可以选 `builder=pyinstaller` 走备用路径（build/laoa_trader.spec 仍保留）
+# - 构建完会**真的把 exe 跑一次**（`--doctor` 自检）再打包：编译版的路径解析最容易静默出错
 # - 产物是 onedir 目录版（启动快、杀软误报少），压缩后通常 200~400MB
 # - 构建失败时会额外上传 pytest-log 产物（里面是完整测试输出），报错时先看它
 # - action 版本已升到 v7（Node 24 运行时），不会再出现 Node.js 20 deprecated 告警
@@ -25,6 +28,11 @@ on:
         description: "跳过测试直接打包（仅在 CI 平台问题未解决时用）"
         type: boolean
         default: false
+      builder:
+        description: "用哪个构建器（默认 Nuitka 编译版；PyInstaller 是备用路径）"
+        type: choice
+        options: [nuitka, pyinstaller]
+        default: nuitka
   push:
     branches: [main]
     paths-ignore:             # 只改文档就不必跑构建，省额度
@@ -43,7 +51,10 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 60
+    # 60 → 150 分钟：Nuitka 要**编译**（不是打包）整个 pandas/pyarrow/PySide6 依赖图，
+    # 在 2 核 runner 上实测明显慢于 PyInstaller；再叠上那 20~40 分钟的测试，
+    # 60 分钟极可能"测试全过、卡在编译上被判失败"（本项目已经为这类超时白跑过一轮）。
+    timeout-minutes: 150
     env:
       PYTHONUTF8: "1"                       # Windows 上避免中文路径/日志乱码
       # 崩了要能看到"是哪条线程/哪一行崩的"：`Fatal Python error: Aborted` 这类中止
@@ -156,15 +167,35 @@ jobs:
           python -c "import platform,sys;print('平台',platform.platform());print('Python',sys.version)"
           python -c "import PySide6,pyarrow,pandas;print('PySide6',PySide6.__version__,'| pyarrow',pyarrow.__version__,'| pandas',pandas.__version__)"
 
+      # ── 主构建：Nuitka（编译成原生 exe）──
+      # 2026-09-22 主人拍板：「用 Nuitka/Cython 把程序编译一遍，不再加其它壳」。
+      # PyInstaller 只是把 .pyc 打进包，解包工具几分钟就能还原源码；Nuitka 编译成 C 再编成
+      # 原生 exe，逆向门槛高一个量级，也不必再叠商业壳（那些壳会抬高杀软误报率）。
+      # 两条路都保留（手动触发时可选 builder），Nuitka 出问题时一键退回 PyInstaller。
       - id: pack
-        name: PyInstaller 打包
-        # 15 → 25 分钟：本步在 Windows runner 上本来就慢，而它一超时就是「测试全过、包没出来」
-        # （2026-09-21 排查中发现：失败根本不在测试那一步，而在打包/检查这一段）。
-        timeout-minutes: 25
+        name: Nuitka 构建（编译成原生 exe）
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.builder != 'pyinstaller' }}
+        # 90 分钟：Nuitka 要编译整个依赖图，比 PyInstaller 慢得多（超时=测试全过、包没出来）
+        timeout-minutes: 90
         shell: pwsh
         run: |
           # 用 `*>` 重定向而不是管道：管道里 `$LASTEXITCODE` 的语义要靠运气
-          # （上一版就因为这类写法差点把失败当成成功），重定向后退出码就是 pyinstaller 的
+          # （上一版就因为这类写法差点把失败当成成功），重定向后退出码就是构建器的
+          python build/nuitka_build.py *> nuitka.log
+          $code = $LASTEXITCODE
+          Get-Content nuitka.log | Select-Object -Last 20
+          if ($code -ne 0) {
+            Write-Host "::error::Nuitka 构建失败（退出码 $code），详见 nuitka.log"
+            exit 1
+          }
+
+      # ── 备用构建：PyInstaller（手动触发时选 builder=pyinstaller）──
+      - id: pack_fallback
+        name: PyInstaller 打包（备用路径）
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.builder == 'pyinstaller' }}
+        timeout-minutes: 25
+        shell: pwsh
+        run: |
           pyinstaller --noconfirm --clean build/laoa_trader.spec *> pyinstaller.log
           $code = $LASTEXITCODE
           Get-Content pyinstaller.log | Select-Object -Last 10
@@ -195,6 +226,51 @@ jobs:
             }
           }
           "产物检查通过" | Set-Content check.log
+
+      # ── 编译产物的冒烟检查：**真的把 exe 跑起来** ──
+      # 为什么必须有这一步：Nuitka 换的是"路径解析"这类最容易静默出错的地方
+      # （图标没了、随包策略列表空了，程序照样能起来）。自检报告会写明
+      # "运行形态 / 程序位置 / 随包资源 / 资源目录 / 随包策略"，所以这里跑一次 --doctor
+      # 再**读那个报告文件**：GUI 子系统的 exe 没有控制台，重定向 stdout 不一定拿得到内容，
+      # 读文件最稳（这也是用户报障时要发给我们的那份东西）。
+      - id: smoke
+        name: 冒烟：跑一次编译产物的自检
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          # 独立的临时数据目录：自检报告落到这里，路径可预测
+          $cfg = Join-Path $PWD "ci-smoke-config.toml"
+          $content = "data_dir = `"$($PWD.Path -replace '\\','/')/ci-smoke-data`"`n"
+          # ⚠️ 用 .NET 显式写「UTF-8 无 BOM」：PowerShell 5.1 的 `Set-Content -Encoding utf8` 会加 BOM，
+          # 而本项目的配置读取按无 BOM 处理（BOM 会让第一个键名变成 \ufeffdata_dir、data_dir 被
+          # 当成未知键忽略 —— 表现是「自检报告写到了别处」，排查极费时间）。
+          [System.IO.File]::WriteAllText($cfg, $content, (New-Object System.Text.UTF8Encoding($false)))
+          $exe = "dist/LaoniuTrader/老牛选股.exe"
+          & $exe --cli --doctor --config $cfg
+          $code = $LASTEXITCODE
+          $report = "ci-smoke-data/logs/自检报告.txt"
+          if (-not (Test-Path $report)) { throw "编译产物没写出自检报告（$report）—— 说明它起来就崩了" }
+          Write-Host "----- 自检报告（前 12 行）-----"
+          Get-Content $report | Select-Object -First 12
+          $text = Get-Content $report -Raw
+          if ($text -notmatch "运行形态\s*:\s*Nuitka") { throw "自检报告里没有 Nuitka 形态：$($text.Substring(0, [Math]::Min(200, $text.Length)))" }
+          # 随包策略目录必须找得到：换成 Nuitka 后这是最容易漏的一处（漏了用户列表是空的）
+          if ($text -notmatch "随包策略\s*:\s*[^\r\n]*formulas") { throw "随包策略目录没解析出来（编译版的 --include-data-dir 没生效？）" }
+          # 图标资源目录同样要能找到
+          if ($text -notmatch "资源目录\s*:\s*[^\r\n]*assets") { throw "资源目录没解析出来（图标会全丢）" }
+          if ($code -ne 0) { throw "自检退出码 $code（应为 0）" }
+          Write-Host "✅ 编译产物自检通过：形态 Nuitka、随包策略与图标目录都解析正常"
+
+      - name: 失败时上传构建日志（构建器换了之后更要留档）
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log
+          path: |
+            nuitka.log
+            pyinstaller.log
+          retention-days: 3
+          if-no-files-found: ignore
 
       - id: zip
         name: 压缩产物（打成一个 zip 再上传）
@@ -327,6 +403,9 @@ jobs:
             # （2026-09-21 就为此白跑了两轮 CI：测试明明 1622 条全过，失败却在后面几步）。
             "step_test=${{ steps.test.outcome }}"
             "step_pack=${{ steps.pack.outcome }}"
+            # Nuitka 是主构建；手动选 pyinstaller 时走 pack_fallback（两条都记，一眼看出走的哪条）
+            "step_pack_fallback=${{ steps.pack_fallback.outcome }}"
+            "step_smoke=${{ steps.smoke.outcome }}"
             "step_check=${{ steps.check.outcome }}"
             "step_zip=${{ steps.zip.outcome }}"
             "step_upload=${{ steps.upload.outcome }}"

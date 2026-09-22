@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -95,21 +96,72 @@ def test_formula_dir_source_run_is_repo_formulas(monkeypatch: pytest.MonkeyPatch
     }
 
 
-def test_formula_dir_frozen_uses_exe_sibling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """打包后：公式目录在 **exe 同级**（用户双击 exe 就看得见、备份得到）。"""
+def test_formula_dir_frozen_uses_exe_sibling(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """打包后：公式目录在 **exe 同级**（用户双击 exe 就看得见、备份得到）。
+
+    这里模拟的是 **PyInstaller** 那种布局：随包公式在 `_MEIPASS`（只读的解包目录）里，
+    用户目录在 exe 同级 —— 于是"播种"这一步是必须的（否则新用户打开列表是空的）。
+    Nuitka 那种布局见下一条用例（随包目录与用户目录**本来就是同一个**，不需要播种）。
+    """
     monkeypatch.delenv(lib.FORMULA_DIR_ENV, raising=False)
-    exe = tmp_path / "dist" / "老牛选股助手" / "老牛选股助手.exe"
+    exe = tmp_path / "dist" / "LaoniuTrader" / "老牛选股.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"fake")
+    # 造一个"_MEIPASS"：里面放着随包公式（内容取自仓库里那份，保证与真实分发一致）
+    meipass = tmp_path / "_MEI999"
+    (meipass / "formulas").mkdir(parents=True)
+    for spec in lib.formula_files(lib.repo_root() / "formulas"):
+        shutil.copyfile(spec.path, meipass / "formulas" / Path(spec.path).name)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(meipass), raising=False)
     monkeypatch.setattr(sys, "executable", str(exe))
 
     folder = lib.formula_dir()
 
     assert folder == exe.parent / "formulas"
     assert folder.is_dir()          # 不存在就创建
-    # 空目录时会自动把随包公式复制进来（否则新用户打开是空列表，第一步就走不下去）
+    # 随包公式被复制进来了（否则新用户打开是空列表，第一步就走不下去）
     assert {spec.name for spec in lib.formula_files(folder)} >= {"放量上攻", "尾盘选股策略"}
+    # 而且**复制**的是随包那份，不是把用户目录指到解包目录里（只读盘上存不了公式）
+    assert lib.bundled_formula_dir() == meipass / "formulas"
+
+
+def test_formula_dir_nuitka_layout_is_its_own_user_dir(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**Nuitka 编译版**：随包公式直接躺在 exe 同级的 `formulas/`，本身就是用户目录。
+
+    Nuitka 的 `--include-data-dir=formulas=formulas` 把随包策略放在 **exe 同级**，
+    而用户目录也解析到那里 —— 两者**是同一个目录**，于是"播种"这一步自然什么都不做
+    （`_sync_bundled_formulas` 的 `source == target` 直接返回）。
+
+    这条要钉两件事：① 用户看到的确实是那几条随包策略（可改可删）；
+    ② 它不会因为"随包=用户目录"而把用户自己的公式覆盖掉或反复复制。
+    """
+    monkeypatch.delenv(lib.FORMULA_DIR_ENV, raising=False)
+    exe = tmp_path / "dist" / "LaoniuTrader" / "老牛选股.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"fake")
+    # Nuitka 产物里随包公式就在 exe 同级（构建脚本的 include-data-dir 落点）
+    bundled = exe.parent / "formulas"
+    bundled.mkdir()
+    for spec in lib.formula_files(lib.repo_root() / "formulas"):
+        shutil.copyfile(spec.path, bundled / Path(spec.path).name)
+    # 用户自己写过一条
+    mine = bundled / "我的策略.txt"
+    mine.write_text("# 名称: 我的策略\nC>MA(C,5)\n", encoding="utf-8")
+
+    monkeypatch.setitem(lib.runtime.__dict__, "__compiled__", object())
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+
+    folder = lib.formula_dir()
+
+    assert folder == bundled                      # 用户目录就是随包目录
+    names = {spec.name for spec in lib.formula_files(folder)}
+    assert {"放量上攻", "尾盘选股策略", "我的策略"} <= names
+    assert mine.read_text(encoding="utf-8") == "# 名称: 我的策略\nC>MA(C,5)\n"   # 没被覆盖
 
 
 def test_formula_dir_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
