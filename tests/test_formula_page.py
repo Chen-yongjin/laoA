@@ -402,8 +402,15 @@ def test_palette_buttons_are_small_and_labelled_in_chinese(page) -> None:
         assert any("\u4e00" <= ch <= "\u9fff" for ch in label), (
             f"{token} 的按钮文字还是英文/符号（{label!r}）"
         )
-        # 语法没丢：tooltip 第一步就写着"插入 XX"
-        assert token in button.toolTip(), f"{token} 的 tooltip 里找不到插入的语法"
+        # 语法没丢：tooltip 第一步就写着"插入 XX"。
+        # 例外只有【空格】那一个（2026-09-21 用户要求加的）：它插入的是**空白字符**，
+        # 而空白字符在 tooltip 文本里根本看不出来 —— 所以那一条改成断言"写着空格"，
+        # 判据一样硬（不是放宽成"随便什么 tooltip 都行"）。
+        tip = button.toolTip()
+        if token.strip() == "":
+            assert "空格" in tip, f"【空格】按钮的 tooltip 要说清它插的是什么：{tip!r}"
+        else:
+            assert token in tip, f"{token} 的 tooltip 里找不到插入的语法"
         # 尺寸：比默认小一圈（高度受主题 QSS 影响，所以同时钉住"最高"和"实际"两个值）。
         # 为什么必须看实际高度：主题里 `QPushButton { padding: 4px 12px; min-height: 20px }`
         # 一度把 setFixedHeight(22) 顶回 30px（实测）—— 只看 maximumHeight() 会漏掉这个 bug。
@@ -2388,3 +2395,46 @@ def test_preview_says_why_when_snapshot_is_unavailable(page, page_cfg, qapp,
 
     assert "市值/换手" in page.hint_text
     assert "只票算不出来" not in page.hint_text      # 不许说成一个假的票数
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 4.5) 【空格】按钮（用户 2026-09-21：「运算符那一栏最后加个空格按键 点击就输入空格」）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_space_button_is_the_last_operator_and_inserts_one_space(page) -> None:
+    """点【空格】= 在光标处插入**一个空格**（逐字符断言，不是"像是有空格"）。"""
+    _open_editor(page)
+    page.editor.setPlainText("C>MA(C,5)")
+    _put_caret(page, 1)                     # 光标落在 `C` 与 `>` 之间
+
+    _click(page, " ")                       # token 就是一个空格
+
+    assert page.editor.toPlainText() == "C >MA(C,5)", "插入的应当正好是一个空格"
+    assert page.editor.textCursor().position() == 2   # 光标跟着往右走一格
+
+
+def test_space_button_label_and_tooltip(page) -> None:
+    """按钮上写「空格」；tooltip 说明它只影响可读性、不影响计算。"""
+    button = page.palette_buttons[" "]
+
+    assert button.text() == "空格"
+    assert "空格" in button.toolTip()
+    assert "不影响计算" in button.toolTip()
+    # 它是**运算符那一组的最后一项**（用户要求的位置）
+    assert fp.OPERATORS[-1][0] == " " and fp.OPERATORS[-1][3] == "空格"
+
+
+def test_space_button_does_not_break_the_other_palette_buttons(page) -> None:
+    """多了一个按钮之后，其它按钮照旧（计数与分列都要跟着更新，别悄悄漏掉）。"""
+    assert len(page.palette_buttons) == (
+        len(fp.VARIABLES) + len(fp.FUNCTIONS) + len(fp.OPERATORS) + len(fp.EXCLUDES)
+    )
+    for box in page.palette_panel.findChildren(QGroupBox):
+        assert box.layout().columnCount() == fp.PALETTE_COLUMNS
+    # 空格插进去之后公式仍然编译得过（不影响计算）
+    _open_editor(page)
+    page.editor.setPlainText("C>MA(C,5)")
+    _put_caret(page, 1)
+    _click(page, " ")
+    fm.compile_formula(page.editor.toPlainText())
