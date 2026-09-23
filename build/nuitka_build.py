@@ -164,6 +164,36 @@ def _dir_size_mb(path: Path) -> float:
     return sum(p.stat().st_size for p in path.rglob("*") if p.is_file()) / 1e6
 
 
+#: 没装 Nuitka 时给出的提示。为什么要自己做这个检查：
+#: 主人 2026-09-23 在 Windows 上按"手动命令"走到这一步，屏幕上直接冒出
+#: `No module named nuitka` —— 他不知道是漏装了一条依赖（`pip install -e .` 只装运行依赖，
+#: `-e ".[dev]"` 才带 Nuitka），也不知道补哪一条。所以这里主动探测并说人话（附国内镜像）。
+NUITKA_MISSING_HINT = (
+    "❌ 没装 Nuitka。请先在项目根目录执行：\n"
+    "     .venv\\Scripts\\python -m pip install nuitka\n"
+    "   国内网络建议加镜像（PySide6 / pyarrow 上百兆，直连很慢）：\n"
+    "     .venv\\Scripts\\python -m pip install nuitka -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
+    "   （更省事的做法：直接 `pip install -e \".[dev]\"`，Nuitka 与 PyInstaller 会一起装上）"
+)
+
+
+def nuitka_available(python: str) -> bool:
+    """这个解释器里有没有可用的 Nuitka（只探测，不导入它的模块）。
+
+    用子进程探测而不是 `import nuitka`：这个脚本自己就跑在项目 venv 里，
+    "有没有装"必须是**被构建用的那个解释器**的答案；顺带避免把 Nuitka 的
+    导入副作用带进本进程。解释器路径不存在（OSError）也算"没有"，不能让它抛出去。
+    """
+    try:
+        probe = subprocess.run(
+            [python, "-c", "import nuitka"],
+            capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return False
+    return probe.returncode == 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="用 Nuitka 构建「老牛选股」")
     parser.add_argument("--keep-going", action="store_true",
@@ -173,6 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cmd = build_command(sys.executable)
+    if not nuitka_available(sys.executable):
+        print(NUITKA_MISSING_HINT)
+        return 2
     if args.print_command:
         print(" ".join(cmd))
         return 0

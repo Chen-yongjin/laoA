@@ -148,3 +148,43 @@ def test_launcher_exists_and_is_a_thin_entry(builder) -> None:
     text = launcher.read_text(encoding="utf-8")
     assert "from laoa_trader.__main__ import main" in text
     assert text.count("\n") < 40, "入口脚本不该越写越厚（Nuitka 会跟着它的导入图走）"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 没装 Nuitka 时要说人话（2026-09-23 主人实测踩到）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 场景：主人按"手动命令"装的是 `pip install -e .`（只有运行依赖，不含 dev extras），
+# 走到 `python build/nuitka_build.py` 时屏幕上直接冒出 Python 的
+# `No module named nuitka` —— 他不知道是漏装了一条依赖、更不知道补哪条。
+# 所以脚本要主动探测并给出完整补救命令（含国内镜像）。
+
+
+def test_missing_nuitka_is_reported_in_chinese_with_the_fix(builder, capsys) -> None:
+    """没装 Nuitka：给中文提示 + 补装命令 + 镜像，退出码非 0（别让它去跑构建）。"""
+    builder.nuitka_available = lambda python: False          # 注入：当作没装
+
+    code = builder.main(["--print-command"])
+
+    out = capsys.readouterr().out
+    assert code == 2, "没装 Nuitka 时不该继续往下构建"
+    assert "没装 Nuitka" in out
+    assert "pip install nuitka" in out                       # 补哪一条，得写出来
+    assert "pypi.tuna.tsinghua.edu.cn" in out                # 国内镜像
+    assert '[dev]' in out                                    # 更省事的那条路也提一句
+
+
+def test_nuitka_probe_does_not_crash_on_a_broken_interpreter() -> None:
+    """探测用的解释器路径不存在（OSError）→ 当作"没装"，不能把异常抛出去。"""
+    assert _load_build_script().nuitka_available("/nonexistent/python-xyz") is False
+
+
+def test_nuitka_probe_agrees_with_what_the_interpreter_reports() -> None:
+    """探测结果必须与"那个解释器能不能 import nuitka"一致（别自己编一个答案）。"""
+    import subprocess
+    import sys
+
+    mod = _load_build_script()
+    expected = subprocess.run([sys.executable, "-c", "import nuitka"],
+                              capture_output=True, check=False).returncode == 0
+    assert mod.nuitka_available(sys.executable) is expected
