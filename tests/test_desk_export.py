@@ -118,8 +118,8 @@ def test_no_tooltip_or_reason_noise_but_source_label_is_kept(tmp_path) -> None:
 
     text = pool.pick_export_text(rows, data_date="2026-09-17", day="2026-09-18")
 
-    assert "1. 半导体甲(600002)  来源：短期反转+自选" in text
-    assert "2. 创业样本(300001)  来源：短期反转+自选" in text
+    assert "1. 半导体甲(600002)  来源：短期反转" in text
+    assert "2. 创业样本(300001)  来源：短期反转" in text
 
 
 def test_source_never_prints_a_placeholder_dash(tmp_path) -> None:

@@ -2741,10 +2741,10 @@ def test_watch_panel_toggle_and_remove(window, seeded, qapp) -> None:
 
 
 def test_pool_table_shows_watchlist_source_and_note(window, seeded, qapp) -> None:
-    """自选股进池后：来源能区分「自选」「策略+自选」，备注在整行的 tooltip 里。"""
+    """自选股进池后：来源写**哪条策略选出来的**（没有策略来源才是「自选」）。"""
     from laoa_trader import pool as pool_mod
 
-    # 600002 是策略选中的（seed 的池子），把它也加为自选 → 来源「…+ 自选」
+    # 600002 是策略选中的（seed 的池子），把它也加为自选 → 来源仍写那条策略名
     window.watch_symbol.setText("600002")
     window.watch_note.setText("龙头")
     window.on_watch_add()
@@ -2754,7 +2754,7 @@ def test_pool_table_shows_watchlist_source_and_note(window, seeded, qapp) -> Non
     qapp.processEvents()
 
     assert window.pool_table.item(0, ui_app.WATCH_HEADERS.index("来源")).text() \
-        == "低价股+自选"
+        == "低价股"
     assert "备注：龙头" in window.pool_table.item(0, 0).toolTip()
 
     # 纯自选（不在策略候选里）→ 来源「自选」，而且**不用等建池**就能进这张表

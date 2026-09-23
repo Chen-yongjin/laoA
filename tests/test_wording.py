@@ -55,7 +55,7 @@ _ALLOWED: tuple[str, ...] = ()
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 1) 显示口径：`公式·X` 读成 `策略·X`（数据没动）
+# 1) 显示口径：剥掉前缀、也不写「+自选」（数据一个字没动）
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -85,7 +85,8 @@ def test_stored_rows_display_without_any_prefix_on_all_three_surfaces() -> None:
 
     assert row["strategy"] == "公式·尾盘超短策略"            # 数据：一个字没改
     assert pool.source_label(row, None) == "尾盘超短策略"
-    assert pool.source_label(row, {"enabled": 1}) == "尾盘超短策略+自选"
+    # ⚠️ 2026-09-23 起**不再拼「+自选」**：它在不在自选里不影响「来源」列
+    assert pool.source_label(row, {"enabled": 1}) == "尾盘超短策略"
     assert pool.source_detail_lines(
         {**row, "source_label": "公式·尾盘超短策略"}
     )[0] == "来源：尾盘超短策略"
@@ -93,12 +94,12 @@ def test_stored_rows_display_without_any_prefix_on_all_three_surfaces() -> None:
     assert pool.source_label({"strategy": "策略·尾盘超短策略"}, None) == "尾盘超短策略"
     # 老内置策略的类名 → 中文名，同样不带前缀；在自选里就是 `名字+自选`
     assert pool.source_label({"strategy": "ReversalStrategy"}, None) == "短期反转"
-    assert pool.source_label({"strategy": "ReversalStrategy"}, {"enabled": 1}) == "短期反转+自选"
+    assert pool.source_label({"strategy": "ReversalStrategy"}, {"enabled": 1}) == "短期反转"
     # 纯手工自选仍是「自选」
     assert pool.source_label({"watchlist": True}, None) == "自选"
     # 用户自己起的名字里带"策略"两个字：原样保留
     assert pool.source_label({"strategy": "我的策略一"}, None) == "我的策略一"
-    assert pool.source_label({"strategy": "我的策略一"}, {"enabled": 1}) == "我的策略一+自选"
+    assert pool.source_label({"strategy": "我的策略一"}, {"enabled": 1}) == "我的策略一"
 
     # 三处同一个词：来源列 / 桌面导出文件 / 推送正文
     text = pool.pick_export_text([row], data_date="2026-09-11", day="2026-09-18", quotes={})
@@ -108,6 +109,39 @@ def test_stored_rows_display_without_any_prefix_on_all_three_surfaces() -> None:
     # 内部判定仍然认「公式·」前缀（数据口径没变）
     assert formula_group.is_formula_strategy(row["strategy"]) is True
     assert formula_group.formula_name_of(row["strategy"]) == "尾盘超短策略"
+
+
+def test_source_label_never_says_watchlist_for_a_strategy_pick() -> None:
+    """**来源列只说"是哪条策略选出来的"**：它在不在自选里都不写「自选」。
+
+    2026-09-23 主人原话："为什么要+自选 什么策略跑出来的 直接记录策略名称
+    只有用户自己输入的才能算自选来源"。
+    """
+    picked = {"strategy": "公式·尾盘选股策略", "strategies": "公式·尾盘选股策略"}
+    manual = {"symbol": "600002", "watchlist": True}
+
+    # 选出来的票：在自选里 / 不在自选里，来源列**同一个词**
+    assert pool.source_label(picked, None) == "尾盘选股策略"
+    assert pool.source_label(picked, {"enabled": 1}) == "尾盘选股策略"
+    assert pool.source_label(picked, {"enabled": 0}) == "尾盘选股策略"
+    # 只有用户自己加的才算「自选」
+    assert pool.source_label(manual, {"enabled": 1}) == "自选"
+    assert pool.source_label(manual, None) == "自选"
+    # `source_kind()` 里的"组合档"随之消失（只剩 策略 / 公式 / 自选 三档）
+    assert pool.source_kind(picked, {"enabled": 1}) == "公式"
+    assert pool.source_kind(manual, {"enabled": 1}) == "自选"
+
+
+def test_legacy_rows_with_the_old_watchlist_suffix_are_displayed_without_it() -> None:
+    """老数据里存过 `X+自选`：显示时**剥掉尾巴**（否则同一只票两种写法）。"""
+    row = {"strategy": "公式·尾盘超短策略", "source_label": "公式·尾盘超短策略+自选"}
+
+    assert pool.source_detail_lines(row)[0] == "来源：尾盘超短策略"
+    # 桌面导出文件同一条路（`_export_source` 也走 `display_source_label`）
+    text = pool.pick_export_text([{"symbol": "600001", "name": "甲样本",
+                                   "source_label": "短期反转+自选"}],
+                                 data_date="2026-09-11", day="2026-09-18", quotes={})
+    assert "来源：短期反转" in text
 
 
 # ══════════════════════════════════════════════════════════════════════════

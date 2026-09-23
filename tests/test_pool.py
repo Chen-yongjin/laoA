@@ -273,7 +273,7 @@ def test_save_pool_is_idempotent(db) -> None:
 
 
 def test_source_label_names_the_strategy_not_the_group() -> None:
-    """四种来源各是什么文本：`X`（自定义与内置**现在是同一个写法**）/ `自选` / `X+自选`。"""
+    """来源各是什么文本：`X`（自定义与内置**现在是同一个写法**）/ `自选`（手工加的）。"""
     builtin = {"strategy": "ReversalStrategy", "strategies": "ReversalStrategy"}
     formula = {"strategy": "公式·放量上攻", "strategies": "公式·放量上攻"}
     manual = {"strategy": "", "strategies": "", "watchlist": True}
@@ -287,8 +287,9 @@ def test_source_label_names_the_strategy_not_the_group() -> None:
     assert formula["strategy"] == "公式·放量上攻"          # 数据没被动过
     assert pool.source_label(formula, None) == "放量上攻"
     assert pool.source_label(manual, None) == "自选"
-    # 两者都有 → 后面接 `+自选`（用户给定的写法，没有空格）
-    assert pool.source_label(builtin, {"enabled": 1}) == "短期反转+自选"
+    # 2026-09-23 起**不再拼「+自选」**（主人："只有用户自己输入的才能算自选来源"）：
+    # 策略选出来的票哪怕同时也在自选里，来源列也只写策略名
+    assert pool.source_label(builtin, {"enabled": 1}) == "短期反转"
     # 组别**不再**出现在这一列里
     assert "T+3" not in pool.source_label(builtin, None)
     assert "短线" not in pool.source_label(builtin, None)

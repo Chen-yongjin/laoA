@@ -2321,8 +2321,9 @@ if QT_AVAILABLE:
                  # `label` 是**给人看的那个词**（`公式·尾盘超短策略`），进编辑框上方的
                  # 「来源」列与备注（`选股来源：X`）；`strategy` 是**引擎那份策略名**
                  # （与 `stock_pool.strategy` 同一种写法），加入自选时存进
-                 # `watchlist.source_strategy` —— 股池那一列靠它才能显示成
-                 # `公式·X+自选`（2026-09-21 主人实报"来源都变成自选了"就是少了这一份）。
+                 # `watchlist.source_strategy` —— 股池那一列靠它才能显示成那条策略名
+                 # （2026-09-21 主人实报"来源都变成自选了"就是少了这一份；
+                 #  2026-09-23 起显示只写名字本身，见 `pool.source_label()`）。
                  "label": self._result_label(r),
                  "strategy": _first_strategy_name(r)}
                 for r in rows
@@ -2525,8 +2526,8 @@ if QT_AVAILABLE:
                     storage.upsert_watchlist(
                         conn, symbol, name=name,
                         note=f"选股来源：{row['label']}", price=price,
-                        # 来源同时**结构化存一份**：股池那一列读它才能显示成
-                        # `公式·尾盘超短策略+自选`（2026-09-21 主人实报的"来源都变成自选了"）
+                        # 来源同时**结构化存一份**：股池那一列读它才能显示成那条策略名
+                        # `尾盘超短策略`（2026-09-21 主人实报的"来源都变成自选了"）
                         source_strategy=row.get("strategy"),
                     )
             except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，不让按钮把界面带走
@@ -2589,7 +2590,7 @@ if QT_AVAILABLE:
                         storage.upsert_watchlist(
                             conn, row["symbol"], name=row["name"],
                             note=f"选股来源：{row['label']}",
-                            # 来源也**结构化存一份**（股池那一列的 `公式·X+自选` 靠它）
+                            # 来源也**结构化存一份**（股池那一列的 `X` 靠它）
                             source_strategy=row.get("strategy"),
                         )
                         added.append(row)

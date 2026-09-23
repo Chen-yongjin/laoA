@@ -299,7 +299,7 @@ def test_watchlist_unknown_action_and_missing_symbol(capsys, watch_db, tmp_path)
 
 
 def test_pool_output_shows_source_and_note(capsys, watch_db, tmp_path) -> None:
-    """`--pool` 要能看出来源与备注（策略 / 自选 / 策略+自选）。"""
+    """`--pool` 要能看出来源与备注（策略名 / 自选）。"""
     config = tmp_path / "config.toml"
     config.write_text(f'data_dir = "{p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
                       encoding="utf-8")
@@ -319,7 +319,8 @@ def test_pool_output_shows_source_and_note(capsys, watch_db, tmp_path) -> None:
     assert "来源 自选" in out                        # 纯自选
     assert "组别 —" in out                           # 自选没有组别（不留空、写 `—`）
     assert "备注 龙头" in out                        # 备注
-    assert "只出现一行" in out                       # 来源说明
+    assert "哪条策略选出来的" in out                 # 来源说明
+    assert "+自选" not in out                        # 2026-09-23 起不再有那个尾巴
     # 策略名**只在「来源」那一栏出现一次**：原来"名称后面紧跟策略名，来源栏再写组名"
     # 的口径已经合并，不能再退回"同一件事说两遍"（`｜低价股` 那个是**理由**字段，不算）
     assert "贵州样本(600519)｜来源 低价股" in out

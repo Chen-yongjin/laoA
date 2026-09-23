@@ -2617,7 +2617,7 @@ def _pool_row(page_cfg, symbol: str) -> dict:
 
 
 def test_add_to_watchlist_keeps_the_pick_source_in_the_pool_page(page, page_cfg) -> None:
-    """点【加入自选】→ 股池那一行的来源是 `公式·X+自选`（**不是**「自选」）。"""
+    """点【加入自选】→ 股池那一行的来源是**那条公式的名字**（**不是**「自选」）。"""
     page.show_pick_result({"data_date": "2026-09-11",
                            "pool": [{"symbol": "600003", "name": "丙样本",
                                      "strategy": "公式·尾盘超短策略"}]})
@@ -2625,7 +2625,7 @@ def test_add_to_watchlist_keeps_the_pick_source_in_the_pool_page(page, page_cfg)
     page.result_table.cellWidget(0, fp.RESULT_ADD_COLUMN).findChild(QPushButton).click()
 
     row = _pool_row(page_cfg, "600003")
-    assert row["source_label"] == "尾盘超短策略+自选"
+    assert row["source_label"] == "尾盘超短策略"
     assert row["strategy"] == "公式·尾盘超短策略"
     # 表格用的就是 `source_label`（`ui/app.py` 那一列），所以这里断言的就是**屏幕上那个词**
     with storage.connect(page_cfg.db_path) as conn:
@@ -2642,8 +2642,8 @@ def test_one_click_add_keeps_the_pick_source_too(page, page_cfg) -> None:
 
     page.btn_add_all.click()
 
-    assert _pool_row(page_cfg, "600003")["source_label"] == "尾盘超短策略+自选"
-    assert _pool_row(page_cfg, "600001")["source_label"] == "放量上攻+自选"
+    assert _pool_row(page_cfg, "600003")["source_label"] == "尾盘超短策略"
+    assert _pool_row(page_cfg, "600001")["source_label"] == "放量上攻"
 
 
 def test_adding_an_existing_symbol_fills_the_missing_source_only(page, page_cfg) -> None:
@@ -2651,7 +2651,7 @@ def test_adding_an_existing_symbol_fills_the_missing_source_only(page, page_cfg)
 
     为什么单独一条：这一条路界面说的是"已经在自选里了（没有重复添加）"——
     所以补来源时**不能**顺手把用户停用的票启用回来、也不能动加入价与他自己写的备注
-    （见 `storage.fill_watchlist_source()`）。手工加过的票从此显示 `公式·X+自选`。
+    （见 `storage.fill_watchlist_source()`）。手工加过的票从此显示那条公式名。
     """
     with storage.connect(page_cfg.db_path) as conn:
         storage.upsert_watchlist(conn, "600003", name="丙样本", note="龙头",
@@ -2669,4 +2669,4 @@ def test_adding_an_existing_symbol_fills_the_missing_source_only(page, page_cfg)
     assert row["note"] == "龙头"                            # 用户写的备注没被动过
     assert float(row["added_price"]) == pytest.approx(5.0)  # 加入价没被重置
     assert "已经在自选里了" in page.hint_text
-    assert _pool_row(page_cfg, "600003")["source_label"] == "尾盘超短策略+自选（已停用）"
+    assert _pool_row(page_cfg, "600003")["source_label"] == "尾盘超短策略（已停用）"

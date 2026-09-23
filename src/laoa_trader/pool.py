@@ -9,7 +9,9 @@
    - 有自己的上限 `watchlist_max`（默认 20），超限会**提示**而不是静默丢弃；
    - 停用（`enabled=0`）的不进池、不监控，但保留在列表里。
 
-去重：同一标的既是策略选中又是自选 → 池子里**只出现一行**，来源标成「策略+自选」。
+去重：同一标的既是策略选中又是自选 → 池子里**只出现一行**，来源写**那条策略名**
+（2026-09-23 主人："只有用户自己输入的才能算自选来源" —— 所以不再拼「+自选」；
+"它在不在自选里"由行上的 `watchlist` 标记说话，内部 `source` 仍记着 `公式+自选`）。
 
 原始说明（策略标的）
 
@@ -209,9 +211,10 @@ def build_pool(
     # ── 自选股：独立上限、不占策略名额、不受热门行业过滤 ──
     pool = merge_watchlist(engine, pool, settings=settings, watchlist=watchlist,
                            report=report)
-    logger.info(f"股票池合成完成：{len(pool)} 只"
-                f"（策略 {sum(1 for r in pool if r.get('strategy'))} 只 / "
-                f"自选 {sum(1 for r in pool if r.get('source') in ('自选', '策略+自选'))} 只）")
+    # 日志的两个数与表头 `pool_counts()` 同口径：**互斥**（策略行 + 纯自选行 = 总数），
+    # 否则会出现"共 13 只（策略 12 · 自选 12）"这种看着像算错的行。
+    total, n_strategy, n_watch = pool_counts(pool)
+    logger.info(f"股票池合成完成：{total} 只（策略 {n_strategy} 只 / 自选 {n_watch} 只）")
     if save and pool:
         rows_to_save = pool if save_picks else [r for r in pool if r.get("watchlist")]
         if rows_to_save:
@@ -233,7 +236,8 @@ def merge_watchlist(
 ) -> list[dict]:
     """把自选股并进池子（去重、独立上限、来源标记）。
 
-    - **去重**：既是策略选中又是自选 → 只留一行，`source` 标成「策略+自选」；
+    - **去重**：既是策略选中又是自选 → 只留一行，`source` 记成「公式+自选」
+      （内部标记；**显示**只写那条策略名 —— 见 `source_label()`）；
     - **独立上限**：`watchlist_max` 只截自选，超出的部分**提示**（`report["warnings"]`）；
     - **顺序**：策略标的（按分数降序）在前，纯自选（按加入时间）在后。
     """
@@ -568,9 +572,12 @@ def format_pool_lines(pool: list[dict]) -> list[str]:
         note = (row.get("note") or "").strip()
         if not tag:
             tag = "自选" + (f"（{note}）" if note else "")
-        elif str(row.get("source") or "").endswith("+自选"):
-            # 既是策略/公式选中又是自选：标出来，免得用户以为"我加的自选没生效"
-            tag += "+自选" + (f"（{note}）" if note else "")
+        elif note:
+            # 2026-09-23 主人："为什么要+自选 什么策略跑出来的 直接记录策略名称
+            # 只有用户自己输入的才能算自选来源" → 推送正文与「自选股池」那一列、
+            # 桌面导出文件必须**同一个词**（策略名本身），三个地方都不再拼「+自选」。
+            # 备注照旧带上：它是用户自己写的理由，与"来源"无关。
+            tag += f"（{note}）"
         lines.append(f"{i}. {row['name']}({row['symbol']}){tag}｜{row.get('reason') or ''}")
     return lines
 
@@ -745,21 +752,23 @@ def _export_source(row: dict) -> str:
 
     三条退路（越靠前越权威）：
 
-    1. 行里已经算好的 `source_label`（`pool_table_rows()` 填的，带 `+自选` 组合标记）；
+    1. 行里已经算好的 `source_label`（`pool_table_rows()` 填的，即那条策略名）；
     2. 现算一次 `source_label(row, None)` —— `run_daily` 传进来的池子行只有
        `strategy/strategies/source/watchlist`，没有 `source_label`；
-    3. 退回 `source`（`策略` / `公式` / `自选` / `公式+自选`）。
+    3. 退回 `source`（`策略` / `公式` / `自选` / `公式+自选`；老数据可能带 `+自选`）。
 
     为什么留第 3 条：第 2 条在"纯自选行没有 `watchlist` 标记"时会给一个 `—`
     （`source_label` 的兜底值）—— 给人看的文件里写"来源：—"等于什么都没说。
     """
-    label = wording.display_strategy(str(row.get("source_label") or "").strip())
+    label = wording.display_source_label(str(row.get("source_label") or "").strip())
     if not label:
         label = source_label(row, None)
     if not label or label == "—":
         # 第 3 条退路拿到的是内部短标签（`公式` / `公式+自选`），照样要说人话
         # （2026-09-22 起界面上不用"公式"这个词，见 `wording`）
-        label = wording.display_words(str(row.get("source") or "").strip()) or "—"
+        label = wording.strip_watch_suffix(
+            wording.display_words(str(row.get("source") or "").strip())
+        ) or "—"
     return label
 
 
@@ -785,7 +794,7 @@ def pick_export_text(
     * **数量**用 `pool_counts()`（与「自选股池」表头同一个函数），所以"M 只策略 /
       K 只自选"与界面上那两个数是同一份算法，不会对不上；
     * **来源**优先用行里已经算好的 `source_label`（`pool_table_rows()` 填的，
-      带「策略·X+自选」那种组合标记），没有才算一次 —— 界面、推送、桌面文件同源；
+      就是那条策略名），没有才算一次 —— 界面、推送、桌面文件同源；
     * **现价**来自 `quotes`（`latest_quotes()` 的结果或调用方注入），没有就不写这一段。
 
     隐私：正文里**只有选股结果本身**（代码、名称、价格、来源）—— 没有 Key、
@@ -981,7 +990,7 @@ def watchlist_source_fields(entry: dict) -> dict:
     来源为空的纯手工自选行：`strategy` 仍是空串，显示就是「自选」（与以前一模一样）。
 
     `enabled=False` 的行照样显示，只是来源里点明状态：`自选（已停用）` /
-    `公式·X+自选（已停用）`（用户要能看见自己停用过的票并把它打开）。
+    `X（已停用）`（用户要能看见自己停用过的票并把它打开）。
     """
     key = watchlist_source_strategy(entry)
     row = {"strategy": key, "strategies": key, "watchlist": True}
@@ -1052,25 +1061,28 @@ def source_kind(row: dict, watch_entry: dict | None) -> str:
     与内置策略的边际证据无关，"这批票是哪来的"要一眼分得清。
     """
     has_strategy = bool(row.get("strategy"))
-    base = "公式" if is_formula_strategy(row.get("strategy") or "") else "策略"
-    in_watch = watch_entry is not None and int(watch_entry.get("enabled", 1)) == 1
     if has_strategy:
-        return f"{base}+自选" if in_watch else base
-    if in_watch:
-        return "自选"
-    return "自选" if row.get("watchlist") else "策略"
+        # 2026-09-23 主人："为什么要+自选 什么策略跑出来的 直接记录策略名称
+        # 只有用户自己输入的才能算自选来源" → 有策略来源就只报策略，不再拼「+自选」，
+        # 于是"组合档"整个消失（`策略+自选` 这个值不再产生）。
+        return "公式" if is_formula_strategy(row.get("strategy") or "") else "策略"
+    # 没有策略来源的行都是**用户自己加进去的** → 自选
+    return "自选"
 
 
 def source_label(row: dict, watch_entry: dict | None) -> str:
-    """界面「来源」列 / CLI 那一列的文本：**是哪条策略选出来的** / 自选 / 组合。
+    """界面「来源」列 / CLI 那一列的文本：**是哪条策略选出来的**，没有策略来源才是「自选」。
 
     用户明确要求这一列回答"是哪条策略"，而不是只写组别（`波段·T+10（T+10）`
     回答不了"凭什么选它"）。所以：
 
-        自定义策略标的 → `策略·放量上攻`（**显示**成策略前缀，见下面的说明）
-        老库里的内置策略行 → `策略·短期反转`（`legacy.strategy_label` 翻中文名）
-        纯自选           → `自选`
-        策略 + 自选      → `策略·短期反转+自选`
+        自定义策略标的 → `尾盘选股策略`（前缀已去掉，见下）
+        老库里的内置策略行 → `短期反转`（`legacy.strategy_label` 翻中文名）
+        纯手工自选       → `自选`
+
+    ⚠️ **2026-09-23 起不再有「+自选」这个尾巴**（主人："为什么要+自选 什么策略跑出来的
+    直接记录策略名称 只有用户自己输入的才能算自选来源"）：策略选出来的票即使同时
+    也在自选表里，来源列也只写策略名 —— 它在不在自选里，看自选表和监控开关那一列。
 
     ⚠️ **2026-09-22 起自定义的那条也显示 `策略·`**（主人："把公式都改成策略吧 这样好看点"）：
     库里存的还是 `公式·放量上攻`（**历史值一个字节都没改**），只有显示时换前缀 ——
@@ -1098,9 +1110,10 @@ def source_label(row: dict, watch_entry: dict | None) -> str:
             # 2026-09-23 主人要求去掉前缀（"公式名称中的策略两个字去掉，无意义"）：
             # 这里就写名字本身；认不出中文名的老类名才退回一个中性的「策略」。
             parts.append(name or "策略")
-    if watch_entry is not None or row.get("watchlist"):
-        parts.append("自选")
-    return "+".join(parts) if parts else "—"
+    # 2026-09-23 起**不再拼「+自选」**：来源列只回答"是哪条策略选出来的"。
+    # "它同时也在自选里"这个事实在别处表达（自选表自己那一行、监控开关那一列），
+    # 在来源列重复一遍只会让人以为"自选"是来源之一。
+    return parts[0] if parts else "自选"
 
 
 def source_detail_lines(row: dict) -> list[str]:
@@ -1114,7 +1127,7 @@ def source_detail_lines(row: dict) -> list[str]:
     # 这一行可能是调用方**自己拼的行**（只带 `source_label` 没有 `strategy`）——
     # 照样把内部前缀换成「策略·」，否则同一只票在 tooltip 里写 `公式·X`、
     # 在「来源」列里写 `策略·X`（2026-09-22 起界面上不用"公式"这个词）
-    label = wording.display_strategy(str(row.get("source_label") or "").strip()) or "—"
+    label = wording.display_source_label(str(row.get("source_label") or "").strip()) or "—"
     lines.append(f"来源：{label}")
     group_label = str(row.get("group_label") or "")
     horizon = int(row.get("horizon") or 0)
@@ -1243,15 +1256,19 @@ def pool_page_rows(db_path: str, day: str | None = None) -> list[dict]:
 def pool_counts(rows: list[dict]) -> tuple[int, int, int]:
     """`(共 N, 策略 M, 自选 K)`：「自选股池」表头那一行小字用。
 
-    口径：
-    - **策略 M** = 有 `strategy` 的行（内置策略与自定义公式都算，界面上靠「来源」列区分）；
-    - **自选 K** = 在自选表里的行（`source` 带「自选」，含"策略+自选"那种重合行）；
-    - M + K 可能大于 N：同一只票既是策略选中又是自选时只算一行（那是用户自己加的重合），
-      表头把两个数都写出来正是为了说明这件事（`共 12 只（策略 10 · 自选 4）`）。
+    口径（2026-09-23 起与「来源」列对齐 —— 主人："只有用户自己输入的才能算自选来源"）：
+    - **策略 M** = 有 `strategy` 的行（自定义策略与老内置策略都算，界面上靠「来源」列区分）；
+    - **自选 K** = **没有**策略来源、由用户手工加进来的行；
+    - 于是 **M + K 恒等于 N**（每只票要么是选出来的、要么是你自己加的）。
+      改之前的口径是"K = 只要在自选表里就算"，与策略行重叠，会出现
+      `共 13 只（策略 12 · 自选 12）` 这种两个分项加起来大于总数的写法。
     """
     total = len(rows)
     strategy = sum(1 for r in rows if str(r.get("strategy") or ""))
-    watch = sum(1 for r in rows if "自选" in str(r.get("source") or ""))
+    watch = sum(
+        1 for r in rows
+        if not str(r.get("strategy") or "") and "自选" in str(r.get("source") or "")
+    )
     return total, strategy, watch
 
 

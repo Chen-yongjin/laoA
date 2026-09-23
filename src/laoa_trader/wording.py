@@ -4,7 +4,10 @@
 
 * 2026-09-22 主人要求「把公式都改成策略吧 这样好看点」→ 来源列显示成 `策略·X`；
 * 2026-09-23 主人要求「把公式名称中的策略两个字去掉，无意义」→ **前缀也去掉**，
-  来源列就显示 `X`（`尾盘选股策略`），组合仍写 `X+自选`。
+  来源列就显示 `X`（`尾盘选股策略`）；
+* 同日主人又要求「为什么要+自选 什么策略跑出来的 直接记录策略名称 只有用户自己
+  输入的才能算自选来源」→ **`+自选` 那个尾巴也不再显示**：来源列只回答"是哪条
+  策略选出来的"，用户手工加进去、没有策略来源的票才写「自选」。
 
 为什么单独一个模块：
 
@@ -71,12 +74,35 @@ def display_words(text: str) -> str:
     return str(text or "").replace(OLD_WORD, NEW_WORD)
 
 
+#: 老数据/老界面用过的"组合尾巴"：`X+自选`。2026-09-23 起来源列不再写它
+#: （主人："为什么要+自选 什么策略跑出来的 直接记录策略名称 只有用户自己输入的才能算自选来源"）。
+STORED_WATCH_SUFFIX = "+自选"
+
+
+def strip_watch_suffix(text: str) -> str:
+    """把老数据里的 `X+自选` 剥成 `X`（**只剥这个尾巴**，别的一律不动）。
+
+    为什么要它：来源列在 09-21~09-23 之间会写成 `公式·X+自选` / `X+自选`，
+    那些值可能已经存进 `source_label` 或写进了桌面导出文件；读回来时若不剥，
+    同一只票就会一会儿带尾巴、一会儿不带。
+    """
+    return str(text or "").replace(STORED_WATCH_SUFFIX, "")
+
+
+def display_source_label(text: str) -> str:
+    """**来源列专用**的一条龙：剥内部前缀 + 剥老的 `+自选` 尾巴。"""
+    return strip_watch_suffix(display_strategy(text))
+
+
 __all__ = [
     "DISPLAY_STRATEGY_PREFIX",
     "LEGACY_DISPLAY_PREFIX",
     "NEW_WORD",
     "OLD_WORD",
     "STORED_FORMULA_PREFIX",
+    "STORED_WATCH_SUFFIX",
+    "display_source_label",
     "display_strategy",
+    "strip_watch_suffix",
     "display_words",
 ]

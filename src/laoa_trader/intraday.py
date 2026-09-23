@@ -344,13 +344,18 @@ def is_trading_day(db_path: str, day: str | None = None) -> bool:
 # ── 观察池 ──
 
 
-def _watch_label(is_strategy: bool, note: str, cost: float | None) -> str:
-    """自选股的展示标签：`自选（龙头，成本 12.40）` / `策略+自选（成本 12.40）`。
+def _watch_label(note: str, cost: float | None) -> str:
+    """自选股的展示标签：`自选（龙头，成本 12.40）`。
 
     把备注与成本写进提醒里，是为了让收到卡片的人**一眼知道为什么盯它**：
     备注是用户自己写的理由（"龙头""消息面"），成本则直接对应止损止盈的基准。
+
+    标签固定写「自选」：这条提醒本来就出自自选表，写「策略+自选」等于在一个
+    自选名单里再解释一次"它也是自选"（2026-09-23 主人："为什么要+自选 什么策略
+    跑出来的 直接记录策略名称 只有用户自己输入的才能算自选来源"）；是哪条策略
+    选出来的，看「自选股池」表的来源列。
     """
-    head = "策略+自选" if is_strategy else "自选"
+    head = "自选"
     details = []
     if note:
         details.append(note)
@@ -428,8 +433,7 @@ def watch_targets(
             note = (entry.get("note") or "").strip()
             held = positions.get(symbol)
             info = targets.get(symbol) or {}
-            label = _watch_label(bool(info.get("strategy")), note,
-                                 held["avg_cost"] if held else None)
+            label = _watch_label(note, held["avg_cost"] if held else None)
             targets[symbol] = {
                 **info,
                 "name": info.get("name") or entry.get("name") or symbol,
