@@ -238,43 +238,104 @@ jobs:
         timeout-minutes: 10
         shell: pwsh
         run: |
+          # ⚠️ 这一步的一切都写进 smoke.log（**成功也写**）：仓库是私密的、artifact 额度又爆了，
+          # 失败时既看不到 Actions 控制台、也拿不到 artifact —— 只有 ci-log 分支能看。
+          # 所以"红在哪、exe 输出了什么、报告写到了哪"必须落进这个文件，否则下次还得靠猜。
+          $log = "smoke.log"
+          "===== 冒烟：编译产物自检 =====" | Set-Content $log
+          Add-Content $log "run=$env:GITHUB_RUN_ID  sha=$env:GITHUB_SHA"
+
           # 独立的临时数据目录：自检报告落到这里，路径可预测
           $cfg = Join-Path $PWD "ci-smoke-config.toml"
+          $dataDir = Join-Path $PWD "ci-smoke-data"
           # ⚠️ 用 .NET 显式写「UTF-8 无 BOM」：PowerShell 5.1 的 `Set-Content -Encoding utf8` 会加 BOM，
           # 而本项目的配置读取按无 BOM 处理（BOM 会让第一个键名变成 \ufeffdata_dir、data_dir 被
           # 当成未知键忽略 —— 表现是「自检报告写到了别处」，排查极费时间）。
           $content = "data_dir = `"$($PWD.Path -replace '\\','/')/ci-smoke-data`"`n"
           [System.IO.File]::WriteAllText($cfg, $content, (New-Object System.Text.UTF8Encoding($false)))
+          Add-Content $log "配置文件：$cfg → $content"
 
           $exe = "dist/LaoniuTrader/老牛选股.exe"
-          # ⚠️⚠️ 必须用 `Start-Process -Wait`：这是**GUI 子系统**的 exe（构建时关掉了控制台），
-          # 而 PowerShell 调用 GUI 程序时**不会等它结束**就返回 —— 第一版就是这么红的：
-          # 检查跑在"报告还没写出来"之前，报的错是"产物没写出自检报告（以为它起来就崩了）"。
-          $proc = Start-Process -FilePath $exe -ArgumentList @("--cli", "--doctor", "--config", $cfg) -Wait -PassThru -NoNewWindow
-          $code = $proc.ExitCode
+          Add-Content $log ("exe 存在：{0}  大小：{1} 字节" -f (Test-Path $exe), (Get-Item $exe -ErrorAction SilentlyContinue).Length)
+          Add-Content $log "----- dist/LaoniuTrader 前 25 项 -----"
+          Get-ChildItem "dist/LaoniuTrader" -ErrorAction SilentlyContinue |
+            Select-Object -First 25 | ForEach-Object { Add-Content $log ("  " + $_.Name) }
 
-          # 报告文件名是中文（自检报告.txt），这里**不写死名字**：
-          # 列 logs/ 下第一个 .txt，既避免编码坑，也顺带证明"报告真的生成了"。
+          # 为什么每个子进程都重定向到文件：GUI 子系统的 exe 没有控制台，`Write-Host` 抓不到它的输出，
+          # 只有把 stdout/stderr 重定向到文件才拿得到 —— 而"exe 到底打印了什么"正是诊断的关键。
+          function Invoke-Exe([string]$Tag, [string[]]$Arguments) {
+            $out = "$Tag.out.txt"
+            $err = "$Tag.err.txt"
+            Remove-Item $out, $err -ErrorAction SilentlyContinue
+            $proc = Start-Process -FilePath $exe -ArgumentList $Arguments -Wait -PassThru `
+              -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+            Add-Content $log "===== $Tag 退出码：$($proc.ExitCode) ====="
+            foreach ($f in @($out, $err)) {
+              if (Test-Path $f) {
+                Add-Content $log "----- $Tag $([System.IO.Path]::GetFileName($f))（前 40 行）-----"
+                Get-Content $f -TotalCount 40 | ForEach-Object { Add-Content $log ("  " + $_) }
+              }
+            }
+            return $proc.ExitCode
+          }
+
+          # 先跑 --version（最便宜的"它到底能不能起来"，输出里带版本 + 构建形态 + 函数数）
+          $verCode = Invoke-Exe "version" @("--cli", "--version", "--config", $cfg)
+          # 再跑 --doctor（会把报告同时写盘）
+          $docCode = Invoke-Exe "doctor" @("--cli", "--doctor", "--config", $cfg)
+
+          # 报告可能落在两处：指定的数据目录（--config 生效）或**默认数据目录**（--config 没被认时）。
+          # 两处都找 —— 否则报错会是"没写出报告"，而真相是"写到了别处"。
           $report = $null
           for ($i = 0; $i -lt 20 -and -not $report; $i++) {
             Start-Sleep -Milliseconds 500
-            $report = (Get-ChildItem "ci-smoke-data/logs" -Filter *.txt -ErrorAction SilentlyContinue | Select-Object -First 1)
+            $dirs = @("$dataDir/logs", (Join-Path $env:LOCALAPPDATA "LaoATrader/data/logs"))
+            foreach ($d in $dirs) {
+              $found = Get-ChildItem $d -Filter *.txt -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+              if ($found) { $report = $found; break }
+            }
           }
+
+          Add-Content $log "----- 数据目录 ci-smoke-data -----"
+          Get-ChildItem -Recurse -Force $dataDir -ErrorAction SilentlyContinue |
+            Select-Object -First 40 | ForEach-Object { Add-Content $log ("  " + $_.FullName) }
+          Add-Content $log "----- 默认数据目录（%LOCALAPPDATA%）-----"
+          Get-ChildItem -Recurse -Force (Join-Path $env:LOCALAPPDATA "LaoATrader/data") -ErrorAction SilentlyContinue |
+            Select-Object -First 40 | ForEach-Object { Add-Content $log ("  " + $_.FullName) }
+
           if (-not $report) {
-            Write-Host "----- ci-smoke-data 里有什么 -----"
-            Get-ChildItem -Recurse -Force "ci-smoke-data" -ErrorAction SilentlyContinue | Select-Object -First 30 | ForEach-Object { $_.FullName }
-            throw "编译产物没写出自检报告（数据目录 ci-smoke-data/logs 下没有 .txt）—— 要么它起来就崩了，要么 --config 没被认"
+            Add-Content $log "❌ 没找到任何自检报告（两处都没找到）"
+            Get-Content $log | Write-Host
+            throw "编译产物没写出自检报告：要么它起来就崩了（看 smoke.log 里 version/doctor 的退出码与输出），要么报告写到了别处（smoke.log 里有两处的目录树）"
           }
-          Write-Host "----- 自检报告：$($report.Name)（前 14 行）-----"
-          Get-Content $report.FullName | Select-Object -First 14
+          Add-Content $log "自检报告：$($report.FullName)"
+          Add-Content $log "----- 自检报告全文 -----"
+          Get-Content $report.FullName | ForEach-Object { Add-Content $log ("  " + $_) }
+
           $text = Get-Content $report.FullName -Raw
-          if ($text -notmatch "运行形态\s*:\s*Nuitka") { throw "自检报告里没有 Nuitka 形态：$($text.Substring(0, [Math]::Min(200, $text.Length)))" }
-          # 随包策略目录必须找得到：换成 Nuitka 后这是最容易漏的一处（漏了用户列表是空的）
-          if ($text -notmatch "随包策略\s*:\s*[^\r\n]*formulas") { throw "随包策略目录没解析出来（编译版的 --include-data-dir 没生效？）" }
-          # 图标资源目录同样要能找到
-          if ($text -notmatch "资源目录\s*:\s*[^\r\n]*assets") { throw "资源目录没解析出来（图标会全丢）" }
-          if ($code -ne 0) { throw "自检退出码 $code（应为 0）" }
-          Write-Host "✅ 编译产物自检通过：形态 Nuitka、随包策略与图标目录都解析正常"
+          if ($verCode -ne 0 -or $docCode -ne 0) {
+            Add-Content $log "❌ 退出码异常：version=$verCode doctor=$docCode"
+            Get-Content $log | Write-Host
+            throw "编译产物退出码异常（version=$verCode doctor=$docCode）—— 详见 ci-log/smoke.log"
+          }
+          if ($text -notmatch "运行形态\s*:\s*Nuitka") {
+            Add-Content $log "❌ 报告里没有 Nuitka 形态"
+            Get-Content $log | Write-Host
+            throw "自检报告里没有 Nuitka 形态（详见 ci-log/smoke.log）"
+          }
+          if ($text -notmatch "随包策略\s*:\s*[^\r\n]*formulas") {
+            Add-Content $log "❌ 随包策略目录没解析出来"
+            Get-Content $log | Write-Host
+            throw "随包策略目录没解析出来（编译版的 --include-data-dir 没生效？详见 ci-log/smoke.log）"
+          }
+          if ($text -notmatch "资源目录\s*:\s*[^\r\n]*assets") {
+            Add-Content $log "❌ 资源目录没解析出来"
+            Get-Content $log | Write-Host
+            throw "资源目录没解析出来（图标会全丢，详见 ci-log/smoke.log）"
+          }
+          Add-Content $log "✅ 冒烟通过：形态 Nuitka、随包策略与资源目录都解析正常"
+          Get-Content $log | Write-Host
 
       - name: 失败时上传构建日志（构建器换了之后更要留档）
         if: failure()
@@ -299,6 +360,51 @@ jobs:
           Compress-Archive -Path 'dist/LaoniuTrader' -DestinationPath 'LaoniuTrader.zip' -Force
           $zip = Get-Item 'LaoniuTrader.zip'
           Write-Host ("压缩包：{0:N1} MB" -f ($zip.Length / 1MB))
+
+      - id: zipcheck
+        name: 包内容自检：解压确认 exe 在、且没有注册机
+        shell: pwsh
+        run: |
+          # 为什么要解压看一遍：zip 是谁都能做的（`Compress-Archive` 也会在目录选错时"成功"，
+          # 结果包里是空的或少了东西）；而主人看不到 Actions 控制台，所以结论要落进
+          # ci-log/zipcheck.log + meta.txt（附件名/字节数/sha256 就是"包真的完整"的证据）。
+          $log = "zipcheck.log"
+          "===== 包内容自检 =====" | Set-Content $log
+          $zip = Get-Item 'LaoniuTrader.zip'
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          Add-Content $log ("文件：{0}  字节：{1}  sha256：{2}" -f $zip.Name, $zip.Length, $hash)
+          "zip_name=$($zip.Name)" | Set-Content zip-meta.txt
+          "zip_bytes=$($zip.Length)" | Add-Content zip-meta.txt
+          "zip_sha256=$hash" | Add-Content zip-meta.txt
+
+          Add-Content $log "----- 包内前 15 项 -----"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+          try {
+            $names = $archive.Entries | ForEach-Object { $_.FullName }
+            $names | Select-Object -First 15 | ForEach-Object { Add-Content $log ("  " + $_) }
+            $exeEntry = $names | Where-Object { $_ -match 'LaoniuTrader/老牛选股\.exe$' }
+            if (-not $exeEntry) {
+              Add-Content $log "❌ 包里没有 LaoniuTrader/老牛选股.exe"
+              Get-Content $log | Write-Host
+              throw "产出的 zip 里没有 LaoniuTrader/老牛选股.exe（详见 ci-log/zipcheck.log）"
+            }
+            Add-Content $log "✅ 主程序在：$exeEntry"
+            # 注册机绝不能进用户的包（里面带签发算法）—— 反向检查，出现就红
+            $keygen = $names | Where-Object { $_ -match '(?i)keygen|注册机' }
+            if ($keygen) {
+              Add-Content $log "❌ 包里出现了注册机相关文件：$($keygen -join ', ')"
+              Get-Content $log | Write-Host
+              throw "用户的包里不许有注册机（详见 ci-log/zipcheck.log）"
+            }
+            Add-Content $log "✅ 包里没有注册机"
+            $count = ($names | Measure-Object).Count
+            Add-Content $log "✅ 包内文件数：$count"
+            "zip_files=$count" | Add-Content zip-meta.txt
+          } finally {
+            $archive.Dispose()
+          }
+          Get-Content $log | Write-Host
 
       - id: upload
         name: 上传产物
@@ -423,6 +529,8 @@ jobs:
             "step_smoke=${{ steps.smoke.outcome }}"
             "step_check=${{ steps.check.outcome }}"
             "step_zip=${{ steps.zip.outcome }}"
+            # 包内容自检（解压看 exe 在不在、有没有注册机）：它 success 才说明"这个 zip 真的能发"
+            "step_zipcheck=${{ steps.zipcheck.outcome }}"
             "step_upload=${{ steps.upload.outcome }}"
             # Release 那条路（主下载通道）：它 success 就说明包已经能下载了，
             # 哪怕 step_upload 因额度失败也不影响用户拿包
@@ -432,10 +540,29 @@ jobs:
             "release_assets=${{ steps.release.outcome == 'success' && '见下一步' || '未取' }}"
           ) | Set-Content ci-log/meta.txt
           $env:GH_TOKEN = $env:GITHUB_TOKEN
-          $assets = gh release view latest --json assets --jq '[.assets[].name] | join(",")' 2>$null
-          if ($LASTEXITCODE -eq 0 -and $assets) { Add-Content ci-log/meta.txt "release_assets=$assets" }
+          # 附件名 + 字节数：主人是私密仓库、看不到 Actions 页面也没法匿名下载，
+          # 这三个数字（名字、大小、sha256）就是"这一轮真的产出了一个完整可用的包"的证据。
+          $assets = gh release view latest --json assets 2>$null
+          if ($LASTEXITCODE -eq 0 -and $assets) {
+            $parsed = $assets | ConvertFrom-Json
+            foreach ($a in $parsed.assets) {
+              Add-Content ci-log/meta.txt ("release_asset={0} {1} bytes" -f $a.name, $a.size)
+            }
+          }
           if (Test-Path pyinstaller.log) { Copy-Item pyinstaller.log ci-log/pyinstaller.log -Force }
           if (Test-Path check.log) { Copy-Item check.log ci-log/check.log -Force }
+          # 冒烟与包自检的完整输出：私密仓库 + artifact 额度爆的情况下，
+          # 这两个文件是"红在哪一步、exe 说了什么、包里有什么"的**唯一**证据来源。
+          if (Test-Path smoke.log) { Copy-Item smoke.log ci-log/smoke.log -Force }
+          if (Test-Path zipcheck.log) { Copy-Item zipcheck.log ci-log/zipcheck.log -Force }
+          # 构建日志只留尾部 200 行（nuitka.log 可能很大，全推会把 ci-log 分支吹起来）
+          if (Test-Path nuitka.log) { Get-Content nuitka.log -Tail 200 | Set-Content ci-log/build-tail.log }
+          if (Test-Path zip-meta.txt) { Get-Content zip-meta.txt | Add-Content ci-log/meta.txt }
+          # 报告文件本身也留一份（exe 的输出在 GUI 子系统下拿不到，这份是它自己写的）
+          foreach ($f in @("ci-smoke-data/logs/*.txt", (Join-Path $env:LOCALAPPDATA "LaoATrader/data/logs/*.txt"))) {
+            Get-ChildItem $f -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName ci-log/smoke-report.txt -Force }
+          }
           Get-Content ci-log/meta.txt
           git add -f ci-log
           git commit -m "CI 结果：${{ job.status }}（run $env:GITHUB_RUN_ID）" --no-verify
