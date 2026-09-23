@@ -243,12 +243,12 @@ def test_window_renders_all_panels(window, qapp) -> None:
     # 列就是用户给定的那几列（顺序也一致）
     assert _header_texts(window.pool_table) == list(ui_app.WATCH_HEADERS)
     assert _header_texts(window.position_table) == list(ui_app.POSITION_HEADERS)
-    # 池子表格第一行：`名称(代码)` + 来源（seeded 里是 `低价股` 策略选的 → `策略·低价股`）
+    # 池子表格第一行：`名称(代码)` + 来源（seeded 里是 `低价股` 策略选的 → `低价股`）
     assert window.pool_table.item(0, 0).text() == "半导体甲(600002)"
     # 列下标按新表头取（板块/来源两列因为新加的市值/换手往后挪了两格）
     assert window.pool_table.item(0, ui_app.WATCH_HEADERS.index("板块")).text() == "半导体"
     assert window.pool_table.item(
-        0, ui_app.WATCH_HEADERS.index("来源")).text() == "策略·低价股"
+        0, ui_app.WATCH_HEADERS.index("来源")).text() == "低价股"
     # 表头右边那行小字：`共 N 只（策略 M · 自选 K）`
     assert window.pool_count_label.text() == "共 1 只（策略 1 · 自选 0）"
     assert window.tabs.currentWidget() is window.market_page      # 启动默认页
@@ -1024,10 +1024,10 @@ def test_watch_table_headers_and_source_column(window) -> None:
     # （用户要求这一列回答"是哪条策略选出来的"，而不是只写组别）
     assert window.pool_table.item(0, 0).text() == "半导体甲(600002)"
     assert window.pool_table.item(0, ui_app.WATCH_HEADERS.index("来源")).text() \
-        == "策略·低价股"
+        == "低价股"
     # 组别与持有期挪进了行 tooltip（列数被用户定死，不能加列）
     tip = window.pool_table.item(0, 0).toolTip()
-    assert "来源：策略·低价股" in tip
+    assert "来源：低价股" in tip
     assert "组别：" not in tip        # 2026-09-18 起没有"策略组"这个概念了
     # 「备注」不再单独占一列（列数被用户定死）：它进了**整行的 tooltip**
     assert "备注" not in "".join(_header_texts(window.pool_table))
@@ -1620,7 +1620,7 @@ def test_pool_source_column_shows_primary_strategy_and_tooltip_the_rest(
         "strategy": "ReversalStrategy",
         "strategies": "ReversalStrategy,DryUpExpansionStrategy",
         "score": 2.0, "reason": "缩量回踩",
-        "label": "短期反转", "source_label": "策略·短期反转",
+        "label": "短期反转", "source_label": "短期反转",
         "industry": "半导体", "note": "", "source": "策略",
         "is_limit_up": False, "continue_day_text": "", "limit_up_reason": "",
     }]
@@ -1632,9 +1632,9 @@ def test_pool_source_column_shows_primary_strategy_and_tooltip_the_rest(
 
     # 来源 = 主策略；同批选中的其它策略进 tooltip（列宽只放得下一条）
     source_column = ui_app.WATCH_HEADERS.index("来源")
-    assert window.pool_table.item(0, source_column).text() == "策略·短期反转"
+    assert window.pool_table.item(0, source_column).text() == "短期反转"
     tip = window.pool_table.item(0, 0).toolTip()
-    assert "来源：策略·短期反转" in tip
+    assert "来源：短期反转" in tip
     assert "同批选中：地量后放量变盘" in tip        # 第二条策略没有从界面上消失
     # 2026-09-18 起没有"组别 / 持有期"（策略组机制删掉），也没有证据标记
     assert "组别：" not in tip and "T+3" not in tip
@@ -1654,11 +1654,11 @@ def test_pool_row_tooltip_shows_limit_up_and_auction(pool_window, qapp,
     rows = [
         {"symbol": "600002", "name": "半导体甲", "strategy": "LowPriceStrategy",
          "strategies": "LowPriceStrategy", "score": 1.0, "reason": "r",
-         "label": "低价股", "source_label": "策略·低价股", "industry": "半导体",
+         "label": "低价股", "source_label": "低价股", "industry": "半导体",
          "note": "", "is_limit_up": True, "continue_day_text": "2 连板",
          "limit_up_reason": "半导体设备+业绩预增"},
         {"symbol": "600003", "name": "白酒样本", "strategy": "X", "strategies": "X",
-         "score": 1.0, "reason": "r", "label": "低价股", "source_label": "策略·低价股",
+         "score": 1.0, "reason": "r", "label": "低价股", "source_label": "低价股",
          "industry": "白酒", "note": "", "is_limit_up": False,
          "continue_day_text": "", "limit_up_reason": ""},
     ]
@@ -2754,7 +2754,7 @@ def test_pool_table_shows_watchlist_source_and_note(window, seeded, qapp) -> Non
     qapp.processEvents()
 
     assert window.pool_table.item(0, ui_app.WATCH_HEADERS.index("来源")).text() \
-        == "策略·低价股+自选"
+        == "低价股+自选"
     assert "备注：龙头" in window.pool_table.item(0, 0).toolTip()
 
     # 纯自选（不在策略候选里）→ 来源「自选」，而且**不用等建池**就能进这张表
@@ -4617,7 +4617,7 @@ def test_pool_row_tooltip_has_no_evidence_marker(pool_window, qapp, monkeypatch)
     rows = [
         {"symbol": "600002", "name": "半导体甲", "strategy": "DryUpExpansionStrategy",
          "strategies": "DryUpExpansionStrategy", "score": 2.0, "reason": "地量后放量",
-         "label": "地量后放量变盘", "source_label": "策略·地量后放量变盘",
+         "label": "地量后放量变盘", "source_label": "地量后放量变盘",
          "industry": "半导体", "note": "", "source": "策略",
          "is_limit_up": False, "continue_day_text": "", "limit_up_reason": ""},
     ]
@@ -4628,7 +4628,7 @@ def test_pool_row_tooltip_has_no_evidence_marker(pool_window, qapp, monkeypatch)
     qapp.processEvents()
 
     tip = window.pool_table.item(0, 0).toolTip()
-    assert "来源：策略·地量后放量变盘" in tip      # 历史行的中文名照旧
+    assert "来源：地量后放量变盘" in tip      # 历史行的中文名照旧
     for gone in ("依赖开盘", "push_only_proven", "策略照常推送", "组别："):
         assert gone not in tip, f"tooltip 里还留着「{gone}」"
 

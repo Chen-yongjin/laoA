@@ -1,0 +1,163 @@
+/* 老牛选股 · 产品站点样式
+   全部自包含：不引外部字体 / 图标库 / CDN（作者的网络不稳，站点必须能离线打开）。
+   配色：浅色为主，主色用红（与软件里「红涨」一致），强调色用深棕（呼应「老牛」）。 */
+
+:root {
+  --red: #d33a2c;
+  --red-dark: #b02a1e;
+  --brown: #6b4a2f;
+  --ink: #22201e;
+  --ink-soft: #5b5651;
+  --line: #e6e1db;
+  --bg: #ffffff;
+  --bg-alt: #faf8f5;
+  --code-bg: #f3efe9;
+  --radius: 12px;
+  --shadow: 0 1px 2px rgba(34, 32, 30, .06), 0 8px 24px rgba(34, 32, 30, .06);
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.7 "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC",
+        system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+a { color: var(--red-dark); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code {
+  background: var(--code-bg);
+  border-radius: 5px;
+  padding: 1px 5px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: .92em;
+}
+
+/* ── 顶栏 ─────────────────────────────────────────────── */
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  background: rgba(255, 255, 255, .94);
+  backdrop-filter: saturate(1.2) blur(6px);
+  border-bottom: 1px solid var(--line);
+}
+.topbar-inner { display: flex; align-items: center; gap: 18px; min-height: 60px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); }
+.brand:hover { text-decoration: none; }
+.brand-mark { font-size: 26px; line-height: 1; }
+.brand-text { display: flex; flex-direction: column; font-weight: 700; letter-spacing: .5px; }
+.brand-text em { font-style: normal; font-weight: 400; font-size: 12px; color: var(--ink-soft); }
+.nav { margin-left: auto; display: flex; gap: 18px; font-size: 14px; }
+.nav a { color: var(--ink-soft); }
+.nav a:hover { color: var(--red-dark); }
+
+/* ── 按钮 ─────────────────────────────────────────────── */
+.btn {
+  display: inline-block;
+  background: linear-gradient(180deg, #e3493a, var(--red));
+  color: #fff; font-weight: 700;
+  border-radius: 999px; padding: 12px 26px;
+  box-shadow: 0 6px 16px rgba(211, 58, 44, .28);
+  white-space: nowrap;
+}
+.btn:hover { text-decoration: none; background: linear-gradient(180deg, var(--red), var(--red-dark)); }
+.btn-sm { padding: 8px 18px; font-size: 14px; box-shadow: none; }
+.btn-lg { padding: 15px 34px; font-size: 18px; }
+.btn.is-pending { background: #b9b3ac; box-shadow: none; cursor: not-allowed; }
+
+/* ── 首屏 ─────────────────────────────────────────────── */
+.hero { padding: 46px 0 34px; background: linear-gradient(180deg, var(--bg-alt), #fff); }
+.hero-inner { display: grid; grid-template-columns: 1.05fr .95fr; gap: 34px; align-items: center; }
+.tag {
+  display: inline-block; margin: 0 0 10px;
+  background: #fdeceb; color: var(--red-dark);
+  border-radius: 999px; padding: 4px 12px; font-size: 13px; font-weight: 700;
+}
+h1 { font-size: 38px; line-height: 1.25; margin: 6px 0 14px; }
+.lead { font-size: 17px; color: var(--ink-soft); margin: 0 0 10px; }
+.lead.strong { color: var(--ink); }
+.cta { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 22px 0 8px; }
+.cta-note { color: var(--ink-soft); font-size: 14px; }
+.ver { font-weight: 700; color: var(--ink); margin-right: 6px; }
+.cta-sub { font-size: 14px; color: var(--ink-soft); margin: 6px 0 0; }
+.pending {
+  margin: 12px 0 0; padding: 10px 14px;
+  background: #fff6e5; border: 1px solid #f0d9a8; border-radius: 10px; font-size: 14px;
+}
+
+/* ── 图片 ─────────────────────────────────────────────── */
+figure { margin: 0; }
+img {
+  display: block; width: 100%; height: auto;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: #fff; box-shadow: var(--shadow);
+}
+.hero-shot img { border-radius: 14px; }
+.wide img { margin-top: 18px; }
+.shots.two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+
+/* ── 分区 ─────────────────────────────────────────────── */
+.band { padding: 52px 0; }
+.band.alt { background: var(--bg-alt); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+h2 { font-size: 26px; margin: 0 0 14px; }
+h3 { font-size: 18px; margin: 0 0 8px; }
+.sub { color: var(--ink-soft); margin: 0 0 18px; }
+.sub.strong { color: var(--ink); }
+
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.card {
+  background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 18px 18px 14px; box-shadow: var(--shadow);
+}
+.card p { margin: 0; color: var(--ink-soft); font-size: 15px; }
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; align-items: center; }
+.split.reverse > div:first-child { order: 2; }
+.ticks { margin: 0; padding-left: 20px; }
+.ticks li { margin-bottom: 10px; color: var(--ink-soft); }
+.ticks li b { color: var(--ink); }
+.steps { margin: 0; padding-left: 22px; }
+.steps li { margin-bottom: 12px; color: var(--ink-soft); }
+.steps li b { color: var(--ink); }
+
+.feature { margin-bottom: 34px; }
+.feature:last-child { margin-bottom: 0; }
+.feature p { color: var(--ink-soft); margin: 0 0 12px; }
+
+/* ── 常见问题 ─────────────────────────────────────────── */
+details {
+  background: #fff; border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 16px; margin-bottom: 10px; box-shadow: var(--shadow);
+}
+summary { cursor: pointer; font-weight: 700; }
+summary::marker { color: var(--red); }
+details p { margin: 10px 0 2px; color: var(--ink-soft); }
+details[open] summary { color: var(--red-dark); }
+
+.fine { font-size: 14px; color: var(--ink-soft); margin: 0 0 10px; }
+
+/* ── 页脚 ─────────────────────────────────────────────── */
+.footer { border-top: 1px solid var(--line); padding: 22px 0; background: #fff; }
+.footer .wrap { display: flex; gap: 18px; flex-wrap: wrap; color: var(--ink-soft); font-size: 13px; }
+
+/* ── 窄屏（手机）───────────────────────────────────────── */
+@media (max-width: 860px) {
+  .hero-inner, .split { grid-template-columns: 1fr; }
+  .split.reverse > div:first-child { order: 0; }
+  .cards { grid-template-columns: 1fr; }
+  .shots.two { grid-template-columns: 1fr; }
+  h1 { font-size: 30px; }
+  h2 { font-size: 22px; }
+  .nav { display: none; }
+  .topbar-inner { gap: 10px; }
+  .brand-text em { display: none; }
+  .band { padding: 40px 0; }
+}

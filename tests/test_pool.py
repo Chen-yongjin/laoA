@@ -127,17 +127,17 @@ def test_format_pool_lines() -> None:
 def test_push_tag_translates_but_keeps_custom_names() -> None:
     """标签翻译的三条边界：类名 → 中文、中文 → 原样（幂等）、自定义名只换前缀。
 
-    2026-09-22 起自定义的那条也显示 `策略·`（主人："把公式都改成策略吧"）——
-    库里存的仍是 `公式·放量上攻`，**只有显示换前缀**（见 `wording.display_strategy`）。
+    2026-09-23 起来源列**不带前缀**（主人："把公式名称中的策略两个字去掉，无意义"）——
+    库里存的仍是 `公式·放量上攻`，**只有显示剥前缀**（见 `wording.display_strategy`）。
     """
     assert pool.push_tag({"strategies": "LowPriceStrategy"}) == "低价股"
     # 已经是中文名的老行（`enabled_strategies = ["低价股"]` 那类写法存下来的）
     assert pool.push_tag({"strategies": "低价股"}) == "低价股"
     assert pool.push_tag({"strategies": "低价股,ReversalStrategy"}) == "低价股、短期反转"
-    # 用户自己起的名字不能被翻译掉（认不出的名字原样返回），只把内部前缀显示成「策略·」
-    assert pool.push_tag({"strategies": "公式·放量上攻"}) == "策略·放量上攻"
+    # 用户自己起的名字不能被翻译掉（认不出的名字原样返回），只把内部前缀剥掉
+    assert pool.push_tag({"strategies": "公式·放量上攻"}) == "放量上攻"
     # 名字里真带"公式"两个字的那种：**一个字都不许改**（那是用户起的名）
-    assert pool.push_tag({"strategies": "公式·我的公式一"}) == "策略·我的公式一"
+    assert pool.push_tag({"strategies": "公式·我的公式一"}) == "我的公式一"
     assert pool.push_tag({"strategies": ""}) == ""
     assert pool.push_tag({}) == ""
 
@@ -226,15 +226,15 @@ def test_pool_table_rows_adds_industry_and_label(
         engine, cfg, tmp_path, monkeypatch) -> None:
     """表格行要带行业与「来源」标签；2026-09-18 起标签是 `<策略前缀><策略名>`。
 
-    2026-09-22（主人要求"把公式都改成策略"）：显示的**前缀是 `策略·`**，
-    与内置策略的 `策略·短期反转` 统一；库里存的还是 `公式·半导体甲`。
+    2026-09-22（主人要求"把公式都改成策略"）：显示的**前缀是 ``**，
+    与内置策略的 `短期反转` 统一；库里存的还是 `公式·半导体甲`。
     """
     _enable_formulas(monkeypatch, tmp_path, cfg, {"半导体甲": "C>12 AND C<13"})
     pool.build_pool(engine, cfg, hot_only=False, save=True, day="2026-09-11")
     rows = pool.pool_table_rows(cfg.db_path)
     assert rows[0]["symbol"] == "600002"
     assert rows[0]["industry"] == "半导体"
-    assert rows[0]["label"] == "策略·半导体甲"
+    assert rows[0]["label"] == "半导体甲"
     # 库里那一份**没有被改写**（显示与存储分家，升级前后不影响历史数据）
     assert rows[0]["strategy"] == "公式·半导体甲"
 
@@ -273,22 +273,22 @@ def test_save_pool_is_idempotent(db) -> None:
 
 
 def test_source_label_names_the_strategy_not_the_group() -> None:
-    """四种来源各是什么文本：`策略·X`（自定义与内置**现在是同一个写法**）/ `自选` / `策略·X+自选`。"""
+    """四种来源各是什么文本：`X`（自定义与内置**现在是同一个写法**）/ `自选` / `X+自选`。"""
     builtin = {"strategy": "ReversalStrategy", "strategies": "ReversalStrategy"}
     formula = {"strategy": "公式·放量上攻", "strategies": "公式·放量上攻"}
     manual = {"strategy": "", "strategies": "", "watchlist": True}
 
-    assert pool.source_label(builtin, None) == "策略·短期反转"
+    assert pool.source_label(builtin, None) == "短期反转"
     # 第二个内置策略（另一组的）名字也要对：不能拿组名冒充
     assert pool.source_label({"strategy": "LowPriceStrategy",
-                              "strategies": "LowPriceStrategy"}, None) == "策略·低价股"
-    # 自定义策略：库里的值还是 `公式·放量上攻`，**显示**成 `策略·放量上攻`
+                              "strategies": "LowPriceStrategy"}, None) == "低价股"
+    # 自定义策略：库里的值还是 `公式·放量上攻`，**显示**成 `放量上攻`
     # （2026-09-22 主人要求把"公式"改口成"策略"；见 `wording`）
     assert formula["strategy"] == "公式·放量上攻"          # 数据没被动过
-    assert pool.source_label(formula, None) == "策略·放量上攻"
+    assert pool.source_label(formula, None) == "放量上攻"
     assert pool.source_label(manual, None) == "自选"
     # 两者都有 → 后面接 `+自选`（用户给定的写法，没有空格）
-    assert pool.source_label(builtin, {"enabled": 1}) == "策略·短期反转+自选"
+    assert pool.source_label(builtin, {"enabled": 1}) == "短期反转+自选"
     # 组别**不再**出现在这一列里
     assert "T+3" not in pool.source_label(builtin, None)
     assert "短线" not in pool.source_label(builtin, None)
@@ -303,7 +303,7 @@ def test_strategy_names_falls_back_to_the_primary_column() -> None:
     row = {"strategy": "ReversalStrategy", "strategies": ""}
     assert pool.strategy_names(row) == ["短期反转"]
     assert pool.push_tag(row) == "短期反转"
-    assert pool.source_label(row, None) == "策略·短期反转"
+    assert pool.source_label(row, None) == "短期反转"
     lines = pool.format_pool_lines([{**row, "name": "甲", "symbol": "600001",
                                      "reason": "短期反转"}])
     assert lines == ["1. 甲(600001)短期反转｜短期反转"]
@@ -321,18 +321,18 @@ def test_source_detail_lines_show_source_and_the_other_formulas() -> None:
         "source_label": "公式·短期反转",
     }
     lines = pool.source_detail_lines(row)
-    assert lines[0] == "来源：策略·短期反转"          # 这一行给的是算好的 `source_label`
-    assert "同批选中：策略·地量后放量变盘" in lines    # 这一行现算（走 `strategy_label`）
+    assert lines[0] == "来源：短期反转"          # 这一行给的是算好的 `source_label`
+    assert "同批选中：地量后放量变盘" in lines    # 这一行现算（走 `strategy_label`）
     assert not any(line.startswith("组别：") for line in lines)
 
     # 只有一条公式的行：只出"来源"一行（不留空壳）
-    plain = {"strategy": "公式·甲", "strategies": "公式·甲", "source_label": "策略·甲"}
-    assert pool.source_detail_lines(plain) == ["来源：策略·甲"]
+    plain = {"strategy": "公式·甲", "strategies": "公式·甲", "source_label": "甲"}
+    assert pool.source_detail_lines(plain) == ["来源：甲"]
 
     # 老库里的内置策略行照旧显示中文名（历史数据的显示口径）
     old = {"strategy": "ReversalStrategy", "strategies": "ReversalStrategy",
-           "source_label": "策略·短期反转"}
-    assert pool.source_detail_lines(old) == ["来源：策略·短期反转"]
+           "source_label": "短期反转"}
+    assert pool.source_detail_lines(old) == ["来源：短期反转"]
 
 
 def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> None:
@@ -344,8 +344,8 @@ def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> 
     """
     row = {"name": "半导体甲", "symbol": "600002", "strategy": "ReversalStrategy",
            "strategies": "ReversalStrategy,DryUpExpansionStrategy", "reason": "缩量回踩",
-           "source_label": "策略·短期反转"}
-    assert pool.source_label(row, None) == "策略·短期反转"
+           "source_label": "短期反转"}
+    assert pool.source_label(row, None) == "短期反转"
     line = pool.format_pool_lines([row])[0]
     assert line == "1. 半导体甲(600002)短期反转、地量后放量变盘｜缩量回踩"
     # 推送标签里的每个中文名，都能在「策略选股」列表里找到（同一份翻译表）
@@ -453,7 +453,7 @@ def test_pool_drops_candidates_that_are_not_formulas(engine, cfg) -> None:
     """调用方传进来的**非公式候选**（老策略类名）一律丢掉。
 
     那 5 条内置策略已经退出选股链路，界面上再也选不出它们 —— 让这种键进池子
-    只会让「来源」列出现一个用户找不到对应行的"策略·X"。公式候选照常保留。
+    只会让「来源」列出现一个用户找不到对应行的"X"。公式候选照常保留。
     """
     picks = {
         "LowPriceStrategy": [{"symbol": "600001", "name": "甲", "reason": "低价股"}],
@@ -481,4 +481,4 @@ def test_pool_rows_carry_no_group(engine, cfg, tmp_path, monkeypatch) -> None:
         assert row["group_label"] == "—"
         assert row["horizon"] == 0
         # 「来源」列照旧回答问题："是哪条策略选出来的"（显示成策略前缀）
-        assert row["source_label"] == "策略·半导体甲"
+        assert row["source_label"] == "半导体甲"

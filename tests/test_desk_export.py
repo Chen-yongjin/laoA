@@ -39,7 +39,7 @@ def _pool_rows() -> list[dict]:
     return [
         {"symbol": "600519", "name": "贵州茅台", "strategy": "ReversalStrategy",
          "strategies": "ReversalStrategy", "source": "策略",
-         "source_label": "策略·短期反转"},
+         "source_label": "短期反转"},
         {"symbol": "000001", "name": "平安银行", "strategy": "", "strategies": "",
          "source": "自选", "source_label": "自选", "watchlist": True},
         {"symbol": "600002", "name": "半导体甲", "strategy": "公式·放量上攻",
@@ -67,9 +67,9 @@ def test_file_name_carries_the_date_and_content_is_the_agreed_layout(tmp_path) -
         "老牛选股助手 · 选股结果 · 2026-09-18（行情日 2026-09-17）",
         # M = 有来源策略的行（内置 + 公式），K = 自选 —— 与「自选股池」表头同一口径
         "共 3 只（策略 2 · 自选 1）",
-        "1. 贵州茅台(600519)  现价 1266.98 +0.71%  来源：策略·短期反转",
+        "1. 贵州茅台(600519)  现价 1266.98 +0.71%  来源：短期反转",
         "2. 平安银行(000001)  来源：自选",
-        "3. 半导体甲(600002)  来源：策略·放量上攻",
+        "3. 半导体甲(600002)  来源：放量上攻",
         pool.EXPORT_FOOTER,
     ]
 
@@ -102,7 +102,7 @@ def test_file_name_defaults_to_today_in_beijing_time(tmp_path, monkeypatch) -> N
 def test_no_tooltip_or_reason_noise_but_source_label_is_kept(tmp_path) -> None:
     """来源优先用行里算好的 `source_label`；行里没有时才算一次（组合来源要留住）。
 
-    `策略·短期反转+自选` 这种"既是选出来的、又是自选"的标记是用户判断该不该动手的依据
+    `短期反转+自选` 这种"既是选出来的、又是自选"的标记是用户判断该不该动手的依据
     （改动方案里它也是「来源」列的写法），桌面文件必须与界面说同一个词。
     `run_daily` 传进来的池子行就是"没有 `source_label`"那种（只有 `strategy` +
     `watchlist` 标记），所以第 2 行专门走这条路。
@@ -110,7 +110,7 @@ def test_no_tooltip_or_reason_noise_but_source_label_is_kept(tmp_path) -> None:
     rows = [
         {"symbol": "600002", "name": "半导体甲", "strategy": "ReversalStrategy",
          "strategies": "ReversalStrategy", "source": "策略+自选",
-         "source_label": "策略·短期反转+自选"},
+         "source_label": "短期反转+自选"},
         {"symbol": "300001", "name": "创业样本", "strategy": "ReversalStrategy",
          "strategies": "ReversalStrategy", "source": "策略+自选",
          "watchlist": True},                    # 没有 source_label → 现算
@@ -118,8 +118,8 @@ def test_no_tooltip_or_reason_noise_but_source_label_is_kept(tmp_path) -> None:
 
     text = pool.pick_export_text(rows, data_date="2026-09-17", day="2026-09-18")
 
-    assert "1. 半导体甲(600002)  来源：策略·短期反转+自选" in text
-    assert "2. 创业样本(300001)  来源：策略·短期反转+自选" in text
+    assert "1. 半导体甲(600002)  来源：短期反转+自选" in text
+    assert "2. 创业样本(300001)  来源：短期反转+自选" in text
 
 
 def test_source_never_prints_a_placeholder_dash(tmp_path) -> None:
@@ -149,7 +149,7 @@ def test_rows_without_symbol_are_dropped(tmp_path) -> None:
     rows = [{"name": "没有代码的行"},
             {"symbol": "600519", "name": "贵州茅台", "strategy": "ReversalStrategy",
              "strategies": "ReversalStrategy", "source": "策略",
-             "source_label": "策略·短期反转"}]
+             "source_label": "短期反转"}]
 
     path = pool.export_pick_file(rows, dest_dir=tmp_path, day="2026-09-18")
 
@@ -257,7 +257,7 @@ def test_latest_quotes_reads_unadjusted_prices(db) -> None:
 def test_export_uses_the_db_for_prices_when_quotes_are_not_injected(db, tmp_path) -> None:
     """不注入行情时按库算现价（`run_daily` 走的就是这条路：只传 `db_path`）。"""
     rows = [{"symbol": "600002", "name": "半导体甲", "strategy": "ReversalStrategy",
-             "strategies": "ReversalStrategy", "source_label": "策略·短期反转"}]
+             "strategies": "ReversalStrategy", "source_label": "短期反转"}]
 
     path = pool.export_pick_file(rows, dest_dir=tmp_path, db_path=db, day="2026-09-18")
 
@@ -269,36 +269,36 @@ def test_export_uses_the_db_for_prices_when_quotes_are_not_injected(db, tmp_path
 def test_no_price_means_no_price_segment(tmp_path) -> None:
     """库里没有这只票的价格 → 那一行**不写**现价（宁可少一个数字，也不编一个）。"""
     row = {"symbol": "999999", "name": "查不到价格的票", "strategy": "ReversalStrategy",
-           "strategies": "ReversalStrategy", "source_label": "策略·短期反转"}
+           "strategies": "ReversalStrategy", "source_label": "短期反转"}
 
     path = pool.export_pick_file([row], dest_dir=tmp_path, quotes={}, day="2026-09-18")
 
     line = path.read_text(encoding="utf-8-sig").splitlines()[2]
-    assert line == "1. 查不到价格的票(999999)  来源：策略·短期反转"
+    assert line == "1. 查不到价格的票(999999)  来源：短期反转"
     assert "现价" not in line
 
 
 def test_price_without_previous_close_omits_only_the_percentage(tmp_path) -> None:
     """只有一天数据（没有昨收）→ 写现价、不写涨跌幅（除零会把整份导出变成"没文件"）。"""
     text = pool.pick_export_text(
-        [{"symbol": "600519", "name": "贵州茅台", "source_label": "策略·短期反转"}],
+        [{"symbol": "600519", "name": "贵州茅台", "source_label": "短期反转"}],
         day="2026-09-18", quotes={"600519": (1266.98, None)},
     )
 
-    assert "现价 1266.98  来源：策略·短期反转" in text
+    assert "现价 1266.98  来源：短期反转" in text
     assert "%" not in text
 
 
 def test_broken_quote_rows_do_not_break_the_file(tmp_path) -> None:
     """价格字段是脏数据（字符串/空元组）时只丢价格段，文件照常写出来。"""
     text = pool.pick_export_text(
-        [{"symbol": "600519", "name": "贵州茅台", "source_label": "策略·短期反转"},
-         {"symbol": "600002", "name": "半导体甲", "source_label": "策略·短期反转"}],
+        [{"symbol": "600519", "name": "贵州茅台", "source_label": "短期反转"},
+         {"symbol": "600002", "name": "半导体甲", "source_label": "短期反转"}],
         day="2026-09-18", quotes={"600519": ("不是数字", 1.0), "600002": ()},
     )
 
     assert "现价" not in text
-    assert "1. 贵州茅台(600519)  来源：策略·短期反转" in text
+    assert "1. 贵州茅台(600519)  来源：短期反转" in text
 
 
 # ── 4) 失败只记日志 ──
@@ -348,7 +348,7 @@ def test_broken_db_for_prices_does_not_stop_the_export(tmp_path, log_records) ->
 
     assert path is not None and path.exists()
     text = path.read_text(encoding="utf-8-sig")
-    assert "1. 贵州茅台(600519)  来源：策略·短期反转" in text
+    assert "1. 贵州茅台(600519)  来源：短期反转" in text
     assert "现价" not in text                                # 没有价格就不写那一段
     assert "读取最新价失败" in messages(log_records)
 

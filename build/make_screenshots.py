@@ -15,6 +15,10 @@
 
 注意：离屏平台下 `widget.grab()` 拿到的就是渲染结果，不需要真的有显示器；
 但**必须先 show() + processEvents()**，否则拿到的是没排版的空白图。
+
+主界面那几张**不是干抓窗口**，而是合成到一张"桌面"画布上：主窗口贴左上、桌宠贴右下角
+（见 `_desktop_canvas`）—— 主人 2026-09-23 的要求：「图片角落把桌宠也带上」，
+要让图看起来是"桌宠站在桌面上陪着主窗口"，而不是只有 `09-桌宠提醒.png` 那张特写。
 """
 
 from __future__ import annotations
@@ -41,8 +45,12 @@ os.environ["LOCALAPPDATA"] = str(_DEMO_HOME / "AppData" / "Local")
 for _key in ("APPDATA", "LOCALAPPDATA"):
     Path(os.environ[_key]).mkdir(parents=True, exist_ok=True)
 
+from PySide6.QtCore import QRectF, Qt                    # noqa: E402
+from PySide6.QtGui import (                              # noqa: E402
+    QBrush, QColor, QImage, QLinearGradient, QPainter, QPixmap,
+)
 from PySide6.QtWidgets import (                          # noqa: E402
-    QApplication, QGroupBox, QScrollArea,
+    QApplication, QGroupBox, QLabel, QScrollArea,
 )
 
 from laoa_trader.config import Config                    # noqa: E402
@@ -53,116 +61,209 @@ WINDOW_SIZE = (1440, 900)
 #: 截图输出目录
 OUT_DIR = REPO / "docs" / "截图"
 
-# ── 演示数据（**全是编的**，但长得像真在用的账户）────────────────────────
+# ── 桌面画布（主窗口 + 角落里的桌宠）────────────────────────────────────
 #
-# 选这些名字是因为散户一眼认识；价格/涨跌幅/市值都按真实量级编（茅台一千多、
-# 银行几块到十几块），免得图里出现"茅台 12 元"这种一眼假的组合。
+#: 桌面画布四周留白（像素）
+CANVAS_MARGIN = 18
+#: 主窗口与桌宠之间的横向间隙（像素）：**宁可画布宽一点，也不让桌宠压住窗口右边的列**
+PET_GAP = 28
+#: 桌面底色（浅灰渐变；纯色大块压缩后几乎不占 PNG 体积）
+WALLPAPER_TOP = "#f4f6f9"
+WALLPAPER_BOTTOM = "#dbe1e9"
+#: 桌宠脚下那点影子的尺寸/透明度（让它像"站在桌面上"，不是"漂着"）
+PET_SHADOW_SIZE = (112, 15)
+PET_SHADOW_ALPHA = 34
+
+# ── 演示数据 ──────────────────────────────────────────────────────────────
+#
+# ⚠️ 下面这些数字**全是编的，不是真实行情**（截图要发给客户，必须可重复、也不能
+# 让人以为是当天的大盘）。但它们必须"看着像真在用的账户"：
+#
+#   主人 2026-09-23 的原话：「里面的自选股都是乱七八糟的什么玩意，一看就知道不会炒股。
+#   找小盘最近涨幅大的股票加进自选和持仓，选股结果里面也搞好一点」
+#
+# 所以这一版的数据口径（改数据时按这张表对一遍，别凭感觉调）：
+#   * **自选股池**：10 行，全是**真实存在的小盘股**（名称与代码配套，300/002/603/001 段）；
+#     当日涨幅 +3%~+10%、流通市值 30~300 亿、换手 3%~15%、价格 5~60 元；
+#     加入日期在过去 3~30 个交易日内，盈亏以盈利为主（−4%~+16%），来源是 `策略·X+自选` 那种组合。
+#   * **持仓监控**：8 行，成本价与现价自洽（盈亏 = 现价/成本 − 1，由 `_align_position_costs`
+#     在抓图前回写保证），盈亏 −5%~+20%，止损/止盈位按成本 ±8%/±15%（见 `main()` 里设的比例）。
+#   * **选股结果**：12 行，清一色 `策略·尾盘选股策略`（尾盘策略刚跑完一轮的样子）。
+#   * **大盘概览**：像"略偏强的一天"（上涨 2600 / 下跌 2000 家、涨停 52、跌停 11、炸板 24、
+#     两市成交 1.6 万亿），板块用真实板块名，且板块名与本地行业同名（否则涨停/跌停家数是 `—`）。
+#
+# 为什么用"真实股票名 + 编的行情"这个组合：名字配错（比如写"机器人龙头 600001"）散户一眼
+# 就看出是假数据；而价格/市值/涨跌幅本来就每天在变，编成"小盘强势股"的量级反而最自然。
+
+#: 全部演示标的：`(代码, 名称, 行业)`。**名称与代码必须是配套的真实标的**
+#: （自选/持仓/选股结果三张表共用这一份，图里才是"同一个人的同一个盘面"）。
+#: 行业用真实板块名，且与「大盘概览 → 热门板块」那几个板块对得上。
 DEMO_STOCKS: tuple[tuple[str, str, str], ...] = (
-    ("600519", "贵州茅台", "白酒"),
-    ("000001", "平安银行", "银行"),
-    ("300750", "宁德时代", "电池"),
-    ("002594", "比亚迪", "汽车整车"),
-    ("601318", "中国平安", "保险"),
-    ("000858", "五粮液", "白酒"),
-    ("600036", "招商银行", "银行"),
-    ("002415", "海康威视", "安防设备"),
-    ("600276", "恒瑞医药", "化学制药"),
-    ("601899", "紫金矿业", "贵金属"),
-    ("300059", "东方财富", "证券"),
-    ("002230", "科大讯飞", "软件开发"),
-    ("600030", "中信证券", "证券"),
-    ("000333", "美的集团", "家电行业"),
-    ("601012", "隆基绿能", "光伏设备"),
+    ("002273", "水晶光电", "光学光电子"),
+    ("300748", "金力永磁", "稀土永磁"),
+    ("002472", "双环传动", "通用设备"),
+    ("603005", "晶方科技", "半导体"),
+    ("300101", "振芯科技", "军工电子"),
+    ("002402", "和而泰", "消费电子"),
+    ("300811", "铂科新材", "金属新材料"),
+    ("002130", "沃尔核材", "电网设备"),
+    ("300638", "广和通", "通信设备"),
+    ("002979", "雷赛智能", "自动化设备"),
+    # ── 下面这些只出现在「选股结果」里（自选里挑了一部分加进去，其余是"看上了还没加"）──
+    ("300913", "兆龙互连", "通信设备"),
+    ("300593", "新雷能", "军工电子"),
+    ("300458", "全志科技", "半导体"),
+    ("002965", "祥鑫科技", "汽车零部件"),
+    ("001309", "德明利", "半导体"),
+    ("002335", "科华数据", "电源设备"),
+    ("603297", "永新光学", "光学元件"),
+    ("002378", "章源钨业", "小金属"),
+    ("300496", "中科创达", "软件开发"),
+    ("002444", "巨星科技", "通用设备"),
 )
 
-#: 自选股池：代码 → (**入库时的来源**（与库里同一个写法：公式选中就是 `公式·X`）, 加入日期, 加入价系数, 监控开关)
-#:
-#: 加入价写成"现价的系数"而不是硬编一个数：现价一改（见 `DEMO_QUOTES`），
-#: 盈亏仍然是合理的 ±8% 以内 —— 硬编价格迟早出现"五粮液 +41%"那种一眼假的数字。
-DEMO_WATCH: dict[str, tuple[str, str, float, bool]] = {
-    "600519": ("公式·尾盘超短", "2026-09-08", 0.976, True),
-    "300750": ("公式·短期反转", "2026-09-09", 1.031, True),
-    "002594": ("公式·尾盘超短", "2026-09-10", 0.958, True),
-    "000858": ("公式·地量放量", "2026-09-11", 1.042, True),
-    "002415": ("公式·首板缩量", "2026-09-14", 0.987, True),
-    "601899": ("", "2026-09-15", 0.945, True),          # 手工加的 → 来源显示「自选」
-    "300059": ("公式·尾盘超短", "2026-09-16", 1.018, True),
-    "600030": ("公式·短期反转", "2026-09-17", 0.993, True),
-    "000333": ("", "2026-09-18", 1.026, True),
-    "601012": ("公式·地量放量", "2026-09-18", 0.972, True),
-}
-
-#: 持仓监控：代码 → (成本价系数（成本 = 现价 × 系数）, 备注)
-#:
-#: 与自选一样用系数而不是硬编成本价：持仓表的「现价」取自快照或本地收盘价
-#: （哪个新用哪个），硬编成本价就会出现"宁德时代 +33%、紫金矿业 +75%"
-#: 这种一眼不像普通账户的盈亏。
-DEMO_POSITIONS: dict[str, tuple[float, str]] = {
-    "600519": (1.045, "长线底仓"),
-    "000001": (0.982, ""),
-    "601318": (0.965, ""),
-    "600036": (1.028, "分红再投"),
-    "600276": (1.061, ""),
-    "002230": (1.035, "看后续订单"),
-    "300750": (0.947, ""),
-    "601899": (0.913, ""),
-}
-
-#: 实时快照（现价, 涨跌幅%, 换手率%, 流通市值亿）—— 注入到快照缓存里，
-#: 这样两张表的「现价/涨幅/市值/换手」有数（真跑会去联网取，截图不该依赖网络）。
+#: 实时快照（现价, 当日涨幅%, 换手率%, 流通市值亿）—— 注入到快照缓存里，
+#: 两张表的「现价/涨幅/市值/换手」与选股结果那几列都从这里取。
+#: 量级按"小盘活跃股"编：市值 46~322 亿、换手 3%~14%、当日涨幅 +3%~+9.4%。
 DEMO_QUOTES: dict[str, tuple[float, float, float, float]] = {
-    "600519": (1266.98, 0.71, 0.20, 15715.0),
-    "000001": (11.86, 1.02, 0.44, 2270.0),
-    "300750": (231.40, 2.35, 0.89, 12864.0),
-    "002594": (108.75, 3.12, 1.42, 9860.0),
-    "601318": (54.10, 0.86, 0.31, 9980.0),
-    "000858": (142.30, 1.55, 0.62, 5520.0),
-    "600036": (42.66, 0.94, 0.28, 8800.0),
-    "002415": (30.95, -1.24, 0.75, 2860.0),
-    "600276": (50.20, -0.58, 0.52, 3200.0),
-    "601899": (20.15, 2.08, 1.16, 4140.0),
-    "300059": (23.08, 3.42, 2.15, 3650.0),
-    "002230": (47.90, -0.75, 1.05, 1110.0),
-    "600030": (28.12, 1.66, 0.88, 2790.0),
-    "000333": (73.15, 0.62, 0.35, 5010.0),
-    "601012": (18.42, -1.86, 1.28, 1400.0),
+    "002273": (21.86, 6.42, 8.6, 268.0),
+    "300748": (22.40, 5.18, 6.9, 292.0),
+    "002472": (27.35, 7.63, 9.4, 235.0),
+    "603005": (24.18, 4.35, 7.2, 158.0),
+    "300101": (19.76, 8.21, 11.3, 112.0),
+    "002402": (15.62, 3.86, 5.4, 143.0),
+    "300811": (38.90, 9.12, 12.6, 98.0),
+    "002130": (21.05, 5.77, 10.2, 264.0),
+    "300638": (20.44, 4.98, 6.1, 156.0),
+    "002979": (31.26, 6.05, 8.8, 96.0),
+    "300913": (32.15, 7.85, 12.0, 74.0),
+    "300593": (24.60, 6.71, 9.7, 105.0),
+    "300458": (32.40, 4.62, 7.8, 208.0),
+    "002965": (28.74, 5.35, 10.6, 118.0),
+    "001309": (58.20, 3.18, 12.1, 132.0),
+    "002335": (30.88, 3.42, 4.9, 187.0),
+    "603297": (41.30, 6.88, 5.7, 46.0),
+    "002378": (12.86, 9.35, 13.4, 132.0),
+    "300496": (52.30, 4.85, 6.4, 241.0),
+    "002444": (26.90, 5.10, 3.2, 322.0),
+}
+
+#: 自选股池：代码 → (**入库时的来源**, 距今几个交易日加的, 加入价系数, 监控开关)
+#:
+#: 来源写"库里那种数据形态"（`公式·X`，界面上显示成 `策略·X`）；
+#: 留一行空来源，用来展示"手工加的自选"显示成「自选」。
+#: 加入价 = 现价 × 系数（由 `_align_added_prices` 在抓图前对齐），
+#: 所以 **盈亏 = 1/系数 − 1**：0.86 → +16.3%，1.04 → −3.8%。
+DEMO_WATCH: dict[str, tuple[str, str, float, bool]] = {
+    # 选股结果那 12 只**都在自选里**（"选出来就加进去"是常规用法）——
+    # 这样自选股池表里不会出现"加入日期/盈亏 = —"的空行
+    "002273": ("公式·尾盘选股策略", 3, 0.878, True),       # +13.9%
+    "300748": ("公式·尾盘选股策略", 5, 0.925, True),       # +8.1%
+    "002472": ("公式·尾盘选股策略", 6, 0.901, True),       # +11.0%
+    "603005": ("公式·首板缩量整理", 8, 1.028, True),       # −2.7%
+    "300101": ("公式·尾盘选股策略", 10, 0.883, True),      # +13.2%
+    "300811": ("公式·尾盘选股策略", 12, 0.868, True),      # +15.2%
+    "002130": ("公式·尾盘选股策略", 14, 0.917, True),      # +9.1%
+    "300638": ("公式·地量后放量变盘", 17, 0.952, False),   # +5.0%（这只关掉监控）
+    "300913": ("公式·尾盘选股策略", 19, 0.934, True),      # +7.1%
+    "300593": ("公式·尾盘选股策略", 21, 1.012, True),      # −1.2%
+    "300458": ("公式·短期反转", 23, 0.906, True),          # +10.4%
+    "002965": ("公式·尾盘选股策略", 26, 1.036, True),      # −3.5%
+    "002979": ("", 28, 1.018, True),                      # 手工加的 → 来源显示「自选」
+}
+
+#: 持仓监控：代码 → (成本价系数（成本 = 现价 × 系数）, 备注, 监控开关)
+#:
+#: 同样用系数：**盈亏 = 1/系数 − 1**（0.833 → +20.0%，1.053 → −5.0%）。
+#: 止损位/止盈位由程序按 `cost × (1 ∓ 比例)` 算（比例在 `main()` 里设成 8% / 15%）。
+DEMO_POSITIONS: dict[str, tuple[float, str, bool]] = {
+    "300748": (0.885, "机器人主线，拿住", True),        # +13.0%
+    "002472": (0.940, "", True),                       # +6.4%
+    "300101": (0.833, "军工电子，已经止盈一半", True),  # +20.0%
+    "002273": (1.053, "追高了，盯着止损", True),        # −5.0%
+    "300811": (0.909, "", True),                       # +10.0%
+    "002130": (0.968, "", False),                      # +3.3%（关掉监控）
+    "603005": (1.024, "", False),                      # −2.3%（关掉监控）
+    "300638": (0.943, "算力模组，中线", True),          # +6.0%
 }
 
 #: 演示用的板块榜（**注入**，不联网）：`(板块名, 当日涨幅%, 主力净额元)`
 #:
-#: 为什么要自己定：板块榜来自腾讯行业接口，真取的话每次跑出来的板块与数字都不一样
-#: （截图就不可重复了），而且它跟本地库的行业对不上 →「涨停数量/跌停数量」两列全 `—`。
-#: 这里让"板块名"与下面按板块造的成分股行业**同名**，两列数字才落得下去。
+#: 三条硬要求：
+#:   ① 板块名用**真实板块名**（机器人/固态电池/CPO/液冷/创新药 这些散户天天听到的）；
+#:   ② 板块名必须与下面 `DEMO_SECTOR_STOCKS` 里那些成分股的行业**同名** ——
+#:      否则「涨停数量/跌停数量」两列全是 `—`（程序是按行业名去本地库里数家数的）；
+#:   ③ 前五个是上涨板块、后五个是下跌板块（页面按涨幅正负分成"上涨前五/下跌前五"两张表）。
 DEMO_SECTORS: tuple[tuple[str, float, float], ...] = (
-    ("传媒", 1.79, 29.78e8), ("计算机", 1.41, 28.53e8), ("家用电器", 1.24, -2.28e8),
-    ("煤炭", 1.18, 4.21e8), ("综合", 1.14, 0.20e8),
-    ("交通运输", -1.17, -7.27e8), ("钢铁", -0.95, -5.47e8),
-    ("建筑材料", -0.92, -12.10e8), ("国防军工", -0.85, -18.37e8), ("通信", -0.70, -54.70e8),
+    ("机器人", 3.42, 38.62e8), ("固态电池", 2.86, 26.41e8), ("CPO", 2.31, 31.07e8),
+    ("液冷", 1.94, 15.83e8), ("创新药", 1.28, 9.24e8),
+    ("白酒", -2.74, -32.16e8), ("房地产", -2.15, -27.48e8),
+    ("煤炭", -1.82, -18.63e8), ("银行", -1.36, -21.35e8), ("航运港口", -0.92, -8.74e8),
 )
 
-#: 按板块造的"成分股"：前 5 个板块里各放 1~3 只当日**涨停**的（喂「涨停数量」），
-#: 后 5 个板块里各放 1~3 只当日**跌停**的（喂「跌停数量」）。代码用主板 6 开头，
-#: 涨跌停就是 ±10%（与项目里实测的板块规则一致；用创业板会变成 20%，数字对不上）。
+#: 按板块造的"成分股"（**只用来喂板块的涨停/跌停家数，不会出现在任何一张图里**）：
+#: 前 5 个板块里各放 1~3 只当日涨停的，后 5 个板块里各放 1~2 只跌停的。
+#: 代码一律用主板 6 开头 —— 涨跌停就是 ±10%（项目里实测的板块规则；用创业板会变 20%，家数就对不上）。
 DEMO_SECTOR_STOCKS: tuple[tuple[str, str, str, str], ...] = (
-    ("600101", "传媒样本甲", "传媒", "up"), ("600102", "传媒样本乙", "传媒", "up"),
-    ("600103", "传媒样本丙", "传媒", "up"),
-    ("600104", "计算机甲", "计算机", "up"), ("600105", "计算机乙", "计算机", "up"),
-    ("600106", "家电甲", "家用电器", "up"), ("600107", "煤炭甲", "煤炭", "up"),
-    ("600108", "综合甲", "综合", "up"),
-    ("600201", "交运甲", "交通运输", "down"), ("600202", "交运乙", "交通运输", "down"),
-    ("600203", "钢铁甲", "钢铁", "down"), ("600204", "钢铁乙", "钢铁", "down"),
-    ("600205", "建材甲", "建筑材料", "down"), ("600206", "军工甲", "国防军工", "down"),
-    ("600207", "通信甲", "通信", "down"), ("600208", "通信乙", "通信", "down"),
+    # ── 上涨板块（涨停）──
+    ("600101", "机器人成分甲", "机器人", "up"), ("600102", "机器人成分乙", "机器人", "up"),
+    ("600103", "机器人成分丙", "机器人", "up"),
+    ("600104", "固态电池成分甲", "固态电池", "up"),
+    ("600105", "固态电池成分乙", "固态电池", "up"),
+    ("600106", "CPO成分甲", "CPO", "up"), ("600107", "CPO成分乙", "CPO", "up"),
+    ("600108", "液冷成分甲", "液冷", "up"),
+    ("600109", "创新药成分甲", "创新药", "up"),
+    # ── 下跌板块（跌停）──
+    ("600201", "白酒成分甲", "白酒", "down"), ("600202", "白酒成分乙", "白酒", "down"),
+    ("600203", "房地产成分甲", "房地产", "down"), ("600204", "房地产成分乙", "房地产", "down"),
+    ("600205", "煤炭成分甲", "煤炭", "down"), ("600206", "煤炭成分乙", "煤炭", "down"),
+    ("600207", "银行成分甲", "银行", "down"),
+    ("600208", "航运港口成分甲", "航运港口", "down"),
 )
 
-#: 消息列表 / 桌宠气泡里那几条提醒（编的，但把项目的提醒类型都用上）
+#: 消息列表 / 桌宠气泡里那几条提醒 —— 用的都是上面自选/持仓里的票，
+#: 文字与那张表的数字对得上（例：振芯科技确实在 +20%，所以它那条是"触及止盈位"）。
 DEMO_ALERTS: tuple[tuple[str, str, str, str], ...] = (
-    ("600519", "stop_loss", "现价 1266.98 已跌破成本价 1180.00 的 −5%（止损提醒）", "09:41"),
-    ("300059", "limit_up_open", "东方财富 300059 涨停打开，现价 23.08（+3.42%）", "10:06"),
-    ("002594", "surge", "比亚迪 002594 放量突破 20 日高点，量比 3.4", "10:52"),
-    ("600276", "break_ma5", "恒瑞医药 600276 跌破 5 日线（50.20）", "11:15"),
-    ("002415", "pullback", "海康威视 002415 回踩 5 日线买点，缩量至 5 日均量 0.7 倍", "13:47"),
-    ("600519", "take_profit", "贵州茅台 600519 触及止盈位 +7.4%", "14:33"),
+    ("300101", "take_profit", "振芯科技 300101 触及止盈位 +20.0%，现价 19.76", "09:41"),
+    ("002273", "stop_loss", "水晶光电 002273 已跌破成本价 23.02 的 −5%（止损提醒）", "09:52"),
+    ("002472", "surge", "双环传动 002472 放量突破 20 日高点，量比 2.6", "10:06"),
+    ("300811", "limit_up_open", "铂科新材 300811 涨停打开，现价 38.90（+9.12%）", "10:23"),
+    ("002130", "pullback", "沃尔核材 002130 回踩 5 日线买点，缩量至 5 日均量 0.7 倍", "13:47"),
+    ("300748", "break_ma5", "金力永磁 300748 跌破 5 日线（22.40），注意减仓", "14:12"),
+)
+
+#: 桌宠两处气泡的文案 —— 都用 `DEMO_ALERTS` 里那条提醒的票，不是另编一只：
+#:   * 桌面合成图（01~07 的右下角）用「涨停打开」，票是自选/持仓里都有的铂科新材；
+#:   * `09-桌宠提醒.png`（特写）用「止损提醒」，与持仓表里水晶光电 −5.04% 对得上。
+#: 气泡在 180 像素宽里换行显示，太长会被截成"…"，所以这里都是短句。
+PET_BUBBLE_CORNER = "铂科新材 300811 涨停打开"
+PET_BUBBLE_CLOSEUP = "水晶光电 002273 止损提醒：已跌破 −5%"
+
+#: 选股结果那一屏的行（12 行，来源统一是尾盘策略 —— "刚跑完一轮"的样子）
+DEMO_RESULT: tuple[str, ...] = (
+    "002273", "300748", "002472", "603005", "300101", "300811",
+    "002130", "300638", "300913", "300593", "300458", "002965",
+)
+
+#: 编辑器里那条公式（与随包的「尾盘选股策略」同一条，主人 2026-09-23 定稿）
+DEMO_FORMULA_NAME = "尾盘选股策略"
+DEMO_FORMULA_NOTE = "小盘尾盘强势股：市值 30~500 亿 + 换手 >3% + 放量 + 均线多头 + 近 10 日涨停"
+DEMO_FORMULA_TEXT = (
+    "ZC:=C/REF(C,1)-1\n"
+    "J5:=MA(C,5)\n"
+    "J10:=MA(C,10)\n"
+    "J20:=MA(C,20)\n"
+    "GAIN_OK:=ZC>=0.02 AND ZC<=0.07\n"
+    "PRICE_OK:=C>=3 AND C<=50\n"
+    "MKT_OK:=流通市值>=30 AND 流通市值<=500\n"
+    "HSL_OK:=换手率>3\n"
+    "VOL_OK:=V>REF(V,1)*1.3\n"
+    "TREND_OK:=J5>J10 AND J10>J20 AND C>J5\n"
+    "ZT_OK:=涨停天数(10)>=1\n"
+    "HOT_OK:=热门行业>=1\n"
+    "BOARD_OK:=ST=0 AND 科创=0 AND 北交所=0\n"
+    "GAIN_OK AND PRICE_OK AND MKT_OK AND HSL_OK AND VOL_OK AND TREND_OK"
+    " AND ZT_OK AND HOT_OK AND BOARD_OK"
 )
 
 
@@ -178,9 +279,12 @@ def _seed_demo_db(cfg: Config) -> list[str]:
             # 起点比现价低、最后一根正好落在演示现价上：曲线像涨上来的，
             # 而且「库里最新收盘价」与注入的快照价**同一个数**（图里不会出现两个价）
             last = DEMO_QUOTES[symbol][0]
-            base = last / (1 + (0.0022 + 0.0005 * (index % 4)) * last_i)
+            pct = DEMO_QUOTES[symbol][1] / 100.0        # 当日涨幅（与注入的快照同一个数）
+            prev = last / (1 + pct)                     # 昨收：最后一根的涨幅 = 快照涨幅
+            slope = 0.005 + 0.0012 * (index % 3)        # 60 个交易日涨 30%~45%，像"最近涨幅大的小盘股"
+            start = prev / (1 + slope * max(last_i - 1, 1))
             for i, day in enumerate(days):
-                price = base * (1 + (0.0022 + 0.0005 * (index % 4)) * i)
+                price = last if i == last_i else start * (1 + slope * i)
                 high = price * 1.018
                 low = price * 0.985
                 rows.append((symbol, day, price, high, low, price,
@@ -214,34 +318,39 @@ def _seed_demo_db(cfg: Config) -> list[str]:
                             6e7, 0, industry, 10.0, 10.0, 1e9, 0, 1, "首板",
                             6e7, 11.0, 0, "hithink", "t"))
         storage.write_limit_up_pool(conn, up_rows)
+        # 再补两条**连板**（用板块里真涨停的那两只）：页面上的"连板/涨停天数"才有出处
         storage.write_limit_up_pool(conn, [
-            (days[-1], "300059", "东方财富", 1, "首板", "09:35:00", "09:35:00",
-             9.8e8, 0, "证券", 5.0, 10.0, 1e9, 0, 1, "首板", 8.8e8, 22.3, 0, "hithink", "t"),
-            (days[-2], "002594", "比亚迪", 2, "2连板", "09:31:00", "09:31:00",
-             1.2e9, 0, "汽车整车", 5.0, 20.0, 1e9, 0, 2, "连板", 1.1e9, 104.0, 0, "hithink", "t"),
+            (days[-1], "600101", "机器人成分甲", 2, "2连板", "09:31:00", "09:31:00",
+             1.2e9, 0, "机器人", 5.0, 20.0, 1e9, 0, 2, "连板", 1.1e9, 11.0, 0, "hithink", "t"),
+            (days[-1], "600104", "固态电池成分甲", 3, "3连板", "09:30:12", "09:30:12",
+             1.6e9, 0, "固态电池", 5.0, 30.0, 1e9, 0, 3, "连板", 1.5e9, 11.0, 0, "hithink", "t"),
         ])
-        for symbol, (source, day, ratio, monitor) in DEMO_WATCH.items():
+        for symbol, (source, back_days, ratio, monitor) in DEMO_WATCH.items():
             name = dict((s, n) for s, n, _ in DEMO_STOCKS)[symbol]
             added_price = round(DEMO_QUOTES[symbol][0] * ratio, 2)
             storage.upsert_watchlist(conn, symbol, name=name, enabled=monitor,
                                      price=added_price, source_strategy=source or None)
-            if day:   # 加入日期：直接写库（界面读的就是这一列）
-                conn.execute("UPDATE watchlist SET added_at = ? WHERE symbol = ?",
-                             (f"{day} 09:35:00", symbol))
-        for symbol, (_ratio, note) in DEMO_POSITIONS.items():
+            # 加入日期 = 距今 back_days 个交易日（界面「加入日期」那一列读的就是 added_at）
+            added_day = days[max(0, last_i - int(back_days))]
+            conn.execute("UPDATE watchlist SET added_at = ? WHERE symbol = ?",
+                         (f"{added_day} 09:35:00", symbol))
+        for symbol, (_ratio, note, monitor) in DEMO_POSITIONS.items():
             name = dict((s, n) for s, n, _ in DEMO_STOCKS)[symbol]
             # 先按"演示现价 × 系数"写一份；建好窗口之后再按**表格真正显示的现价**精调
             # （见 `_align_position_costs`）—— 两处口径必须是同一个数
             cost = round(DEMO_QUOTES[symbol][0] * _ratio, 2)
             storage.upsert_position(conn, symbol, name=name, avg_cost=cost, note=note)
+            # 监控开关（`position.monitor`；upsert 不收这个参数，直接改库）—— 图里要有开有关
+            conn.execute("UPDATE position SET monitor = ? WHERE symbol = ?",
+                         (1 if monitor else 0, symbol))
         # 当日池子：让「选股结果」页有内容可显示（来源写 `策略·X` 的**数据**形态）
         storage.save_pool(conn, [
-            {"symbol": "300059", "name": "东方财富", "strategy": "公式·尾盘超短",
-             "strategies": "公式·尾盘超短", "score": 6.0, "reason": "证券·热门行业证券"},
-            {"symbol": "600519", "name": "贵州茅台", "strategy": "公式·尾盘超短",
-             "strategies": "公式·尾盘超短", "score": 5.0, "reason": "白酒·热门行业白酒"},
-            {"symbol": "002594", "name": "比亚迪", "strategy": "公式·短期反转",
-             "strategies": "公式·短期反转", "score": 4.0, "reason": "汽车整车"},
+            {"symbol": symbol, "name": name,
+             "strategy": "公式·尾盘选股策略", "strategies": "公式·尾盘选股策略",
+             "score": round(6.0 - 0.2 * i, 1), "reason": industry}
+            for i, (symbol, name, industry) in enumerate(
+                (s, n, ind) for s, n, ind in DEMO_STOCKS if s in DEMO_RESULT
+            )
         ], days[-1])
         storage.record_alerts(conn, [
             {"symbol": symbol, "kind": kind, "price": DEMO_QUOTES[symbol][0], "detail": detail}
@@ -286,18 +395,45 @@ def _trading_days(count: int) -> list[str]:
     return sorted(out)
 
 
+def _demo_quote(symbol: str) -> dict:
+    """一条演示快照（形状与 `ui.quotes.fetch_snapshot_prices` 的返回一致）。
+
+    `at` / `as_of` 必须是**数字时间戳（epoch 秒）**：`quotes.is_fresh()` 用它判断
+    "这条快照是不是今天的、够不够新"，字符串会被判成不新鲜 —— 界面上「现价」会退回
+    本地收盘价（数值对得上、看不出来），而「市值/换手」直接显示 `—`。
+    """
+    import time
+
+    price, pct, turnover, mktcap = DEMO_QUOTES.get(symbol, (10.0, 0.0, 1.0, 100.0))
+    stamp = time.time()
+    return {"symbol": symbol, "price": price, "pct": pct, "at": stamp, "as_of": stamp,
+            "source": "演示数据", "turnover_rate": turnover, "circ_mktcap": mktcap}
+
+
 def _block_network_fetches() -> None:
-    """把所有"真去联网"的取数入口换掉（快照 / 板块榜 / 概览都换成固定数据）。
+    """把"真去联网"的取数入口换掉（快照 / 板块榜 / 概览都换成固定数据）。
 
     为什么必须拦：这些图是要发出去的，必须**每次跑都一样**；真取一次行情，
     图里的价格、涨跌家数就跟着当天走，重跑一次就变了。
+
+    ⚠️ 必须在**建主窗口之前**调用（`main()` 里的顺序不能改）：窗口一构造就可能起
+    取数线程，那个线程用的是"当时那个取数函数"；等窗口建好再换，它已经把真实行情
+    写进缓存了 —— 踩过一次，图上"水晶光电 21.86"变成了当天的真价 26.19，
+    市值/换手/涨跌幅与两张表的盈亏全跟着变（图既不可重复，也不是要演示的盘面）。
     """
     from laoa_trader.data import sources
+    from laoa_trader.ui import quotes as quotes_mod
 
     def _no_snapshot(_cfg, symbols, *_args, **_kwargs):
         return [{"symbol": str(s), **_demo_quote_fields(str(s))} for s in (symbols or [])]
 
-    sources.snapshot_map = _no_snapshot        # type: ignore[assignment]
+    def _fake_snapshot(cfg, symbols, *_args, **_kwargs):
+        # `ui.quotes.fetch_snapshot_prices` 的默认实现就是"调 sources.snapshot_map"，
+        # 这里整条换掉：不管谁（定时器 / 手动刷新 / 构造时那一轮）来取，都只回演示数据
+        return {str(s): _demo_quote(str(s)) for s in (symbols or [])}
+
+    sources.snapshot_map = _no_snapshot                  # type: ignore[assignment]
+    quotes_mod.fetch_snapshot_prices = _fake_snapshot    # type: ignore[assignment]
 
 
 def _demo_quote_fields(symbol: str) -> dict:
@@ -344,26 +480,59 @@ def _patch_sector_rank() -> None:
 
 
 def _fake_market_client():
-    """概览用假客户端：概览层本身已被测试覆盖，这里只要"页面上有数"。"""
-    from tests.test_market import SAMPLE_ROWS, FakeMarketClient
+    """概览用假客户端：**数字按"略偏强的普通交易日"编**（不联网、每次跑都一样）。
+
+    口径（与 `DEMO_STOCKS` 上头那段注释是一套，改的时候一起看）：
+      * 涨跌家数：4800 只里 **上涨 2600 / 下跌 2000 / 平盘 200**（24 只一循环：13 涨 10 跌 1 平）；
+      * 涨停 52 / 跌停 11 / 炸板 24（走 `totals`，页面直接显示这三个数）；
+      * 沪深成交额 ≈ 1.6 万亿 —— 由下面**上证与深成两行的 turnover 相加**得出，别只改一处；
+      * 宽基指数：上证 3xxx、深成 1xxxx、创业板 2xxx、科创50、上证50、中证2000，
+        涨跌幅一律在 ±0.5% 以内（这个"略偏强"的日子里全绿是合理的）。
+    """
+    from tests.test_market import FakeMarketClient
     from laoa_trader import market
 
-    # 涨跌家数用**真实量级**（5000+ 只）：假客户端只回 3 行的话，页面上会出现
-    # "上涨 1 · 下跌 1 · 平盘 1" —— 一眼就是坏的演示数据
+    # 涨跌幅的取值池：**故意各放几个接近 ±9.9% 的**，这样"涨停 52 家"看起来有出处
+    up_values = (0.42, 1.86, 3.24, 6.15, 9.92, 0.78, 2.55, 4.31, 1.12, 7.42, 0.35, 5.08, 2.02)
+    down_values = (-0.31, -1.24, -2.87, -5.63, -9.87, -0.72, -1.95, -3.44, -0.55, -7.15)
     items: list[dict] = []
     for i in range(4800):
-        if i % 8 == 0:
-            pct = 0.0                      # 每 8 只里 1 只平盘
+        slot = i % 24
+        if slot < 13:
+            pct = up_values[slot % len(up_values)]
+        elif slot < 23:
+            pct = down_values[(slot - 13) % len(down_values)]
         else:
-            pct = 1.6 if i % 5 else -1.2   # 涨多跌少，看起来像普涨的一天
+            pct = 0.0
         items.append({"thscode": f"{600000 + i}.SH", "turnover": 6e7,
                       "volume": 8e4, "price_change_ratio_pct": pct})
     pages = [{"item": items[:2400], "total": 4800},
              {"item": items[2400:], "total": 4800}]
+
+    rows = [
+        # ── 宽基（点位是真实量级；涨跌幅 ±0.5% 以内）──
+        {"thscode": "000001.SH", "last_price": 3892.44, "price_change_ratio_pct": 0.29,
+         "turnover": 7642.6e8},
+        {"thscode": "399001.SZ", "last_price": 13441.90, "price_change_ratio_pct": 0.21,
+         "turnover": 8437.2e8},                        # ← 两行相加 ≈ 1.61 万亿（页面显示的成交额）
+        {"thscode": "399006.SZ", "last_price": 3298.36, "price_change_ratio_pct": 0.38},
+        {"thscode": "000688.SH", "last_price": 1531.62, "price_change_ratio_pct": 0.45},
+        {"thscode": "000300.SH", "last_price": 4489.20, "price_change_ratio_pct": 0.24},
+        {"thscode": "000016.SH", "last_price": 2846.90, "price_change_ratio_pct": 0.09},
+        {"thscode": "000852.SH", "last_price": 7562.10, "price_change_ratio_pct": 0.42},
+        # ── 情绪 ──
+        {"thscode": "883404.TI", "last_price": 885.53, "price_change_ratio_pct": 0.36},
+        {"thscode": "883958.TI", "last_price": 6928.17, "price_change_ratio_pct": 0.58},
+        {"thscode": "883994.TI", "last_price": 1551.88, "price_change_ratio_pct": 0.44},
+        {"thscode": "883418.TI", "last_price": 2131.00, "price_change_ratio_pct": 0.31},
+        # ── 板块指数（这个块用的是注入的板块榜，这两行只是让"板块"那一组也有数）──
+        {"thscode": "881155.TI", "last_price": 1408.77, "price_change_ratio_pct": -1.36},
+        {"thscode": "881157.TI", "last_price": 1122.35, "price_change_ratio_pct": -0.48},
+    ]
     return FakeMarketClient(
-        totals={market.LIMIT_UP_PATH: 58, market.LIMIT_DOWN_PATH: 14,
-                market.LIMIT_BREAK_PATH: 27},
-        rows=list(SAMPLE_ROWS), pages=pages,
+        totals={market.LIMIT_UP_PATH: 52, market.LIMIT_DOWN_PATH: 11,
+                market.LIMIT_BREAK_PATH: 24},
+        rows=rows, pages=pages,
     )
 
 
@@ -405,12 +574,24 @@ def _apply_fake_quotes(win) -> None:
     # 本地收盘价（数值对得上、看不出来），而「市值/换手」直接显示 `—`
     # （截图里就是两列空的，第一次跑正是这么暴露的）。
     stamp = time.time()
-    win.quotes.apply({
+    payload = {
         symbol: {"symbol": symbol, "price": price, "pct": pct, "at": stamp,
                  "as_of": stamp, "source": "演示数据",
                  "turnover_rate": turnover, "circ_mktcap": mktcap}
         for symbol, (price, pct, turnover, mktcap) in DEMO_QUOTES.items()
-    })
+    }
+    win.quotes.apply(payload)
+
+    # ⚠️ **只 apply 一次是不够的**：界面每 5 秒会再刷一轮（`QuoteService.tick()`），
+    # 那一轮会去联网取**真实行情**，把上面的演示数据整批覆盖掉 —— 实测过一次：
+    # 演示里"水晶光电 21.86"在图上变成了当天真价 26.19，市值/换手/涨跌幅、
+    # 以及两张表算出来的盈亏全跟着变（图既不可重复，也不是我们要演示的盘面）。
+    # 所以这里把取数函数本身换成"只回演示数据"，之后的每一次刷新都拿到同一批数。
+    def _fake_fetch(_cfg, symbols, *_args, **_kwargs):
+        wanted = [str(s) for s in (symbols or [])]
+        return {s: dict(payload[s]) for s in wanted if s in payload}
+
+    win.quotes._fetch = _fake_fetch        # type: ignore[assignment]
 
 
 def _wait_market(win, app) -> None:
@@ -427,12 +608,108 @@ def _wait_market(win, app) -> None:
     app.processEvents()
 
 
+
+def _dump_table(table, title: str) -> None:
+    """把表格的真实单元格值打到 stdout（`LAOA_SHOTS_DEBUG=1` 时启用）。
+
+    为什么要这一层：截图上"数字看着对不对"没法自动化断言，而**肉眼看图**又容易看错
+    （离屏渲染的表格缩在小窗里，字很小）。这个开关让"数据对不对"变成可核对的文本输出，
+    改完演示数据先跑一遍它，比盯着 PNG 猜快得多。
+    """
+    headers = [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+    print(f"--- {title}（{table.rowCount()} 行）---")
+    print(" | ".join(headers))
+    for r in range(table.rowCount()):
+        cells: list[str] = []
+        for c in range(table.columnCount()):
+            item = table.item(r, c)
+            if item is not None:
+                cells.append(item.text().replace("\n", " "))
+                continue
+            holder = table.cellWidget(r, c)
+            label = holder.findChild(QLabel) if holder is not None else None
+            cells.append(label.text() if label is not None else "")
+        print(" | ".join(cells))
+
+
 def _grab(widget, name: str) -> Path:
     """存一张图（`grab()` 拿到的是渲染结果，离屏平台下同样有效）。"""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUT_DIR / f"{name}.png"
     widget.grab().save(str(path), "PNG")
     return path
+
+
+def _canvas_size(pet_size: tuple[int, int]) -> tuple[int, int]:
+    """桌面画布尺寸：宽 = 左边距 + 窗口 + 间隙 + 桌宠 + 右边距；高取窗口与桌宠里的较大者。"""
+    width = CANVAS_MARGIN * 2 + WINDOW_SIZE[0] + PET_GAP + pet_size[0]
+    height = CANVAS_MARGIN * 2 + max(WINDOW_SIZE[1], pet_size[1])
+    return int(width), int(height)
+
+
+def _desktop_canvas(win_pix: QPixmap, pet_pix: QPixmap) -> QPixmap:
+    """把主窗口与桌宠合成到一张"桌面"画布上（窗口贴左上、桌宠贴右下角）。
+
+    两个必须守住的点：
+
+    ① **桌宠是透明底的**（`DesktopPet` 是 `WA_TranslucentBackground` 的独立顶层窗口，
+       素材 `assets/pet.png` 自带透明通道），合成时**直接贴上去**就行 —— 千万别给它
+       垫一块白底/圆角卡片，那会变成"桌面上多了一块白方块"（用户 2026-09-20 特意换成
+       透明底素材，要摆脱的就是这个效果）。
+    ② **桌宠整只都在画布内**（右下角留 `CANVAS_MARGIN` 边距、不与窗口重叠，
+       中间还隔 `PET_GAP`）：窗口右边是表格的列和按钮，压上去就看不清了 ——
+       所以画布宁可宽一点，也不要"桌宠挤在窗口上"。
+    """
+    width, height = _canvas_size((pet_pix.width(), pet_pix.height()))
+    canvas = QPixmap(width, height)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    # 桌面底色（浅灰渐变）
+    gradient = QLinearGradient(0, 0, 0, height)
+    gradient.setColorAt(0.0, QColor(WALLPAPER_TOP))
+    gradient.setColorAt(1.0, QColor(WALLPAPER_BOTTOM))
+    painter.fillRect(0, 0, width, height, QBrush(gradient))
+    # 窗口投影：几层半透明圆角矩形（比真高斯模糊便宜太多，压缩后也几乎不涨体积）
+    painter.setPen(Qt.PenStyle.NoPen)
+    for spread, alpha in ((12, 14), (7, 22), (3, 30)):
+        painter.setBrush(QColor(15, 23, 42, alpha))
+        painter.drawRoundedRect(QRectF(
+            CANVAS_MARGIN - spread, CANVAS_MARGIN - spread + 4,
+            win_pix.width() + spread * 2, win_pix.height() + spread * 2,
+        ), 16, 16)
+    painter.drawPixmap(CANVAS_MARGIN, CANVAS_MARGIN, win_pix)
+
+    pet_x = width - CANVAS_MARGIN - pet_pix.width()
+    pet_y = height - CANVAS_MARGIN - pet_pix.height()
+    # 脚下一点点影子（很淡；透明区域是"上面的像素"，不会因此变成方块）
+    shadow_w, shadow_h = PET_SHADOW_SIZE
+    painter.setBrush(QColor(15, 23, 42, PET_SHADOW_ALPHA))
+    painter.drawEllipse(QRectF(
+        pet_x + (pet_pix.width() - shadow_w) / 2, pet_y + pet_pix.height() - 20,
+        shadow_w, shadow_h,
+    ))
+    painter.drawPixmap(pet_x, pet_y, pet_pix)
+    painter.end()
+    return canvas
+
+
+def _save_canvas(canvas: QPixmap, name: str) -> Path:
+    """存桌面画布。
+
+    存之前转成 **RGB888**（画布本身不透明）：带 alpha 通道的 PNG 体积更大，
+    而我们不需要那条通道（透明的是桌宠那张图，已经合成完了）。
+    """
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    path = OUT_DIR / f"{name}.png"
+    image = canvas.toImage().convertToFormat(QImage.Format.Format_RGB888)
+    image.save(str(path), "PNG")
+    return path
+
+
+def _grab_desktop(win, pet, name: str) -> Path:
+    """抓「主窗口 + 角落桌宠」的桌面合成图（主界面那几张都用它）。"""
+    return _save_canvas(_desktop_canvas(win.grab(), pet.grab()), name)
 
 
 def main() -> int:
@@ -449,8 +726,18 @@ def main() -> int:
     # 清空会让「系统设置 → 数据来源」显示"当前没有启用的来源、请把它加回去"，
     # 那种画面像装坏了，不能拿去当产品介绍图。
     cfg.hithink_api_key = ""
+    # 止损 8% / 止盈 15%：持仓表那两列就是按这两个比例算的（成本 × (1 ∓ 比例)），
+    # 编成"止损在成本下方 8%、止盈在上方 15%"，图里才是普通散户的设置
+    cfg.stop_loss = 0.08
+    cfg.take_profit = 0.15
     days = _seed_demo_db(cfg)
     print(f"演示库就绪：{len(DEMO_STOCKS)} 只票 / {len(days)} 个交易日 → {cfg.db_path}")
+
+    # ⚠️ 顺序要紧：**先**拦住所有联网取数，再建窗口 —— 窗口构造时起的取数线程
+    # 会用"当时那个取数函数"，晚一步就会把真实行情写进缓存（见 `_block_network_fetches`）
+    _patch_sector_rank()
+    _block_network_fetches()
+    _pretend_windows_voices()
 
     from laoa_trader.ui import app as ui_app
 
@@ -459,9 +746,6 @@ def main() -> int:
     win.show()
     app.processEvents()
 
-    _patch_sector_rank()
-    _block_network_fetches()
-    _pretend_windows_voices()
     _apply_fake_quotes(win)
     for widget in (getattr(win, "voice_hint", None),):
         if widget is not None:
@@ -470,6 +754,16 @@ def main() -> int:
     win._refresh_positions()
     app.processEvents()
 
+    # 桌宠（**先建出来**：主界面那几张要把它合成到右下角）。
+    # 气泡有效期给足 —— 默认 8 秒，抓七八张图的时间足够它自己消失，
+    # 那样后面几张图里桌宠就没气泡了（同一批图里必须长一个样）。
+    from laoa_trader.ui.desktop_pet import DesktopPet
+
+    pet = DesktopPet(None)
+    pet.set_unread(3)
+    pet.show_bubble(PET_BUBBLE_CORNER, seconds=3600)
+    pet.show()
+    app.processEvents()
 
     # ① 大盘概览（注入假客户端，避免联网）
     win.refresh_market_overview(force=True, client=_fake_market_client())
@@ -480,58 +774,48 @@ def main() -> int:
     )):
         win.tabs.setCurrentIndex(index)
         app.processEvents()
+        if os.environ.get("LAOA_SHOTS_DEBUG"):
+            if index == 1:
+                _dump_table(win.pool_table, "自选股池")
+            elif index == 2:
+                _dump_table(win.position_table, "持仓监控")
         if index == 2:
             # 持仓表抓图**前一刻**才对齐成本价：这张表的「现价」会随刷新在
             # "快照价 / 本地收盘价"之间换来源，早点对齐会被后一次刷新冲掉 ——
             # 结果就是"现价 31.41、成本 18.40、盈亏 +70%"这种不像真账户的画面。
             _align_position_costs(win)
             app.processEvents()
-        saved.append(_grab(win, name))
+        saved.append(_grab_desktop(win, pet, name))
 
     # ② 策略编辑器（左边有内容、右边四组按钮面板）
     win.tabs.setCurrentIndex(3)          # 先切回「策略选股」——不切的话抓到的是上一屏
     app.processEvents()
     page = win.formula_page
     page.btn_edit.click()
-    page.name_edit.setText("尾盘超短策略(T+1)")
-    page.note_edit.setText("尾盘选强势股：5 日均线多头 + 当日涨 3~5% + 放量一倍")
-    page.editor.setPlainText(
-        "ZC:=C/REF(C,1)-1\n"
-        "J5:=MA(C,5)\n"
-        "J10:=MA(C,10)\n"
-        "J20:=MA(C,20)\n"
-        "PRICE_OK:=C>=3 AND C<=50\n"
-        "MKT_OK:=流通市值>=30 AND 流通市值<=500\n"
-        "GAIN_OK:=ZC>=0.03 AND ZC<=0.05\n"
-        "VOL_OK:=V>REF(V,1)*2\n"
-        "TREND_OK:=J5>J10 AND J10>J20 AND C>J5\n"
-        "LB_OK:=量比()>1.5\n"
-        "ZT_OK:=涨停天数(5)>=1\n"
-        "BOARD_OK:=创业板=0 AND 科创=0 AND 北交所=0\n"
-        "PRICE_OK AND MKT_OK AND GAIN_OK AND VOL_OK AND TREND_OK"
-        " AND LB_OK AND ZT_OK AND BOARD_OK"
-    )
+    page.name_edit.setText(DEMO_FORMULA_NAME)
+    page.note_edit.setText(DEMO_FORMULA_NOTE)
+    page.editor.setPlainText(DEMO_FORMULA_TEXT)
     page.on_validate()
     app.processEvents()
-    saved.append(_grab(win, "06-策略选股-编辑器"))
+    saved.append(_grab_desktop(win, pet, "06-策略选股-编辑器"))
 
     # ③ 选股结果（6 列 + 每行【加入自选】）
     # 先把下面那块编辑器收起来：结果表在上一屏、编辑器的编辑框在下一屏，
     # 两者同时摊开会把结果表挤成半截（营销图里要一眼看清 6 列）
     page.on_close_panel()
     app.processEvents()
+    name_of = dict((symbol, name) for symbol, name, _ in DEMO_STOCKS)
     page.show_pick_result({
         "data_date": days[-1],
         "pool": [
-            {"symbol": s, "name": n, "strategy": "公式·尾盘超短"}
-            for s, n, _ in DEMO_STOCKS[:4]
-        ] + [
-            {"symbol": s, "name": n, "strategy": "公式·短期反转"}
-            for s, n, _ in DEMO_STOCKS[4:9]
+            {"symbol": symbol, "name": name_of[symbol], "strategy": "公式·尾盘选股策略"}
+            for symbol in DEMO_RESULT
         ],
     })
     app.processEvents()
-    saved.append(_grab(win, "07-策略选股-选股结果"))
+    if os.environ.get("LAOA_SHOTS_DEBUG"):
+        _dump_table(page.result_table, "选股结果")
+    saved.append(_grab_desktop(win, pet, "07-策略选股-选股结果"))
 
     # ④ 消息列表（QQ 那种，未读带圆点）
     from laoa_trader.ui.message_center import MessageCenter
@@ -546,15 +830,10 @@ def main() -> int:
     app.processEvents()
     saved.append(_grab(center, "08-消息列表"))
 
-    # ⑤ 桌宠（带气泡）
-    from laoa_trader.ui.desktop_pet import DesktopPet
-
-    pet = DesktopPet(None)
-    pet.set_unread(3)
+    # ⑤ 桌宠特写（就是主界面那几张右下角那只，换成止损提醒那条一起拍）
     # 气泡有长度上限（`desktop_pet.BUBBLE_MAX_CHARS = 34`），超了会被截成"…" ——
     # 演示图里用一句正好放得下的
-    pet.show_bubble("贵州茅台 600519 止损提醒：已跌破 −5%")
-    pet.show()
+    pet.show_bubble(PET_BUBBLE_CLOSEUP, seconds=3600)
     app.processEvents()
     saved.append(_grab(pet, "09-桌宠提醒"))
 

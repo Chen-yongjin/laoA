@@ -147,4 +147,4 @@ def test_pool_rows_carry_no_evidence_marker(cfg, db) -> None:
         assert row["evidence"] == ""
         assert row["evidence_text"] == ""
     # 老行的中文名照旧显示（历史数据的显示口径由 legacy.strategy_label 负责）
-    assert rows["600001"]["source_label"] == "策略·短期反转"
+    assert rows["600001"]["source_label"] == "短期反转"

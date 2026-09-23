@@ -922,9 +922,9 @@ def export_pick_file(
         return None
 
 
-#: 界面「来源」列里内置策略的前缀（用户给定的写法：`策略·短期反转`）。
-#: 为什么要一个常量：这个前缀会出现在「来源」列、行 tooltip、CLI 打印与文档示例里，
-#: 散着写迟早会出现"一处 `策略：`、一处 `策略·`"这种对不上的情况。
+#: **老版本**用过、现在只用来"剥掉"的前缀：2026-09-22 那版把来源列显示成 `策略·X`，
+#: 2026-09-23 主人要求连前缀一起去掉。留着它是因为**老的备注文本**里可能写着
+#: `选股来源：策略·X`（见 `watchlist_source_strategy()`），解析时要把这截剥掉。
 STRATEGY_SOURCE_PREFIX = "策略·"
 
 #: 老版本把选中它的那条策略**写在备注里**时用的前缀（`选股来源：公式·尾盘超短策略`）。
@@ -1095,7 +1095,9 @@ def source_label(row: dict, watch_entry: dict | None) -> str:
             parts.append(wording.display_strategy(strategy))
         else:
             name = primary_strategy_name(row)
-            parts.append(f"{STRATEGY_SOURCE_PREFIX}{name}" if name else "策略")
+            # 2026-09-23 主人要求去掉前缀（"公式名称中的策略两个字去掉，无意义"）：
+            # 这里就写名字本身；认不出中文名的老类名才退回一个中性的「策略」。
+            parts.append(name or "策略")
     if watch_entry is not None or row.get("watchlist"):
         parts.append("自选")
     return "+".join(parts) if parts else "—"

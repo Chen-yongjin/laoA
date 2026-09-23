@@ -1,12 +1,16 @@
-"""界面上不再出现"公式"这个词：统一叫**策略**（主人 2026-09-22：「把公式都改成策略吧 这样好看点」）。
+"""来源列里那个名字**不带任何前缀**：就写策略名本身（主人 2026-09-23：「把公式名称中的策略两个字去掉，无意义」）。
+
+（前情：2026-09-22 主人说过"把公式都改成策略吧"，那版把来源列显示成 `策略·X`；
+2026-09-23 他要求连这个前缀也去掉，于是 `公式·X` / 老的 `策略·X` / 老类名
+三条路都剥成同一个名字，如 `尾盘选股策略`、`短期反转`。）
 
 这一条口径有两半，**必须分清楚**，否则改起来一定出错：
 
 * **给人看的字**（控件文字、tooltip、占位符、菜单项、提示区、推送正文、桌面文件）
-  → 一律说「策略」，来源列显示成 `策略·尾盘超短策略`（与内置策略的 `策略·短期反转` 同写法）；
+  → 一律说「策略」，来源列显示成 `尾盘超短策略` / `短期反转`（**不带前缀**）；
 * **数据与标识符**（库里存的 `公式·X`、`formulas/` 目录、`enabled_formulas` 配置键、
   `Formula` / `formula_group` / `formulas.py`、CLI 参数名）→ **一个字都不许改**。
-  升级时也没有任何数据迁移：老行里的 `公式·X` 显示时被读成 `策略·X`
+  升级时也没有任何数据迁移：老行里的 `公式·X` 显示时被剥成 `X`
   （`wording.display_strategy()`），所以升级前后同一只票只有一种写法。
 
 "不出现公式"的**判据**（见 `test_no_formula_word_in_user_visible_text`）：
@@ -55,30 +59,52 @@ _ALLOWED: tuple[str, ...] = ()
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_display_strategy_only_rewrites_the_prefix() -> None:
-    """只换内部前缀，**不动名字本身** —— 用户起的名字里带"公式"也不许被改。"""
-    assert wording.display_strategy("公式·放量上攻") == "策略·放量上攻"
-    assert wording.display_strategy("策略·短期反转") == "策略·短期反转"      # 已是显示写法
-    assert wording.display_strategy("我的公式一") == "我的公式一"            # 用户的名字
-    assert wording.display_strategy("公式·我的公式一") == "策略·我的公式一"
+def test_display_strategy_strips_the_prefix_and_nothing_else() -> None:
+    """剥前缀，**不动名字本身** —— 用户起的名字里带"策略/公式"也不许被改。
+
+    口径变过两次（09-22 加前缀 → 09-23 去前缀），所以**两种老写法都要能剥**：
+    库里存的 `公式·X`、更早版本显示过并写进过备注的 `策略·X`。
+    """
+    assert wording.display_strategy("公式·放量上攻") == "放量上攻"
+    assert wording.display_strategy("策略·短期反转") == "短期反转"          # 老显示写法
+    assert wording.display_strategy("尾盘选股策略") == "尾盘选股策略"       # 本来就干净
+    assert wording.display_strategy("我的策略一") == "我的策略一"           # 用户的名字
+    assert wording.display_strategy("公式·我的公式一") == "我的公式一"
+    assert wording.display_strategy("公式·我的策略一") == "我的策略一"
     assert wording.display_strategy("") == ""
 
 
-def test_stored_formula_rows_are_displayed_with_the_strategy_prefix() -> None:
-    """库里存的是 `公式·X`（**历史值不改**），界面上读出来必须是 `策略·X`。
+def test_stored_rows_display_without_any_prefix_on_all_three_surfaces() -> None:
+    """库里存 `公式·X`、老行存类名 —— 显示端**三条路都不带前缀**，且三处同一个词。
 
-    两个入口都要对：`pool.source_label()`（界面「来源」列、桌面文件、推送正文）
-    与 `pool.source_detail_lines()`（行 tooltip）；后者拿到的可能是别处拼好的行，
-    所以它自己也要把前缀读对（否则 tooltip 与「来源」列两处写法不一样）。
+    为什么三处都要钉：来源列、桌面导出文件、推送正文各自都能"自己拼一次"，
+    上一轮漏的正是这种"一处改了、另一处没改"。
     """
-    row = {"strategy": "公式·尾盘超短策略", "strategies": "公式·尾盘超短策略"}
+    row = {"strategy": "公式·尾盘超短策略", "strategies": "公式·尾盘超短策略",
+           "name": "甲样本", "symbol": "600001"}
 
     assert row["strategy"] == "公式·尾盘超短策略"            # 数据：一个字没改
-    assert pool.source_label(row, None) == "策略·尾盘超短策略"
-    assert pool.source_label(row, {"enabled": 1}) == "策略·尾盘超短策略+自选"
+    assert pool.source_label(row, None) == "尾盘超短策略"
+    assert pool.source_label(row, {"enabled": 1}) == "尾盘超短策略+自选"
     assert pool.source_detail_lines(
         {**row, "source_label": "公式·尾盘超短策略"}
-    )[0] == "来源：策略·尾盘超短策略"
+    )[0] == "来源：尾盘超短策略"
+    # 09-22 那版写进备注/来源列的老写法，也要剥掉
+    assert pool.source_label({"strategy": "策略·尾盘超短策略"}, None) == "尾盘超短策略"
+    # 老内置策略的类名 → 中文名，同样不带前缀；在自选里就是 `名字+自选`
+    assert pool.source_label({"strategy": "ReversalStrategy"}, None) == "短期反转"
+    assert pool.source_label({"strategy": "ReversalStrategy"}, {"enabled": 1}) == "短期反转+自选"
+    # 纯手工自选仍是「自选」
+    assert pool.source_label({"watchlist": True}, None) == "自选"
+    # 用户自己起的名字里带"策略"两个字：原样保留
+    assert pool.source_label({"strategy": "我的策略一"}, None) == "我的策略一"
+    assert pool.source_label({"strategy": "我的策略一"}, {"enabled": 1}) == "我的策略一+自选"
+
+    # 三处同一个词：来源列 / 桌面导出文件 / 推送正文
+    text = pool.pick_export_text([row], data_date="2026-09-11", day="2026-09-18", quotes={})
+    assert "来源：尾盘超短策略" in text
+    assert pool.push_tag(row) == "尾盘超短策略"
+
     # 内部判定仍然认「公式·」前缀（数据口径没变）
     assert formula_group.is_formula_strategy(row["strategy"]) is True
     assert formula_group.formula_name_of(row["strategy"]) == "尾盘超短策略"

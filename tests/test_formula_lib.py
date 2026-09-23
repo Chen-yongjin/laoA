@@ -677,15 +677,15 @@ def test_enabled_formula_enters_pool_with_formula_source(engine, formulas_cfg: C
 
     table_rows = {row["symbol"]: row for row in pool.pool_table_rows(formulas_cfg.db_path)}
     row = table_rows[formula_rows[0]["symbol"]]
-    assert row["label"] == "策略·收盘在5日线上"          # 「来源策略」列
-    assert row["source_label"] == "策略·收盘在5日线上"   # 「来源」列
+    assert row["label"] == "收盘在5日线上"          # 「来源策略」列
+    assert row["source_label"] == "收盘在5日线上"   # 「来源」列
     assert row["source"] == "公式"
     assert row["is_formula"] is True
     # 自定义公式**不打**证据标记（那是内置策略的边际证据，不是用户公式的）
     assert row["evidence_text"] == ""
 
     lines = "\n".join(pool.format_pool_lines(rows))
-    assert "策略·收盘在5日线上" in lines
+    assert "收盘在5日线上" in lines
 
 
 def test_not_enabled_formula_does_not_change_pool(engine, formulas_cfg: Config, tmp_path: Path,
@@ -752,7 +752,7 @@ def test_push_title_mentions_formula_group(engine, formulas_cfg: Config, tmp_pat
     assert report["pool"]
     assert "策略：收盘在5日线上" in captured["title"]
     body = "\n".join(captured["lines"])
-    assert "策略·收盘在5日线上" in body
+    assert "收盘在5日线上" in body
 
 
 def test_formula_opt_in_writes_config_and_keeps_comments(formulas_cfg: Config,
