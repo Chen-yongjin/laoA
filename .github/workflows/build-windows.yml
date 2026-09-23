@@ -66,6 +66,47 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v7
 
+      - name: 心跳：把"这一轮已经启动"写进 ci-log（失败也不影响构建）
+        # 为什么要有这一步（2026-09-23 的教训）：仓库是私密的、artifact 又拿不到，
+        # 而 ci-log 只在**job 末尾**写一次 —— 于是 push 之后 80 分钟没有任何信号，
+        # 完全分不清"这一轮根本没启动（Actions 额度/排队/账单问题）"和"还在跑"。
+        # 心跳让"已启动"在一分钟内可见，也让"没启动"能立刻被证明。
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          @(
+            "sha=$env:GITHUB_SHA"
+            "run=$env:GITHUB_RUN_ID"
+            "attempt=$env:GITHUB_RUN_ATTEMPT"
+            "runner_os=$env:RUNNER_OS"
+            "started=$((Get-Date).ToUniversalTime().ToString('o'))"
+            "builder=${{ inputs.builder || 'nuitka' }}"
+          ) | Set-Content heartbeat.txt
+          $blob = (git hash-object -w heartbeat.txt)
+          # ⚠️ 用**临时索引**做 plumbing（read-tree/commit-tree/push 一个对象），
+          # 绝不 `git checkout` 到 ci-log 分支 —— 那会把主工作树切走，
+          # 后面的测试与构建就会跑在 ci-log 分支的内容上（那是另一份旧快照）。
+          $idx = Join-Path $env:RUNNER_TEMP "ci-heartbeat-index"
+          for ($i = 1; $i -le 5; $i++) {
+            git fetch origin ci-log --depth=1 2>$null
+            if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 5; continue }
+            Remove-Item $idx -ErrorAction SilentlyContinue
+            $env:GIT_INDEX_FILE = $idx
+            git read-tree FETCH_HEAD 2>$null
+            git update-index --add --cacheinfo "100644,$blob,ci-log/heartbeat.txt" 2>$null
+            $tree = (git write-tree)
+            # ⚠️ 显式给身份：检出后的工作树常常没配 user.name/email，
+            # 而 commit-tree 没有身份会直接失败（心跳就静默没了）
+            $commit = (git -c user.name=ci-log-bot -c user.email=ci-log-bot@users.noreply.github.com `
+              commit-tree $tree -p FETCH_HEAD -m "心跳：run $env:GITHUB_RUN_ID 已启动")
+            git push origin "${commit}:ci-log" 2>$null
+            $ok = $LASTEXITCODE
+            Remove-Item Env:\GIT_INDEX_FILE -ErrorAction SilentlyContinue
+            if ($ok -eq 0) { Write-Host "心跳已写入 ci-log/heartbeat.txt"; exit 0 }
+            Start-Sleep -Seconds 5
+          }
+          Write-Host "::warning::心跳没能写进 ci-log（不影响构建）"
+
       - name: 安装 Python 3.11
         uses: actions/setup-python@v7
         with:
