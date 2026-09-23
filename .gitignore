@@ -34,3 +34,7 @@ config.toml
 # 测试产生的临时目录（打包时必须排除，否则会把测试垃圾带进 zip）
 *.tmpdir
 .pytest_cache/
+
+# 网站里的下载包（80MB 的构建产物，不进 git；发布时手动放进去）
+网站/downloads/*.zip
+laoA/网站/downloads/*.zip
