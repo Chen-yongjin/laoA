@@ -1149,6 +1149,144 @@ def test_load_series_end_to_end_selection(tmp_path: Path) -> None:
     assert [s.symbol for s in fm.load_series(path) if zt.eval(s)[-1]] == ["600002"]
 
 
+# ── 盘中实时口径：把"今天"这一根接在日线后面（用户 2026-09-23 定的内置规则）──
+#
+# 规格："开盘时间里运行的选股，都是实时的，不是开盘时间，采用 K 线"。
+# 所以引擎只需多做一件事：给它一根今天的快照，就把它接成**最后一根 K 线** ——
+# 之后 C / REF / 量比() 全部自动变成盘中口径，用户写的公式一个字都不用改。
+
+
+def _live(path: Path, day: str, kline_day: str, *, symbol: str = "600001",
+          prev_close: float, close: float, **kw: float) -> list:
+    """按 `LiveBar` 接一根"今天"，返回库里的全部序列（顺序与库里一致）。"""
+    bar = fm.LiveBar(prev_close=prev_close, close=close, **kw)
+    return list(fm.load_series(path, today=day, live_bars={symbol: bar},
+                               kline_day=kline_day))
+
+
+def test_live_bar_becomes_the_last_candle(tmp_path: Path) -> None:
+    """接上今天这一根之后：日期、收盘、昨收都对，且**今天就是最后一根**。"""
+    path = _make_db(tmp_path)
+    series = _live(path, "2026-01-07", "2026-01-06", prev_close=15.0, close=15.75,
+                   open=15.1, high=16.0, low=15.0, volume=2e6, turnover=3e7)
+    a = series[0]
+    assert a.date[-1] == "2026-01-07" and len(a.date) == 7
+    assert a.close[-1] == pytest.approx(15.75)
+    np.testing.assert_allclose(a.close[:-1], [10, 11, 12, 13, 14, 15])
+    # 今开/最高/最低/量额都跟着接上（`_make_db` 里 factor=1，所以不复权价就是后复权价）
+    assert (float(a.open[-1]), float(a.high[-1]), float(a.low[-1])) == (
+        pytest.approx(15.1), pytest.approx(16.0), pytest.approx(15.0))
+    assert a.vol[-1] == pytest.approx(2e6) and a.amount[-1] == pytest.approx(3e7)
+    # 昨收：最后一根的前收就是昨天那根的后复权收盘（不是 NaN）
+    assert a.pre_close[-1] == pytest.approx(15.0)
+    # 没给快照的那只票**不接**（照旧按日线算，最后一根还是 1-06）
+    assert series[1].date[-1] == "2026-01-06"
+
+
+def test_live_bar_makes_pct_change_intraday(tmp_path: Path) -> None:
+    """`C/REF(C,1)-1` 必须等于**盘中涨幅**（这是整件事的目的）。
+
+    库里 1-06 收 15.00（比 1-05 涨 7%）—— 不接今天这一根时，那条 7% 是**昨天**的涨幅。
+    快照现价与昨收持平（今天没涨）时接了之后必须**不再命中**，而 +5% 时命中。
+    """
+    path = _make_db(tmp_path)
+    plain = list(fm.load_series(path))[0]
+    assert bool(fm.compile_formula("C/REF(C,1)-1 >= 0.04").eval(plain)[-1]) is True
+    flat = _live(path, "2026-01-07", "2026-01-06", prev_close=15.0, close=15.0)[0]
+    assert bool(fm.compile_formula("C/REF(C,1)-1 >= 0.04").eval(flat)[-1]) is False
+    assert bool(fm.compile_formula(
+        "C/REF(C,1)-1 > -0.001 AND C/REF(C,1)-1 < 0.001").eval(flat)[-1]) is True
+    up = _live(path, "2026-01-07", "2026-01-06", prev_close=15.0, close=15.75)[0]
+    assert bool(fm.compile_formula("C/REF(C,1)-1 >= 0.04").eval(up)[-1]) is True
+
+
+def test_live_bar_is_scaled_to_the_hfq_convention(tmp_path: Path) -> None:
+    """**后复权口径**：库里那一列是后复权价、快照是不复权价，换算只能有一个比例。
+
+    造一只"历史因子 = 2"的票（原始 10 元、库里存 20 元），快照现价 11 元、昨收 10 元
+    （+10%）：接出来的收盘必须是 22（= 11 × 20/10），涨幅正好 10%。
+    忘了换算（直接写 11）时涨幅会算成 −45%，而且**一只都不会报错** —— 只是选不出票。
+    """
+    from laoa_trader.data import storage
+
+    path = storage.init_db(tmp_path / "f.db")
+    days = ["2026-01-05", "2026-01-06"]
+    with storage.connect(path) as conn:
+        storage.write_stock_basic(conn, [("600001", "样本甲", "半导体")])
+        storage.write_daily_raw(conn, [      # factor=2 → 后复权价 = 原始价 × 2
+            ("600001", days[0], 10.0, 10.0, 10.0, 10.0, 1e6, 1e7, 2.0),
+            ("600001", days[1], 10.0, 10.0, 10.0, 10.0, 1e6, 1e7, 2.0),
+        ])
+    series = _live(path, "2026-01-07", "2026-01-06", prev_close=10.0, close=11.0)[0]
+    np.testing.assert_allclose(series.close, [20.0, 20.0, 22.0])
+    assert bool(fm.compile_formula(
+        "C/REF(C,1)-1 > 0.099 AND C/REF(C,1)-1 < 0.101").eval(series)[-1]) is True
+
+
+def test_live_bar_looks_like_earlier_candles(tmp_path: Path) -> None:
+    """绝对价也要跟着换算：最朴素的 `C>REF(C,1)*1.02` 在盘中必须成立。
+
+    这条防的是"只把涨幅算对、把绝对价忘了"的半吊子实现：现价 11 元比库里的后复权价
+    20 元小，漏了换算时 `C>REF(C,1)` 这类写法会整体反过来。
+    """
+    path = _make_db(tmp_path)
+    series = _live(path, "2026-01-07", "2026-01-06", prev_close=15.0, close=16.0)[0]
+    assert bool(fm.compile_formula(
+        "C>REF(C,1) AND C>REF(C,1)*1.02").eval(series)[-1]) is True
+
+
+def test_live_bar_marks_today_as_limit_up(tmp_path: Path) -> None:
+    """今天涨停 → `涨停天数()` 认（连板数由昨天那根滚上来）。"""
+    path = _make_db(tmp_path)
+    # 600001 昨天（1-06）收 15.00 → 主板涨停价 = 16.50
+    series = _live(path, "2026-01-07", "2026-01-06", prev_close=15.0, close=16.5)[0]
+    assert bool(fm.compile_formula("涨停天数()>0").eval(series)[-1]) is True
+    assert bool(fm.compile_formula("C>=ZTPRICE(REF(C,1),0.1)").eval(series)[-1]) is True
+    # 差一分钱就不是涨停（余量只有 0.005 元，见 `LIVE_LIMIT_EPS`）
+    miss = _live(path, "2026-01-07", "2026-01-06", prev_close=15.0, close=16.49)[0]
+    assert bool(fm.compile_formula("涨停天数()>0").eval(miss)[-1]) is False
+
+
+def test_live_bar_uses_today_amount_for_volume_ratio(tmp_path: Path) -> None:
+    """`量比()` 自动用今天这一根的量（盘中量比）—— 公式不用改一个字。"""
+    path = _make_db(tmp_path)
+    series = _live(path, "2026-01-07", "2026-01-06", prev_close=15.0, close=15.0,
+                   volume=1e8, turnover=1e9)[0]
+    # 前 5 日均额约 1e7（见 `_make_db`）→ 今天 1e9 是百倍量
+    assert bool(fm.compile_formula("量比()>50").eval(series)[-1]) is True
+    assert bool(fm.compile_formula("量比()>500").eval(series)[-1]) is False
+
+
+def test_live_bar_is_skipped_when_it_would_be_wrong(tmp_path: Path) -> None:
+    """四种**不接**的情形：库里已有今天、最后一根不是最新行情日、缺现价/昨收、没给行情日。
+
+    一条都不能少 —— 接错了不会报错，只会静静地给出一批"看着很合理"的信号：
+    * 库里已有今天那一根 → 再接一根会让同一天出现两次（REF/MA 全部错位）；
+    * 停牌/缺天的票（最后一根早于全市场最新行情日）→ 拿一个断了好几天的缺口当"今天的涨幅"；
+    * 缺现价或昨收 → 涨幅的基准都没有，只能**不编**；
+    * 没给 `kline_day` → 连"最新行情日是哪天"都不知道，没有判据就不接。
+    """
+    path = _make_db(tmp_path)
+    bar = fm.LiveBar(prev_close=15.0, close=16.0)
+    # ① 库里已经有"今天"了（kline_day = 今天）
+    same = list(fm.load_series(path, today="2026-01-06", live_bars={"600001": bar},
+                               kline_day="2026-01-06"))
+    assert same[0].date == [f"2026-01-{d:02d}" for d in range(1, 7)]
+    # ② 这只票的最后一根不是最新行情日（kline_day 是 1-07，它的最后一根是 1-06）
+    stale = list(fm.load_series(path, today="2026-01-07", live_bars={"600001": bar},
+                                kline_day="2026-01-07"))
+    assert stale[0].date[-1] == "2026-01-06"
+    # ③ 缺昨收（快照只有现价）→ 拼不出来，照旧日 K
+    no_prev = list(fm.load_series(
+        path, today="2026-01-07", kline_day="2026-01-06",
+        live_bars={"600001": fm.LiveBar(prev_close=0.0, close=16.0)}))
+    assert no_prev[0].date[-1] == "2026-01-06"
+    # ④ 没有 kline_day：一律不接
+    none_day = list(fm.load_series(path, today="2026-01-07",
+                                   live_bars={"600001": bar}))
+    assert none_day[0].date[-1] == "2026-01-06"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 六、性能
 # ══════════════════════════════════════════════════════════════════════════

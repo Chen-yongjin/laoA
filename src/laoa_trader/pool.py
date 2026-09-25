@@ -157,6 +157,13 @@ def build_pool(
             "ran": list(formula_run.ran),
             "picks": {k: len(v) for k, v in formula_run.picks.items()},
             "status": dict(formula_run.status),
+            # 这一轮用的 K 线口径（"开盘时间里跑的选股都是实时的"，见 `formulas.prepare_inputs`）：
+            # 界面的结论行与结果页都会显示它 —— 同一份策略在盘中和收盘后选出的票不一样，
+            # 不显示口径就没法解释。
+            "caliber": formula_run.caliber,
+            # 口径类的**告知**（如"盘中取不到快照，已退回日 K"）：**不进 errors** ——
+            # `report["errors"]` 是"这一轮算不算成功"的判据，一句告知不该让选股被判失败
+            "warnings": list(formula_run.warnings),
             # **完整候选行也要留一份**：`scheduler.run_daily()` 从这里取候选写 `signal`
             # 表（盘中风控观察池用）。只留计数的话那边就没东西可写 —— 而 `signal`
             # 表的口径没变（每条公式最多取 SIGNAL_TOP_N 只，由调用方截断）。

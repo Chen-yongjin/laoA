@@ -565,6 +565,15 @@ class Config:
     intraday_interval: int = 60
     stop_loss: float = 0.05
     take_profit: float = 0.10
+    #: **盘中选股用实时数据**（用户 2026-09-23 定的内置规则：「开盘时间里运行的选股，
+    #: 都是实时的，不是开盘时间，采用 K 线」）。**默认开**。
+    #: 开：开盘时间（9:30–11:30 / 13:00–15:00 的交易日）里跑公式选股 /【运行】时，
+    #:     用此刻的实时快照拼出"今天"这一根 K 线接在日线后面 —— 于是公式里的
+    #:     `C`、`C/REF(C,1)-1`、`量比()`、`C>MA(C,5)` 一个字不改就是**盘中口径**；
+    #:     不在开盘时间（或取不到快照）自动退回库里的日 K，并在界面上写明用的是哪套。
+    #: 关：任何时候都用库里的日 K（收盘口径）—— 想复现历史信号的人可以关掉它。
+    #: 环境变量 `INTRADAY_PICK_LIVE`（写错一律回默认 = 开）。
+    intraday_pick_live: bool = True
     #: 集合竞价**全市场扫描**提醒（9:15–9:25 的真实买卖盘）：**默认关**。
     #: 代码（客户端 `auction_snapshot`、解析、打分、过滤、卡片那一行、设置页那一组、
     #: 详情里的"竞价扫描结果"）都已就绪并通过测试，但**口径与阈值还在与用户确认** ——
@@ -1012,6 +1021,8 @@ def _apply_env(cfg: Config) -> Config:
         ("TRADE_SELL_SLIPPAGE", "sell_slippage"),
         ("INTRADAY_INTERVAL", "intraday_interval"),
         ("INTRADAY_AUCTION", "intraday_auction"),
+        # 盘中选股是否用实时数据（用户 2026-09-23 定：开盘时间里一律实时）
+        ("INTRADAY_PICK_LIVE", "intraday_pick_live"),
         # 旧名（上一版的 `auction_alert_min_*`）继续认：**排在新名前面**，
         # 两个都设时后写的（新名）赢 —— 手写过的环境变量不该因为改名就失效
         ("AUCTION_ALERT_MIN_PCT", "auction_min_pct"),

@@ -2863,6 +2863,139 @@ class _Evaluator:
 # 数据接口（与数据库解耦：求值器只认 Series）
 # ══════════════════════════════════════════════════════════════════════════
 
+#: 「今天」这一根的合成规则里的浮点余量：涨停价是两位小数，比大小要留一点余量
+#: （与 `price_limits` 的 `_EPS`、`public_sync` 的 `PRICE_EPS` 同一个量级）。
+LIVE_LIMIT_EPS = 0.005
+
+
+@dataclass(frozen=True)
+class LiveBar:
+    """盘中「今天」这一根 K 线的**原始（不复权）**快照值 —— 实时口径的原料。
+
+    为什么要有它：用户 2026-09-23 定的规矩是"在软件内置规则里设定：开盘时间里运行的
+    选股都是实时的，不是开盘时间才采用 K 线"。日更要到收盘后才有今天这根，
+    所以盘中必须**自己把今天这一根拼出来** —— 拼出来之后，用户已经写好的公式
+    （`C`、`C/REF(C,1)-1`、`量比()`、`C>MA(C,5)`）不用改一个字就全变成盘中口径，
+    这正是"内置规则"而不是"再写一条盘中公式"的意义。
+
+    为什么存**原始价**、换算放到 `load_series` 里做：快照给的现价永远是不复权价
+    （交易所口径），换到后复权要乘"库里最后一根的后复权收盘 ÷ 这里的昨收" ——
+    那个比例只有同时看得见"库里的行"与"这里这几个数"的地方才算得出来
+    （理由见 `_live_arrays`）。存原始价还有个好处：`pre_close` 也正好是
+    涨停价的基准（`price_limits.limit_up_price` 要的就是不复权前收）。
+
+    Attributes:
+        prev_close: 快照里的**昨收**（交易所调整后的前收盘）。缺了它这根 K 线就
+            拼不出来（也**不编**一个出来），见 `_live_arrays`。
+        close: 现价；`open` / `high` / `low` 是今开 / 最高 / 最低（都是不复权、元）。
+        volume: 成交量（**股**）；`turnover`: 成交额（**元**）。口径与库里的列一致
+            （后复权只调价不调量，见 `storage` 里的视图定义），所以可以直接接上去。
+    """
+
+    prev_close: float
+    close: float
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    volume: float | None = None
+    turnover: float | None = None
+
+
+def _live_arrays(
+    bar: LiveBar,
+    symbol: str,
+    name: str,
+    dates: list[str],
+    close: np.ndarray,
+    open_: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    vol: np.ndarray,
+    amount: np.ndarray,
+    limit_days: np.ndarray,
+    limit_cnt: np.ndarray,
+    *,
+    today: str,
+    kline_day: str | None,
+) -> tuple[list[str], np.ndarray, ...] | None:
+    """在日线后面接上"今天"这一根（拼不出来就返回 None，**绝不编数**）。
+
+    换算口径（这是本函数唯一容易搞错的地方，所以推导写全）：
+
+        快照给的现价是不复权价，而库里那一列是**后复权**价（`后复权 = 不复权 × 因子`）。
+        设库里最后一根的后复权收盘为 `hfq_last`、因子为 `f_last`，快照昨收为 `adj_prev`
+        （交易所调整后的前收盘，除权日会被下调），于是"今天"的因子 `f_today = f_last × k`，
+        其中除权步长 `k = 原始前收 ÷ adj_prev`（见 `public_sync.factor_step`）。
+        而 `hfq_last = 原始前收 × f_last`，代进去：
+
+            f_today = hfq_last ÷ adj_prev          ⇒     今天的后复权价 = 现价 × hfq_last ÷ adj_prev
+
+        所以只需要一个比例 `hfq_last / adj_prev`：它同时含了历史因子与今天的除权步长。
+        比出来的 `今天的后复权收盘 ÷ 昨天那根` 正好等于 `现价 ÷ 昨收` = 今天的真实涨幅，
+        也就是说 `C/REF(C,1)-1` 会原样给出**盘中涨幅**（有测试钉住）。
+
+    为什么只有在"库里最后一根正好是全市场最新行情日"时才接（`kline_day`）：
+    停牌、退市、或用户好多天没开机的票，最后一根是**旧的**。给它接一根今天的，
+    它就会混进"今天选中的票"里 —— 而它的今天这根是按一个断了好几天的缺口算出来的，
+    涨跌幅是假的。这类票本来就该被"最后一根不是最新行情日"那条规则跳过。
+
+    Returns:
+        接上今天那一根之后的全部数组（顺序与入参一致）；不该接/接不了返回 None：
+        库里已经有今天这一根、最后一根不是最新行情日、现价或昨收缺一个。
+    """
+    if not dates or kline_day is None:
+        return None
+    if dates[-1] >= today:
+        # 库里已经有"今天"这一根了（日更跑过，或数据比今天还新）：**不重复接**，
+        # 同一天出现两根会让 REF/MA 这些窗口函数全部错位。
+        return None
+    if dates[-1] != kline_day:
+        return None                      # 停牌/数据缺天的票：不靠"接一根"混进今天的选股
+    if not (bar.prev_close and bar.prev_close > 0 and bar.close and bar.close > 0):
+        return None                      # 缺现价或缺昨收：拼不出来，退回日线
+    factor = float(close[-1]) / float(bar.prev_close)
+    if not math.isfinite(factor) or factor <= 0:
+        return None
+
+    def scaled(value: float | None, fallback: float) -> float:
+        """把快照里的不复权价换成后复权价；缺了就退到 `fallback`（现价）。
+
+        为什么缺最高/最低时用现价而不是 NaN：一根 K 线的最高价天然 ≥ 现价、
+        最低价 ≤ 现价，用现价填是**自洽的最小假设**（"今天到目前为止没有更高的价"）；
+        填 NaN 会让 `C<=H` 这类本来该成立的写法在盘中集体失效，用户完全看不出原因
+        （来源没给最高价这件事，界面上没有任何地方能显示）。
+        """
+        raw = float(value) if value else fallback
+        return raw * factor
+
+    new_close = float(bar.close) * factor
+    new_open = scaled(bar.open, float(bar.close))
+    new_high = max(scaled(bar.high, float(bar.close)), new_close, new_open)
+    new_low = min(scaled(bar.low, float(bar.close)), new_close, new_open)
+    new_vol = float(bar.volume) if bar.volume is not None else math.nan
+    new_amount = float(bar.turnover) if bar.turnover is not None else math.nan
+
+    # 今天是不是涨停：用**不复权**的现价与昨收判（涨停价本来就是不复权口径）。
+    # 连板数由"昨天那一根"滚上来（与日更里攒涨停池的规则一致：在就 +1，否则算 1）。
+    from laoa_trader import price_limits as pl       # 延迟导入：与 ZTPRICE 的实现同一份规则
+
+    target = pl.limit_up_price(float(bar.prev_close), symbol, name)
+    limit_today = 1.0 if (target is not None
+                          and float(bar.close) >= target - LIVE_LIMIT_EPS) else 0.0
+    cnt_today = (float(limit_cnt[-1]) + 1.0 if limit_today else 0.0)
+
+    return (
+        [*dates, today],
+        np.append(close, new_close),
+        np.append(open_, new_open),
+        np.append(high, new_high),
+        np.append(low, new_low),
+        np.append(vol, new_vol),
+        np.append(amount, new_amount),
+        np.append(limit_days, limit_today),
+        np.append(limit_cnt, cnt_today),
+    )
+
 
 @dataclass
 class Series:
@@ -2936,6 +3069,10 @@ def load_series(
     start: str | None = None,
     extra: dict[str, dict[str, float]] | None = None,
     hot_industries: dict[str, int] | None = None,
+    *,
+    today: str | None = None,
+    live_bars: dict[str, LiveBar] | None = None,
+    kline_day: str | None = None,
 ) -> Iterator[Series]:
     """从本地库逐只产出 `Series`（**只读、不联网**；扩展字段由调用方给）。
 
@@ -2958,6 +3095,16 @@ def load_series(
             给了就给每只票填 `热门行业`（按它的 `stock_basic.industry` 查表），
             **同样是"只有今天这一个值"**（前面填 NaN）—— 它表达的是"当前状态"，
             不是一条历史序列；写成 `REF(热门行业,5)` 是没意义的（会得到缺值）。
+        today: 「今天」的日期（`YYYY-MM-DD`）。给了就会在每只票的日线后面**接上今天
+            这一根**（用 `live_bars` 里的实时快照拼），于是 `C` / `C/REF(C,1)-1` /
+            `量比()` 全部变成盘中口径 —— 这是"开盘时间里跑的选股都是实时的，不是开盘
+            时间才采用 K 线"那条规矩的实现点（见 `formulas.resolve_caliber`）。
+            None（默认）= 完全按库里的日线走，与没有这个参数时**逐字一致**。
+        live_bars: `{代码: LiveBar}`（实时快照的原始值）。缺某只票就不给它接今天这一根，
+            它照旧按日线算。
+        kline_day: 库里最新的行情日（`formulas.latest_trading_day`）。**必须给**：
+            只有"最后一根正好是它"的票才接今天这一根 —— 否则停牌/缺天的票会靠
+            "接一根"混进今天的选股，而且涨跌幅是假的（推导见 `_live_arrays`）。
 
     Yields:
         Series（时间升序）。没有数据的代码会被跳过。
@@ -3010,6 +3157,11 @@ def load_series(
 
             dates = [str(r[0]) for r in rows]
             close = np.array([_num_or_nan(r[4]) for r in rows], dtype="float64")
+            open_arr = np.array([_num_or_nan(r[1]) for r in rows], dtype="float64")
+            high_arr = np.array([_num_or_nan(r[2]) for r in rows], dtype="float64")
+            low_arr = np.array([_num_or_nan(r[3]) for r in rows], dtype="float64")
+            vol_arr = np.array([_num_or_nan(r[5]) for r in rows], dtype="float64")
+            amount_arr = np.array([_num_or_nan(r[6]) for r in rows], dtype="float64")
             limit_days = np.array(
                 [1.0 if d in pool else 0.0 for d in dates], dtype="float64"
             )
@@ -3021,6 +3173,25 @@ def load_series(
             if len(dates) > 1:
                 # 后复权口径下"昨收"就是昨日的后复权收盘价，直接平移一根即可
                 pre_close[1:] = close[:-1]
+
+            # 盘中实时口径：把"今天"这一根接上去（`today` 为 None 时这里整段是空操作，
+            # 与没有这个功能时**逐字一致**）。
+            # 接在扩展字段之前是**故意的**：扩展字段的语义是"只有最后那一根有值"，
+            # 它按 `len(dates)` 铺；先铺后接的话那个值会落到"昨天"上 ——
+            # 于是 `现价>MA(C,5)` 里的现价指的是昨天的价，而界面上完全看不出来。
+            bar = (live_bars or {}).get(symbol)
+            if today and bar is not None:
+                patched = _live_arrays(
+                    bar, symbol, name, dates, close, open_arr, high_arr, low_arr,
+                    vol_arr, amount_arr, limit_days, limit_cnt,
+                    today=today, kline_day=kline_day,
+                )
+                if patched is not None:
+                    (dates, close, open_arr, high_arr, low_arr, vol_arr, amount_arr,
+                     limit_days, limit_cnt) = patched
+                    # 接上今天这一根之后，"昨天"跟着往后挪了一格：`pre_close` 也要补一格，
+                    # 否则最后一根的"昨收"是 NaN（`REF(C,1)` 之外再用到昨收的都会缺值）
+                    pre_close = np.append(pre_close, float(close[-2]))
 
             # 扩展字段：把"只有今天这一个数"的值铺成一条序列（末尾是今天、前面 NaN）。
             # 为什么这样铺：公式只看**最后一根** K 线选股，所以末尾那个值就是答案；
@@ -3047,11 +3218,11 @@ def load_series(
                 extra=series_extra,
                 date=dates,
                 close=close,
-                open=np.array([_num_or_nan(r[1]) for r in rows], dtype="float64"),
-                high=np.array([_num_or_nan(r[2]) for r in rows], dtype="float64"),
-                low=np.array([_num_or_nan(r[3]) for r in rows], dtype="float64"),
-                vol=np.array([_num_or_nan(r[5]) for r in rows], dtype="float64"),
-                amount=np.array([_num_or_nan(r[6]) for r in rows], dtype="float64"),
+                open=open_arr,
+                high=high_arr,
+                low=low_arr,
+                vol=vol_arr,
+                amount=amount_arr,
                 pre_close=pre_close,
                 limit_up_days=limit_days,
                 limit_up_cnt=limit_cnt,

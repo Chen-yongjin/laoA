@@ -109,6 +109,15 @@ class FormulaRun:
     ran: list[str] = field(default_factory=list)
     #: 扫过的票数（日志用）
     scanned: int = 0
+    #: 这一轮用的 K 线口径（一句中文：盘中实时 / 日 K 线，见 `formulas.prepare_inputs`）。
+    #: 界面上要显示出来 —— "同一份策略、同一个按钮，昨天选出的和今天选出的为什么不一样"
+    #: 这个问题只有口径能解释。
+    caliber: str = ""
+    #: **告知**（不是错误）：典型是"盘中想用实时数据，但取不到快照 → 已退回日 K 线"。
+    #: 与 `errors` 分开的理由：建池的"成功/失败"判据是"errors 是否为空"
+    #: （`scheduler.Scheduler._report_succeeded`），把一句告知塞进 errors 会让一次
+    #: **正常完成**的选股被判成失败（票选出来了、推送也发了，状态却写"未成功"再补跑一遍）。
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
@@ -121,14 +130,19 @@ def run_enabled_formulas(
     *,
     directory: str | Path | None = None,
 ) -> FormulaRun:
-    """跑 `enabled_formulas` 里的公式，返回池子候选（**不写库、不联网**）。
+    """跑 `enabled_formulas` 里的公式，返回池子候选（**不写库**）。
 
     实现要点：
     * **一遍扫描**：`load_series()` 逐只产出，几条公式共用同一个 `Series`
       （每条公式单独读一遍库要多花几倍时间，而公式通常只有 1~3 条）；
     * 只看**每只票最后一根 K 线**，且该票的最后一根必须是全市场最新行情日
       （口径与内置策略、与界面【试算】完全一致）；
+    * **K 线口径按时间自动切**：开盘时间里的那一轮用实时快照拼出"今天"这一根
+      （见 `formulas.prepare_inputs`），所以【试算】与【开始选股】的口径永远一致；
     * 数据长度不足 `min_history` 的票直接跳过（滚动窗口全是缺值 ⇒ 不可能出信号）。
+
+    联网：只有"公式用到快照字段"或"此刻正走盘中实时口径"时才取**一趟**快照
+    （见 `formulas.prepare_inputs`）；其余情况一个请求都不发。
     """
     result = FormulaRun()
     names = lib.enabled_names(cfg, directory)
@@ -149,34 +163,48 @@ def run_enabled_formulas(
     if not active:
         return result
 
-    day = lib.latest_trading_day(db_path)
     failures: dict[str, int] = {}
     first_error: dict[str, str] = {}
     hits: dict[str, list[dict]] = {formula.label: [] for formula in active}
 
-    # 只有真用到了 `流通市值` / `换手率` 的公式才去取那一趟实时快照
-    # （这两个数日线里没有，见 `formula.EXTRA_FIELDS`）；一条都没用到就一个请求都不发，
-    # 与"没这个功能"完全一样。取不到时**不报错**：条件不成立而已，
-    # 但要在状态里说一句，否则用户看着"勾了却没出票"会以为是公式写错了。
-    extra: dict[str, dict[str, float]] = {}
-    hot: dict[str, int] = {}
-    if any(set(formula.fields) & set(lib.HOT_FIELDS) for formula in active):
-        # 「热门行业」读库就能算（不联网）：最近 N 天上过热门榜的行业
-        hot = lib.hot_industry_counts(db_path)
-    if any(set(formula.fields) & set(lib.SNAPSHOT_FIELDS) for formula in active):
-        extra, note = lib.snapshot_extra(cfg, lib.all_symbols(db_path))
-        if note:
-            result.errors.append(note)
-            logger.warning(note)
+    # 输入（K 线口径 + 扩展字段）全部由 `lib.prepare_inputs` 一份逻辑给：
+    # "开盘时间里跑的选股都是实时的"这条规矩在**试算与建池两条路上必须是同一份实现** ——
+    # 各写一份迟早会出现"点【运行】选出 3 只、点【开始选股】选出 1 只"，而这种差异
+    # 用户没有任何办法解释。快照只在"公式真用到那些字段"或"此刻正走盘中口径"时才取一趟；
+    # 一条都不需要时**一个请求都不发**（与"没这个功能"完全一样）。
+    prepared = lib.prepare_inputs(cfg, db_path, active)
+    # 库里最新的行情日**由 prepare_inputs 一起给出**（它自己也要用它判"要不要接今天那根"）：
+    # 这里不再查一次 —— 两次 MAX(date) 之间理论上还能变（数据一边更新一边选股），
+    # 于是"接没接今天那根"与"跳过哪些票"就可能按两个不同的日子判。
+    day = prepared.kline_day
+    result.caliber = prepared.caliber
+    if prepared.caliber:
+        logger.info(f"策略选股 {prepared.caliber}")
+    for note in prepared.notes:
+        # 影响"选不选得出来"的提示（典型：快照取不到 ⇒ 用到那些字段的条件一律不成立）
+        # 走 `errors`：界面会把它显示在状态栏/结果页上，不然用户看到的是
+        # "条件成立却一只都不出"，只能怀疑策略写错了。
+        result.errors.append(note)
+        logger.warning(note)
+    for warning in prepared.warnings:
+        # 口径类的**告知**进 `warnings`，不进 `errors` —— 建池的"成功/失败"判据是
+        # "errors 是否为空"（`scheduler.Scheduler._report_succeeded`）：一句"退回了日 K"
+        # 会让一次正常完成、票也选出来了的选股被判成失败（还要在补跑点再跑一遍）。
+        result.warnings.append(warning)
+        logger.warning(warning)
 
     try:
-        series_iter = fm.load_series(db_path, extra=extra, hot_industries=hot)
+        series_iter = fm.load_series(
+            db_path, extra=prepared.extra, hot_industries=prepared.hot,
+            today=prepared.today, live_bars=prepared.live_bars,
+            kline_day=prepared.kline_day,
+        )
         # ⚠️ `load_series` 是**生成器**：函数体要到第一次 `next()` 才执行，
         # 所以"库不存在"这类错误是在下面这个 for 里抛出来的 —— try 必须包住整个循环
         # （只在 `fm.load_series(...)` 那一行外面的 try 拦不住任何东西，实测踩过）。
         for series in series_iter:
             result.scanned += 1
-            if day is not None and series.date[-1] != day:
+            if day is not None and series.date[-1] not in (day, prepared.today):
                 # 停牌/退市的票：它的"最后一根"是旧的，拿它当"今天选中"是错的
                 continue
             for formula in active:

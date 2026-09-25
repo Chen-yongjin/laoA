@@ -730,6 +730,46 @@ def test_preview_hit_message_keeps_truncation_hint_and_skipped_errors(
     )
 
 
+def test_preview_hit_message_puts_the_candle_caliber_on_the_first_line(
+        page, qapp, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**这一轮用的是哪套 K 线**必须显示在最前面（同日同时辰的口径差别全靠它解释）。
+
+    这份程序的内置规则是"开盘时间里跑的选股都是实时的，不是开盘时间才用 K 线"
+    （用户 2026-09-23 定）。同一份公式、同一个按钮，盘中与收盘后本来就会选出不同的票 ——
+    界面上不写这一行，用户只会以为程序不稳定。
+    """
+    monkeypatch.setattr(lib, "preview_hits", lambda *a, **k: {
+        "date": "2026-09-23", "count": 1, "shown": 1,
+        "hits": [{"symbol": "600001", "name": "甲样本"}],
+        "scanned": 7, "skipped": 0, "errors": [],
+        "caliber": "📊 本次口径：盘中实时（10:05，用现价拼出今天 2026-09-23 这根 K 线）"})
+    page.editor.setPlainText("C>MA(C,5)")
+
+    page.btn_preview.click()
+    _wait_preview(page, qapp)
+
+    lines = page.hint_text.splitlines()
+    assert lines[0].startswith("📊 本次口径：") and "盘中实时" in lines[0]
+    # 结果那一行照旧在它下面（口径只是**加一行**，不替换任何原有文案）
+    assert lines[1] == "最近交易日 2026-09-23 命中 1 只：甲样本(600001)"
+
+
+def test_preview_hit_message_without_caliber_is_unchanged(page, qapp,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """老/替身返回值里没有 `caliber` 时**一个字符都不多**（口径是加一行，不是改文案）。"""
+    monkeypatch.setattr(lib, "preview_hits", lambda *a, **k: {
+        "date": "2026-09-11", "count": 0, "hits": [], "shown": 0,
+        "scanned": 7, "skipped": 3, "errors": []})
+    page.editor.setPlainText("C>MA(C,5)")
+
+    page.btn_preview.click()
+    _wait_preview(page, qapp)
+
+    assert page.hint_text == (
+        "最近交易日 2026-09-11：没有命中（扫了 7 只，3 只因数据不足跳过）"
+    )
+
+
 def test_preview_reports_broken_formula_instead_of_running(page) -> None:
     """公式写错：**根本不起线程**（不用等后台；报错就是报错）。"""
     page.editor.setPlainText("C>MAA(C,5)")
@@ -1950,6 +1990,33 @@ def test_result_view_says_why_when_nothing_was_picked(page) -> None:
     hint = page.result_hint.text()
     assert "没有选到票" in hint and "2026-09-11" in hint
     assert "数据闸门" in hint                     # 出错原因必须让人看见
+
+
+def test_result_view_shows_the_candle_caliber(page) -> None:
+    """结果页也要写出这一轮的口径（盘中实时 / 日 K 线）—— 结论与错误之外的第 3 类信息。
+
+    它从 `report["formulas"]["caliber"]` 来（`pool.build_pool` 写进去、
+    `formula_group.run_enabled_formulas` 给的值），所以这里喂一份形状相同的 report。
+    """
+    page.show_pick_result({
+        "data_date": "2026-09-23",
+        "pool": [{"symbol": "600001", "name": "甲样本", "strategy": "公式·放量上攻"}],
+        "formulas": {"caliber": "📊 本次口径：盘中实时（10:05）"},
+    })
+
+    assert "本次口径" in page.result_hint.text()
+    assert "盘中实时" in page.result_hint.text()
+
+
+def test_result_view_without_a_caliber_is_unchanged(page) -> None:
+    """report 里没有 `formulas`（老调用方 / 行列表形态）时结果页照旧，不多一行。"""
+    page.show_pick_result({
+        "data_date": "2026-09-11",
+        "pool": [{"symbol": "600001", "name": "甲样本", "strategy": "公式·放量上攻"}],
+    })
+
+    assert "本次口径" not in page.result_hint.text()
+    assert "本次选股结果：共 1 只" in page.result_hint.text()
 
 
 def test_show_pick_result_keeps_the_signature_the_main_window_uses(page, page_cfg) -> None:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -580,15 +581,32 @@ def test_run_enabled_formulas_picks_expected_symbols(formula_db: str, formulas_c
 
 
 def test_run_enabled_formulas_reports_missing_db(formulas_cfg: Config, tmp_path: Path) -> None:
-    """库不存在：说清楚原因就返回，**不抛异常**（否则整轮建池会挂）。"""
+    """库不存在：说清楚原因就返回，**不抛异常**（否则整轮建池会挂）。
+
+    顺带钉住一件差点踩进去的事：**判口径时不许把库"碰"出来**。`is_trading_day()` 会打开
+    本地库，而 sqlite 对不存在的文件是"连上就建一个空库" —— 一旦先问日历再问数据，
+    "库还没下载"就会被 `load_series` 报成"库是空的"（错误信息对不上），而且在用户
+    数据目录里凭空多出一个空 db 文件。所以 `_live_decision()` 里"有没有日线数据"
+    必须排在"今天是不是交易日"前面。
+    """
     folder = tmp_path / "formulas"
     _write_formula(folder, "随便", "C>MA(C,5)")
     formulas_cfg.enabled_formulas = ["随便"]
+    db = tmp_path / "没有.db"
 
-    run = formula_group.run_enabled_formulas(tmp_path / "没有.db", formulas_cfg, directory=folder)
+    # 盘中口径的准备步骤本身也不能建库（这一句就是那条判据）
+    prepared = lib.prepare_inputs(
+        formulas_cfg, db, [fm.compile_formula("C>MA(C,5)")],
+        now=datetime(2026, 9, 14, 10, 0),
+    )
+    assert prepared.today is None and "本地还没有日线数据" in prepared.caliber
+    assert not db.exists(), "判口径不该把库文件建出来"
+
+    run = formula_group.run_enabled_formulas(db, formulas_cfg, directory=folder)
 
     assert run.picks == {}
     assert run.errors and "本地数据库不存在" in run.errors[0]
+    assert not db.exists()
     assert "本地数据库不存在" in run.status["随便"]
 
 
@@ -988,10 +1006,32 @@ def test_preview_hits_uses_snapshot_fields(formula_db: str, formulas_cfg: Config
     assert calls == [["600001", "600002", "600003"]]      # 只取一趟，且只要库里的票
 
 
+def _off_hours_now() -> datetime:
+    """收盘后的一个确定时刻（2026-09-14 20:00，周一）：口径必须是**日 K 线**。"""
+    return datetime(2026, 9, 14, 20, 0)
+
+
+@pytest.fixture()
+def off_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把"现在"钉在收盘后（见 `_off_hours_now`）。
+
+    为什么这些用例要钉死时钟：内置规则是"开盘时间里跑的选股用实时数据"
+    （用户 2026-09-23 定），而"现在是不是开盘时间"只能看**真实时钟** ——
+    不钉的话，同一个用例在 CI 的白天与深夜会走两条不同的路（一边取快照、一边不取），
+    断言"一个请求都不发"就会变成"看跑测试的时间"。
+    """
+    monkeypatch.setattr(lib, "caliber_now", _off_hours_now)
+
+
 def test_preview_hits_without_snapshot_fields_sends_no_request(
-    formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch
+    formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
+    off_hours: None,
 ) -> None:
-    """**不用这两个字段的公式一个请求都不发**（与"没这个功能"完全一样）。"""
+    """**不用这两个字段的公式一个请求都不发**（与"没这个功能"完全一样）。
+
+    `off_hours` 把"现在"钉在收盘后：盘中口径**本身**就要取一趟快照（拼今天那根 K 线），
+    所以这两件事必须分开测 —— 这里测的是"收盘后、又不用快照字段，就一个请求都不发"。
+    """
     calls = _fake_snapshot(monkeypatch, {})
     formula = fm.compile_formula("C>MA(C,5)")
 
@@ -1027,11 +1067,12 @@ def test_intraday_fields_use_the_snapshot_and_are_percentages(
 
 
 def test_snapshot_is_fetched_only_for_the_fields_the_formula_actually_uses(
-    formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch
+    formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
+    off_hours: None,
 ) -> None:
     """取快照的判据是**这条公式**用到的字段，而不是"表里有没有盘中字段"。
 
-    两条对照：只用日线字段 → 0 次请求；用到 `换手率` → 正好 1 次（一趟批量，
+    两条对照（都在收盘后）：只用日线字段 → 0 次请求；用到 `换手率` → 正好 1 次（一趟批量，
     不是逐只票各取一次）。这条守着"别把快照变成无条件的开销"。
     """
     calls = _fake_snapshot(monkeypatch, {})
@@ -1184,3 +1225,250 @@ def test_hot_industry_counts_is_the_union_over_the_window(formula_db: str,
     counts = lib.hot_industry_counts(formula_db, days=3)
 
     assert counts == {"银行": 2, "煤炭": 1, "券商": 1}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# K 线口径按时间自动切（用户 2026-09-23 定的内置规则）
+#
+# 原话："在软件内置规则里设定，开盘时间里运行的选股，都是实时的，不是开盘时间，
+# 采用 K 线。" 下面五条就是这句话的四种情形 + 选股链路同口径：
+#   ① 开盘时间 + 有快照   → 用现价拼出"今天"这根 K 线（口径写明"盘中实时"）
+#   ② 非开盘时间          → 用库里的日 K（**即使快照能用也不接**）
+#   ③ 开盘时间 + 没快照   → 退回日 K，并且必须说清（否则会被当成公式写错）
+#   ④ 开关关掉            → 开盘时间也用日 K
+#   ⑤ 选股链路（建池）用**同一个函数**取口径，与【运行】不可能不一致
+# ══════════════════════════════════════════════════════════════════════════
+
+#: 盘中测试用的固定时刻：2026-09-14（周一）10:00 —— 夹具库的最后一天是 09-11（周五）
+SESSION_AT = datetime(2026, 9, 14, 10, 0)
+
+
+@pytest.fixture()
+def session_db(formula_db: str) -> str:
+    """把 2026-09-14 补进交易日历的夹具库（生产里这一行由日更/下载写进去）。
+
+    为什么非要补：`is_trading_day()` 读的是库里的 `trading_calendar`，而"今天是不是
+    交易日"正是实时口径的第一道闸门 —— 不补的话它在休市日也会用昨天的快照冒充今天的盘。
+    """
+    with storage.connect(formula_db) as conn:
+        storage.write_calendar(conn, ["2026-09-14"])
+    return formula_db
+
+
+@pytest.fixture()
+def session_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把"现在"钉在开盘时间（2026-09-14 10:00，北京时间）。"""
+    monkeypatch.setattr(lib, "caliber_now", lambda: SESSION_AT)
+
+
+def _last_close(db: str, symbol: str) -> float:
+    """库里这只票最后一根的后复权收盘（拼实时 K 线的基准）。"""
+    with storage.connect(db) as conn:
+        row = conn.execute(
+            "SELECT close FROM stock_daily_hfq WHERE symbol = ? ORDER BY date DESC LIMIT 1",
+            (symbol,),
+        ).fetchone()
+    return float(row[0])
+
+
+def _session_quotes(db: str, plan: dict[str, float]) -> dict[str, dict]:
+    """按"昨收 = 库里最后一根收盘"造一份快照：`{代码: 今日涨幅}` → 快照行。"""
+    quotes = {}
+    for symbol, gain in plan.items():
+        prev = _last_close(db, symbol)
+        last = prev * (1 + gain)
+        quotes[symbol] = {
+            "prev_close": prev, "last_price": last, "open": prev,
+            "high": max(prev, last), "low": min(prev, last),
+            "volume": 5e6, "turnover": 5e7,
+            "pct": gain * 100, "volume_ratio": 6.0, "turnover_rate": 5.0,
+        }
+    return quotes
+
+
+def test_preview_hits_uses_live_data_in_session(
+    session_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
+    session_clock: None,
+) -> None:
+    """① 开盘时间跑【运行】→ 用实时快照拼出"今天"这根 K 线，`C/REF(C,1)-1` 就是盘中涨幅。
+
+    公式同时用到「现价那一根」（`C/REF(C,1)-1`）与快照字段（`现涨幅`/`现量比`），
+    所以顺带钉住另一件事：**同一轮只取一趟快照**（`calls` 长度 1）——
+    取两次会看到两个时刻的盘面，K 线里的涨幅与 `现涨幅` 就对不上了。
+    """
+    calls = _fake_snapshot(monkeypatch, _session_quotes(session_db, {
+        "600001": 0.05,      # 今天 +5%：三个条件都成立
+        "600002": 0.01,      # 今天 +1%：`现涨幅>=4` 不成立
+        "600003": 0.0,       # 今天持平：`C/REF(C,1)-1>=0.04` 不成立
+    }))
+    formula = fm.compile_formula("C/REF(C,1)-1 >= 0.04 AND 现涨幅 >= 4 AND 现量比 >= 1")
+
+    result = lib.preview_hits(formula, session_db, cfg=formulas_cfg)
+
+    assert [hit["symbol"] for hit in result["hits"]] == ["600001"]
+    # 行情日显示**今天**（报成 09-11 会让用户以为程序在拿昨天的收盘数据选股）
+    assert result["date"] == "2026-09-14"
+    assert "盘中实时" in result["caliber"] and "2026-09-14" in result["caliber"]
+    assert result["errors"] == []
+    assert len(calls) == 1, calls
+
+
+def test_preview_hits_uses_daily_kline_off_hours(
+    session_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """② 非开盘时间（晚上 20:00）→ 用库里的日 K，**即使快照取得到也不接那一根**。
+
+    夹具库里的票每天涨 1%，所以 `C/REF(C,1)-1>=0.04` 一只都不出；而同一份公式在
+    ①（盘中 +5%）里能选出 600001 —— 两条放在一起才说明"口径真的按时间切了"。
+    另一件被钉住的事：这种公式**收盘后一个请求都不发**。
+    """
+    calls = _fake_snapshot(monkeypatch, _session_quotes(session_db, {"600001": 0.05}))
+    monkeypatch.setattr(lib, "caliber_now", lambda: datetime(2026, 9, 14, 20, 0))
+
+    result = lib.preview_hits(fm.compile_formula("C/REF(C,1)-1 >= 0.04"),
+                              session_db, cfg=formulas_cfg)
+
+    assert result["count"] == 0
+    assert result["date"] == "2026-09-11"          # 库里最新行情日
+    assert "日 K 线" in result["caliber"] and "不是开盘时间" in result["caliber"]
+    assert calls == []
+
+
+def test_preview_hits_uses_daily_kline_on_a_holiday(
+    session_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """休市日：钟点在开盘时间里，但**今天不在交易日历里** → 一样用日 K。
+
+    只看钟点会把上周五的快照当成"今天的盘"（现价比昨收=上一交易日收盘，涨幅 0），
+    选出来一批看起来正常的假信号。这一条守着那道闸门。
+    """
+    calls = _fake_snapshot(monkeypatch, _session_quotes(session_db, {"600001": 0.05}))
+    monkeypatch.setattr(lib, "caliber_now", lambda: datetime(2026, 9, 12, 10, 0))  # 周六
+
+    result = lib.preview_hits(fm.compile_formula("C/REF(C,1)-1 >= 0.04"),
+                              session_db, cfg=formulas_cfg)
+
+    assert result["count"] == 0
+    assert "日 K 线" in result["caliber"] and "休市" in result["caliber"]
+    assert calls == []
+
+
+def test_preview_hits_falls_back_to_daily_when_the_snapshot_is_missing(
+    session_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
+    session_clock: None,
+) -> None:
+    """③ 开盘时间但取不到快照 → 退回日 K，并且**必须说清是退回**。
+
+    不说清的话，用户看到的是"盘中条件明明成立却一只都不出"，只能怀疑公式写错了。
+    """
+    _fake_snapshot(monkeypatch, {})       # 一个数都取不到
+    formula = fm.compile_formula("C/REF(C,1)-1 >= 0.04")
+
+    result = lib.preview_hits(formula, session_db, cfg=formulas_cfg)
+
+    assert result["count"] == 0
+    assert result["date"] == "2026-09-11"
+    assert "日 K 线" in result["caliber"] and "取不到实时快照" in result["caliber"]
+    joined = " ".join(result["notes"])
+    assert "开盘时间" in joined and "退回日 K 线" in joined, result["notes"]
+    assert result["errors"] == []
+
+
+def test_intraday_pick_live_off_always_uses_daily_kline(
+    session_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
+    session_clock: None,
+) -> None:
+    """④ 关掉「盘中选股用实时数据」→ 开盘时间也用日 K（想复现历史信号的人这么用）。"""
+    formulas_cfg.intraday_pick_live = False
+    calls = _fake_snapshot(monkeypatch, _session_quotes(session_db, {"600001": 0.05}))
+
+    result = lib.preview_hits(fm.compile_formula("C/REF(C,1)-1 >= 0.04"),
+                              session_db, cfg=formulas_cfg)
+
+    assert result["count"] == 0
+    assert "日 K 线" in result["caliber"] and "已关" in result["caliber"]
+    assert calls == []
+
+
+def test_intraday_pick_live_defaults_to_on() -> None:
+    """开关**默认开**（用户要的是"开盘时间里一律实时"，不是每次去勾一下）。"""
+    assert Config().intraday_pick_live is True
+    assert lib.intraday_pick_live(Config()) is True
+    # 拿不到属性的老配置对象也当"开"处理（口径判据不因为少一个字段就失效）
+    assert lib.intraday_pick_live(object()) is True
+
+
+def test_run_enabled_formulas_uses_live_data_in_session(
+    session_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
+    session_clock: None,
+) -> None:
+    """⑤ 选股链路（建池）与【运行】用**同一个函数**取口径 ⇒ 结果必须一致。
+
+    这是"漏接一根线"的典型：快照早就在试算那条路上接通了，建池却没有 ——
+    用户看到的是"点【运行】选出 3 只、点【开始选股】选出 1 只"，没有任何办法解释。
+    """
+    fx = formulas_cfg.data_dir / "formulas"
+    fx.mkdir(parents=True, exist_ok=True)
+    _write_formula(fx, "盘中涨幅", "C/REF(C,1)-1 >= 0.04 AND 现涨幅 >= 4")
+    formulas_cfg.enabled_formulas = ["盘中涨幅"]
+    _fake_snapshot(monkeypatch, _session_quotes(session_db, {"600001": 0.05}))
+
+    run = formula_group.run_enabled_formulas(session_db, formulas_cfg, directory=fx)
+
+    assert run.ran == ["盘中涨幅"]
+    assert {pick["symbol"] for pick in run.picks["公式·盘中涨幅"]} == {"600001"}
+    assert "盘中实时" in run.caliber
+    assert run.errors == [] and run.status == {}
+
+
+def test_live_fallback_is_a_warning_not_an_error(
+    session_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
+    session_clock: None,
+) -> None:
+    """⑥ 盘中取不到快照 →「退回日 K」是一句**告知**，不能让这一轮被判成失败。
+
+    判据是 `scheduler.Scheduler._report_succeeded`：`report["errors"]` 非空 = 未成功 =
+    到补跑点再跑一遍。把一句"退回了日 K"塞进 errors 的后果是：票选出来了、推送也发了，
+    状态却写"未成功"、还要再跑一遍（2026-09-23 实跑踩到，`test_pipeline` 当场红）。
+    所以它在 `warnings` 里：界面照样显示（结论行 + 结果页），但不影响成败判定。
+    """
+    fx = formulas_cfg.data_dir / "formulas"
+    fx.mkdir(parents=True, exist_ok=True)
+    _write_formula(fx, "随便", "C>MA(C,5)")
+    formulas_cfg.enabled_formulas = ["随便"]
+    _fake_snapshot(monkeypatch, {})       # 一个数都取不到
+
+    run = formula_group.run_enabled_formulas(session_db, formulas_cfg, directory=fx)
+
+    assert run.errors == [], run.errors
+    assert any("退回日 K 线" in w for w in run.warnings), run.warnings
+    assert "日 K 线" in run.caliber and "取不到实时快照" in run.caliber
+
+
+def test_live_fallback_warning_reaches_the_report_without_failing_it(
+    session_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
+    session_clock: None,
+) -> None:
+    """⑦ 那句告知要传到 `report` 里（界面靠它显示），但**不进 `report["errors"]`**。
+
+    建池是"界面 / 定时 / 命令行"三条路共用的那一个函数，所以成败判据与显示口径
+    都必须在它这里就分清楚 —— 只在 `FormulaRun` 上分开、到 report 又混起来等于没分。
+    """
+    from laoa_trader.data.engine import DataEngine
+
+    fx = formulas_cfg.data_dir / "formulas"
+    fx.mkdir(parents=True, exist_ok=True)
+    _write_formula(fx, "随便", "C>MA(C,5)")
+    formulas_cfg.enabled_formulas = ["随便"]
+    # 建池那条路自己解析策略目录（没有 `directory=` 参数），所以用环境变量指过去
+    monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(fx))
+    _fake_snapshot(monkeypatch, {})
+
+    report: dict = {}
+    pool.build_pool(DataEngine(session_db), formulas_cfg, size=10, hot_only=False,
+                    save=False, report=report, watchlist=[])
+
+    assert report["formulas"]["ran"] == ["随便"]
+    assert any("退回日 K 线" in w for w in report["formulas"]["warnings"])
+    assert report.get("errors") in (None, []), report.get("errors")
+    assert "日 K 线" in report["formulas"]["caliber"]        # 口径那句话也带出来了

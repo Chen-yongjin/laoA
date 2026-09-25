@@ -39,6 +39,8 @@ import shutil
 import sqlite3
 import sys
 from collections import OrderedDict
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -641,27 +643,21 @@ def snapshot_extra(
     所以按 `sources.snapshot_map()`（含"按字段从后面来源补齐"）取一趟，
     再铺成公式认的 `Series.extra`。
 
+    Args:
+        quotes: **已经取好的快照**（`_quote_rows` 的出口）。给进来就不再取一趟 ——
+            实时口径（`prepare_inputs`）要拿同一份快照既拼 K 线又填扩展字段，
+            取两次会看到两个时刻的盘面。`{}` 的语义是"取过了、什么都没有"，
+            与 `None`（= 还没取）**不是一回事**。
+
     Returns:
         `(extra, note)`：`note` 是**取不到时给用户看的一句人话**（拿到了就是空串）——
         取不到就等于条件永远不成立（0 只），不说清用户会以为公式写错了。
     """
-    from laoa_trader.data import sources
-
     codes = [str(c) for c in dict.fromkeys(symbols) if str(c)]
     if not codes:
         return {}, ""
     if quotes is None:
-        try:
-            quotes = sources.snapshot_map(cfg, codes)
-        except Exception as exc:  # noqa: BLE001 - 取不到就是没有这两个字段
-            logger.info(f"取快照失败（市值/换手用不了）：{exc}")
-            quotes = {}
-        else:
-            try:
-                # 同花顺的快照不返回这两项 → 按字段从后面的来源（默认免 Key 公开源）补
-                sources.supplement_map(cfg, quotes, codes)
-            except Exception as exc:  # noqa: BLE001
-                logger.info(f"补齐快照字段失败（市值/换手可能不全）：{exc}")
+        quotes = _quote_rows(cfg, codes)
     extra: dict[str, dict[str, float]] = {}
     for symbol, row in (quotes or {}).items():
         values = {name: row.get(SNAPSHOT_FIELD_KEYS[name]) for name in SNAPSHOT_FIELDS}
@@ -694,6 +690,259 @@ def all_symbols(db_path: str | Path) -> list[str]:
         return []
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# K 线口径：按时间自动在「日 K 线」与「盘中实时」之间切换
+#
+# 用户 2026-09-23 的原话（这就是本段全部的规格）：
+#     "在软件内置规则里设定，开盘时间里运行的选股，都是实时的，不是开盘时间，采用 K 线。"
+#
+# 也就是说：**这件事不该由用户写进公式**。他在盘中点【运行】/【开始选股】，
+# 用的就该是此刻的盘面；收盘之后（或周末、或没网）再用库里那根日 K。
+# 于是公式里的 `C`、`C/REF(C,1)-1`、`量比()`、`C>MA(C,5)` 一个字都不用改，
+# 就自动变成盘中口径 —— 这是"内置规则"与"再教用户写一条盘中公式"的区别。
+#
+# 三件事必须同时成立才走实时（任何一条不成立都退回日 K，并**在界面上说清是哪一条**）：
+#   1. 配置开关 `intraday_pick_live`（默认开，设置页有勾选项）；
+#   2. 现在是**开盘时间**（9:30–11:30 / 13:00–15:00，北京时间）；
+#   3. 今天是**交易日**（读库里 `trading_calendar`），且库里还没有今天那一根。
+# 再加一条"数据条件"：**取得到实时快照**。取不到就退回日 K，并且提示里写明白
+# —— 否则用户看到的是"条件明明成立却一只都不出"，只能怀疑公式写错了。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def caliber_now() -> datetime:
+    """这次选股看到的「现在」（**北京时间**的墙上时间）。
+
+    为什么单独一个函数而不是到处 `datetime.now()`：交易时段、交易日、口径文案全都挂在
+    它上面，而测试要能钉死"现在是开盘时间"（`monkeypatch.setattr(lib, "caliber_now", …)`）。
+    与 `intraday.now_shanghai()` / `clock.now_cn()` 是同一份实现（时区解耦的理由见那边）。
+    """
+    from laoa_trader import clock
+
+    return clock.now_cn()
+
+
+def intraday_pick_live(cfg: Any) -> bool:
+    """配置 `intraday_pick_live`（「盘中选股用实时数据」）：**默认开**。
+
+    默认开是用户点名要的（"开盘时间里运行的选股都是实时的"）；关掉它的人要的是
+    "盘中也要可复现的收盘口径"（比如对着历史信号复盘），所以留了这个开关。
+    """
+    return bool(getattr(cfg, "intraday_pick_live", True))
+
+
+def _as_num(value: Any) -> float | None:
+    """快照里的一项 → float；认不出（`None`/`-`/空串）返回 None。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number else None      # NaN 也算"没有这个数"
+
+
+def _quote_rows(cfg: Any, codes: Sequence[str]) -> dict[str, dict]:
+    """取一趟实时快照（含"主源给不了的字段往后补齐"），**绝不抛到调用方**。
+
+    单独抽出来是因为实时口径要**一趟快照干两件事**：拼"今天"这根 K 线（价格/量）
+    与填 `流通市值 / 换手率 / 现价 / 现涨幅 / 现量比 / 现换手`（扩展字段）。
+    早先这两件事各取一次的话，同一轮选股会看到两个时刻的盘面 —— 那是最没法解释的
+    一类不一致（涨幅与 K 线对不上，用户只能怀疑程序坏了）。
+    """
+    from laoa_trader.data import sources
+
+    wanted = [str(c) for c in dict.fromkeys(codes) if str(c)]
+    if not wanted:
+        return {}
+    try:
+        quotes = sources.snapshot_map(cfg, wanted)
+    except Exception as exc:  # noqa: BLE001 - 取不到就是"没有实时数据"
+        logger.info(f"取快照失败（市值/换手/盘中字段用不了）：{exc}")
+        return {}
+    try:
+        # 同花顺的快照不返回量比/市值/换手 → 按字段从后面的来源（默认免 Key 公开源）补
+        sources.supplement_map(cfg, quotes, wanted)
+    except Exception as exc:  # noqa: BLE001
+        logger.info(f"补齐快照字段失败（市值/换手可能不全）：{exc}")
+    return quotes
+
+
+def live_bars_from_quotes(quotes: dict[str, dict] | None) -> dict[str, fm.LiveBar]:
+    """快照 → `{代码: LiveBar}`（拼"今天"那根 K 线的原料）。
+
+    只收**同时有现价与昨收**的票：缺一个就拼不出这根 K 线（涨幅的基准就是昨收），
+    而**编一个**昨收出来会让"今天的涨幅"凭空多出一截。缺的票不接今天这根，
+    照旧按日线算 —— 这是"少算一只"与"算错一只"之间的取舍，选少算。
+    """
+    out: dict[str, fm.LiveBar] = {}
+    for symbol, row in (quotes or {}).items():
+        if not isinstance(row, dict):
+            continue
+        prev = _as_num(row.get("prev_close"))
+        last = _as_num(row.get("last_price"))
+        if not prev or prev <= 0 or not last or last <= 0:
+            continue
+        out[str(symbol)] = fm.LiveBar(
+            prev_close=prev,
+            close=last,
+            open=_as_num(row.get("open")),
+            high=_as_num(row.get("high")),
+            low=_as_num(row.get("low")),
+            volume=_as_num(row.get("volume")),
+            turnover=_as_num(row.get("turnover")),
+        )
+    return out
+
+
+@dataclass
+class Prepared:
+    """一次选股要交给公式引擎的**全部输入**（含"用哪套 K 线口径"的结论）。
+
+    为什么打包成一个对象而不是让每个调用方自己拼：试算（`preview_hits`）与建池
+    （`formula_group.run_enabled_formulas`）必须**完全同口径** —— 要是各写一份，
+    迟早出现"点【运行】选出 3 只、点【开始选股】选出 1 只"这种没法解释的差异。
+    """
+    #: 库里最新的行情日（K 线口径的"今天"）
+    kline_day: str | None = None
+    #: 实时口径的"今天"；**None = 本次没用实时**（用它当"要不要接一根"的开关）
+    today: str | None = None
+    #: `{代码: LiveBar}`：实时口径下要接到日线后面的那一根
+    live_bars: dict[str, fm.LiveBar] = field(default_factory=dict)
+    #: `{代码: {扩展字段: 值}}`（市值/换手/现价/现涨幅/现量比/现换手）
+    extra: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: `{行业名: 上榜次数}`（热门行业）
+    hot: dict[str, int] = field(default_factory=dict)
+    #: **给用户看的一句口径说明**（界面上直接显示；永远非空）
+    caliber: str = ""
+    #: 影响"选不选得出来"的提示（典型：快照取不到 ⇒ 用到那些字段的条件一律不成立）。
+    #: 建池那条路把它当**错误**（`FormulaRun.errors`）：它的意思是"这次的条件算不出来"，
+    #: 而不是"程序跑得好好的" —— 也正因为如此，定时任务会因此安排一次补跑。
+    notes: list[str] = field(default_factory=list)
+    #: **告知**（不是错误）：典型是"盘中想用实时数据，但取不到快照 → 已退回日 K 线"。
+    #: 为什么必须与 `notes` 分开：建池的"成功/失败"判据是"errors 是否为空"
+    #: （`scheduler.Scheduler._report_succeeded`）—— 把一句"退回了日 K"塞进 errors，
+    #: 会让一次**正常完成**的选股被判成失败（表现：明明选出了票、推送也发了，
+    #: 状态却写"未成功"，还要在补跑时间再跑一遍）。
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def display_day(self) -> str | None:
+        """对外显示的"行情日"：实时口径下就是今天（否则用户会以为选的是昨天的盘）。"""
+        return self.today or self.kline_day
+
+
+def _live_decision(cfg: Any, db_path: str | Path, kline_day: str | None,
+                   today: str, moment: datetime) -> tuple[bool, str]:
+    """要不要走盘中实时 → `(走不走, 不走的理由)`（理由进那句口径说明）。
+
+    ⚠️ 判据的顺序要紧：**先看库有没有数据**，再去看交易日历。`is_trading_day()` 会打开
+    本地库（`storage.connect`），而 sqlite 对**不存在的文件**是"连上就建一个空库" ——
+    于是"库还没下载"这件事会被后面 `load_series` 那句"本地数据库不存在"悄悄变成
+    "库是空的、一只票都读不到"（错误信息对不上，还会凭空多出一个空 db 文件）。
+    """
+    if cfg is None:
+        return False, "没有配置（拿不到数据来源）"
+    if not intraday_pick_live(cfg):
+        return False, "「盘中选股用实时数据」已关"
+    # 延迟导入：`intraday` 会拉起数据层一大片（hithink/engine/storage），
+    # 而这个判据只有"真要跑选股"时才用到；模块级导入会让 `import formulas`
+    # 顺带把网络栈与数据库层拉进来（成绩单/公式列表页用不到它们）。
+    from laoa_trader import intraday
+
+    if not intraday.in_session(moment):
+        return False, f"现在 {moment:%H:%M} 不是开盘时间"
+    if kline_day is None:
+        # 库不存在 / 库是空的：连"最近行情日"都没有，谈不上盘中口径
+        return False, "本地还没有日线数据"
+    if kline_day >= today:
+        return False, f"库里已经有 {today} 这根 K 线了"
+    if not intraday.is_trading_day(str(db_path), today):
+        # 休市日（周末/节假日）在 9:30–15:00 之间也是"不在交易时段"的 —— 只看钟点会把
+        # 上一个交易日的快照当成"今天的盘"，选出一批 pct=0 的假信号
+        return False, "今天不在交易日历里（休市）"
+    return True, ""
+
+
+def prepare_inputs(
+    cfg: Any,
+    db_path: str | Path,
+    formulas: Sequence[fm.Formula] | None = None,
+    symbols: Sequence[str] | None = None,
+    *,
+    now: datetime | None = None,
+) -> Prepared:
+    """按"现在是不是开盘时间"准备这次选股的全部输入（K 线口径 + 扩展字段）。
+
+    Args:
+        cfg: 配置（None = 没有配置：不联网、不取快照，纯日 K 口径）。
+        db_path: 本地库。
+        formulas: 这一轮要跑的公式。**它们的字段决定要不要取快照**：一条都不用到
+            快照字段（市值/换手/现价/现涨幅/现量比/现换手）时，只有"盘中实时口径"
+            会去取那一趟；否则**一个请求都不发**（与"没这个功能"完全一样）。
+        symbols: 只关心这些代码（None = 库里全部）。
+        now: 注入的"现在"（测试用；None = 真时间，见 `caliber_now`）。
+
+    Returns:
+        `Prepared`（口径结论 + 引擎要的全部输入）。
+    """
+    moment = caliber_now() if now is None else now
+    today = moment.strftime("%Y-%m-%d")
+    kline_day = latest_trading_day(db_path)
+    want_snapshot = any(set(f.fields) & set(SNAPSHOT_FIELDS) for f in (formulas or ()))
+    live, why = _live_decision(cfg, db_path, kline_day, today, moment)
+
+    prepared = Prepared(kline_day=kline_day)
+    quotes: dict[str, dict] = {}
+    targets: list[str] = []
+    if cfg is not None and (live or want_snapshot):
+        # 取快照必须先知道"要哪些票"：库里给了代码就用它，没给就是全市场
+        # （`load_series` 是逐只 yield 的生成器，拿不到代码表，见 `all_symbols`）
+        targets = list(symbols) if symbols is not None else all_symbols(db_path)
+        quotes = _quote_rows(cfg, targets)
+
+    if live:
+        prepared.live_bars = live_bars_from_quotes(quotes)
+        if not prepared.live_bars:
+            # 想实时却拿不到数据：退回日 K，并且**必须说清**（不然用户看到的是
+            # "条件成立却一只都不出"，只能怀疑策略写错了）。
+            # 走 `warnings` 而不是 `notes`：这是一句**告知**，这次选股本身是正常完成的
+            # （建池那边把 `notes` 当错误，会让一次成功的选股被判成"未成功"并安排补跑）。
+            live, why = False, "盘中取不到实时快照"
+            prepared.warnings.append(
+                "⚠️ 现在是开盘时间，本该按实时数据选股，但取不到实时快照 → "
+                "本次已退回日 K 线口径（收盘数据）。用到「现价 / 现涨幅 / 现量比 / 现换手」"
+                "的条件不会成立；市值/换手也一样取不到。"
+                "可稍后重试，或在「系统设置 → 数据来源」里确认来源与 Key 可用。"
+            )
+        else:
+            prepared.today = today
+
+    if want_snapshot and cfg is not None:
+        # 快照已经取过就**直接复用**：同一轮里再取一次会看到另一个时刻的盘面，
+        # 于是 K 线里的涨幅与 `现涨幅` 对不上（这类不一致用户只能怀疑程序坏了）。
+        # 传 `quotes` 而不是 `quotes or None`：空字典的语义是"取过了、什么都没有"，
+        # 换成 None 会让它再取一趟（正是要避免的那件事）。
+        extra, note = snapshot_extra(cfg, list(targets), quotes=quotes)
+        prepared.extra = extra
+        if note:
+            prepared.notes.append(note)
+
+    prepared.hot = hot_industry_counts(db_path) if formulas and any(
+        set(f.fields) & set(HOT_FIELDS) for f in formulas
+    ) else {}
+
+    if prepared.today:
+        # ⚠️ 这句是**纯文本**（进 QLabel 的提示区、进选股完成的结论），不是 markdown ——
+        # 写 `**加粗**` 的话用户看到的就是两个星号（用户明确说过不喜欢这种星号）。
+        prepared.caliber = (f"📊 本次口径：盘中实时（{moment:%H:%M}，"
+                            f"用现价拼出今天 {today} 这根 K 线）")
+    else:
+        prepared.caliber = (f"📊 本次口径：日 K 线（最后一根 {kline_day or '无'}；"
+                            f"{why}）")
+    return prepared
+
+
 def preview_hits(
     formula: fm.Formula,
     db_path: str | Path,
@@ -702,6 +951,7 @@ def preview_hits(
     start: str | None = None,
     symbols: Sequence[str] | None = None,
     cfg: Any = None,
+    now: datetime | None = None,
 ) -> dict:
     """在**当前本地库**上跑一遍公式，返回最新行情日的命中清单（只读）。
 
@@ -709,19 +959,26 @@ def preview_hits(
     最后一根 K 线早于全市场最新行情日的票会被跳过（停牌/退市：它的"最后一根"
     是旧的，拿它当"今天选中"是错的）。
 
-    联网与否：公式里用到 `流通市值` / `换手率` 时才会取**一趟**实时快照
-    （这两个数日线里没有，见 `snapshot_extra`）；不用它们的公式**一个请求都不发**。
+    **K 线口径按时间自动切**（用户 2026-09-23 定的内置规则，见 `prepare_inputs`）：
+    开盘时间（9:30–11:30 / 13:00–15:00 的交易日）里跑 → 用实时快照拼出"今天"这一根，
+    `C` / `C/REF(C,1)-1` / `量比()` 于是都是**盘中口径**；不在开盘时间 → 用库里的日 K。
+    取不到实时快照时退回日 K，并在 `notes` 里说清（`caliber` 那一行也写明是哪套口径）。
+
+    联网与否：公式里用到 `流通市值` / `换手率` 等快照字段、或者此刻正走实时口径时，
+    才取**一趟**实时快照（这两个数日线里没有，见 `snapshot_extra`）；
+    收盘后不用这些字段的公式**一个请求都不发**。
 
     Returns:
-        {"date": 行情日, "count": 命中数, "hits": [{"symbol","name"}...],
-         "shown": 展示数, "scanned": 扫过的票数, "skipped": 数据不足的票数,
-         "errors": [中文错误...], "notes": [全局提示...]}
+        {"date": 行情日（实时口径下就是今天）, "count": 命中数,
+         "hits": [{"symbol","name"}...], "shown": 展示数,
+         "scanned": 扫过的票数, "skipped": 数据不足的票数,
+         "errors": [中文错误...], "notes": [全局提示...],
+         "caliber": 这次用的 K 线口径（一句中文，界面直接显示）}
 
         `hits` 是**全量**命中清单（按代码排序、不截断），`limit` 只决定 `shown`：
         界面按 `shown` 截断**显示**（提示区一行放不下 60 只票），而【导出选股结果】
         要写**完整**的一份 —— 给用户的文件里少几只，是最难被发现的那种错。
     """
-    day = latest_trading_day(db_path)
     hits: list[dict] = []
     errors: list[str] = []
     #: **全局提示**（与"某只票算不出来"分开）：典型是"市值/换手现在取不到"这类
@@ -731,29 +988,27 @@ def preview_hits(
     notes: list[str] = []
     scanned = 0
     skipped = 0
-    # 两类"额外字段"按需准备，**用到才做**：
-    #   * 快照字段（流通市值/换手率）要联网，取一趟；
-    #   * 热门行业读库就能算（不联网），算一次。
-    # 两者互不依赖：公式只用热门行业时不该去取快照（也就一个请求都不发）。
-    extra: dict[str, dict[str, float]] = {}
-    hot: dict[str, int] = {}
-    note = ""
-    if cfg is not None and set(formula.fields) & set(SNAPSHOT_FIELDS):
-        targets = list(symbols) if symbols is not None else None
-        if targets is None:
-            targets = all_symbols(db_path)
-        extra, note = snapshot_extra(cfg, targets)
-        if note:
-            notes.append(note)
-    if set(formula.fields) & set(HOT_FIELDS):
-        hot = hot_industry_counts(db_path)
-    for series in fm.load_series(db_path, symbols=symbols, start=start, extra=extra,
-                                 hot_industries=hot):
+    # 输入（K 线口径 + 扩展字段）全部由 `prepare_inputs` 一份逻辑给 —— 建池那条路
+    # （`formula_group.run_enabled_formulas`）用的是**同一个函数**，所以
+    # 【运行】与【开始选股】不可能出现两套口径。
+    prepared = prepare_inputs(cfg, db_path, [formula], symbols, now=now)
+    day = prepared.kline_day
+    # 试算这里两类提示都并进 `notes`（界面对它们一视同仁：都渲染成单独一行）——
+    # 「建池」那条路才需要分开（那边 errors 是"成功/失败"的判据，见 `Prepared`）
+    notes.extend(prepared.notes)
+    notes.extend(prepared.warnings)
+    for series in fm.load_series(
+        db_path, symbols=symbols, start=start, extra=prepared.extra,
+        hot_industries=prepared.hot,
+        today=prepared.today, live_bars=prepared.live_bars, kline_day=prepared.kline_day,
+    ):
         # 数据不够长：公式的滚动窗口一定全是缺值 ⇒ 不可能出信号，直接跳过（省时间）
         if len(series.date) < formula.min_history:
             skipped += 1
             continue
-        if day is not None and series.date[-1] != day:
+        # 最后一根必须是"全市场最新行情日"；实时口径下就是**今天那一根**
+        # （没接上今天那根的票照旧按日线判，见 `load_series`）
+        if day is not None and series.date[-1] not in (day, prepared.today):
             skipped += 1
             continue
         scanned += 1
@@ -768,7 +1023,9 @@ def preview_hits(
             hits.append({"symbol": series.symbol, "name": series.name})
     hits.sort(key=lambda hit: hit["symbol"])
     return {
-        "date": day,
+        # 实时口径下"行情日"就是**今天**：这一轮选的正是此刻的盘面，
+        # 报成"最近交易日 2026-09-22"会让用户以为程序在拿昨天的收盘数据选股
+        "date": prepared.display_day,
         "count": len(hits),
         # 全量（界面自己按 `shown` 截断显示，导出要全量）
         "hits": hits,
@@ -777,6 +1034,7 @@ def preview_hits(
         "skipped": skipped,
         "errors": errors,
         "notes": notes,
+        "caliber": prepared.caliber,
     }
 
 
@@ -833,6 +1091,9 @@ def run_scorecard(
     errors: list[str] = []
     scanned = 0
 
+    # ⚠️ 成绩单**永远只用库里的日 K**（不带 `today`/`live_bars`）：它算的是"这条公式
+    # 在历史上行不行"。塞一根盘中的"今天"进去，等于拿一个还没有收盘结果的样本去算胜率
+    # （而且同一份历史每次点都得到不同的数）。实时口径只属于【运行】/【开始选股】那条路。
     series_iter = fm.load_series(db_path, symbols=symbols, start=start)
     # 进度需要"总数"，而 `load_series` 是生成器（不知道总数）—— 先按库里的代码数
     # 报总步数：比"进度条永远停在 0%"好得多，且不额外读行情。
@@ -994,7 +1255,12 @@ __all__ = [
     "HOT_WINDOW_DAYS",
     "SNAPSHOT_FIELDS",
     "SNAPSHOT_FIELD_KEYS",
+    "Prepared",
+    "caliber_now",
     "hot_industry_counts",
+    "intraday_pick_live",
+    "live_bars_from_quotes",
+    "prepare_inputs",
     "all_symbols",
     "snapshot_extra",
     "bundled_formula_dir",

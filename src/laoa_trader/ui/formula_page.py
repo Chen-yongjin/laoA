@@ -1934,6 +1934,11 @@ if QT_AVAILABLE:
             if shown is None:      # 老/替身返回值里没有 `shown` 时：全列（宁可多列，不少列）
                 shown = len(hits)
             hits = hits[:shown]
+            # 「这次用的是哪套 K 线」**必须写在最前面**：同一份公式、同一个按钮，
+            # 盘中（实时口径）与收盘后（日 K）选出来的票本来就会不一样，
+            # 不写这一行用户只会以为程序不稳定（内置规则见 `formulas.prepare_inputs`）。
+            caliber = str(result.get("caliber") or "")
+            prefix = (caliber + "\n") if caliber else ""
             if result["count"]:
                 # 标的写法与全项目一致：**半角** `名称(代码)`（改版方案第四节），
                 # 与「自选股池」表格、推送正文、错误信息里的写法逐字相同
@@ -1946,6 +1951,7 @@ if QT_AVAILABLE:
             else:
                 text = (f"最近交易日 {result['date']}：没有命中"
                         f"（扫了 {result['scanned']} 只，{result['skipped']} 只因数据不足跳过）")
+            text = prefix + text
             hint = formulas_lib.limit_up_hint(formula)
             if hint:
                 text += "\n⚠️ " + hint
@@ -2301,13 +2307,24 @@ if QT_AVAILABLE:
             """
             errors: list[str] = []
             picked: list[dict] = []
+            caliber = ""
+            warnings: list[str] = []
             if isinstance(rows, dict):
                 data_date = data_date or rows.get("data_date")
                 picked = [r for r in (rows.get("pool") or []) if isinstance(r, dict)]
                 errors = [str(e) for e in (rows.get("errors") or [])]
+                # 这一轮用的是哪套 K 线（盘中实时 / 日 K）：结果页上也要看得见，
+                # 否则"同一份策略昨天选出 3 只、今天选出 7 只"没有解释
+                formulas = rows.get("formulas")
+                if isinstance(formulas, dict):
+                    caliber = str(formulas.get("caliber") or "")
+                    # 口径类的告知（如"盘中取不到快照，已退回日 K"）：它们**不是错误**
+                    # （不在 `report["errors"]` 里），但用户得知道"这一轮为什么没用实时数据"
+                    warnings = [str(w) for w in (formulas.get("warnings") or [])]
             elif rows is not None:
                 picked = [r for r in rows if isinstance(r, dict)]
-            self._fill_result(picked, data_date=data_date, errors=errors)
+            self._fill_result(picked, data_date=data_date, errors=errors,
+                              caliber=caliber, warnings=warnings)
             self.show_result_page()
             logger.info(
                 "本次选股结果已显示在「策略选股」页：%d 只（行情日 %s）",
@@ -2323,11 +2340,17 @@ if QT_AVAILABLE:
                 return str(row.get("strategy") or row.get("strategies") or "—")
 
         def _fill_result(self, picked: list[dict], *, data_date: Any = None,
-                         errors: list[str] | None = None) -> None:
+                         errors: list[str] | None = None,
+                         caliber: str = "", warnings: list[str] | None = None) -> None:
             """把池子行铺进结果表，并写好那句结论。
 
             **只列"选出来的"票**（带来源的行）：`run_daily` 的池子里还会混进自选股
             （那是"我自己加的"，不是"这次选出来的"），口径与建池那份清单一致。
+
+            `caliber` 是这一轮用的 K 线口径（`formulas.prepare_inputs` 给的那句话）：
+            它显示在结论下面，用户才知道"这次是按盘中实时算的，还是按收盘日 K 算的"。
+            `warnings` 是口径类的**告知**（如"盘中取不到快照，已退回日 K"）：
+            它们与 `errors` 分开（不是失败），但都要让人看见。
             """
             rows = [r for r in picked
                     if r.get("symbol") and str(r.get("strategy") or r.get("strategies") or "")]
@@ -2379,9 +2402,16 @@ if QT_AVAILABLE:
                     "可以点【返回策略列表】改一改再跑一轮。"
                 )
             for message in (errors or []):
-                # 出错的那几条（数据闸门拦住、公式出错…）直接说在结论下面 ——
+                # 出错的那几条（数据闸门拦住、策略出错…）直接说在结论下面 ——
                 # 用户点完【开始选股】最想知道的就是"为什么没结果"
                 self.result_hint.setText(self.result_hint.text() + "\n❌ " + message)
+            for warning in (warnings or []):
+                # 口径类的告知（不是错误）：也写在结论下面，让"这一轮为什么没用实时数据"
+                # 有地方看（它不在 `errors` 里，因为选了票、推送也发了，这一轮是成功的）
+                self.result_hint.setText(self.result_hint.text() + "\n" + warning)
+            if caliber:
+                # 口径写在最后一行（它是"这一轮怎么算的"，不是错误也不是结论）
+                self.result_hint.setText(self.result_hint.text() + "\n" + caliber)
 
         # ── 结果表：实时数据 + 每一行的【加入自选】 ──────────────────
 
