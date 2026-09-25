@@ -1088,7 +1088,7 @@ def format_message(
     lines = []
     for alert in sorted(alerts, key=lambda a: a["kind"]):
         label = KIND_LABELS.get(alert["kind"], alert["kind"])
-        # 标的写法 **半角括号**：与界面两张表的列头 `名称(代码)` 一致（改版方案第四节）
+        # 标的写法 **半角括号**：与界面两张表的列头 `名称(代码)` 一致（开发文档）
         lines.append(f"{label}｜{alert['name']}({alert['symbol'] or '—'}){alert['detail']}")
         symbol = alert.get("symbol") or ""
         if not symbol or not alert.get("price"):

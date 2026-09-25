@@ -6,7 +6,7 @@
             （下面是"没有数据"这一类**一句话提示**，以及只在任务运行时出现的细进度条）
     页签：大盘概览 / 自选股池 / 持仓监控 / 策略选股 / 系统设置
 
-为什么要这样改（见 `docs/改版方案.md` 一、二）
+为什么要这样改（见 `docs/开发文档.md` 第 1、2 节）
 --------------------------------------------
 - 原来顶部是"三行状态 + 七个按钮"，同一件事说三遍，而按钮又分不清"数据"与"选股"；
   现在**标题区不做任何操作**：下载/刷新/检查在「系统设置」，选股在「策略选股」，
@@ -111,7 +111,7 @@ WATCH_HEADERS: tuple[str, ...] = (
 WATCH_ADDED_COLUMN = WATCH_HEADERS.index("加入日期")
 WATCH_PNL_COLUMN = WATCH_HEADERS.index("盈亏")
 #: 「持仓监控」的列。**没有"数量"**：用户给定的字段只有 代码 + 成本价 + 备注
-#: （`quantity` 留在库里做兼容，见 `docs/改版方案.md` 第五节）。
+#: （`quantity` 留在库里做兼容，见 `docs/开发文档.md`）。
 #: 同样是 2026-09-17 加的两列 + 提醒改监控开关（与上面同一套口径，两张表要一致）。
 POSITION_HEADERS: tuple[str, ...] = (
     "名称(代码)", "成本价", "现价", "涨幅", "市值", "换手",
@@ -4396,7 +4396,7 @@ if QT_AVAILABLE:
 
             为什么是"不复权"：现价这一列要与用户手上的**真实成本**直接比 ——
             后复权价在送股/分红之后会整体缩放（10 送 10 就是两倍），
-            拿它算「盈亏比例」正是这次要修掉的 bug（见 `docs/改版方案.md` 第五节）。
+            拿它算「盈亏比例」正是这次要修掉的 bug（见 `docs/开发文档.md`）。
 
             **只查没有实时快照的那些票**：交易时段里绝大多数票都有实时价，
             为它们去查本地日线（每只票一次索引范围扫描）纯属白做 ——
@@ -4677,7 +4677,7 @@ if QT_AVAILABLE:
                 cap_item, turn_item = self._snapshot_cells(symbol)
                 alert = alerts.get(symbol)
                 row_tip = self._row_tooltip(row, monitor_off=symbol in monitor_off)
-                # 名称(代码)：**半角括号**，与 `docs/改版方案.md` 第四节的口径一致
+                # 名称(代码)：**半角括号**，与 `docs/开发文档.md`的口径一致
                 name_item = self._tag_item(
                     f"{row.get('name') or ''}({symbol})".strip(), symbol, row_tip
                 )

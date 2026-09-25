@@ -607,7 +607,7 @@ def cli(argv: list[str] | None = None) -> int:
             group = str(row.get("group_label") or "—")
             horizon = int(row.get("horizon") or 0)
             group_text = f"{group}（T+{horizon}）" if horizon and group != "—" else group
-            # 标的写法与界面两张表一致：**半角**括号 `名称(代码)`（见 docs/改版方案.md 第四节）
+            # 标的写法与界面两张表一致：**半角**括号 `名称(代码)`（见 docs/开发文档.md）
             print(f"  {i:>2}. {row['name']}({row['symbol']})｜"
                   f"来源 {row.get('source_label') or '—'}｜组别 {group_text}｜"
                   f"{row.get('industry') or '—'}｜{row.get('reason') or ''}{note}")

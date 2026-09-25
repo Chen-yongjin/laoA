@@ -17,7 +17,7 @@ workflow 里的 PyInstaller 步骤**都保留**，作为备用路径（Nuitka �
 Release 附件全要跟着改）：
 * 目录：`dist/LaoniuTrader/`
 * 可执行文件：`老牛选股.exe`（Windows）/ `老牛选股`（其它平台）
-* 随包数据（`config.example.toml`、`README.md`、`快速验收.md`、
+* 随包数据（`config.example.toml`、`README.md`、`docs/验收清单.md`、
   `laoa_trader/assets/`、`formulas/`）放在**产物目录里**，
   位置与 `build/laoa_trader.spec` 的 `DATAS` 一一对应 ——
   路径解析统一走 `laoa_trader.runtime`，别在这里另发明一套。
@@ -52,7 +52,7 @@ EXE_NAME = "老牛选股"
 DATA_FILES: tuple[tuple[Path, str], ...] = (
     (PROJECT_ROOT / "config.example.toml", "config.example.toml"),
     (PROJECT_ROOT / "README.md", "README.md"),
-    (PROJECT_ROOT / "快速验收.md", "快速验收.md"),
+    (PROJECT_ROOT / "docs" / "验收清单.md", "验收清单.md"),
 )
 DATA_DIRS: tuple[tuple[Path, str], ...] = (
     (SRC / "laoa_trader" / "assets", "laoa_trader/assets"),

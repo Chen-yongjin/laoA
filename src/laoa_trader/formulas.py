@@ -1009,7 +1009,7 @@ def preview_hits(
             mask = formula.eval(series)
         except (fm.FormulaError, fm.FormulaDataError) as exc:
             # 一只票算不出来不该让整次试算失败（与选股链路的隔离口径一致）
-            # 标的写法统一成**半角** `名称(代码)`（见 docs/改版方案.md 第四节）
+            # 标的写法统一成**半角** `名称(代码)`（见 docs/开发文档.md）
             errors.append(f"{series.name}({series.symbol})：{exc}")
             continue
         if bool(mask[-1]):
@@ -1101,7 +1101,7 @@ def run_scorecard(
             mask = formula.eval(series)
         except (fm.FormulaError, fm.FormulaDataError) as exc:
             # 单只票的缺失值/坏数据只记一笔，不影响其它票（也不让成绩单整体失败）
-            # 标的写法统一成**半角** `名称(代码)`（见 docs/改版方案.md 第四节）
+            # 标的写法统一成**半角** `名称(代码)`（见 docs/开发文档.md）
             errors.append(f"{series.name}({series.symbol})：{exc}")
             continue
         dates = series.date

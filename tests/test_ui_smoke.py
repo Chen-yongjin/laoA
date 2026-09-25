@@ -222,7 +222,7 @@ def _symbols_of(table) -> list[str]:
 
 
 def test_window_renders_all_panels(window, qapp) -> None:
-    # **五个页签**，顺序就是用户给定的顺序（见 `docs/改版方案.md` 第二节）
+    # **五个页签**，顺序就是用户给定的顺序（见 `docs/开发文档.md`）
     assert window.tabs.count() == 5
     assert [window.tabs.tabText(i) for i in range(5)] == list(ui_app.TAB_TITLES)
     # 2026-09-17：第一个页签从「全市概览」改回「大盘概览」（用户要求）——
@@ -2532,7 +2532,7 @@ def test_pick_result_is_shown_on_the_formula_page_again(window, qapp) -> None:
 def test_alert_texts_use_halfwidth_parens(window) -> None:
     """提醒相关的**所有用户可见文本**都是半角 `名称(代码)`：表格目标列 / 浮窗行 / 详情。
 
-    全项目只有一种写法（`docs/改版方案.md` 第四节）：两处表格的列头早就写的是
+    全项目只有一种写法（`docs/开发文档.md`）：两处表格的列头早就写的是
     `名称(代码)`，推送正文、浮窗、详情再写全角就等于同一只票在屏幕上长得不一样。
     机器可读的格式（CSV/JSON/库字段）**一个都没动**。
     """
