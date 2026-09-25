@@ -92,6 +92,10 @@ QUOTE_FIELDS: tuple[str, ...] = (
     "symbol", "name", "last_price", "prev_close", "open",
     "high", "low", "volume", "turnover", "pct",
     "turnover_rate", "circ_mktcap",
+    # 量比（倍）：2026-09-23 加 —— 公式里的「盘中快照」字段 `现量比` 要它。
+    # 同花顺的快照端点**没有**这一项，所以它同时进了 `SUPPLEMENT_FIELDS`：
+    # 主源给不出来时按字段往后找来源补（公开源/东方财富都提供）。
+    "volume_ratio",
 )
 
 
@@ -502,7 +506,8 @@ def snapshot_map(cfg: Any, symbols: list[str] | None = None) -> dict[str, dict]:
 #: （官方文档 `vendor/Financial-API/docs/api/endpoints-prices.md` 的"响应字段"表写得很死；
 #: 全项目能拿到流通市值的只有竞价端点 `float_market_cap`，那要求正处竞价时段）。
 #: 用户实报过："新加入的市值和换手，都没有数据" —— 因为他配了 Key、走的是同花顺主源。
-SUPPLEMENT_FIELDS: tuple[str, ...] = ("turnover_rate", "circ_mktcap")
+#: `volume_ratio`（量比）同样是主源给不出来的：同花顺 snapshot 只回价量那几个字段。
+SUPPLEMENT_FIELDS: tuple[str, ...] = ("turnover_rate", "circ_mktcap", "volume_ratio")
 
 
 def supplement_map(

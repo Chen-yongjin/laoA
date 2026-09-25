@@ -90,7 +90,7 @@ PET_SHADOW_ALPHA = 34
 #   * **持仓监控**：8 行，成本价与现价自洽（盈亏 = 现价/成本 − 1，由 `_align_position_costs`
 #     在抓图前回写保证），盈亏 −5%~+20%，止损/止盈位按成本 ±8%/±15%（见 `main()` 里设的比例）。
 #   * **选股结果**：12 行，清一色 `尾盘选股策略`（尾盘策略刚跑完一轮的样子）。
-#   * **大盘概览**：像"略偏强的一天"（上涨 2600 / 下跌 2000 家、涨停 52、跌停 11、炸板 24、
+#   * **大盘概览**：像"略偏强的一天"（上涨 3120 / 下跌 2020 / 平盘 420，合计 5560、涨停 52、跌停 11、炸板 24、
 #     两市成交 1.6 万亿），板块用真实板块名，且板块名与本地行业同名（否则涨停/跌停家数是 `—`）。
 #
 # 为什么用"真实股票名 + 编的行情"这个组合：名字配错（比如写"机器人龙头 600001"）散户一眼
@@ -484,7 +484,7 @@ def _fake_market_client():
     """概览用假客户端：**数字按"略偏强的普通交易日"编**（不联网、每次跑都一样）。
 
     口径（与 `DEMO_STOCKS` 上头那段注释是一套，改的时候一起看）：
-      * 涨跌家数：4800 只里 **上涨 2600 / 下跌 2000 / 平盘 200**（24 只一循环：13 涨 10 跌 1 平）；
+      * 涨跌家数：全市场 **5560 只**里 上涨 3120 / 下跌 2020 / 平盘 420（沪 2300 / 深 3000 / 北 260）；
       * 涨停 52 / 跌停 11 / 炸板 24（走 `totals`，页面直接显示这三个数）；
       * 沪深成交额 ≈ 1.6 万亿 —— 由下面**上证与深成两行的 turnover 相加**得出，别只改一处；
       * 宽基指数：上证 3xxx、深成 1xxxx、创业板 2xxx、科创50、上证50、中证2000，
@@ -496,19 +496,35 @@ def _fake_market_client():
     # 涨跌幅的取值池：**故意各放几个接近 ±9.9% 的**，这样"涨停 52 家"看起来有出处
     up_values = (0.42, 1.86, 3.24, 6.15, 9.92, 0.78, 2.55, 4.31, 1.12, 7.42, 0.35, 5.08, 2.02)
     down_values = (-0.31, -1.24, -2.87, -5.63, -9.87, -0.72, -1.95, -3.44, -0.55, -7.15)
+
+    # ⚠️ 家数必须与**真实市场量级**对得上：A 股全市场约 5560 只（本项目实测口径），
+    # 所以三个数加起来要 ≈5560 —— 第一版只造了 4800 个样本、而且分页尺寸没和引擎对齐
+    # （`market.BREADTH_PAGE_SIZE = 1000`，页面却给了 2400 一项），界面上只数到 2400 只，
+    # 显示成"上涨 1300 / 下跌 1000"，主人一眼就看出假。
+    # 现在的口径：上涨 3120 + 下跌 2020 + 平盘 420 = 5560（略偏强的普通一天），
+    # 其中涨停 52 家算在上涨里、跌停 11 家算在下跌里（见下面 totals），不矛盾。
+    up_n, down_n, flat_n = 3120, 2020, 420
+    # 三个市场的代码段分开造，看着像真的（沪 ≈2300 / 深 ≈3000 / 北交所 ≈260）
+    exchange_plan = (("SH", 2300, "600%03d.SH"), ("SZ", 3000, "00%04d.SZ"),
+                     ("BJ", 260, "83%04d.BJ"))
+    catalogue: list[str] = []
+    for _ex, count, pattern in exchange_plan:
+        catalogue.extend(pattern % i for i in range(1, count + 1))
+
     items: list[dict] = []
-    for i in range(4800):
-        slot = i % 24
-        if slot < 13:
-            pct = up_values[slot % len(up_values)]
-        elif slot < 23:
-            pct = down_values[(slot - 13) % len(down_values)]
+    for i, thscode in enumerate(catalogue):
+        if i < up_n:
+            pct = up_values[i % len(up_values)]
+        elif i < up_n + down_n:
+            pct = down_values[(i - up_n) % len(down_values)]
         else:
             pct = 0.0
-        items.append({"thscode": f"{600000 + i}.SH", "turnover": 6e7,
+        items.append({"thscode": thscode, "turnover": 6e7,
                       "volume": 8e4, "price_change_ratio_pct": pct})
-    pages = [{"item": items[:2400], "total": 4800},
-             {"item": items[2400:], "total": 4800}]
+
+    page_size = market.BREADTH_PAGE_SIZE
+    pages = [{"item": items[i:i + page_size], "total": len(items)}
+             for i in range(0, len(items), page_size)]
 
     rows = [
         # ── 宽基（点位是真实量级；涨跌幅 ±0.5% 以内）──
@@ -534,6 +550,9 @@ def _fake_market_client():
         totals={market.LIMIT_UP_PATH: 52, market.LIMIT_DOWN_PATH: 11,
                 market.LIMIT_BREAK_PATH: 24},
         rows=rows, pages=pages,
+        # ⚠️ 分页尺寸必须与引擎一致（`market.BREADTH_PAGE_SIZE`）：靠它把 offset 映射成页号，
+        # 对不上就会"只数到第一页"，家数直接少一半。
+        page_size=page_size,
     )
 
 

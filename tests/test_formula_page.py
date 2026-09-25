@@ -354,6 +354,20 @@ def _font_size(widget) -> int:
     return font.pointSize() if font.pointSize() > 0 else font.pixelSize()
 
 
+def test_palette_has_the_four_intraday_fields(page) -> None:
+    """右侧「变量」面板要有盘中的四个字段，且 tooltip 写清"盘中口径"这两条限制。
+
+    `现价 / 现涨幅 / 现量比 / 现换手` 是用户在盘中按当时快照筛股用的（2026-09-23 加）。
+    tooltip 必须写明：非交易时段取不到（条件不成立）、**没有历史、不能回测** ——
+    这两句是用户判断"为什么现在跑不出票"的唯一线索。
+    """
+    for name in ("现价", "现涨幅", "现量比", "现换手"):
+        assert name in page.palette_buttons, f"面板里缺少「{name}」按钮"
+        tip = page.palette_buttons[name].toolTip()
+        assert "盘中" in tip and "不能回测" in tip, (name, tip)
+        assert page.palette_buttons[name].text() == name
+
+
 def test_palette_covers_variables_functions_operators(page) -> None:
     tokens = set(page.palette_buttons)
     assert {"C", "O", "H", "L", "V", "AMO", "PRE", "INDUSTRY"} <= tokens
@@ -2393,8 +2407,11 @@ def test_preview_says_why_when_snapshot_is_unavailable(page, page_cfg, qapp,
     page.on_preview()
     _wait_preview(page, qapp)
 
-    assert "市值/换手" in page.hint_text
-    assert "只票算不出来" not in page.hint_text      # 不许说成一个假的票数
+    # 提示覆盖的字段变多了（含盘中的四个），断言按"那一类字段取不到"来钉，
+    # 并保留"不许说成一个假的票数"这条（那是逐票错误，混进来票数是假的）
+    assert "实时快照" in page.hint_text and "取不到" in page.hint_text
+    assert "现量比" in page.hint_text
+    assert "只票算不出来" not in page.hint_text
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -95,7 +95,8 @@ MARKET_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
 #:   `{"f2":1266.98,"f5":17554,"f6":2217338283.0,"f8":0.14,"f12":"600519",
 #:     "f21":1583828386835}`
 #: ）—— 请求里不写这两个字段名，服务端**就不会返回它们**，所以字段串必须一起改。
-SNAPSHOT_FIELDS = "f12,f14,f2,f3,f4,f5,f6,f15,f16,f17,f18,f8,f21"
+#: `f10` = **量比**（2026-09-23 加：盘中口径的公式要它；实测与腾讯 `[49]` 同一口径）
+SNAPSHOT_FIELDS = "f12,f14,f2,f3,f4,f5,f6,f15,f16,f17,f18,f8,f10,f21"
 
 #: 单只快照 `stock/get` 的字段（**分口径**，见模块头第 2 条）：
 #:   f43 现价 / f44 最高 / f45 最低 / f46 今开 / f47 成交量(手) / f48 成交额(元) /
@@ -156,7 +157,7 @@ MAX_PLAUSIBLE_PRICE = 10000.0
 UNIFIED_KEYS: tuple[str, ...] = (
     "symbol", "name", "last_price", "prev_close", "open",
     "high", "low", "volume", "turnover", "pct",
-    "turnover_rate", "circ_mktcap",
+    "turnover_rate", "circ_mktcap", "volume_ratio",
 )
 
 #: 元 → 亿（统一口径里市值一律是**亿**）。
@@ -362,6 +363,9 @@ def normalize_row(row: dict, caliber: str = CALIBER_YUAN) -> dict | None:
         # `f21` 是**元** → ÷1e8 成亿（实测 1583828386835 → 15838.28 亿）
         "turnover_rate": _num(row.get("f8")),
         "circ_mktcap": _yi(row.get("f21")),
+        # `f10` 量比（倍，无量纲）：与腾讯 `[49]` 同口径（实测同一只票两边一致）；
+        # 它给"盘中口径"的公式字段用（见 `formulas.SNAPSHOT_FIELDS`）
+        "volume_ratio": _num(row.get("f10")),
     }
 
 

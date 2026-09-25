@@ -566,7 +566,26 @@ def latest_trading_day(db_path: str | Path) -> str | None:
 
 
 #: 需要**实时快照**的公式字段（只有今天这一个值，见 `formula.EXTRA_FIELDS`）
-SNAPSHOT_FIELDS: tuple[str, ...] = ("流通市值", "换手率")
+#: 需要用**实时快照**才能算的公式字段（用到才去取一趟，见 `snapshot_extra`）。
+#:
+#: 分两类口径：
+#:   * 收盘型：`流通市值` / `换手率` —— 日线里没有，快照给的是"今天"的值；
+#:   * 盘中型（2026-09-23 加，用户："必须加进去啊"）：`现价` / `现涨幅` / `现量比` / `现换手`
+#:     —— 语义是"**现在这一刻**的盘面"，用户在盘中点【运行】/【开始选股】时按当时的快照算；
+#:     非交易时段取不到（条件不成立、一只都不出），而且**没有历史、不能回测**。
+SNAPSHOT_FIELDS: tuple[str, ...] = ("流通市值", "换手率", "现价", "现涨幅", "现量比", "现换手")
+
+#: 公式字段名 → 快照字典（`sources.QUOTE_FIELDS`）里的键名。
+#: 只有这一张表说了算：名字与键名对不上的症状是"字段永远是 NaN、一只都不出"，
+#: 而界面上完全看不出原因（与 `_FuncSpec.uses_fields` 那个坑同一类）。
+SNAPSHOT_FIELD_KEYS: dict[str, str] = {
+    "流通市值": "circ_mktcap",
+    "换手率": "turnover_rate",
+    "现价": "last_price",
+    "现涨幅": "pct",
+    "现量比": "volume_ratio",
+    "现换手": "turnover_rate",
+}
 
 #: 需要**热门行业**（读库算，不联网）的字段名
 HOT_FIELDS: tuple[str, ...] = ("热门行业",)
@@ -645,16 +664,17 @@ def snapshot_extra(
                 logger.info(f"补齐快照字段失败（市值/换手可能不全）：{exc}")
     extra: dict[str, dict[str, float]] = {}
     for symbol, row in (quotes or {}).items():
-        values = {name: row.get("circ_mktcap" if name == "流通市值" else "turnover_rate")
-                  for name in SNAPSHOT_FIELDS}
+        values = {name: row.get(SNAPSHOT_FIELD_KEYS[name]) for name in SNAPSHOT_FIELDS}
         values = {k: float(v) for k, v in values.items() if v is not None}
         if values:
             extra[symbol] = values
     if extra:
         return extra, ""
-    return {}, ("⚠️ 市值/换手这两个数现在取不到（没有实时行情快照），"
-                "用到它们的条件一律不成立 —— 所以可能一只都选不出来。"
-                "交易时段再试，或者在「系统设置 → 数据来源」里确认来源可用。")
+    return {}, ("⚠️ 需要实时快照的字段（流通市值 / 换手率 / 现价 / 现涨幅 / 现量比 / 现换手）"
+                "现在都取不到（没有行情快照），用到它们的条件一律不成立 —— 所以可能一只都选不出来。"
+                "交易时段再试，或者在「系统设置 → 数据来源」里确认来源可用。"
+                "（注意：`现价 / 现涨幅 / 现量比 / 现换手` 是**盘中口径**，只有盘中运行时才有值，"
+                "而且没有历史、不能回测。）")
 
 
 def all_symbols(db_path: str | Path) -> list[str]:
@@ -973,6 +993,7 @@ __all__ = [
     "HOT_FIELDS",
     "HOT_WINDOW_DAYS",
     "SNAPSHOT_FIELDS",
+    "SNAPSHOT_FIELD_KEYS",
     "hot_industry_counts",
     "all_symbols",
     "snapshot_extra",

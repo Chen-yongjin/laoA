@@ -1001,6 +1001,69 @@ def test_preview_hits_without_snapshot_fields_sends_no_request(
     assert calls == []
 
 
+def test_intraday_fields_use_the_snapshot_and_are_percentages(
+    formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """盘中的四个字段（现价/现涨幅/现量比/现换手）由快照喂进来，且**涨幅用百分数**。
+
+    用户 2026-09-23 要的"开盘 5 分钟后选股"就是这个：盘中点【运行】时按那一刻的快照算。
+    这里把 `pct=3.2` 注进去，公式写 `现涨幅>=1 AND 现涨幅<=5` —— 若哪天有人把
+    `pct` 当小数（0.032）映射，这条会立刻红（这正是最容易悄悄错的地方）。
+    """
+    calls = _fake_snapshot(monkeypatch, {
+        "600001": {"last_price": 12.5, "pct": 3.2, "volume_ratio": 6.1, "turnover_rate": 4.4},
+        "600002": {"last_price": 8.0, "pct": 0.4, "volume_ratio": 1.2, "turnover_rate": 1.1},
+        "600003": {"last_price": 30.0, "pct": 3.9, "volume_ratio": 7.0, "turnover_rate": 5.0},
+    })
+    formula = fm.compile_formula(
+        "现涨幅>=1 AND 现涨幅<=5 AND 现量比>5 AND 现换手>=3 AND 现换手<=8 AND 现价<20"
+    )
+
+    result = lib.preview_hits(formula, formula_db, cfg=formulas_cfg)
+
+    # 只有 600001 全中：600002 涨幅/量比/换手都不够，600003 现价 30 元被 `现价<20` 排除
+    assert [hit["symbol"] for hit in result["hits"]] == ["600001"]
+    assert calls and set(calls[0]) == {"600001", "600002", "600003"}
+
+
+def test_snapshot_is_fetched_only_for_the_fields_the_formula_actually_uses(
+    formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取快照的判据是**这条公式**用到的字段，而不是"表里有没有盘中字段"。
+
+    两条对照：只用日线字段 → 0 次请求；用到 `换手率` → 正好 1 次（一趟批量，
+    不是逐只票各取一次）。这条守着"别把快照变成无条件的开销"。
+    """
+    calls = _fake_snapshot(monkeypatch, {})
+
+    lib.preview_hits(fm.compile_formula("C>MA(C,5)"), formula_db, cfg=formulas_cfg)
+    assert calls == []
+
+    lib.preview_hits(fm.compile_formula("C>MA(C,5) AND 换手率>0"), formula_db,
+                     cfg=formulas_cfg)
+    assert len(calls) == 1
+
+
+def test_snapshot_field_keys_cover_every_snapshot_field() -> None:
+    """字段名 → 快照键名的映射表必须**覆盖全部** `SNAPSHOT_FIELDS`（漏一个就永远 NaN）。
+
+    这是本项目踩过两次的坑（`uses_fields` 漏登记、字段名与键名对不上）：症状都是
+    "公式条件永远不成立、一只都不出"，而界面完全看不出原因。
+    """
+    from laoa_trader.data import sources
+
+    assert set(lib.SNAPSHOT_FIELD_KEYS) == set(lib.SNAPSHOT_FIELDS)
+    for field, key in lib.SNAPSHOT_FIELD_KEYS.items():
+        assert key in sources.QUOTE_FIELDS, f"{field} → {key} 不在快照字段契约里"
+
+
+def test_intraday_fields_are_registered_in_the_engine() -> None:
+    """四个字段都进了引擎的白名单（否则解析期就报"未知字段"）。"""
+    for name in ("现价", "现涨幅", "现量比", "现换手"):
+        assert name in fm.EXTRA_FIELDS, name
+    fm.compile_formula("现量比>5")          # 能解析即算通过
+
+
 def test_preview_hits_says_so_when_the_snapshot_is_missing(
     formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1013,14 +1076,25 @@ def test_preview_hits_says_so_when_the_snapshot_is_missing(
     assert result["count"] == 0
     # 这句是**全局提示**（影响整次试算），不是"某只票算不出来" —— 放在 `notes` 里，
     # 界面才会把它单独渲染一行，而不是说成"1 只票算不出来"（票数是假的）
-    assert any("市值/换手" in note for note in result["notes"]), result["notes"]
+    # 2026-09-23 起这句话覆盖的字段变多了（流通市值/换手率 + 四个盘中字段），
+    # 所以断言改成"必须是实时快照那一类字段取不到"，并**另外**钉住盘中口径的说明 ——
+    # 两句都必须在，用户才知道"不是公式写错"且"盘中字段本来就只在盘中有值"。
+    joined = " ".join(result["notes"])
+    assert "实时快照" in joined and "取不到" in joined, result["notes"]
+    assert "现量比" in joined and "不能回测" in joined, result["notes"]
     assert result["errors"] == []
 
 
 def test_snapshot_extra_skips_symbols_without_values(formula_db: str,
                                                      formulas_cfg: Config,
                                                      monkeypatch: pytest.MonkeyPatch) -> None:
-    """快照里没有那两个数的票**不进 extra**（缺值由引擎按"条件不成立"处理）。"""
+    """快照里没值的票**不进 extra**（缺值由引擎按"条件不成立"处理）。
+
+    2026-09-23 起 `SNAPSHOT_FIELDS` 多了四个"盘中口径"字段（现价/现涨幅/现量比/现换手），
+    其中 `现换手` 与 `换手率` 同源（同一份 `turnover_rate`）—— 所以这里注入两个字段后，
+    extra 里会出现 `流通市值 / 换手率 / 现换手` 三项：**同源的两个名字都要有**，
+    否则用户写 `现换手` 会永远 NaN（而界面看不出原因）。
+    """
     _fake_snapshot(monkeypatch, {
         "600001": {"circ_mktcap": 50.0, "turnover_rate": 8.0},
         "600002": {"circ_mktcap": None, "turnover_rate": None},
@@ -1028,7 +1102,7 @@ def test_snapshot_extra_skips_symbols_without_values(formula_db: str,
 
     extra, note = lib.snapshot_extra(formulas_cfg, ["600001", "600002"])
 
-    assert extra == {"600001": {"流通市值": 50.0, "换手率": 8.0}}
+    assert extra == {"600001": {"流通市值": 50.0, "换手率": 8.0, "现换手": 8.0}}
     assert note == ""
 
 
