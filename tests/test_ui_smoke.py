@@ -851,20 +851,21 @@ def test_doctor_command_prints_report(cfg, capsys, tmp_path) -> None:
 
 
 def test_settings_tab_widgets_reflect_config(window) -> None:
-    """「系统设置」= **六组**（顺序固定），每组控件如实反映配置的当前值。
+    """「系统设置」= **五组**（顺序固定），每组控件如实反映配置的当前值。
 
-    组由用户给定（`SETTINGS_GROUPS`）：数据来源 → 通知方式 → 竞价扫描 → **选股口径** →
+    五组由用户给定（`SETTINGS_GROUPS`）：数据来源 → 通知方式 → 竞价扫描 →
     **T策略** → 其他。T策略那一组是用户拍板的名字（原来叫「持仓风险」，用户要求把
-    止损/止盈合并进来，原话：止盈止损比例给客户自己设置，在 T策略 中编辑）；
-    「选股口径」是 2026-09-23 加的：盘中选股用不用实时数据，**默认用**
-    （用户原话："开盘时间里运行的选股，都是实时的，不是开盘时间，采用 K 线"）。
+    止损/止盈合并进来，原话：止盈止损比例给客户自己设置，在 T策略 中编辑）。
     策略组/成员策略的启停**不在这一页**（按规格移到「策略选股」的列表里）。
+    「盘中使用实时数据」也**不在这一页、且全程序没有这个开关**：那是内置规则，
+    主人 2026-09-23 明确划掉（"不需要加开关，按照我说的规则来"）——
+    见 `test_no_switch_can_disable_the_intraday_caliber`（`tests/test_formula_lib.py`）。
     """
     from laoa_trader import config as config_mod
     from laoa_trader.ui import app as ui_app
 
     assert list(window.settings_sections) == list(ui_app.SETTINGS_GROUPS) == [
-        "数据来源", "通知方式", "竞价扫描", "选股口径", "T策略", "其他",
+        "数据来源", "通知方式", "竞价扫描", "T策略", "其他",
     ]
     for title, box in window.settings_sections.items():
         assert box.title_label.text() == title
@@ -990,18 +991,19 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
         assert len(box.toolTip()) >= 10                       # 每个阈值都写清"跟谁比、比多少"
     # 这七个控件**确实在「T策略」组里**（止损/止盈是用户要求合并进来的，
     # 只断言"窗口上有这些控件"是不够的 —— 它们可能在别的组里）。
-    # ⚠️ 按**组名**取，不要按下标：组会增减（2026-09-23 就在它前面插了「选股口径」）
+    # ⚠️ 按**组名**取，不要按下标：组会增减（2026-09-23 一度在它前面插过「选股口径」，
+    # 当天又被主人划掉 —— "不需要加开关，按照我说的规则来"）
     t_group = window.settings_sections["T策略"]
     assert t_group.title_label.text() == "T策略"
     for widget in (window.intraday_t_box, window.stop_loss_box, window.take_profit_box,
                    window.t_high_min_gain_box, window.t_high_pullback_box,
                    window.t_low_min_drop_box, window.t_low_rebound_box):
         assert t_group.isAncestorOf(widget) is True
-    # 选股口径那一组里就是那个勾选框，而且**默认勾上**（用户要的是"盘中一律实时"）
-    caliber_group = window.settings_sections["选股口径"]
-    assert caliber_group.isAncestorOf(window.caliber_live_box) is True
-    assert window.caliber_live_box.isChecked() is True
-    assert window.cfg.intraday_pick_live is True
+    # 「盘中使用实时数据」**没有**勾选框，也没有对应的配置属性：口径是内置规则
+    # （主人 2026-09-23："不需要加开关，按照我说的规则来"）。键集合那一侧由
+    # `SETTINGS_KEYS` 钉着（它不在里面），这里再钉"窗口上根本没有这个控件"。
+    assert not hasattr(window, "caliber_live_box")
+    assert not hasattr(window.cfg, "intraday_pick_live")
 
     # 其他：主题 / 当日异动（默认关）/ 自选上限 / 是否进池
     assert window.theme_box.currentData() == window.cfg.ui_theme
@@ -2140,9 +2142,7 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
     "intraday_auction", "auction_min_pct", "auction_max_pct", "auction_min_amount",
     "auction_min_volume_ratio", "auction_min_score", "auction_alert_max_items",
     "auction_boards", "auction_scan_at",
-    # 4) 选股口径（2026-09-23 加：开盘时间里跑的选股用不用实时数据）
-    "intraday_pick_live",
-    # 5) T策略
+    # 4) T策略
     "stop_loss", "take_profit", "intraday_t", "t_high_min_gain_pct",
     "t_high_pullback_pct", "t_low_min_drop_pct", "t_low_rebound_pct",
     # 6) 其他
@@ -2152,11 +2152,10 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
 })
 
 
-def test_collect_settings_updates_covers_exactly_the_six_groups(window) -> None:
-    """收集函数的键集合 = 六组控件的**全部**键（一键保存的"写哪些"就是它决定的）。
+def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None:
+    """收集函数的键集合 = 五组控件的**全部**键（一键保存的"写哪些"就是它决定的）。
 
-    **38 是现在的个数**（37 + `intraday_pick_live`：2026-09-23 加的「选股口径」那一组，
-    见 `SETTINGS_GROUPS`；37 那部分含 `hithink_api_key` —— 用户澄清"不要配 KEY"指的是
+    **37 是现在的个数**（含 `hithink_api_key` —— 用户澄清"不要配 KEY"指的是
     **程序里不许预置自己的 Key**，不是不给填，
     所以内置同花顺那一行重新有了输入框，一键保存也就该把它写回去；
     出厂包里这个值始终是空串，程序从不写死它）。
@@ -2177,20 +2176,21 @@ def test_collect_settings_updates_covers_exactly_the_six_groups(window) -> None:
     } - SETTINGS_KEYS
     updates = window._collect_settings_updates()
     assert set(updates) == SETTINGS_KEYS | extra_key_fields
-    # 当前：38 个固定键（35 → 33：删掉 Windows 通知那一路时
+    # 当前：37 个固定键（35 → 33：删掉 Windows 通知那一路时
     # `notify_windows_sound` / `notify_windows_open_url` 随之取消；
     # 33 → 37：加上桌宠与中文朗读的 4 个键；
     # 37 → 38：用户要求"桌宠声音可以自由改"，加上音色下拉的 `notify_voice_name`；
     # 39 → 38：2026-09-21 删掉"数字逐位念"开关 `notify_voice_digits`，
     # 主人原话："价格逐位不需要有选项，直接按我说的做就行了"；
-    # 38 → 37：同一天删掉语速键 `notify_voice_rate`（"把播报速度直接锁定 1.0 吧"）；
-    # 37 → 38：2026-09-23 加上「选股口径」那一组的 `intraday_pick_live`）
-    assert len(updates) == 38
+    # 38 → 37：同一天删掉语速键 `notify_voice_rate`（"把播报速度直接锁定 1.0 吧"）。
+    # 2026-09-23 一度加过 `intraday_pick_live`（「选股口径」那一组），当天又被主人划掉
+    # ——"不需要加开关，按照我说的规则来"，所以个数回到 37）
+    assert len(updates) == 37
     # 2026-09-18 起**必须收**它：内置同花顺那一行有输入框，一键保存就该把它写回去
     # （出厂值是空串，程序从不预置；"填了没保存"才是要防的那件事）
     assert "hithink_api_key" in updates
-    # 「盘中选股用实时数据」默认开，且它真的在键集合里（勾选框一改就该写回配置）
-    assert updates["intraday_pick_live"] is True
+    # 「盘中选股用实时数据」**不在键集合里**：内置规则没有开关，一键保存写不出去它
+    assert "intraday_pick_live" not in updates
     assert "_bad_scan_at" not in updates           # 内部提示字段不许进配置文件
 
 
@@ -2227,9 +2227,7 @@ def _change_every_settings_control(window) -> None:
     for key, box in window.auction_board_boxes.items():
         box.setChecked(key in ("main", "star"))
     window.auction_scan_at_edit.setText("09:21, 09:24")
-    # 4) 选股口径（默认是**开**，这里关掉 —— 只有反过来改才证明它真的被写回）
-    window.caliber_live_box.setChecked(False)
-    # 5) T策略（开关 + 四个做T阈值 + 止损/止盈）
+    # 4) T策略（开关 + 四个做T阈值 + 止损/止盈）
     window.stop_loss_box.setValue(6.0)
     window.take_profit_box.setValue(12.0)
     window.intraday_t_box.setChecked(True)
@@ -2283,7 +2281,6 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
         "auction_alert_max_items = 7",
         'auction_boards = ["main", "star"]',
         'auction_scan_at = ["09:21", "09:24"]',
-        "intraday_pick_live = false",
         "stop_loss = 0.06",
         "take_profit = 0.12",
         "intraday_t = true",
@@ -2306,9 +2303,6 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
     # （用户 2026-09-18 要回了输入口，`hithink_api_key` 属于固定键）
     assert hint.startswith(f"✅ 已保存 {len(SETTINGS_KEYS)} 项（已写入 config.toml）")
     assert "生效：主题 系统默认；" in hint and "T策略 开" in hint
-    # 选股口径也念出来：用户把「盘中选股用实时数据」关掉之后，回显里必须看得见
-    # 现在是"只用日 K 线"（不然他下次选股看到另一批票会以为程序坏了）
-    assert "选股口径 只用日 K 线" in hint
     # 那一行的 Key 现在**会被写回**：值就是输入框里显示的（= 用户 config 里的原值），
     # 所以内容不变、但**写这一下是有的**（"填了没保存"才是要防的那件事）
     assert f'hithink_api_key = "{before_key}"' in text
@@ -2319,8 +2313,6 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
     assert window.cfg.t_low_rebound_pct == 1.5
     assert window.cfg.watchlist_in_pool is False
     assert window.cfg.watchlist_max == 30
-    # 「盘中选股用实时数据」关掉之后内存里的配置也跟上（下次选股就走日 K 口径）
-    assert window.cfg.intraday_pick_live is False
     # 主题换到"系统默认"要真的生效（不只是写进文件）
     assert qapp.styleSheet() == ""
 
@@ -3281,14 +3273,14 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     qapp.processEvents()
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
     assert f'{fake_key} = "token-abc"' in text
-    # 38 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 39 项
+    # 37 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 38 项
     # （35 + 1 → 33 + 1：2026-09-18 删掉 Windows 通知那一路少了两个键；
     #  33 + 1 → 37 + 1：加上桌宠与中文朗读的四个键；
     #  37 + 1 → 38 + 1：用户要求"桌宠声音可以自由改"，加上 `notify_voice_name`；
     #  39 + 1 → 38 + 1：2026-09-21 删掉"数字逐位念"开关；
-    #  38 + 1 → 37 + 1：同一天删掉语速键（语速锁定 1.0）；
-    #  37 + 1 → 38 + 1：2026-09-23 加上「选股口径」那一组的 `intraday_pick_live`）
-    assert window.save_settings_hint.text().startswith("✅ 已保存 39 项")
+    #  38 + 1 → 37 + 1：同一天删掉语速键（语速锁定 1.0）
+    #  —— 2026-09-23 加过又划掉的 `intraday_pick_live` 让个数回到 37 + 1）
+    assert window.save_settings_hint.text().startswith("✅ 已保存 38 项")
     # 内置同花顺的 Key 也在这份键集合里（它的输入框和替身来源的走同一条规则）
     assert "hithink_api_key" in window._collect_settings_updates()
 

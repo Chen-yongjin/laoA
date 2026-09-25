@@ -295,20 +295,21 @@ SECTOR_HEADER_TIPS_DOWN: tuple[str, ...] = (
 SECTOR_CELL_PADDING = 24
 SECTOR_TABLE_CHROME = 40
 
-# ── 「系统设置」的六组（顺序 = 页面上下顺序）──
+# ── 「系统设置」的五组（顺序 = 页面上下顺序）──
 #: 每组一个带标题的块。**顺序**是用户给定的：先"数据从哪来"，
-#: 再"消息怎么发"，然后是三个具体功能（竞价扫描 / 选股口径 / T策略），最后是零碎的偏好。
+#: 再"消息怎么发"，然后是两个具体功能（竞价扫描 / T策略），最后是零碎的偏好。
 #:
-#: 「选股口径」是 2026-09-23 加的（用户："开盘时间里运行的选股，都是实时的，
-#: 不是开盘时间，采用 K 线"）：只有一个勾选框 —— 盘中选股用不用实时数据（默认用）。
-#: 它排在「竞价扫描」后面，因为两者都回答"取什么数、什么时候取"。
+#: ⚠️ 这里**没有**"盘中选股用不用实时数据"的勾选框，而且不许加：2026-09-23 我加过一组
+#: 「选股口径」，主人当场划掉 —— "不需要加开关，按照我说的规则来"。那条规则是内置的、
+#: 无条件的（开盘时间里跑选股就是实时口径，其余时间用日 K，取不到快照退回日 K 并写明），
+#: 界面上只**显示**口径（结果页/提示区那句 `📊 本次口径：…`），不给用户关它。
 #:
 #: T策略那一组是用户拍板的名字：原来叫「持仓风险」，只装止损/止盈与四个做T阈值；
 #: 现在**合并成一组** —— 用户原话"止盈止损比例给客户自己设置（在T策略中编辑）"。
 #: 为什么合并合理：这四个阈值与那两个比例全是"这只票该怎么买卖"的数字，
 #: 分散在两组里，用户改做T阈值时看不到止损比例、反之亦然，而它们经常要一起调。
 SETTINGS_GROUPS: tuple[str, ...] = (
-    "数据来源", "通知方式", "竞价扫描", "选股口径", "T策略", "其他",
+    "数据来源", "通知方式", "竞价扫描", "T策略", "其他",
 )
 # ── 「数据来源」：来源列表（**同花顺是主源，公开源是兜底**）──
 #: 内置来源的键（它仍然读 `cfg.data_sources` 决定启停与优先级）。
@@ -2885,11 +2886,12 @@ if QT_AVAILABLE:
             return notes
 
         def _build_settings_tab(self) -> Any:
-            """「系统设置」页：**六组 + 底部一个【保存设置】**（一键写回本页所有设置）。
+            """「系统设置」页：**五组 + 底部一个【保存设置】**（一键写回本页所有设置）。
 
-            组与顺序见 `SETTINGS_GROUPS`：数据来源 → 通知方式 → 竞价扫描 → 选股口径 →
-            T策略 → 其他（「T策略」这一组是用户拍板的名字：做T开关 + 四个阈值 +
-            止损/止盈比例；「选股口径」是 2026-09-23 加的：盘中选股用不用实时数据）。
+            组与顺序见 `SETTINGS_GROUPS`：数据来源 → 通知方式 → 竞价扫描 → T策略 → 其他
+            （「T策略」这一组是用户拍板的名字：做T开关 + 四个阈值 + 止损/止盈比例）。
+            **没有**"盘中使用实时数据"的开关：那是内置规则，主人 2026-09-23 明确划掉
+            （"不需要加开关，按照我说的规则来"），界面上只显示本次用的是哪套口径。
 
             为什么要"一键保存"（而不是每组一个保存按钮）：原来四组各有各的保存按钮，
             用户勾完通知、改完止损，得记住"这两个按钮都要点一遍" —— 漏点哪个都是
@@ -2897,7 +2899,7 @@ if QT_AVAILABLE:
             现在**页面底部一个【保存设置】把本页所有设置一次写回**，
             校验失败时明确拒绝并点名哪一项（见 `_collect_settings_updates`）。
 
-            为什么整页套一层滚动区：这一页控件最多（六组、三十多个控件），
+            为什么整页套一层滚动区：这一页控件最多（五组、三十多个控件），
             它们的"最小高度"合起来有 1000 像素以上；页签的最小高度取所有页的最大值，
             于是**整窗的最小高度**被这一页顶到屏幕外 —— 1366×768 的笔记本
             （可用高约 680）上窗口缩不小，底边直接被屏幕切掉（用户反馈的"最下边看不见"）。
@@ -2917,7 +2919,6 @@ if QT_AVAILABLE:
             self._build_settings_source_group(layout)
             self._build_settings_notify_group(layout)
             self._build_settings_auction_group(layout)
-            self._build_settings_caliber_group(layout)
             self._build_settings_risk_group(layout)
             self._build_settings_misc_group(layout)
 
@@ -2927,7 +2928,7 @@ if QT_AVAILABLE:
             self.save_settings_button = QPushButton("保存设置")
             self.save_settings_button.setObjectName("primaryAction")
             self.save_settings_button.setToolTip(
-                "把本页六组设置**一次**写回 config.toml（你写的注释与未知键都会保留）；"
+                "把本页五组设置**一次**写回 config.toml（你写的注释与未知键都会保留）；"
                 "任何一项填得不对会明确拒绝并指出是哪一项"
             )
             self.save_settings_button.clicked.connect(self.on_save_settings)
@@ -2960,7 +2961,7 @@ if QT_AVAILABLE:
         def _settings_group(self, layout: Any, title: str, note: str = "") -> Any:
             """建一组（带标题的块）并挂到页面上 → 返回**给调用方填控件的布局**。
 
-            做成一个方法而不是六处各写一遍：六组的标题字号、边距、说明行的样式与
+            做成一个方法而不是五处各写一遍：五组的标题字号、边距、说明行的样式与
             "块要能被整块取到"（`settings_sections`）这几件事必须处处一致 ——
             抄五遍必然抄歪一处，而歪掉的那一组看起来就像"没做完"。
             """
@@ -3456,43 +3457,8 @@ if QT_AVAILABLE:
             self.auction_hint.setWordWrap(True)
             body.addWidget(self.auction_hint)
 
-        def _build_settings_caliber_group(self, layout: Any) -> None:
-            """「选股口径」组：开盘时间里跑的选股用不用实时数据（**默认用**）。
-
-            用户 2026-09-23 定的内置规则："开盘时间里运行的选股，都是实时的，
-            不是开盘时间，采用 K 线"。所以这一组只有一个勾选框，而且是**默认勾上**的 ——
-            界面存在的意义是让想复现历史信号的人能关掉它，不是让每个人每次都选一遍。
-
-            为什么不放在「策略选股」页上：那是"写策略、跑策略"的地方，
-            而这是"用什么数据跑"的全局口径；再说那张页面上已经有【运行】/【开始选股】
-            两个按钮，再加一个会影响它们结果的开关，容易点错还不知道改了什么。
-            """
-            # ⚠️ 下面这一行小字是**用户可见**的（QLabel 不解析 markdown）：别写 `**加粗**`
-            # 与"公式"二字 —— 前者会原样显示成星号，后者被 `tests/test_wording.py` 钉死
-            # （主人："把公式名称中的策略两个字去掉" —— 界面上统一说「策略」）。
-            body = self._settings_group(
-                layout, "选股口径",
-                "开盘时间里跑选股用实时数据（现价拼出今天这根 K 线），其余时间用本地 K 线",
-            )
-            self.caliber_live_box = QCheckBox("盘中选股用实时数据（默认开）")
-            self.caliber_live_box.setChecked(bool(getattr(self.cfg, "intraday_pick_live", True)))
-            self.caliber_live_box.setToolTip(
-                "开盘时间（9:30–11:30 / 13:00–15:00 的交易日）里跑【运行】或【开始选股】时：\n"
-                "用此刻的实时快照拼出「今天」这一根 K 线，接在日线后面 ——\n"
-                "于是策略里写好的 C、C/REF(C,1)-1、量比()、C>MA(C,5) 一个字不改就是盘中口径。\n"
-                "不在开盘时间（或取不到实时快照）会自动退回本地日 K，并在结果里写明用的哪套。\n"
-                "取消勾选 = 任何时候都用本地日 K（收盘口径，可复现历史信号）。"
-            )
-            body.addWidget(self.caliber_live_box)
-            caliber_hint = QLabel(
-                "盘中选股会先取一趟实时快照（全市场约 5600 只，多花十几秒，跑在后台线程里）。"
-            )
-            caliber_hint.setObjectName("statusTag")      # 小号灰字
-            caliber_hint.setWordWrap(True)
-            body.addWidget(caliber_hint)
-
         def _build_settings_risk_group(self, layout: Any) -> None:
-            """第 5 组「T策略」：T策略总开关 + **四个做T阈值** + **止盈/止损比例**。
+            """第 4 组「T策略」：T策略总开关 + **四个做T阈值** + **止盈/止损比例**。
 
             为什么补这一组：`stop_loss` / `take_profit` 这两个比例原来**界面上完全没有入口**
             （只能手改 config.toml），而「持仓监控」里的止损位/止盈位两列就是按它们算的 ——
@@ -3611,7 +3577,7 @@ if QT_AVAILABLE:
             body.addWidget(t_note)
 
         def _build_settings_misc_group(self, layout: Any) -> None:
-            """第 6 组「其他」：界面主题 + 当日异动提醒 + 自选股上限与是否进池。
+            """第 5 组「其他」：界面主题 + 当日异动提醒 + 自选股上限与是否进池。
 
             为什么"当日异动提醒"在这里：它是一条**独立于止损止盈**的消息源
             （全市场异动里挑自己的票），默认关（用户拍板：减少无用消息）——
@@ -6895,7 +6861,7 @@ if QT_AVAILABLE:
         def _collect_settings_updates(self) -> dict:
             """本页**所有**控件的当前值 → `{配置键: 值}`（一键保存的唯一收集入口）。
 
-            为什么要"一个收集函数"而不是六组各弹一个 dict：一键保存必须写**同一个键集合** ——
+            为什么要"一个收集函数"而不是五组各弹一个 dict：一键保存必须写**同一个键集合** ——
             测试直接断言这个集合（多一个键、少一个键都是 bug：少一个键就是"改了没生效"，
             多一个键就是把不属于本页的东西悄悄改了）。
             """
@@ -6914,8 +6880,9 @@ if QT_AVAILABLE:
                 # 3) 竞价扫描（`_bad_scan_at` 只给提示用，不进配置文件）
                 **{k: v for k, v in self._panel_auction_updates().items()
                    if k != "_bad_scan_at"},
-                # 3.5) 选股口径（开盘时间里跑的选股用不用实时数据，见 `formulas.prepare_inputs`）
-                "intraday_pick_live": self.caliber_live_box.isChecked(),
+                # ⚠️ 这里**没有**"盘中选股用不用实时数据"这个键，而且不许加：
+                # 口径是内置规则（见 `formulas.prepare_inputs`），主人 2026-09-23 划掉了开关
+                # ——"不需要加开关，按照我说的规则来"。有测试钉着键集合里没有它。
                 # 4) T策略（止损/止盈在配置里存**小数**，见 `on_save_t_strategy`）
                 "stop_loss": abs(float(self.stop_loss_box.value())) / 100.0,
                 "take_profit": abs(float(self.take_profit_box.value())) / 100.0,
@@ -7088,9 +7055,8 @@ if QT_AVAILABLE:
                 f"生效：主题 {theme_mod.theme_label(str(self.theme_box.currentData()))}；"
                 f"通知 {notify}；"
                 f"竞价扫描 {'开' if self.auction_on_box.isChecked() else '关'}；"
-                # 选股口径：开着 = 开盘时间里用实时数据选股（这是内置规则，回显里念出来
-                # 用户才知道自己刚才关掉/打开了什么）
-                f"选股口径 {'盘中用实时数据' if self.caliber_live_box.isChecked() else '只用日 K 线'}；"
+                # ⚠️ 回显里**不说**"选股口径"：那是内置规则、没有开关可点，
+                # 写在这里只会让用户去找一个不存在的控件（本轮口径显示在结果那一侧）
                 # 止损/止盈就在「T策略」组里（用户拍板），回显时一并念出来
                 f"T策略 {'开' if self.intraday_t_box.isChecked() else '关'}"
                 f"（止损 −{float(self.stop_loss_box.value()):g}% / "

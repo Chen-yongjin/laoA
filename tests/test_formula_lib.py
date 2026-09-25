@@ -1228,15 +1228,18 @@ def test_hot_industry_counts_is_the_union_over_the_window(formula_db: str,
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# K 线口径按时间自动切（用户 2026-09-23 定的内置规则）
+# K 线口径按时间自动切（主人 2026-09-23 定的内置规则）
 #
 # 原话："在软件内置规则里设定，开盘时间里运行的选股，都是实时的，不是开盘时间，
-# 采用 K 线。" 下面五条就是这句话的四种情形 + 选股链路同口径：
+# 采用 K 线。" —— 同一天他又划掉了我加的那个开关："不需要加开关，按照我说的规则来"，
+# 所以这条规则是**无条件**的（下面 ④ 专门钉"关不掉"）。
+# 下面这几条就是这句话的四种情形 + 选股链路同口径：
 #   ① 开盘时间 + 有快照   → 用现价拼出"今天"这根 K 线（口径写明"盘中实时"）
 #   ② 非开盘时间          → 用库里的日 K（**即使快照能用也不接**）
-#   ③ 开盘时间 + 没快照   → 退回日 K，并且必须说清（否则会被当成公式写错）
-#   ④ 开关关掉            → 开盘时间也用日 K
+#   ③ 开盘时间 + 没快照   → 退回日 K，并且必须说清（否则会被当成策略写错）
+#   ④ 没有任何开关能关掉它 → 配置里没有这个键、环境变量也没有、硬塞属性也不理
 #   ⑤ 选股链路（建池）用**同一个函数**取口径，与【运行】不可能不一致
+#   ⑥⑦ 「退回日 K」是告知不是错误（不能让一次成功的选股被判成失败）
 # ══════════════════════════════════════════════════════════════════════════
 
 #: 盘中测试用的固定时刻：2026-09-14（周一）10:00 —— 夹具库的最后一天是 09-11（周五）
@@ -1374,28 +1377,42 @@ def test_preview_hits_falls_back_to_daily_when_the_snapshot_is_missing(
     assert result["errors"] == []
 
 
-def test_intraday_pick_live_off_always_uses_daily_kline(
+def test_no_switch_can_disable_the_intraday_caliber(
     session_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
     session_clock: None,
 ) -> None:
-    """④ 关掉「盘中选股用实时数据」→ 开盘时间也用日 K（想复现历史信号的人这么用）。"""
+    """④ **没有任何开关能关掉这条规则**（主人 2026-09-23："不需要加开关，按照我说的规则来"）。
+
+    他当天先要了这条内置规则，我把开关也做了出来，他随手就把开关划掉了 ——
+    所以这里从四个方向把"关不掉"钉死，免得以后又"顺手加个开关"：
+
+    1. 配置里**没有** `intraday_pick_live` 这个字段（`dataclasses.fields` 逐个看）；
+    2. 环境变量里也没有它（`INTRADAY_PICK_LIVE=0` 不会在配置上变出这个属性）；
+    3. 就算有人（老配置、老包、别的代码）硬把这个属性塞进配置对象，**规则也不理它** ——
+       盘中该实时还是实时（这是最关键的一条：判据只认时间，不认属性）；
+    4. 界面上也没有那个勾选框（设置页的键集合由 `tests/test_ui_smoke.py` 钉着）。
+    """
+    import dataclasses
+
+    from laoa_trader import config as config_mod
+
+    assert "intraday_pick_live" not in {f.name for f in dataclasses.fields(Config)}
+    cfg = Config()
+    monkeypatch.setenv("INTRADAY_PICK_LIVE", "0")
+    config_mod._apply_env(cfg)
+    assert not hasattr(cfg, "intraday_pick_live")
+
+    # ③ 硬塞一个"关"的属性进去：规则照旧（盘中就是实时口径）
     formulas_cfg.intraday_pick_live = False
     calls = _fake_snapshot(monkeypatch, _session_quotes(session_db, {"600001": 0.05}))
 
     result = lib.preview_hits(fm.compile_formula("C/REF(C,1)-1 >= 0.04"),
                               session_db, cfg=formulas_cfg)
 
-    assert result["count"] == 0
-    assert "日 K 线" in result["caliber"] and "已关" in result["caliber"]
-    assert calls == []
-
-
-def test_intraday_pick_live_defaults_to_on() -> None:
-    """开关**默认开**（用户要的是"开盘时间里一律实时"，不是每次去勾一下）。"""
-    assert Config().intraday_pick_live is True
-    assert lib.intraday_pick_live(Config()) is True
-    # 拿不到属性的老配置对象也当"开"处理（口径判据不因为少一个字段就失效）
-    assert lib.intraday_pick_live(object()) is True
+    assert [hit["symbol"] for hit in result["hits"]] == ["600001"]
+    assert result["date"] == "2026-09-14"          # 盘中口径：行情日就是今天
+    assert "盘中实时" in result["caliber"]
+    assert len(calls) == 1
 
 
 def test_run_enabled_formulas_uses_live_data_in_session(
