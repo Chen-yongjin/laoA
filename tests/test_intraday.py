@@ -374,3 +374,91 @@ def test_alert_rows_adds_labels(db, cfg) -> None:
         )
     rows = intraday.alert_rows(db)
     assert rows[0]["label"] == "🚀 放量突破20日高"
+
+
+# ── 交易日判据：日历滞后 ≠ 休市（2026-09-28 修"盘中提醒无效"）──
+
+
+def test_is_trading_day_weekend_without_calendar_is_still_holiday(db) -> None:
+    """日历为空也要认周末 —— 否则周六会拿上一交易日的快照跑一轮假提醒。"""
+    with storage.connect(db) as conn:
+        conn.execute("DELETE FROM trading_calendar")
+        conn.commit()
+    assert intraday.is_trading_day(db, "2026-09-12") is False      # 周六
+    assert intraday.is_trading_day(db, "2026-09-11") is True       # 周五
+
+
+def test_is_trading_day_with_stale_calendar_assumes_trading(db) -> None:
+    """日历只到上一个交易日（今早还没同步）→ 按交易日处理。
+
+    这是"盘中提醒无效"的根因：日历由**日更（默认 16:00）**写，第二天开盘时里面
+    还没有今天，老实现直接判"休市" —— 于是从 9:30 静默到当晚日更，
+    而且判据藏在库里，界面上一个字都不提示。
+    """
+    with storage.connect(db) as conn:
+        storage.write_calendar(conn, ["2026-09-10", "2026-09-11"])
+    assert intraday.is_trading_day(db, "2026-09-14") is True       # 周一，日历滞后
+
+
+def test_is_trading_day_with_future_calendar_is_exact(db) -> None:
+    """日历已经覆盖到今天之后 → 没有今天就是真休市（调休/节假日）。"""
+    with storage.connect(db) as conn:
+        storage.write_calendar(conn, ["2026-09-10", "2026-09-11", "2026-09-15"])
+    assert intraday.is_trading_day(db, "2026-09-14") is False      # 周中休市
+
+
+# ── 那一句结论：说清"跑没跑 / 跑出什么" ──
+
+
+def test_report_text_explains_a_skipped_round() -> None:
+    """"没提醒"与"跑不起来"必须分得出来（【检查盘面】按钮 + 状态栏共用）。"""
+    assert "不是交易日" in intraday.report_text(
+        {"trading_day": False, "skip": "今天不是交易日"})
+    assert "交易时段" in intraday.report_text(
+        {"trading_day": True, "in_session": False,
+         "skip": "现在不在交易时段（9:30–11:30 / 13:00–15:00）"})
+    assert "API Key" in intraday.report_text({"error": "未配置同花顺 API Key（测试）"})
+
+
+def test_report_text_counts_watched_and_fresh() -> None:
+    text = intraday.report_text({"trading_day": True, "in_session": True,
+                                 "watched": 12, "hits": 3, "fresh": 0})
+    assert "盯了 12 只" in text and "命中 3 条" in text
+    assert "都在今天提醒过了" in text      # 命中但全被当天去重挡掉，要说清
+    text = intraday.report_text({"watched": 5, "hits": 2, "fresh": 2})
+    assert "新增提醒 2 条" in text
+    assert "没有触发条件的票" in intraday.report_text({"watched": 5, "hits": 0})
+
+
+# ── 持仓票必须被盯（止损止盈最该提醒的就是手上的票）──
+
+
+def test_position_outside_pool_gets_stop_loss_alert(db, cfg, monkeypatch) -> None:
+    """持仓票不在池子/自选里，也要收到止损提醒（参考价 = 持仓成本）。
+
+    2026-09-28 主人实报"盘中提醒无效"：他手上的票记在「持仓」，而止损/止盈/跌破5日线
+    原来只在"池子/自选/近期信号"这个观察面里跑 —— 持仓票整场交易一条提醒都没有。
+    """
+    monkeypatch.setenv("INTRADAY_POOL_ONLY", "1")
+    with storage.connect(db) as conn:
+        storage.write_calendar(conn, [now_shanghai().strftime("%Y-%m-%d")])
+        storage.upsert_position(conn, "600002", name="半导体甲", quantity=1000,
+                                avg_cost=20.0)
+    client = FakeClient(snapshots=[{
+        "ticker": "600002", "thscode": "600002.SH", "last_price": 18.0,
+        "price_change_ratio_pct": -10.0, "turnover": 1.0e8, "high_price": 19.0,
+    }])
+    engine = DataEngine(db)
+    today = now_shanghai().strftime("%Y-%m-%d")
+    stats: dict = {}
+    alerts = intraday.build_alerts(engine, client, cfg=cfg, today=today, stats=stats)
+    assert stats == {"watched": 1, "universe": 0, "held_extra": 1}
+    hit = [a for a in alerts if a["kind"] == "stop_loss"]
+    assert hit, "持仓票跌破成本 5% 没有止损提醒"
+    # 名字里带「持仓（成本 …）」：同一天它若也在自选里，用户要能分辨止损是按哪个价算的
+    assert "持仓（成本 20.00）" in hit[0]["name"]
+    assert "20.00" in hit[0]["detail"]          # 参考价就是持仓成本，不猜
+
+    report = intraday.run_once(engine, cfg, ignore_session=True, client=client)
+    assert report["fresh"] >= 1
+    assert "stop_loss" in {row["kind"] for row in intraday.alert_rows(db)}

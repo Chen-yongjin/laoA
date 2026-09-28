@@ -2563,7 +2563,17 @@ class _Parser:
         if upper not in self.funcs:
             self.funcs.append(upper)
 
-        if spec.result == "same":
+        if upper == "REF" and args[0].dtype == _BOOL:
+            # REF(X,N)：X 是条件时，结果**还是条件**。
+            # 运行期本来就是这么算的（`_ref` 给出 0/1/NaN 的浮点序列，`_logic_combine`
+            # 正好吃这种序列），所以这里只是把**静态类型**对齐。不补这一笔，
+            # `ZT:=C/REF(C,1)>=1.095 AND C=H;` 之后再写 `REF(ZT,1) AND ...`
+            # 会被判成"AND 需要条件（现在是数值序列）" —— 而这是通达信里最普通的写法
+            # （2026-09-28 实测：随包的 `二板炸板（反指）` 就卡在这一行）。
+            # 只放行 REF，不放开"任意数值都能当条件"：`V AND C>O` 照样当场报错
+            # （那是把放量写漏了，见 `_require_cond` 的取舍）。
+            dtype = _BOOL
+        elif spec.result == "same":
             # IF(COND,A,B)：类型取 A/B，两者必须一致（否则 np.where 会静默造出字符串数组）
             if args[1].dtype != args[2].dtype:
                 raise FormulaError(

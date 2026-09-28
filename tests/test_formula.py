@@ -641,6 +641,21 @@ def test_logic_requires_real_conditions() -> None:
         assert needle in str(err)
 
 
+def test_ref_of_a_condition_is_still_a_condition() -> None:
+    """`REF(条件, N)` 还是条件 —— 通达信里最普通的写法，不能被判成"数值序列"。
+
+    `ZT:=C/REF(C,1)>=1.095 AND C=H;` 之后写 `REF(ZT,1) AND C<O` 是标准套路
+    （随包的「二板炸板（反指）」就是这一行）。运行期本来就算 0/1/NaN，
+    所以这只是一笔静态类型的对齐；`V AND C>O` 仍然照旧报错（见上一个用例）。
+    """
+    formula = fm.compile_formula("ZT:=C>=H\nREF(ZT,1) AND C<O\n")
+    assert formula is not None
+    # 3 根 K 线：第 0 根 ZT=1（C=H 且收阳），之后 ZT=0
+    # → 第 1 根满足"上一根是涨停型实体" 且 当日收阴（C<O）
+    s = make_series([10.0, 9.0, 9.5], high=[10.0, 9.0, 9.5], open_=[9.0, 10.0, 10.0])
+    assert sig("ZT:=C>=H AND C>O\nREF(ZT,1) AND C<O\n", s) == [False, True, False]
+
+
 def test_string_operators_are_limited() -> None:
     for text in ('INDUSTRY>"a"', 'INDUSTRY=1', '1=INDUSTRY'):
         err = compile_error(text + "\n")

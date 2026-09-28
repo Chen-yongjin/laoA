@@ -103,7 +103,7 @@ def build_command(python: str) -> list[str]:
         f"--output-dir={STAGING}",
         # 版本信息：属性里看得出来这是哪个产品哪个版本（也方便用户报障）
         "--product-name=老牛选股",
-        "--product-version=1.2.0",
+        "--product-version=1.2.1",
         "--file-description=老牛选股助手（行情软件辅助工具）",
         # 编译期优化：去掉断言与 docstring 相关的开销；`__doc__` 我们**要**保留
         # （策略编辑器的帮助文案、函数的"是什么"提示都读它），所以不加 --python-flag=-OO

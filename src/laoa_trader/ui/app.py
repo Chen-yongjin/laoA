@@ -4154,10 +4154,45 @@ if QT_AVAILABLE:
             return "✅ 数据就绪"
 
         def _intraday_text(self, st: dict) -> str:
-            """盘中提醒的三种说法（`时段中` / `已暂停` / 空串=不在时段就不提）。"""
+            """盘中提醒的说法（`时段中` / `已暂停` / 空串=不在时段就不提）+ 上一轮结果。
+
+            为什么要带上"上一轮"（2026-09-28 加的）：主人报"盘中提醒无效"，而界面上
+            只有"盘中提醒时段中"这一句 —— 它只说明**时钟**到了交易时段，既不说提醒
+            **跑没跑**，也不说**跑出什么**。现在直接写成
+            `盘中提醒时段中（10:31 盯 12 只，命中 0 条）`，"没提醒"与"没在跑"一眼可分。
+            """
             if st.get("intraday_paused"):
                 return INTRADAY_PAUSED
-            return INTRADAY_IN_SESSION if st.get("in_session") else INTRADAY_OUT_SESSION
+            if not st.get("in_session"):
+                return INTRADAY_OUT_SESSION
+            note = self._intraday_note(st)
+            return f"{INTRADAY_IN_SESSION}（{note}）" if note else INTRADAY_IN_SESSION
+
+        @staticmethod
+        def _intraday_note(st: dict) -> str:
+            """上一轮盘中提醒的**紧凑**结果：`10:31 盯 12 只，命中 0 条`。
+
+            紧凑版是给状态栏那一句用的（它只占一行）；完整版在【详情】里
+            （`intraday.report_text`），两者的数字来自同一份 report。
+            """
+            report = st.get("last_intraday") or {}
+            if not report:
+                return ""
+            bits = []
+            at = str(st.get("last_intraday_at") or "")
+            if at:
+                bits.append(at[:5])
+            if report.get("error"):
+                bits.append(f"失败：{report['error']}")
+            elif report.get("skip"):
+                bits.append(str(report["skip"]))
+            else:
+                if report.get("watched"):
+                    bits.append(f"盯 {int(report['watched'])} 只")
+                bits.append(f"命中 {int(report.get('hits') or 0)} 条")
+                if report.get("fresh"):
+                    bits.append(f"新增 {int(report['fresh'])} 条")
+            return "，".join(bits)
 
 
         def _auction_detail_lines(self) -> list[str]:
@@ -4236,7 +4271,9 @@ if QT_AVAILABLE:
                 f"今日池子：{facts['pool_count']} 只"
                 f"（含自选 {summary.get('watchlist', 0)} 只）",
                 f"持仓浮动：{self._floating_pnl(pnl)}",
-                f"盘中提醒：{intraday_state}",
+                f"盘中提醒：{intraday_state}"
+                + (f" · {intraday.report_text(st.get('last_intraday'))}"
+                   if st.get("last_intraday") else ""),
                 # 定时运行已按用户要求整组移除，这里不再有"主跑/补跑/下次自动运行"
                 # （状态栏里那句"今天该自动跑却没跑"也随之删除：它描述的事已经不存在了）
                 f"数据自检：{self_check.get('status') or '尚未自检'}"
@@ -6313,6 +6350,10 @@ if QT_AVAILABLE:
                 self._toast(f"{label}：{summarize(result)}")
             elif isinstance(result, dict) and "pool" in result:
                 self._on_pipeline_done(label, result)
+            elif isinstance(result, dict) and ("hits" in result or "trading_day" in result):
+                # 盘中提醒那一轮的 report：它**没有** `pool`/`data_date`，以前会掉进
+                # 最后那个分支显示成"盘中检查完成： 池子 0 只"（用户点了按钮等于没反馈）
+                self._toast(f"{label}完成：{intraday.report_text(result)}")
             elif isinstance(result, dict):
                 self._toast(f"{label}完成：{result.get('data_date') or ''}"
                             f" 池子 {len(result.get('pool') or [])} 只")

@@ -1,6 +1,6 @@
 [project]
 name = "laoa-trader"
-version = "1.2.0"
+version = "1.2.1"
 description = "老牛选股助手（Windows 单机版）：A 股选股 + 盯盘 + 提醒"
 authors = [{ name = "async-chen" }]           # 与「关于」对话框、README 的版权信息一致
 requires-python = ">=3.11"

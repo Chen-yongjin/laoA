@@ -930,7 +930,9 @@ def test_run_once_pushes_t_hint_once_per_day(cfg, monkeypatch) -> None:
     """
     monkeypatch.setenv("INTRADAY_POOL_ONLY", "1")
     cfg.intraday_t = True          # 做T**默认关**（用户拍板）；这条验的是它的整条链路
-    _t_pos(cfg)
+    # 成本刻意取 12.00：现价 12.34 够触发做T高抛，但**够不到止盈**（12.00 × 1.10 = 13.20）
+    # —— 这条用例要单独钉住做T那一条链路，不希望被同时命中的止盈搅进来
+    _t_pos(cfg, cost=12.0)
     _t_day(cfg, (T_DAY, "2026-09-17"))
     client = FakeClient(snapshots=[_t_snap(last=12.34, high=12.78, low=12.05, prev=12.0,
                                            vwap=12.10, pct=2.83)])
@@ -993,25 +995,33 @@ def test_run_once_watches_held_symbols_outside_the_pool(cfg, monkeypatch) -> Non
     assert t_rows[0]["label"] == it.KIND_LABELS["t_high"]
     asked = [c[1] for c in client.calls if c[0] == "snapshot"]
     assert "600009" in asked[0]                 # 持仓确实被放进了快照请求
-    # 补进来的持仓**只跑做T规则**（止损止盈那些的观察池口径没被顺手改掉）。
-    # 说明：它本来也拿不到历史上下文，所以这一条是"意图声明"，不是防某个活的 bug。
-    assert not [r for r in rows if r["symbol"] == "600009" and r["kind"] not in it.T_KINDS]
+    # 补进来的持仓**也跑卖出/风控规则**（2026-09-28 主人报"盘中提醒无效"）：原来它们
+    # 只跑做T，而做T默认关 —— "只把票记在持仓里"的用户就整场交易零提醒。
+    # 这里成本 10.00、现价 12.34 → 止盈。
+    sells = [r for r in rows if r["symbol"] == "600009" and r["kind"] not in it.T_KINDS]
+    assert [r["kind"] for r in sells] == ["take_profit"]
 
 
 def test_intraday_t_off_emits_nothing_and_asks_nothing(cfg, monkeypatch) -> None:
-    """`intraday_t = false`：一条做T提示都不发，**连持仓都不查、快照也不请求**。"""
+    """`intraday_t = false`：一条做T提示都不发；但持仓的止损止盈**照跑**。
+
+    2026-09-28 改的：老实现把"持仓票"整条观察面挂在做T开关上（关掉做T连持仓都不查），
+    于是主人报"盘中提醒无效" —— 他手上的票记在持仓里，止损/止盈一条都没有。
+    现在做T开关只管做T，卖出/风控规则独立于它。
+    """
     monkeypatch.setenv("INTRADAY_POOL_ONLY", "1")
     cfg.intraday_t = False
-    _t_pos(cfg, "600009")
+    _t_pos(cfg, "600009")          # 成本 10.00
     _t_day(cfg)
     client = FakeClient(snapshots=[
         _t_snap("600009", last=12.34, high=12.78, low=12.05, prev=12.0, vwap=12.10, pct=2.83),
     ])
     result = it.run_once(DataEngine(cfg.db_path), cfg, ignore_session=True, client=client,
                          notifier=lambda t, l: None, now=T_NOW)
-    assert result["hits"] == 0 and result["fresh"] == 0 and result["pushed"] is False
-    assert [r for r in it.alert_rows(cfg.db_path) if r["kind"] in it.T_KINDS] == []
-    assert [c for c in client.calls if c[0] == "snapshot"] == []
+    rows = it.alert_rows(cfg.db_path, limit=20)
+    assert [r for r in rows if r["kind"] in it.T_KINDS] == []      # 做T提示一条都没有
+    assert [r["kind"] for r in rows] == ["take_profit"]            # 止盈照发（10.00 → 12.34）
+    assert result["fresh"] == 1 and result["pushed"] is True
 
 
 def test_t_hints_never_enter_the_daily_pool_push(cfg, monkeypatch) -> None:

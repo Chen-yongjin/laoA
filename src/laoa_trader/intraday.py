@@ -326,19 +326,49 @@ def in_session(now: datetime | None = None) -> bool:
 
 
 def is_trading_day(db_path: str, day: str | None = None) -> bool:
-    """用官方交易日历判断是否开盘（库里查不到就当交易日，避免日历没同步时整天不跑）。"""
+    """用官方交易日历判断是否开盘。
+
+    判据顺序（改这里要小心：判错一次不是"少一条提醒"，而是**一整天全哑**，
+    而且哑得没有任何提示 —— 用户看到的是"运行=是、交易时段=是、就是没提醒"）：
+
+        1. 库里**有**这一天 → 交易日；
+        2. 周末 → 不是（日历再怎么滞后也不会改变这一点）；
+        3. 日历**已经越过**这一天（`MAX(date) > day`）→ 这一档日历是齐的，
+           没有它就是真休市（调休/节假日）；
+        4. 日历最新只到这一天或更早（`MAX(date) <= day`）→ **日历还没同步到今天**，
+           按交易日处理。
+
+    第 4 条是 2026-09-28 修的：老实现只认第 1、2 条（另外"表为空当交易日"），
+    于是"昨晚 16:00 日更写了截至昨天的日历、今早开机还没同步"这个**每天都会发生**
+    的情形被当成休市 —— 盘中提醒从开盘静默到当晚日更，用户只会说"盘中提醒无效"。
+    代价：日历滞后的工作日内遇上"周中的节假日"，会按交易日跑一轮（数据是上一交易日的，
+    价格阈值类规则仍然成立）；日历一旦覆盖到今天之后（默认的主源日历是近一年，
+    含未来交易日），第 3 条会立刻接管，判断恢复精确。
+    """
     day = day or now_shanghai().strftime("%Y-%m-%d")
     try:
         with storage.connect(db_path) as conn:
             row = conn.execute(
                 "SELECT 1 FROM trading_calendar WHERE date = ?", (day,)
             ).fetchone()
-            has_calendar = conn.execute("SELECT COUNT(*) FROM trading_calendar").fetchone()[0]
+            latest = conn.execute("SELECT MAX(date) FROM trading_calendar").fetchone()[0]
     except Exception:  # noqa: BLE001 - 库还没建好时按"交易日"处理，别把提醒整天关掉
         return True
-    if not has_calendar:
+    if row:
         return True
-    return bool(row)
+    try:
+        weekday = datetime.strptime(day, "%Y-%m-%d").weekday()
+    except ValueError:
+        weekday = 0                     # 日期本身不合法（调用方给的）：不据此判休市
+    if weekday >= 5:
+        return False
+    if not latest:
+        return True                     # 日历是空的：见上（同步失败时整天不跑更糟）
+    if str(latest) > day:
+        return False                    # 日历齐到"今天之后"，没有今天 = 真休市
+    logger.info(f"交易日历只到 {latest}（还没到今天 {day}）：按交易日处理，"
+                "免得盘中提醒从开盘静默到当晚日更")
+    return True
 
 
 # ── 观察池 ──
@@ -362,6 +392,19 @@ def _watch_label(note: str, cost: float | None) -> str:
     if cost:
         details.append(f"成本 {float(cost):.2f}")
     return f"{head}（{'，'.join(details)}）" if details else head
+
+
+def _position_label(cost: float | None) -> str:
+    """持仓票的标签：`持仓（成本 12.40）`。
+
+    与 `_watch_label` 分开写是为了让「持仓」与「自选」在消息列表里一眼可分 ——
+    同一只票既自选又持仓时，止损止盈要按**成本**算，标签必须说清用的是哪个口径。
+    """
+    try:
+        cost = float(cost) if cost else None
+    except (TypeError, ValueError):
+        cost = None
+    return f"持仓（成本 {cost:.2f}）" if cost else "持仓"
 
 
 def _display_name(base: str, info: dict) -> str:
@@ -517,12 +560,18 @@ def evaluate_sell_rules(
     symbol: str, snap: dict, ctx: dict, ref_close: float | None,
     cfg: Config | None = None,
 ) -> list[tuple[str, float, str]]:
-    """卖出/风控规则：返回 [(kind, price, detail)]。"""
+    """卖出/风控规则：返回 [(kind, price, detail)]。
+
+    止损/止盈只需要一个有意义的**参考价**（持仓成本、或昨收），不需要本地历史；
+    跌破 5 日线/涨停打开才要 `ctx`。所以 2026-09-28 把"没有 ctx 就整条不跑"改成
+    "逐条看自己要什么" —— 持仓票（尤其本地没下过历史数据的）从此也能收到止损止盈提醒。
+    """
     cfg = cfg or get_config()
     stop_pct, target_pct = cfg.stop_loss, cfg.take_profit
     last = snap.get("last_price")
-    if not last or not ctx:
+    if not last:
         return []
+    ctx = ctx or {}
     hits = []
     ref = ref_close or ctx.get("prev_close")
     if ref:
@@ -976,6 +1025,7 @@ def build_alerts(
     scan_market: bool = False,
     cfg: Config | None = None,
     today: str | None = None,
+    stats: dict | None = None,
 ) -> list[dict]:
     """跑一轮规则，返回本轮命中的提醒（**未去重**）。
 
@@ -988,29 +1038,38 @@ def build_alerts(
         today: 北京时间的今天（`YYYY-MM-DD`）；做T提示要用它判断"是不是今天新建的仓"。
             默认按 `now_shanghai()` 取 —— 但 `run_once` 会把它的 `now` 传进来，
             这样测试注入一个固定时刻时，这里的时间也是同一个（不会一半注入一半真实）。
+        stats: 出参（可省）：填 `watched`/`universe`/`held_extra`，供【检查盘面】那句
+            结论说清"这一轮到底盯了几只" —— 否则"命中 0 条"和"一只都没盯"长得一样。
     """
     cfg = cfg or get_config()
     today = today or now_shanghai().strftime("%Y-%m-%d")
     pool, pool_symbols = watch_targets(engine.db_path)
-    # 做T提示只看**持仓**（quantity > 0）；关掉功能时连持仓都不查，一次库都不多读
-    held = held_positions(engine.db_path) if bool(getattr(cfg, "intraday_t", True)) else {}
+    # 持仓一律查（不再挂在"做T"开关上）：**手上的票是最该提醒的那一类**，
+    # 而"止损/止盈/跌破 5 日线"原来只在"池子/自选/近期信号"里跑 —— 于是
+    # "我只把票记在持仓里"的用户整场交易收不到任何提醒（2026-09-28 主人实报"盘中提醒无效"）。
+    held = held_positions(engine.db_path)
     symbols = list(pool)
     # 持仓**不一定在观察池里**（池子天天重建、用户手上的票却没变），所以要把
     # "不在池子里的持仓"补进这一轮的快照请求；只补几只，仍在同一个 100 只批次里，不额外发请求。
-    # 补进来的标的一律**只跑做T规则**：止损止盈那几条的观察池口径是"池子/自选/近期信号"，
-    # 顺手扩大它们的作用面等于悄悄改了另一个功能的行为，不在这次改动范围内。
-    extra = [s for s in held if s and s not in pool]
+    off = monitor_off_symbols(engine.db_path)   # 「已关闭监控」的持仓照旧不盯
+    extra = [s for s in held if s and s not in pool and s not in off]
     symbols += extra
+    if stats is not None:
+        stats.update({"watched": len(symbols), "universe": len(pool),
+                      "held_extra": len(extra)})
     if not symbols:
         logger.info("股票池与近期信号都为空，无标的可盯")
     else:
         logger.info(f"本轮盯 {len(symbols)} 只（其中股票池 {len(pool_symbols)} 只"
                     + (f"，补进来的持仓 {len(extra)} 只" if extra else "") + "）")
-    # 历史上下文只给池内标的算：补进来的持仓不需要（做T提示只用快照自己的字段，
-    # 而且本地日线是**后复权**价，跟实时价根本不是一套口径，不能拿来算涨跌幅）
-    ctx = history_context(engine.db_path, list(pool))
+    # 历史上下文：池内标的 + 补进来的持仓 —— 跌破 5 日线/涨停打开要用 MA5 与昨收。
+    # 做T提示只用快照自己的字段，用不到这一份。
+    ctx = history_context(engine.db_path, list(pool) + extra)
 
     alerts: list[dict] = []
+    # 做T提示只看开关（默认关，用户拍板）；**持仓本身不挂在这个开关上** ——
+    # 止损止盈那些卖出规则要照跑，否则"只把票记在持仓里"的用户零提醒（见上面）。
+    t_on = bool(getattr(cfg, "intraday_t", False))
     for i in range(0, len(symbols), 100):
         batch = symbols[i : i + 100]
         try:
@@ -1029,14 +1088,25 @@ def build_alerts(
             context = ctx.get(symbol, {})
             info = pool.get(symbol) or {}
             position = held.get(symbol)
-            if position is not None:
+            if position is not None and t_on:
                 # 做T提示：只有持仓股才跑（`position` 非 None 就等价于"在持仓表里"）
                 t_base = str(position.get("name") or info.get("name") or symbol)
                 for kind, price, detail in evaluate_t_rules(symbol, snap, position, today, cfg):
                     alerts.append({"symbol": symbol, "name": t_base, "kind": kind,
                                    "price": price, "detail": detail})
             if symbol not in pool:
-                continue          # 补进来的持仓：除做T外不跑别的规则（见上面的注释）
+                # 补进来的持仓（既不在池子里、也不是自选）：跑卖出/风控规则，
+                # 参考价用**持仓成本** —— 成本才是止损止盈的基准，昨收不是。
+                if position is None:
+                    continue
+                cost = float(position.get("avg_cost") or 0) or None
+                base = str(position.get("name") or symbol)
+                label = _position_label(cost)
+                for kind, price, detail in evaluate_sell_rules(
+                        symbol, snap, context, cost, cfg):
+                    alerts.append({"symbol": symbol, "name": f"{base}·{label}",
+                                   "kind": kind, "price": price, "detail": detail})
+                continue
             ref = info.get("close")
             base = info.get("name") or symbol
             name = _display_name(base, info)
@@ -1117,6 +1187,42 @@ def format_message(
             continue
     title = f"⚡ 盘中提醒 {stamp}"
     return title, lines
+
+
+def report_text(report: dict | None) -> str:
+    """把 `run_once` 的 report 翻成一句中文（【检查盘面】按钮与状态栏用）。
+
+    为什么专门翻这一句：界面原来把它丢进了"选股流程"那个分支，显示成
+    `盘中检查完成： 池子 0 只` —— 点了按钮只看到"池子 0 只"，既不知道盯了几只，
+    也不知道为什么一条都没提醒（不是交易日 / 不在交易时段 / 没配 API Key /
+    全被当天去重挡了）。**"没有提醒"与"提醒跑不起来"是两件完全不同的事**，
+    分不清就只能得到"盘中提醒无效"这一种结论。
+    """
+    report = report or {}
+    if report.get("error"):
+        return f"没跑成：{report['error']}"
+    if report.get("skip"):
+        return f"已跳过：{report['skip']}"
+    watched = int(report.get("watched") or 0)
+    hits = int(report.get("hits") or 0)
+    fresh = int(report.get("fresh") or 0)
+    bits = [f"盯了 {watched} 只"]
+    if report.get("held_extra"):
+        bits.append(f"其中补盯的持仓 {int(report['held_extra'])} 只")
+    bits.append(f"命中 {hits} 条")
+    if fresh:
+        bits.append(f"新增提醒 {fresh} 条（已进消息列表）")
+    elif hits:
+        bits.append("都在今天提醒过了（同标的同类型当天只提醒一次）")
+    else:
+        bits.append("本轮没有触发条件的票")
+    text = "，".join(bits)
+    auction = report.get("auction") or {}
+    if auction.get("slot"):
+        text += f"；竞价扫描 {auction['slot']} 命中 {int(auction.get('hits') or 0)} 只"
+    if auction.get("error"):
+        text += f"；竞价扫描失败：{auction['error']}"
+    return text
 
 
 # ── 集合竞价强度 / 当日异动 ──
@@ -1979,16 +2085,18 @@ def run_once(
         now: "现在"（测试用；默认取北京时间）。
 
     Returns:
-        {"trading_day", "in_session", "hits", "fresh", "pushed", "error",
-         "auction": {"slot", "scanned", "hits", "pushed"}}
+        {"trading_day", "in_session", "hits", "fresh", "pushed", "error", "skip",
+         "watched", "universe", "held_extra", "auction": {"slot", "scanned", "hits", "pushed"}}
     """
     cfg = cfg or get_config()
     now = now or now_shanghai()
     today = now.strftime("%Y-%m-%d")
     result = {"trading_day": is_trading_day(engine.db_path, today),
               "in_session": in_session(now), "hits": 0, "fresh": 0, "pushed": False,
-              "error": "", "auction": {}}
+              "error": "", "skip": "", "watched": 0, "universe": 0, "held_extra": 0,
+              "auction": {}}
     if not result["trading_day"]:
+        result["skip"] = "今天不是交易日"
         logger.info("今天不是交易日，跳过盘中提醒（含竞价扫描）")
         return result
     # 竞价扫描是"到点才扫"（默认 09:20 / 09:25）：先算出这一轮到没到扫描时刻，
@@ -2003,17 +2111,18 @@ def run_once(
             logger.debug(f"竞价扫描到点判断失败（本轮不扫）：{exc}")
     in_window = result["in_session"] or bool(scan_slot)
     if not in_window and not ignore_session:
+        result["skip"] = "现在不在交易时段（9:30–11:30 / 13:00–15:00）"
         logger.info("当前不在交易时段（也不在竞价扫描时刻），跳过")
         return result
 
     if client is None and not hx.available():
         logger.warning("未配置同花顺 API Key，无法获取实时行情")
-        result["error"] = "未配置 API Key"
+        result["error"] = "未配置同花顺 API Key（拿不到实时行情，盘中提醒无法运行）"
         return result
 
     try:
         client = client or hx.HithinkClient(api_key=cfg.hithink_api_key or None, pace=0.05)
-        alerts = build_alerts(engine, client, cfg=cfg, today=today)
+        alerts = build_alerts(engine, client, cfg=cfg, today=today, stats=result)
         result["hits"] = len(alerts)
         fresh = record_alerts(engine.db_path, alerts, today)
         result["fresh"] = len(fresh)
