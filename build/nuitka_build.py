@@ -41,6 +41,25 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC = PROJECT_ROOT / "src"
+
+
+def product_version() -> str:
+    """exe 属性里的产品版本 = 包里的 `__version__`（**唯一真源**）。
+
+    以前这里是第二份字面量，发版时"三处都得改"（`__init__.py` / `pyproject.toml` /
+    这个脚本），漏一处就会出现"界面写着 1.2.1、右键属性写着 1.2.0"这种只能靠用户
+    报障才发现的不一致。直接在打包时从源码读，就不存在第二份。
+    读不到（源码树不完整）时退回 `0.0.0`：属性里的版本号不值得让整次构建失败。
+    """
+    init = SRC / "laoa_trader" / "__init__.py"
+    try:
+        for line in init.read_text(encoding="utf-8").splitlines():
+            if line.startswith("__version__"):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return "0.0.0"
+
 #: 构建中间目录（每次重建；`--keep-going` 时保留下来看日志）
 STAGING = PROJECT_ROOT / "build" / "nuitka-out"
 #: 最终产物目录名（**ASCII**：解压/命令行/别的工具里中文名容易乱码）
@@ -103,7 +122,7 @@ def build_command(python: str) -> list[str]:
         f"--output-dir={STAGING}",
         # 版本信息：属性里看得出来这是哪个产品哪个版本（也方便用户报障）
         "--product-name=老牛选股",
-        "--product-version=1.2.1",
+        f"--product-version={product_version()}",
         "--file-description=老牛选股助手（行情软件辅助工具）",
         # 编译期优化：去掉断言与 docstring 相关的开销；`__doc__` 我们**要**保留
         # （策略编辑器的帮助文案、函数的"是什么"提示都读它），所以不加 --python-flag=-OO

@@ -386,13 +386,14 @@ laoA/
 
 - **小改动 +0.01**：末位加一（`1.2.0` → `1.2.1`）。
 - **大升级 +0.1**：中段加一（`1.2.0` → `1.3.0`）。
-- 三处必须同步，否则会出现"界面说这个版本、包是那个版本"：
+- 两处必须同步，否则会出现"界面说这个版本、包是那个版本"：
 
 | 位置 | 内容 |
 |---|---|
 | `src/laoa_trader/__init__.py` | `__version__`（唯一真源，界面 / 通知 / `--version` 都读它） |
 | `pyproject.toml` | `[project] version` |
-| `build/nuitka_build.py` | 命令行里的 `--product-version=` |
+
+`build/nuitka_build.py` 的 `--product-version=` **打包时现读 `__version__`**（2026-09-28 起），不再是手抄的第三份字面量。
 
 ### 提交信息与文档同步
 

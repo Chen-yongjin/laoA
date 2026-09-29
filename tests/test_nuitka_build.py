@@ -45,6 +45,18 @@ def test_exe_and_dist_names_are_what_we_promise_users(builder) -> None:
     assert builder.EXE_NAME == "老牛选股"            # exe 名中文（用户在资源管理器里双击的就是它）
 
 
+def test_product_version_has_one_source_of_truth(builder) -> None:
+    """exe 属性里的产品版本 = `laoa_trader.__version__`（2026-09-28 起不再手抄一份）。
+
+    以前这个脚本里躺着第二份字面量，发版要"三处都得改"；漏一处就会出现
+    "界面写 1.2.1、右键属性写 1.2.0"，而且只有用户报障才会发现。
+    """
+    import laoa_trader
+
+    assert builder.product_version() == laoa_trader.__version__
+    assert f"--product-version={laoa_trader.__version__}" in builder.build_command("python")
+
+
 def test_build_command_covers_every_packaged_data_file(builder) -> None:
     """随包数据一个都不能漏（漏了就是"程序起来了、图标/随包策略/示例配置不见了"）。"""
     cmd = builder.build_command("python")
