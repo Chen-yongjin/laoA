@@ -399,8 +399,13 @@ jobs:
           # （PySide6/pyarrow 那一堆），逐个小文件走 artifact 服务既慢又容易在
           # 某一步上翻车；用户下载回来同样是"解压 → 进 LaoniuTrader 目录 → 双击 exe"。
           Compress-Archive -Path 'dist/LaoniuTrader' -DestinationPath 'LaoniuTrader.zip' -Force
+          # 2026-09-30 用户要求：另外留一份**带版本号**的包，方便一眼认出是哪个版本。
+          # 固定名 LaoniuTrader.zip 继续保留（Release 固定直链、站点兜底都靠它，不能改掉）。
+          $ver = (Select-String -Path 'src/laoa_trader/__init__.py' -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Copy-Item 'LaoniuTrader.zip' "LaoniuTrader-$ver.zip" -Force
+          "ver=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           $zip = Get-Item 'LaoniuTrader.zip'
-          Write-Host ("压缩包：{0:N1} MB" -f ($zip.Length / 1MB))
+          Write-Host ("压缩包：{0:N1} MB   带版本号的副本：LaoniuTrader-{1}.zip" -f ($zip.Length / 1MB), $ver)
 
       - id: zipcheck
         name: 包内容自检：解压确认 exe 在、且没有注册机
@@ -415,6 +420,7 @@ jobs:
           $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
           Add-Content $log ("文件：{0}  字节：{1}  sha256：{2}" -f $zip.Name, $zip.Length, $hash)
           "zip_name=$($zip.Name)" | Set-Content zip-meta.txt
+          "zip_version=${{ steps.zip.outputs.ver }}" | Add-Content zip-meta.txt
           "zip_bytes=$($zip.Length)" | Add-Content zip-meta.txt
           "zip_sha256=$hash" | Add-Content zip-meta.txt
 
@@ -460,7 +466,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: LaoniuTrader
-          path: LaoniuTrader.zip
+          path: |
+            LaoniuTrader.zip
+            LaoniuTrader-${{ steps.zip.outputs.ver }}.zip
           # ⚠️ 2 天而不是 14：私有仓库的 Actions 存储有硬额度（免费额度 500MB），
           # 而这份产物压缩后就有几百 MB —— 攒十几次就把额度顶爆，之后**上传必失败**
           # （2026-09-21 实测：测试/打包/检查全 success，只有 step_upload=failure）。
@@ -485,7 +493,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: LaoniuTrader-retry-${{ github.run_id }}
-          path: LaoniuTrader.zip
+          path: |
+            LaoniuTrader.zip
+            LaoniuTrader-${{ steps.zip.outputs.ver }}.zip
           retention-days: 2
           if-no-files-found: ignore
 
@@ -528,7 +538,8 @@ jobs:
             gh release create $tag --title "老牛选股 · 最新构建" --notes $notes
             if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
           }
-          gh release upload $tag LaoniuTrader.zip --clobber
+          $ver = "${{ steps.zip.outputs.ver }}"
+          gh release upload $tag LaoniuTrader.zip "LaoniuTrader-$ver.zip" --clobber
           if ($LASTEXITCODE -ne 0) { throw "上传 Release 附件失败" }
           gh release edit $tag --notes $notes
           Write-Host "::notice::已挂到 Release：https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/LaoniuTrader.zip"
