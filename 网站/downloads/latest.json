@@ -1,0 +1,5 @@
+{
+  "version": "1.2.1",
+  "file": "LaoniuTrader-1.2.1.zip",
+  "note": "下载按钮会指向这个文件；换版本时只改本文件与 downloads/ 里的包名"
+}
