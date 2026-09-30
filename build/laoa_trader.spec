@@ -131,10 +131,8 @@ HIDDEN = [
 # ── 随包分发的数据文件（目标路径 → 源路径）──
 DATAS = [
     (str(PROJECT_ROOT / "config.example.toml"), "."),
-    (str(PROJECT_ROOT / "README.md"), "."),
-    # 验收清单随包放：用户解压后**exe 旁边就有**"该点哪几下"，
-    # 不用回头翻仓库（这是"拿到就能自己验"的最小代价）
-    (str(PROJECT_ROOT / "docs" / "验收清单.md"), "."),
+    # 2026-09-30 用户要求：包里不再带 README.md 与 验收清单.md
+    # （说明与验收清单改为随下载页/微信单独给，不进安装包）
     # 图标要打进包里：窗口 / 托盘 / 关于页都从 `laoa_trader/assets/` 取
     # （位置解析集中在 `laoa_trader/assets.py`，spec 这里只负责把文件放进去）
     (str(SRC / "laoa_trader" / "assets"), "laoa_trader/assets"),
