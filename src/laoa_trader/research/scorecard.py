@@ -280,7 +280,7 @@ def check_convention(conv: Convention) -> Convention:
 
 
 #: **默认并列输出的口径**。A/B/C 的出场窗口相同（都到 D+2），只有进场价不同 ——
-#: 这样才能干净地回答问题："这个 α 到底是选股能力，还是抢开盘抢出来的？"
+#: 这样才能干净地回答问题："这个 α 到底是匹配能力，还是抢开盘抢出来的？"
 CONVENTIONS: tuple[Convention, ...] = (
     Convention("A", "A 开盘买·隔日收盘卖", 1, "open", 2, "close",
                "旧口径：D+1 开盘买 → D+2 收盘卖（与 NAS 历史结论对齐）"),
@@ -683,7 +683,7 @@ def build_picks(
     top_n: int | None = None,
     risk_symbols: set[str] | None = None,
 ) -> pd.DataFrame:
-    """生成某个信号定义在**每个交易日**的选股（取每天前 top_n 只）。
+    """生成某个信号定义在**每个交易日**的匹配（取每天前 top_n 只）。
 
     Returns:
         DataFrame[date, symbol, factor]（已剔除 ST/退市风险股，已排序截断）。
@@ -722,7 +722,7 @@ def market_map(
         （买不进的样本按 K 的进场方式剔除：开盘买剔一字板、尾盘买剔收盘涨停），
         再对全部股票取算术平均。
 
-    它代表"当天闭眼买一篮子平均股票"的收益：扣掉它，剩下的才是选股能力。
+    它代表"当天闭眼买一篮子平均股票"的收益：扣掉它，剩下的才是匹配能力。
     """
     convs = as_conventions(conventions)
     if panel.empty:
@@ -858,7 +858,7 @@ def daily_t(values_by_date: dict[str, list[float]]) -> tuple[float | None, float
 
     为什么必须按信号日聚合：同一天选出的几十只票同涨同跌，把 3 万条信号当
     3 万个独立样本，t 值会虚高十倍以上（标准差被低估、样本量被高估）。
-    先算每日均值再做单样本 t 检验，才是"这个策略有没有稳定的选股能力"。
+    先算每日均值再做单样本 t 检验，才是"这个策略有没有稳定的匹配能力"。
 
     残留偏差：持有 N 天的收益在相邻信号日之间仍重叠（自相关），t 值依然偏乐观。
     """
@@ -1326,7 +1326,7 @@ def format_table(
     else:
         convs = as_conventions(DEFAULT_HORIZONS)
     lines.append("=" * 116)
-    lines.append("策略成绩单（回测）：D 收盘选股 → D+1 进场 → 按口径持有 → 出场（卖出日严格晚于买入日）")
+    lines.append("策略成绩单（回测）：D 收盘匹配 → D+1 进场 → 按口径持有 → 出场（卖出日严格晚于买入日）")
     lines.append("  · A = D+1【开盘】买（旧口径）· B = D+1【尾盘(收盘)】买（更贴近散户真实执行）"
                  "· C = D+1 尾盘买 → D+2 开盘卖（只吃隔夜）")
     lines.append("  · T+0（当日买当日卖）在本工具里被直接判定为**不可执行**，不参与任何统计")

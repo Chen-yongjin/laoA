@@ -1,8 +1,8 @@
-/* 老牛选股 · 站点脚本（原生 JS，无依赖）
+/* 财神助手 · 站点脚本（原生 JS，无依赖）
  *
  * 做两件事：
  *   1) 读 downloads/latest.json（当前版本 + 包文件名），把下载按钮指向**带版本号**的包；
- *      读不到就退回老约定 downloads/LaoniuTrader.zip（老站点、老包名照样能用）。
+ *      读不到就退回老约定 downloads/CaishenTrader.zip（老站点、老包名照样能用）。
  *   2) HEAD 探测该文件在不在：在 → 按钮生效，并显示文件大小与版本号；
  *      不在 → 按钮置灰、显示「下载准备中，请联系作者微信 q352162」。
  *
@@ -12,7 +12,7 @@
  */
 (function () {
   var MANIFEST = 'downloads/latest.json';
-  var FALLBACK = 'downloads/LaoniuTrader.zip';
+  var FALLBACK = 'downloads/CaishenTrader.zip';
 
   function human(bytes) {
     if (!bytes || bytes < 1024) return bytes + ' B';

@@ -435,7 +435,7 @@ def db(cfg: Config, trading_days: list[str]) -> str:
         # 让合成小库也能通过"运行时自检"（否则调度/界面会因为数据闸门而拒绝跑策略）：
         # 补一条**零效果**复权事件 —— 只为满足"复权事件非空"这一条判据。
         # 0 送股/0 配股/0 现金分红 ⇒ 因子恒等于 1，**不改变任何策略输入**
-        # （用真实的送配股事件会整体缩放后复权价，可能影响其它用例的选股结果）。
+        # （用真实的送配股事件会整体缩放后复权价，可能影响其它用例的匹配结果）。
         storage.write_adjust_events(conn, [(symbols_first, trading_days[0], 0.0, 0.0, 0.0, 0.0)])
     # 小样本库（6 只股票 / 40 个交易日）远低于默认门槛 4000 只、4.5 年 ——
     # 放低门槛，让它按"真实小库"参与后续流程；其余判据（行业覆盖/复权事件/日历）
@@ -603,7 +603,7 @@ def sqlite_conn(db: str):
 def _isolate_license_state(tmp_path_factory, monkeypatch):
     """每个用例都用一份**干净的授权状态**（默认：刚装上、试用第 1 天）。
 
-    为什么必须隔离：授权状态文件在 `%APPDATA%\LaoATrader\license.json`（开发机上
+    为什么必须隔离：授权状态文件在 `%APPDATA%\CaishenHelper\license.json`（开发机上
     也可能真的存在）。不隔离的话，**测试行为会跟着开发机/CI 机器上那份文件变**：
     那里写着"试用到期"时，每个建 `MainWindow` 的用例都会多弹一个授权窗口，
     定时器与窗口数跟着变（这类差异最难的是一开始就看不出来 —— 本机全绿、CI 上偶发崩）。
@@ -722,7 +722,7 @@ def _close_orphan_top_level_windows():
 
 @pytest.fixture(autouse=True)
 def _no_real_desktop_export(tmp_path, monkeypatch):
-    """测试期间**绝不往真桌面写文件**（选股结果导出会落在桌面）。
+    """测试期间**绝不往真桌面写文件**（匹配结果导出会落在桌面）。
 
     为什么必须有：`scheduler.run_daily()` 建池成功后会往**桌面**导出一份结果文本
     （用户要求）。测试里大量调用 `run_daily`（pipeline / cli / scheduler_gate …），

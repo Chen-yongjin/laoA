@@ -74,7 +74,7 @@ def test_data_coverage_and_summary(db) -> None:
 
 
 def test_engine_survives_missing_database(cfg) -> None:
-    """库文件不存在时自动建空库（不抛异常）—— 首次运行点"选股"不该崩。"""
+    """库文件不存在时自动建空库（不抛异常）—— 首次运行点"匹配"不该崩。"""
     engine = DataEngine(cfg.data_dir / "brand-new.db")
     assert engine.get_active_symbols() == []
     assert engine.get_latest_data_date() is None
@@ -143,7 +143,7 @@ def test_scheduler_loop_never_dies_on_error(cfg, db, monkeypatch) -> None:
 
 
 def test_run_daily_pipeline_without_key_is_safe(cfg, db, monkeypatch) -> None:
-    """没配 Key 也能跑完整流程（只用本地库选股），不推送。"""
+    """没配 Key 也能跑完整流程（只用本地库匹配），不推送。"""
     monkeypatch.delenv("HITHINK_FINANCE_API_KEY", raising=False)
     cfg.hithink_api_key = ""
     report = scheduler.run_daily(cfg, DataEngine(db), notify=False)
@@ -187,7 +187,7 @@ def test_run_daily_notifies_pool_with_plan_params(cfg, db, monkeypatch) -> None:
 
     report = scheduler.run_daily(cfg, DataEngine(db), notify=True)
     assert report["pool"]
-    assert "老牛选股助手-选股池" in captured["title"]
+    assert "财神助手-标的池" in captured["title"]
     body = "\n".join(captured["lines"])
     assert "600001" in body
     assert "条件单参数" in body          # 附带触发价/委托价/止损止盈
@@ -197,7 +197,7 @@ def test_run_daily_notifies_pool_with_plan_params(cfg, db, monkeypatch) -> None:
 def test_run_daily_survives_formula_crash(cfg, db, monkeypatch) -> None:
     """候选那一层（现在是「公式」组）整体崩掉时，流程仍返回结构化报告（界面据此提示）。
 
-    2026-09-18 起"策略层"就是"公式层"（内置策略退出了选股链路），所以这条从
+    2026-09-18 起"策略层"就是"公式层"（内置策略退出了匹配链路），所以这条从
     `rules.run_all` 崩溃改成 `formula_group.run_enabled_formulas` 崩溃 ——
     要保的东西没变：异常不许冒出去，必须变成 `report["errors"]` 里一句能看懂的中文。
     """
@@ -208,8 +208,8 @@ def test_run_daily_survives_formula_crash(cfg, db, monkeypatch) -> None:
 
     monkeypatch.setattr("laoa_trader.strategy.formula_group.run_enabled_formulas", boom)
     report = scheduler.run_daily(cfg, DataEngine(db), notify=False)
-    # 错误里要能看出"哪一步炸了"（前缀是"选股："）+ 原始异常（用户据此报障）
-    assert any("选股：" in e and "公式全炸了" in e for e in report["errors"])
+    # 错误里要能看出"哪一步炸了"（前缀是"匹配："）+ 原始异常（用户据此报障）
+    assert any("匹配：" in e and "公式全炸了" in e for e in report["errors"])
     assert report["pool"] == []
 
 

@@ -22,7 +22,7 @@ def test_defaults() -> None:
     cfg = load_config(use_env=False)
     assert cfg.run_at == "16:00"              # 新默认：收盘后主跑
     assert cfg.run_at_fallback == "19:15"     # 主跑没成功时的补跑
-    assert cfg.auto_run is False              # 用户拍板：不设定时运行（选股随时手动）
+    assert cfg.auto_run is False              # 用户拍板：不设定时运行（匹配随时手动）
     assert cfg.intraday_interval == 60
     assert cfg.stop_loss == 0.05
     assert cfg.take_profit == 0.10
@@ -65,7 +65,7 @@ data_dir = "{p(tmp_path / 'mydata')}"
 
 def test_supports_nested_section(tmp_path: Path) -> None:
     path = _write(tmp_path, """
-title = "老牛选股助手"
+title = "财神助手"
 
 [laoa_trader]
 hithink_api_key = "nested-key"
@@ -151,16 +151,16 @@ def test_explicit_path_that_does_not_exist(tmp_path: Path) -> None:
 
 
 def test_default_data_dir_uses_localappdata(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Windows 默认数据目录 `%LOCALAPPDATA%\\LaoATrader\\data`。"""
+    """Windows 默认数据目录 `%LOCALAPPDATA%\\CaishenHelper\\data`。"""
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\me\AppData\Local")
     assert config_mod.default_data_dir() == Path(
-        r"C:\Users\me\AppData\Local") / "LaoATrader" / "data"
+        r"C:\Users\me\AppData\Local") / "CaishenHelper" / "data"
 
 
 def test_default_data_dir_without_localappdata(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.setenv("XDG_DATA_HOME", "/tmp/xdg")
-    assert config_mod.default_data_dir() == Path("/tmp/xdg/LaoATrader/data")
+    assert config_mod.default_data_dir() == Path("/tmp/xdg/CaishenHelper/data")
 
 
 def test_search_paths_include_env_pointer(tmp_path: Path, monkeypatch) -> None:
@@ -245,7 +245,7 @@ def test_watchlist_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_example_config_documents_watchlist() -> None:
-    """config.example.toml 里要能看懂怎么用自选股（用户第一站）。"""
+    """config.example.toml 里要能看懂怎么用自选标的（用户第一站）。"""
     import tomllib
     from pathlib import Path as P
 
@@ -255,7 +255,7 @@ def test_example_config_documents_watchlist() -> None:
     assert data["watchlist_in_pool"] is True
     text = example.read_text(encoding="utf-8")
     assert "--watchlist add" in text          # 教怎么加
-    assert "自选股" in text
+    assert "自选标的" in text
 
 
 def test_autorun_defaults_and_toml(tmp_path: Path) -> None:
@@ -722,7 +722,7 @@ def test_example_config_documents_position_t() -> None:
 
 
 def test_default_strategy_set_is_no_formula() -> None:
-    """选股相关只剩一个键：`enabled_formulas`，**默认空 = 只盯自选股**。
+    """匹配相关只剩一个键：`enabled_formulas`，**默认空 = 只盯自选标的**。
 
     2026-09-18 之前这里断言的是"默认只开 short 组"（`enabled_groups`）；
     内置策略改成随包公式、策略组机制删掉之后，那两个键连字段都不存在了 ——
@@ -749,7 +749,7 @@ def test_default_history_window_is_six_months() -> None:
 
 def test_default_switches_are_off() -> None:
     """出厂设置里"会自己动"的东西一律关掉（用户拍板）：
-    不设定时运行（选股随时手动）、T策略默认关、当日异动默认关（减少无用消息）。
+    不设定时运行（匹配随时手动）、T策略默认关、当日异动默认关（减少无用消息）。
     """
     cfg = load_config(use_env=False)
     assert cfg.auto_run is False

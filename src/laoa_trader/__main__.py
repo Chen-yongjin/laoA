@@ -1,9 +1,9 @@
-"""老牛选股助手（Windows 单机版）。
+"""财神助手（Windows 单机版）。
 
 入口：`python -m laoa_trader`（无参数启动 GUI），或 `--cli` 走命令行：
 
     python -m laoa_trader --cli --download     # 下载 10 年历史数据（含进度）
-    python -m laoa_trader --cli --once         # 跑一次：数据增量 + 选股 + 建池
+    python -m laoa_trader --cli --once         # 跑一次：数据增量 + 匹配 + 建池
     python -m laoa_trader --cli --pool         # 只看当前股票池
     python -m laoa_trader --cli --market       # 打印大盘概览那几行
     python -m laoa_trader --cli --market       # 只看大盘概览（与页面同一份：家数/成交额/涨跌家数/三组指数）
@@ -85,7 +85,7 @@ def _doctor(cfg, startup_problem: str = "") -> None:
 
     import laoa_trader
 
-    print("老牛选股助手 —— 自检")
+    print("财神助手 —— 自检")
     print("=" * 56)
     print(f"程序版本    : {laoa_trader.__version__}")
     # 运行形态与两条关键路径：换成 Nuitka 之后，"图标/随包公式找没找到"是最容易出问题的地方
@@ -110,7 +110,7 @@ def _doctor(cfg, startup_problem: str = "") -> None:
           f"（{'已存在' if cfg.db_path.exists() else '尚未创建'}）")
     print(f"dump 目录   : {cfg.dump_dir}（{'已存在' if cfg.dump_dir.exists() else '尚未创建'}）")
     # Path(...) 包一层：`data_dir` 可能还是界面传进来的字符串（save_settings 之前）
-    print(f"日志文件    : {Path(cfg.data_dir) / 'logs' / 'laoa-trader.log'}")
+    print(f"日志文件    : {Path(cfg.data_dir) / 'logs' / 'caishen-helper.log'}")
     print("-" * 56)
     print(f"同花顺 Key  : {_mask(cfg.hithink_api_key)}")
     # 数据来源现在是一张**可添加的列表**（`data_sources`，顺序即取数优先级）：
@@ -209,7 +209,7 @@ def _doctor(cfg, startup_problem: str = "") -> None:
         if not summary["daily_rows"]:
             print("\n提示：先跑 `python -m laoa_trader --cli --download` 建库。")
         elif not cfg.hithink_api_key:
-            print("\n提示：未配置同花顺 API Key，只能基于本地已有数据选股，无法更新。")
+            print("\n提示：未配置同花顺 API Key，只能基于本地已有数据匹配，无法更新。")
     except Exception as exc:  # noqa: BLE001 - 自检本身不能崩
         print(f"数据概况读取失败：{type(exc).__name__}: {exc}")
 
@@ -270,7 +270,7 @@ def _preflight_gate(cfg, auto_download: bool) -> int | None:
 
 
 def _watchlist_command(cfg, values: list[str], note: str) -> int:
-    """自选股命令行：add / list / remove / enable / disable。
+    """自选标的命令行：add / list / remove / enable / disable。
 
     名称**自动从本地库补**（`stock_basic`）；查不到也允许添加，只是提示一下 ——
     刚上市或有改名时库里可能还没有，不该因此拦住用户。
@@ -290,10 +290,10 @@ def _watchlist_command(cfg, values: list[str], note: str) -> int:
         with storage.connect(cfg.db_path) as conn:
             rows = storage.load_watchlist(conn)
         if not rows:
-            print("自选股为空。用 `--watchlist add 600519 --note 龙头` 添加。")
+            print("自选标的为空。用 `--watchlist add 600519 --note 龙头` 添加。")
             return 0
         pool_symbols = set(pool_mod.pool_symbols(cfg.db_path))
-        print(f"自选股（{len(rows)} 只，上限 {cfg.watchlist_max}）：")
+        print(f"自选标的（{len(rows)} 只，上限 {cfg.watchlist_max}）：")
         for row in rows:
             status = "启用" if int(row.get("enabled", 1)) == 1 else "已停用"
             if not cfg.watchlist_in_pool:
@@ -323,7 +323,7 @@ def _watchlist_command(cfg, values: list[str], note: str) -> int:
         with storage.connect(cfg.db_path) as conn:
             storage.upsert_watchlist(conn, symbol, name=name, note=note, enabled=True)
             total = len(storage.load_watchlist(conn, enabled_only=True))
-        print(f"✅ 已加入自选股：{symbol} {name or ''}"
+        print(f"✅ 已加入自选标的：{symbol} {name or ''}"
               + (f"（备注 {note}）" if note else "")
               + f"；当前启用 {total} 只（上限 {cfg.watchlist_max}）")
         if total > cfg.watchlist_max:
@@ -334,7 +334,7 @@ def _watchlist_command(cfg, values: list[str], note: str) -> int:
     if action in ("remove", "del", "delete"):
         with storage.connect(cfg.db_path) as conn:
             removed = storage.remove_watchlist(conn, symbol)
-        print("✅ 已从自选股移除：" + symbol if removed else f"未找到自选股 {symbol}")
+        print("✅ 已从自选标的移除：" + symbol if removed else f"未找到自选标的 {symbol}")
         return 0 if removed else 1
 
     if action in ("enable", "disable"):
@@ -342,7 +342,7 @@ def _watchlist_command(cfg, values: list[str], note: str) -> int:
         with storage.connect(cfg.db_path) as conn:
             changed = storage.set_watchlist_enabled(conn, symbol, enabled)
         if not changed:
-            print(f"未找到自选股 {symbol}")
+            print(f"未找到自选标的 {symbol}")
             return 1
         print(f"✅ 已{'启用' if enabled else '停用'}：{symbol}"
               + ("" if enabled else "（停用后不进池、不监控，仍保留在列表里）"))
@@ -479,12 +479,12 @@ def _market_command(cfg) -> int:
 def cli(argv: list[str] | None = None) -> int:
     """命令行模式。"""
     parser = argparse.ArgumentParser(
-        prog="laoa_trader", description="老牛选股助手（命令行）"
+        prog="laoa_trader", description="财神助手（命令行）"
     )
     parser.add_argument("--cli", action="store_true", help="强制命令行模式")
     parser.add_argument("--config", help="config.toml 路径")
     parser.add_argument("--download", action="store_true", help="下载/更新历史数据")
-    parser.add_argument("--once", action="store_true", help="跑一次：数据增量 + 选股 + 建池")
+    parser.add_argument("--once", action="store_true", help="跑一次：数据增量 + 匹配 + 建池")
     parser.add_argument("--pool", action="store_true", help="显示当前股票池")
     parser.add_argument(
         "--market", action="store_true",
@@ -495,10 +495,10 @@ def cli(argv: list[str] | None = None) -> int:
     # （连同配套的 `--horizons` / `--out` / `--db` / `--top`）**整体删掉了** ——
     # 它们服务的对象是写在 `strategy/rules.py` 里的那 5 条 Python 策略与策略组机制，
     # 那两样东西随"内置策略改成随包公式"一起删除（见 legacy.py 的模块注释）。
-    # 想按条件选股就在界面上勾公式（或直接改 `formulas/` 里的公式文件）。
+    # 想按条件匹配就在界面上勾公式（或直接改 `formulas/` 里的公式文件）。
     parser.add_argument(
         "--watchlist", nargs="+", metavar=("动作", "代码"),
-        help="自选股管理：add 600519 / list / remove 600519 / enable 600519 / disable 600519"
+        help="自选标的管理：add 600519 / list / remove 600519 / enable 600519 / disable 600519"
              "（add 时名称自动从本地库补，可用 --note 写备注）",
     )
     parser.add_argument("--note", default="", help="配合 --watchlist add：备注（例如 龙头）")
@@ -561,7 +561,7 @@ def cli(argv: list[str] | None = None) -> int:
 
         from laoa_trader.strategy import formula as fm
 
-        print(f"老牛选股助手 {laoa_trader.__version__}")
+        print(f"财神助手 {laoa_trader.__version__}")
         print(f"构建形态：{runtime.describe()}")
         print(f"程序位置：{runtime.exe_dir()}")
         print(f"策略引擎：支持 {len(fm.SUPPORTED_FUNCTIONS)} 个函数")
@@ -644,7 +644,7 @@ def cli(argv: list[str] | None = None) -> int:
     if args.once:
         from laoa_trader.scheduler import data_gate, run_daily
 
-        # 数据闸门（与界面【开始选股】、调度线程同一口径）：
+        # 数据闸门（与界面【开始匹配】、调度线程同一口径）：
         # 没数据就跑公式 = 选出错的票，所以这里明确拒绝并返回非零退出码
         gate = data_gate(cfg, DataEngine(cfg.db_path))
         if not gate["ok"]:
@@ -654,13 +654,13 @@ def cli(argv: list[str] | None = None) -> int:
         # ⚠️ 2026-09-18（用户要求）：**候选只来自勾选的公式** —— 那 5 条写在代码里的
         # Python 策略连同策略组机制一起删掉了（`--groups` / `--strategies` /
         # `--list-groups` / `--scorecard` 这些入口也随之删除）。
-        # 所以这里不再因为"没有启用任何策略"而拒绝运行：一条公式都没勾 = 只盯自选股，
+        # 所以这里不再因为"没有启用任何策略"而拒绝运行：一条公式都没勾 = 只盯自选标的，
         # 那是**默认的正常状态**。
         enabled = [str(n) for n in (getattr(cfg, "enabled_formulas", None) or [])]
         if enabled:
-            print("本次按勾选的策略选股：" + "、".join(enabled))
+            print("本次按勾选的策略匹配：" + "、".join(enabled))
         else:
-            print("没有勾选任何策略（enabled_formulas 为空）：本次只处理自选股")
+            print("没有勾选任何策略（enabled_formulas 为空）：本次只处理自选标的")
 
         report = run_daily(cfg, DataEngine(cfg.db_path), notify=not args.no_notify)
         print(f"数据日期：{report['data_date']}")

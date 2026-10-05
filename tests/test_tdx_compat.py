@@ -1,4 +1,4 @@
-"""通达信（TDX）公式兼容层：**网上抄来的选股公式要能直接跑**。
+"""通达信（TDX）公式兼容层：**网上抄来的匹配公式要能直接跑**。
 
 用户原话（2026-09-21）：「我要的是通达信公式进来直接能跑」。
 
@@ -51,7 +51,7 @@ def _close_to(expr: str, expected: float, series: fm.Series, eps: float = 1e-6) 
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 一、真实风格的 TDX 选股公式：能编译、能跑出结果（不报错）
+# 一、真实风格的 TDX 匹配公式：能编译、能跑出结果（不报错）
 # ══════════════════════════════════════════════════════════════════════════
 
 #: 从网上抄来的典型写法（保留原有语法点：`:` 输出 / `;` 结尾 / COLORxxx / DRAWICON /
@@ -331,7 +331,7 @@ def test_unsupported_functions_say_so_in_chinese() -> None:
 
 
 def test_a_formula_with_only_drawing_statements_is_rejected() -> None:
-    """整条公式只有画图语句 → 没有选股条件，必须报错（而不是"编译通过但什么都不做"）。"""
+    """整条公式只有画图语句 → 没有匹配条件，必须报错（而不是"编译通过但什么都不做"）。"""
     with pytest.raises(fm.FormulaError):
         fm.compile_formula("DRAWICON(C>O,10,1);\nDRAWTEXT(C>O,20,'阳');")
 

@@ -1,9 +1,9 @@
-"""每日精选股票池：**策略标的 + 自选股**，两类成员一起进池、一起盯。
+"""每日精匹配票池：**策略标的 + 自选标的**，两类成员一起进池、一起盯。
 
 池子成员有两类
 --------------
 1. **策略标的**：启用组 → 候选 → 热门行业过滤 → 权重打分 → 每策略≤3 → 取前 N（N=`size`）；
-2. **自选股**（用户在界面/CLI 手动加的）：
+2. **自选标的**（用户在界面/CLI 手动加的）：
    - **不受热门行业过滤**（自己选的，就是要盯）；
    - **不占策略名额**（`size` 只限制策略标的）；
    - 有自己的上限 `watchlist_max`（默认 20），超限会**提示**而不是静默丢弃；
@@ -28,7 +28,7 @@
    （`formula_group.MAX_PER_FORMULA` / `FORMULA_WEIGHT`）；
 3. 只保留**热门行业**的候选（当日行业涨停密度 + 近 5 日行业成分等权涨幅，归一化后取前 12）；
    **公式标的不过这道收敛**（条件是用户自己写明的，再被他没看见的行业过滤删掉最莫名其妙）；
-4. 自选股独立并入（**不占公式名额、不受热门行业过滤**）；
+4. 自选标的独立并入（**不占公式名额、不受热门行业过滤**）；
 5. 结果落库 `stock_pool`，盘中提醒直接盯这个池子。
 
 > 这些策略的 α 都只有 0.1~0.5%，**远小于盘中波动**，所以池子只是"值得盯的清单"。
@@ -89,7 +89,7 @@ def build_pool(
     """跑入选策略并合成当日股票池。
 
     除了内置策略，这里还会**自动并入 `enabled_formulas` 里勾选的自定义公式**
-    （作为与 short 等并列的「公式」组）—— 界面【开始选股】、定时日更、CLI 三条路
+    （作为与 short 等并列的「公式」组）—— 界面【开始匹配】、定时日更、CLI 三条路
     都走这个函数，所以放在这里就不可能有哪条路"忘了带公式"。默认（没勾公式时）
     一次库都不读，行为与以前完全一致。
 
@@ -100,22 +100,22 @@ def build_pool(
         hot_only: 是否只保留热门行业（用户要求：池子只选热门行业，数量少、盯得过来）。
             **自定义公式不参与这道收敛**（条件本身就是用户写明的，见下面的说明）。
         save: 是否落库 `stock_pool`。
-        save_picks: **选股结果（公式选出来的票）要不要一起落库**。
-            2026-09-21 主人要求"策略选股结果改成不自动加入股池" —— 所以【开始选股】
-            这条路传 `False`：`stock_pool` 里只留**自选股**（用户自己加的、以及在结果
+        save_picks: **匹配结果（公式选出来的票）要不要一起落库**。
+            2026-09-21 主人要求"策略匹配结果改成不自动加入股池" —— 所以【开始匹配】
+            这条路传 `False`：`stock_pool` 里只留**自选标的**（用户自己加的、以及在结果
             页面点【加入自选】加进来的），选出来的票只在结果页面显示，要不要留下由用户点。
             为什么不是整条建池都不做：`stock_pool` 同时是**盘中监控的盯盘清单**
-            （`intraday` 读它），而自选股必须继续被盯着 —— 见 `merge_watchlist()`。
+            （`intraday` 读它），而自选标的必须继续被盯着 —— 见 `merge_watchlist()`。
         day: 池子日期，默认按库里最新行情日期。
         picks: 已算好的候选（`{"公式·X": [...]}`）。调用方已经算过就直接传，
             免得再跑一遍（`run_enabled_formulas` 要扫全库，跑两遍纯浪费）。
-        selection: **2026-09-18 起不再用于选股，只为兼容老调用方保留这个参数**。
+        selection: **2026-09-18 起不再用于匹配，只为兼容老调用方保留这个参数**。
             用户把"内置策略"整体改成了随包公式（可改可删），"跑哪些策略"这件事
             现在只有一个答案：`config.toml` 里 `enabled_formulas` 勾了哪几条公式 ——
             它由 `formula_group.run_enabled_formulas()` 自己读，不需要外面传选择。
-        watchlist: 自选股行（`{symbol,name,note,enabled}`）；None 时按配置从库里读
+        watchlist: 自选标的行（`{symbol,name,note,enabled}`）；None 时按配置从库里读
             （`watchlist_in_pool=false` 表示"只记录不监控"，此时会跳过）。
-        report: 可选的可变字典，用来接收"自选股超上限被截掉几只"之类的提示
+        report: 可选的可变字典，用来接收"自选标的超上限被截掉几只"之类的提示
             （返回类型保持 list，避免破坏现有调用方）。**公式组的运行结果与错误
             也写进它**（`report["formulas"]` / `report["errors"]`）。
 
@@ -125,17 +125,17 @@ def build_pool(
     if picks is None:
         # ⚠️ 2026-09-18（用户要求）：候选**只来自"勾选的公式"**，不再是"跑内置策略"。
         # 原来这里调已删掉的 `rules.run_all()` 跑那 5 条写在代码里的 Python 策略；用户把它们
-        # 整体改成了随包公式（可改可删），于是 5 条策略退出选股链路 ——
+        # 整体改成了随包公式（可改可删），于是 5 条策略退出匹配链路 ——
         # 下面那段 `formula_group.run_enabled_formulas()` 成了**唯一**的候选来源，
         # 随包公式与用户自己写的一条待遇完全相同（勾上才跑）。
         picks_by_strategy = {}
     else:
         picks_by_strategy = picks
 
-    # ── 「公式」组：用户自己在「公式选股」页勾的自定义公式 ──
+    # ── 「公式」组：用户自己在「公式匹配」页勾的自定义公式 ──
     #
     # 为什么放在这里（而不是让调用方先合并好）：**建池是唯一必须并入公式的地方** ——
-    # 界面上的【开始选股】、定时任务、CLI 三条路都会走到 `build_pool`，
+    # 界面上的【开始匹配】、定时任务、CLI 三条路都会走到 `build_pool`，
     # 放在这里就不可能出现"某一条路忘了带公式"（那种 bug 极难发现：
     # 用户勾了公式，手动建池有、定时建池没有）。
     #
@@ -157,12 +157,12 @@ def build_pool(
             "ran": list(formula_run.ran),
             "picks": {k: len(v) for k, v in formula_run.picks.items()},
             "status": dict(formula_run.status),
-            # 这一轮用的 K 线口径（"开盘时间里跑的选股都是实时的"，见 `formulas.prepare_inputs`）：
+            # 这一轮用的 K 线口径（"开盘时间里跑的匹配都是实时的"，见 `formulas.prepare_inputs`）：
             # 界面的结论行与结果页都会显示它 —— 同一份策略在盘中和收盘后选出的票不一样，
             # 不显示口径就没法解释。
             "caliber": formula_run.caliber,
             # 口径类的**告知**（如"盘中取不到快照，已退回日 K"）：**不进 errors** ——
-            # `report["errors"]` 是"这一轮算不算成功"的判据，一句告知不该让选股被判失败
+            # `report["errors"]` 是"这一轮算不算成功"的判据，一句告知不该让匹配被判失败
             "warnings": list(formula_run.warnings),
             # **完整候选行也要留一份**：`scheduler.run_daily()` 从这里取候选写 `signal`
             # 表（盘中风控观察池用）。只留计数的话那边就没东西可写 —— 而 `signal`
@@ -171,7 +171,7 @@ def build_pool(
         }
 
     # 兜底：调用方可能传进来"不是公式"的候选（老代码、老配置留下的策略类名）。
-    # 2026-09-18 起那 5 条内置策略退出选股链路，所以这类键一律丢掉 ——
+    # 2026-09-18 起那 5 条内置策略退出匹配链路，所以这类键一律丢掉 ——
     # 让它进池子只会让「来源」列出现"策略·X"这种界面上已经选不出来的东西，
     # 用户看着它却找不到对应的策略行（那是最难解释的一种现象）。
     stale = [k for k in picks_by_strategy if not is_formula_strategy(k)]
@@ -215,7 +215,7 @@ def build_pool(
     pool = build_pool_from_picks(picks_by_strategy, size=size)
     logger.info(f"策略标的合成完成：{len(pool)} 只")
 
-    # ── 自选股：独立上限、不占策略名额、不受热门行业过滤 ──
+    # ── 自选标的：独立上限、不占策略名额、不受热门行业过滤 ──
     pool = merge_watchlist(engine, pool, settings=settings, watchlist=watchlist,
                            report=report)
     # 日志的两个数与表头 `pool_counts()` 同口径：**互斥**（策略行 + 纯自选行 = 总数），
@@ -229,7 +229,7 @@ def build_pool(
                    or datetime.now().strftime("%Y-%m-%d"))
             save_pool(engine.db_path, rows_to_save, day)
         else:
-            logger.info("这一轮没有自选股要落库（选股结果不再自动进池）")
+            logger.info("这一轮没有自选标的要落库（匹配结果不再自动进池）")
     return pool
 
 
@@ -241,7 +241,7 @@ def merge_watchlist(
     watchlist: list[dict] | None = None,
     report: dict | None = None,
 ) -> list[dict]:
-    """把自选股并进池子（去重、独立上限、来源标记）。
+    """把自选标的并进池子（去重、独立上限、来源标记）。
 
     - **去重**：既是策略选中又是自选 → 只留一行，`source` 记成「公式+自选」
       （内部标记；**显示**只写那条策略名 —— 见 `source_label()`）；
@@ -270,7 +270,7 @@ def merge_watchlist(
 
     if dropped:
         message = (
-            f"自选股 {len(enabled)} 只超过上限 watchlist_max={limit}，"
+            f"自选标的 {len(enabled)} 只超过上限 watchlist_max={limit}，"
             f"本次只监控前 {limit} 只，另有 {dropped} 只未纳入"
             f"（可在 config.toml 提高 watchlist_max，或把暂时不看的停用）"
         )
@@ -309,7 +309,7 @@ def merge_watchlist(
             "reason": "自选" + (f"（{note}）" if note else ""),
             "note": note,
             "watchlist": True,
-            # 从选股结果页加入自选的票带着"当初是哪条策略/公式选出来的"
+            # 从匹配结果页加入自选的票带着"当初是哪条策略/公式选出来的"
             # （`watchlist.source_strategy`）—— 推送正文、桌面文件、盘中提醒都读这一份，
             # 所以这里必须把它带上，否则同一只票在股池表里写 `公式·X+自选`、
             # 在推送里写「自选」，两处对不上（2026-09-21 主人实报的那个 bug）。
@@ -548,7 +548,7 @@ def push_tag(row: dict) -> str:
     （`.replace("Strategy", "")`）——那是服务器版的内部叫法，而推送是给**手机上的
     人**看的：用户收到的会是 `1. 平安银行(000001)LowPrice｜…`，
     而界面同一只票写的是「低价股」（`strategy_label()`）。同一件事两个名字，
-    用户根本分不清是"哪条策略选的"，也没法拿它去对照「策略选股」列表。
+    用户根本分不清是"哪条策略选的"，也没法拿它去对照「策略匹配」列表。
 
     **与「来源」列的关系**：界面那一列写 `策略·低价股`（只写主策略，列宽只够一条），
     推送这一行把**所有**命中的策略名都列出来（`低价股、短期反转`）——
@@ -581,7 +581,7 @@ def format_pool_lines(pool: list[dict]) -> list[str]:
             tag = "自选" + (f"（{note}）" if note else "")
         elif note:
             # 2026-09-23 主人："为什么要+自选 什么策略跑出来的 直接记录策略名称
-            # 只有用户自己输入的才能算自选来源" → 推送正文与「自选股池」那一列、
+            # 只有用户自己输入的才能算自选来源" → 推送正文与「自选标的」那一列、
             # 桌面导出文件必须**同一个词**（策略名本身），三个地方都不再拼「+自选」。
             # 备注照旧带上：它是用户自己写的理由，与"来源"无关。
             tag += f"（{note}）"
@@ -590,29 +590,29 @@ def format_pool_lines(pool: list[dict]) -> list[str]:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 桌面导出：选股结果除了进「自选股池」，也 output 一个文件到桌面
+# 桌面导出：匹配结果除了进「自选标的」，也 output 一个文件到桌面
 # ══════════════════════════════════════════════════════════════════════════
 #
-# 用户原话：「选股结果直接进自选股池……（也可以同时 output 一个文件到桌面）」
+# 用户原话：「匹配结果直接进自选标的……（也可以同时 output 一个文件到桌面）」
 #
 # 为什么放在 `pool.py`（而不是 `ui/` 或 `scheduler.py`）：
 #   1. 这里的每一行都是**池子行 → 给人看的文本**，与 `format_pool_lines()`
 #      （推送正文）是同一件事的两种排版；放一处才不会出现"两套写法"，
 #      而且两份文本用的是同一批中文名（`strategy_label` / `source_label`）。
-#   2. 界面【开始选股】、定时日更、CLI `--once` **三条路都经过 `run_daily` → 建池**，
+#   2. 界面【开始匹配】、定时日更、CLI `--once` **三条路都经过 `run_daily` → 建池**，
 #      导出挂在这个位置三条路就都有桌面文件；挂在界面上则只有点按钮那条路有。
 #   3. 这一层不依赖 Qt、不联网、不读配置，可以单独测（`tests/test_desk_export.py`）。
 
-#: 导出文件名（用户给定：`老牛选股助手-选股结果-2026-09-18.txt`）。
+#: 导出文件名（用户给定：`财神助手-匹配结果-2026-09-18.txt`）。
 #: 同一天再跑一次会**覆盖同一个文件**：桌面不是归档目录，堆一串同名文件只会让人分不清。
-EXPORT_NAME_PREFIX = "老牛选股助手-选股结果-"
+EXPORT_NAME_PREFIX = "财神助手-匹配结果-"
 EXPORT_NAME_SUFFIX = ".txt"
 
 #: 文件名与正文里的日期写法（用户给定：`2026-09-18`）
 EXPORT_DAY_FORMAT = "%Y-%m-%d"
 
-#: 正文第一行（`老牛选股助手 · 选股结果 · 2026-09-18（行情日 2026-09-17）`）
-EXPORT_TITLE = "老牛选股助手 · 选股结果"
+#: 正文第一行（`财神助手 · 匹配结果 · 2026-09-18（行情日 2026-09-17）`）
+EXPORT_TITLE = "财神助手 · 匹配结果"
 
 #: 正文最后一行。**必须留着**：这份文件常被用户转发到群里，而里面的价格只是
 #: 公开来源的快照 —— 不写清楚，看到的人会当它是交易所行情。
@@ -624,11 +624,11 @@ EXPORT_FOOTER = (
 #: 桌面目录的候选写法：Windows 英文系统叫 `Desktop`、中文系统叫 `桌面`；
 #: 后两条覆盖"桌面被 OneDrive 接管"那类机器。自己拼路径一定会猜错几台机器，
 #: 所以 `_standard_desktop()` 还会**先**问 Qt/系统要一次答案（见那里的说明）。
-#: 桌面上的**子目录**：导出文件落在 `桌面/老牛选股/` 里（2026-09-21 主人要求）。
+#: 桌面上的**子目录**：导出文件落在 `桌面/财神助手/` 里（2026-09-21 主人要求）。
 #: 为什么要有这一层：以前直接扔在桌面根目录，用久了桌面上会散着一堆
-#: `老牛选股助手-选股结果-*.txt`（每天一个），桌面本身就是用户摆东西的地方 ——
+#: `财神助手-匹配结果-*.txt`（每天一个），桌面本身就是用户摆东西的地方 ——
 #: 收进一个以软件命名的文件夹里，找起来反而更快。
-EXPORT_FOLDER_NAME = "老牛选股"
+EXPORT_FOLDER_NAME = "财神助手"
 
 DESKTOP_SUBDIRS: tuple[tuple[str, ...], ...] = (
     ("Desktop",),
@@ -643,7 +643,7 @@ def _is_dir(path: Path) -> bool:
 
     为什么单独包一层：桌面目录是"猜"出来的，猜错的那台机器上可能是
     `C:\\Users\\别人\\Desktop` 这种读不动的路径 —— 个别 Windows 路径上
-    `is_dir()` 会抛 `OSError`，而"导出到桌面"这件事**不该**把选股流程带走。
+    `is_dir()` 会抛 `OSError`，而"导出到桌面"这件事**不该**把匹配流程带走。
     """
     try:
         return path.is_dir()
@@ -755,7 +755,7 @@ def _quote_text(price: float, pct: float | None) -> str:
 
 
 def _export_source(row: dict) -> str:
-    """桌面文件里的「来源」：与「自选股池」表格那一列**同一个词**。
+    """桌面文件里的「来源」：与「自选标的」表格那一列**同一个词**。
 
     三条退路（越靠前越权威）：
 
@@ -786,11 +786,11 @@ def pick_export_text(
     day: str | None = None,
     quotes: dict[str, tuple[float, float | None]] | None = None,
 ) -> str:
-    """本次选股结果 → 桌面文件的**正文**（纯函数：不碰磁盘、不联网、不读配置）。
+    """本次匹配结果 → 桌面文件的**正文**（纯函数：不碰磁盘、不联网、不读配置）。
 
     版式（用户给定）：
 
-        老牛选股助手 · 选股结果 · 2026-09-18（行情日 2026-09-17）
+        财神助手 · 匹配结果 · 2026-09-18（行情日 2026-09-17）
         共 N 只（策略 M · 自选 K）
         1. 贵州茅台(600519)  现价 1266.98 +0.71%  来源：策略·短期反转
         2. …
@@ -798,13 +798,13 @@ def pick_export_text(
 
     三条口径：
 
-    * **数量**用 `pool_counts()`（与「自选股池」表头同一个函数），所以"M 只策略 /
+    * **数量**用 `pool_counts()`（与「自选标的」表头同一个函数），所以"M 只策略 /
       K 只自选"与界面上那两个数是同一份算法，不会对不上；
     * **来源**优先用行里已经算好的 `source_label`（`pool_table_rows()` 填的，
       就是那条策略名），没有才算一次 —— 界面、推送、桌面文件同源；
     * **现价**来自 `quotes`（`latest_quotes()` 的结果或调用方注入），没有就不写这一段。
 
-    隐私：正文里**只有选股结果本身**（代码、名称、价格、来源）—— 没有 Key、
+    隐私：正文里**只有匹配结果本身**（代码、名称、价格、来源）—— 没有 Key、
     没有本地路径、没有系统信息。这份文件是要被用户转发出去的。
     """
     rows = [row for row in (pool_rows or []) if row.get("symbol")]
@@ -843,7 +843,7 @@ def pick_export_text(
 
 
 def export_file_name(day: str) -> str:
-    """文件名（`老牛选股助手-选股结果-2026-09-18.txt`，用户给定）。"""
+    """文件名（`财神助手-匹配结果-2026-09-18.txt`，用户给定）。"""
     return f"{EXPORT_NAME_PREFIX}{day}{EXPORT_NAME_SUFFIX}"
 
 
@@ -869,15 +869,15 @@ def export_pick_file(
     home: Any = None,
     fallback_dir: Any = None,
 ) -> Path | None:
-    """把**本次选股结果**写成一个桌面上的纯文本文件；失败只记日志、返回 None。
+    """把**本次匹配结果**写成一个桌面上的纯文本文件；失败只记日志、返回 None。
 
-    用户要求："结果直接进自选股池……也可以同时 output 一个文件到桌面"。
-    所以这是**附赠**产物：它绝不能影响选股/建池/推送（调用方 `run_daily` 另有兜底
+    用户要求："结果直接进自选标的……也可以同时 output 一个文件到桌面"。
+    所以这是**附赠**产物：它绝不能影响匹配/建池/推送（调用方 `run_daily` 另有兜底
     try，这里自己也不再往外抛）。
 
-    落点（2026-09-21 主人要求）：`桌面/老牛选股/老牛选股助手-选股结果-<日期>.txt` ——
+    落点（2026-09-21 主人要求）：`桌面/财神助手/财神助手-匹配结果-<日期>.txt` ——
     桌面根目录不再散着文件，都收进以软件命名的那个文件夹里；找不到桌面时退回数据目录，
-    同样套一层 `老牛选股`。
+    同样套一层 `财神助手`。
 
     Args:
         pool_rows: 池子行（`build_pool()` 的返回值）。
@@ -897,7 +897,7 @@ def export_pick_file(
     """
     rows = [row for row in (pool_rows or []) if row.get("symbol")]
     if not rows:
-        logger.info("本次没有选股结果，不导出桌面文件")
+        logger.info("本次没有匹配结果，不导出桌面文件")
         return None
     try:
         if day is None:
@@ -915,8 +915,8 @@ def export_pick_file(
             target = target / EXPORT_FOLDER_NAME
         if target is None:
             logger.warning(
-                "找不到桌面目录、也没有可用的回退目录：本次选股结果没有导出"
-                "（不影响选股与推送）"
+                "找不到桌面目录、也没有可用的回退目录：本次匹配结果没有导出"
+                "（不影响匹配与推送）"
             )
             return None
         target.mkdir(parents=True, exist_ok=True)      # 目录不在就建（回退目录常常还没建）
@@ -929,24 +929,24 @@ def export_pick_file(
         path = target / export_file_name(day)
         _write_export(path, pick_export_text(rows, data_date=data_date,
                                             day=day, quotes=quotes))
-        logger.info(f"选股结果已导出到 {path}")
+        logger.info(f"匹配结果已导出到 {path}")
         return path
-    except Exception as exc:  # noqa: BLE001 - 导出失败绝不能把选股流程带走
+    except Exception as exc:  # noqa: BLE001 - 导出失败绝不能把匹配流程带走
         logger.warning(
-            f"导出选股结果到桌面失败（不影响选股与推送）：{type(exc).__name__}: {exc}"
+            f"导出匹配结果到桌面失败（不影响匹配与推送）：{type(exc).__name__}: {exc}"
         )
         return None
 
 
 #: **老版本**用过、现在只用来"剥掉"的前缀：2026-09-22 那版把来源列显示成 `策略·X`，
 #: 2026-09-23 主人要求连前缀一起去掉。留着它是因为**老的备注文本**里可能写着
-#: `选股来源：策略·X`（见 `watchlist_source_strategy()`），解析时要把这截剥掉。
+#: `匹配来源：策略·X`（见 `watchlist_source_strategy()`），解析时要把这截剥掉。
 STRATEGY_SOURCE_PREFIX = "策略·"
 
-#: 老版本把选中它的那条策略**写在备注里**时用的前缀（`选股来源：公式·尾盘超短策略`）。
+#: 老版本把选中它的那条策略**写在备注里**时用的前缀（`匹配来源：公式·尾盘超短策略`）。
 #: 现在来源有自己的列（`watchlist.source_strategy`），这个前缀只用来**救老数据**：
 #: 认得出就显示出来，认不出就当没有（宁可显示「自选」，也不瞎猜）。
-WATCH_SOURCE_NOTE_PREFIX = "选股来源："
+WATCH_SOURCE_NOTE_PREFIX = "匹配来源："
 
 
 def watchlist_source_strategy(entry: dict) -> str:
@@ -957,7 +957,7 @@ def watchlist_source_strategy(entry: dict) -> str:
     1. `watchlist.source_strategy` 这一列（2026-09-21 加）—— **加入那一刻**写下来的，
        用户后来怎么改备注都改不掉它。写法与 `stock_pool.strategy` 一致
        （`公式·尾盘超短策略` / 老内置策略的类名）。
-    2. 备注里的 `选股来源：X` —— 老版本（来源列还不存在时）把来源写在备注里，
+    2. 备注里的 `匹配来源：X` —— 老版本（来源列还不存在时）把来源写在备注里，
        这里认一次能把那一批老数据救回来。X 是**给人看的那个词**，所以：
        `公式·X` 原样就是策略名；`策略·X` 要去掉前缀（`strategy_label()` 认不出的名字
        原样返回，显示时前缀会被 `source_label()` 补回来）。
@@ -1026,7 +1026,7 @@ def strategy_names(row: dict) -> list[str]:
     - `strategies` 是后加的列，**老库/手写的池子行可能只有 `strategy`** ——
       那时推送正文会退化成"自选"，把策略标的写成自选是最难查的那类错；
     - 中文名只有一份来源（`legacy.strategy_label`：老数据的类名 → 中文名）：手机上、表格里、tooltip 里
-      看到的必须是同一个词，否则用户没法拿它去对照「策略选股」列表。
+      看到的必须是同一个词，否则用户没法拿它去对照「策略匹配」列表。
 
     自定义公式的合成名（`公式·放量上攻`）`strategy_label()` 认不出来会原样返回 ——
     正是我们要的：用户自己起的名字不能被翻译掉。
@@ -1083,7 +1083,7 @@ def source_label(row: dict, watch_entry: dict | None) -> str:
     用户明确要求这一列回答"是哪条策略"，而不是只写组别（`波段·T+10（T+10）`
     回答不了"凭什么选它"）。所以：
 
-        自定义策略标的 → `尾盘选股策略`（前缀已去掉，见下）
+        自定义策略标的 → `尾盘匹配策略`（前缀已去掉，见下）
         老库里的内置策略行 → `短期反转`（`legacy.strategy_label` 翻中文名）
         纯手工自选       → `自选`
 
@@ -1127,7 +1127,7 @@ def source_detail_lines(row: dict) -> list[str]:
     """一行的**来源明细**（行 tooltip 用）：哪条策略 / 哪个组 / 同批还被谁选中。
 
     列数被用户定死成 6 列，塞不进第二列策略名，但"这一行到底是谁选出来的"必须查得到：
-    - `来源：公式·尾盘选股策略` —— 与「来源」列同一个文本；
+    - `来源：公式·尾盘匹配策略` —— 与「来源」列同一个文本；
     - `同批选中：放量上攻` —— 只在这一行被**多条**公式选中时出现（写公式名）。
     """
     lines: list[str] = []
@@ -1188,11 +1188,11 @@ def limit_up_text(row: dict) -> str:
 
 
 def watchlist_only_rows(db_path: str, day: str | None = None) -> list[dict]:
-    """**不在今日池子里**的自选股 → 与 `pool_table_rows` 同形状的行。
+    """**不在今日池子里**的自选标的 → 与 `pool_table_rows` 同形状的行。
 
     为什么必须有这一层：`pool_table_rows` 读的是 `stock_pool` 表 —— 那是**建池那一刻**
     的快照，只包含"策略/公式选中的 + 当时已存在的自选"。用户在两次建池之间手工加的自选
-    根本不在里面，而「自选股池」这一页按用户要求是"唯一入口"：**加了就必须看得见**，
+    根本不在里面，而「自选标的」这一页按用户要求是"唯一入口"：**加了就必须看得见**，
     不能等到今晚重新建池才出现（"我明明加了它，界面上没有"是最容易被当成 bug 的行为）。
 
     返回的行补上 `source_label = "自选"`、`industry`、`note`，以及 `is_limit_up`
@@ -1219,15 +1219,15 @@ def watchlist_only_rows(db_path: str, day: str | None = None) -> list[dict]:
         if not symbol or symbol in in_pool:
             continue
         enabled = int(entry.get("enabled", 1)) == 1
-        # 「来源」列（2026-09-21 修）：这一只是**从选股结果页加入自选**的，就显示
-        # `公式·尾盘超短策略+自选` —— 以前这里写死成「自选」，于是"从选股列表加入的票
+        # 「来源」列（2026-09-21 修）：这一只是**从匹配结果页加入自选**的，就显示
+        # `公式·尾盘超短策略+自选` —— 以前这里写死成「自选」，于是"从匹配列表加入的票
         # 到股池里全变成自选了"（主人实报）。纯手工加的票没有来源，仍是「自选」。
         source_fields = watchlist_source_fields(entry)
         out.append({
             "symbol": symbol,
             "name": str(entry.get("name") or names.get(symbol) or ""),
             "score": None,
-            "reason": "自选股",
+            "reason": "自选标的",
             "group": "",
             "group_label": "—",
             "horizon": 0,
@@ -1248,7 +1248,7 @@ def watchlist_only_rows(db_path: str, day: str | None = None) -> list[dict]:
 
 
 def pool_page_rows(db_path: str, day: str | None = None) -> list[dict]:
-    """「自选股池」页的**全部行**：精选池（策略/公式/当时已有的自选）+ 后来手工加的自选。
+    """「自选标的」页的**全部行**：精选池（策略/公式/当时已有的自选）+ 后来手工加的自选。
 
     顺序：池内行在前（沿用 `pool_table_rows` 的分数降序），后来手工加的自选按
     `watchlist` 表的顺序追加在后 —— 用户刚加的那只排在末尾，正好在视线落点上。
@@ -1261,7 +1261,7 @@ def pool_page_rows(db_path: str, day: str | None = None) -> list[dict]:
 
 
 def pool_counts(rows: list[dict]) -> tuple[int, int, int]:
-    """`(共 N, 策略 M, 自选 K)`：「自选股池」表头那一行小字用。
+    """`(共 N, 策略 M, 自选 K)`：「自选标的」表头那一行小字用。
 
     口径（2026-09-23 起与「来源」列对齐 —— 主人："只有用户自己输入的才能算自选来源"）：
     - **策略 M** = 有 `strategy` 的行（自定义策略与老内置策略都算，界面上靠「来源」列区分）；

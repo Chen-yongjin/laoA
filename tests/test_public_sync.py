@@ -19,9 +19,9 @@
    公开源拿不到的字段必须是 NULL 而不是 0（`连板()>=2` 会把 0 当成真实值）。
 
 ⚠️ 口径（2026-09-18 用户核实后要求写准，别让测试写出假承诺）：这条路让"没 Key 也能看到
-当天行情"，但**选股仍然跑不起来，而且是设计如此** —— 数据闸门要求 `adjust_event` 非空与
+当天行情"，但**匹配仍然跑不起来，而且是设计如此** —— 数据闸门要求 `adjust_event` 非空与
 行业覆盖 ≥90%，这两样只有同花顺那条路（用户自己的 Key）给得到。所以本文件里**不许**出现
-"免 Key 攒够历史就能选股"这类说法；这条界线由
+"免 Key 攒够历史就能匹配"这类说法；这条界线由
 `test_public_source_data_can_never_pass_the_stock_picking_gate` 单独钉住。
 
 夹具全是真的：`tests/fixtures/public_market/scan_rows.json` 是 2026-09-17 那一趟真实全市场
@@ -1031,7 +1031,7 @@ def test_daily_update_public_writes_nothing_on_an_empty_snapshot(cfg, monkeypatc
     """快照为空（断网/被限流）→ **失败，且一个字节都不写**。
 
     "绝不写半份数据"：如果先写了代码表/日历、再发现行情为空，库里就出现
-    "有日历、有名字、没有当天 K 线"的中间态 —— 选股会跑在半个市场上，
+    "有日历、有名字、没有当天 K 线"的中间态 —— 匹配会跑在半个市场上，
     而自检与界面都看不出哪里不对。
     """
     storage.init_db(cfg.db_path)
@@ -1244,9 +1244,9 @@ def test_daily_update_falls_back_to_the_public_source_without_a_key(cfg, monkeyp
     这是"不填 Key 也能用"的命门：用户装上 exe 不填任何 Key，日更必须能落数据，否则
     库里永远是空的、连当天的行情都看不到。
 
-    ⚠️ 但"能日更"**不等于**"能选股"（2026-09-18 用户核实后要求把这句话说准）：选股要过
+    ⚠️ 但"能日更"**不等于**"能匹配"（2026-09-18 用户核实后要求把这句话说准）：匹配要过
     数据闸门，而闸门的两条硬条件（`adjust_event` 非空、行业覆盖 ≥90%）只有同花顺那条路
-    满足得了 —— 所以这里**不许**写成"攒够历史就能选股"。这条界线由
+    满足得了 —— 所以这里**不许**写成"攒够历史就能匹配"。这条界线由
     `test_public_source_data_can_never_pass_the_stock_picking_gate` 单独钉住。
     所以这里断言的不只是"走了哪条路"，而是"库里真的多了当天那一根"。
     """
@@ -1491,19 +1491,19 @@ def test_missing_prev_close_is_not_an_ex_right_event() -> None:
 
 
 def test_public_source_data_can_never_pass_the_stock_picking_gate(cfg, monkeypatch) -> None:
-    """免 Key（只有公开源）**永远过不了数据闸门** —— "能日更"和"能选股"是两件事。
+    """免 Key（只有公开源）**永远过不了数据闸门** —— "能日更"和"能匹配"是两件事。
 
     为什么必须把这条钉死（2026-09-18 用户核实后要求）：日更成功（`ok is True`、写了几千行）
-    太容易被读成"这台机器可以选股了"，于是注释、提示、文档里就会出现"没 Key 也能用，
-    攒够历史就能选股"这种**做不到的承诺**。产品事实是：自检的就绪条件里有两条硬条件 ——
+    太容易被读成"这台机器可以匹配了"，于是注释、提示、文档里就会出现"没 Key 也能用，
+    攒够历史就能匹配"这种**做不到的承诺**。产品事实是：自检的就绪条件里有两条硬条件 ——
       - `adjust_event` 非空（`preflight.check`：缺了就是"后复权价会算错，不能算就绪"）；
       - 行业覆盖 ≥ `MIN_INDUSTRY_COVERAGE`（90%）。
     而 `storage.write_adjust_events()` 全项目**只**被 `sync.py` 那条同花顺 dump 路调用，
     行业归属（`sync_industry`）也只有那条路给得到 —— 公开源这两样都给不了。
-    所以：没 Key 时行情 / 大盘概览 / 每日增量照常，**选股是设计上就跑不起来的**。
+    所以：没 Key 时行情 / 大盘概览 / 每日增量照常，**匹配是设计上就跑不起来的**。
 
     这条用例同时是"假承诺"的守门人：谁把闸门放宽成"有行情就放行"，或者把公开源写成
-    "攒够历史就能选股"，这里会当场变红（而不是等到用户配不出票来才发现）。
+    "攒够历史就能匹配"，这里会当场变红（而不是等到用户配不出票来才发现）。
     """
     from laoa_trader.data import preflight
     from laoa_trader.scheduler import data_gate
@@ -1532,7 +1532,7 @@ def test_public_source_data_can_never_pass_the_stock_picking_gate(cfg, monkeypat
     check = preflight.check(cfg.db_path, cfg)
     assert check["status"] == preflight.NEEDS_FULL
     assert check["has_adjust_events"] is False
-    assert "复权事件" in check["reason"]          # 拒绝理由必须说清"为什么不能选股"
+    assert "复权事件" in check["reason"]          # 拒绝理由必须说清"为什么不能匹配"
 
     gate = data_gate(cfg)
     assert gate["ok"] is False                   # 闸门真的拦下 → 策略一次都不会跑

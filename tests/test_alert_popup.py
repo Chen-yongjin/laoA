@@ -547,10 +547,10 @@ def test_row_click_opens_detail_with_push_text(win, cfg, qapp) -> None:
 
 
 def test_view_all_switches_to_the_watch_pool_tab(win, cfg, qapp) -> None:
-    """【查看全部】→ 显示主窗口并切到「自选股池」页。
+    """【查看全部】→ 显示主窗口并切到「自选标的」页。
 
     「盘中提醒」那一页已按用户要求取消，提醒现在住在两张表的「提醒」列里 ——
-    而「自选股池」是池子的唯一入口（"哪几只票出了什么事"一眼一行）。
+    而「自选标的」是池子的唯一入口（"哪几只票出了什么事"一眼一行）。
     """
     cfg.notify_popup = True                     # 浮窗默认关，这条专测浮窗那一路
     _add_alerts(cfg, [{"symbol": "600000", "kind": "break_high", "price": 12.34,
@@ -561,7 +561,7 @@ def test_view_all_switches_to_the_watch_pool_tab(win, cfg, qapp) -> None:
     qapp.processEvents()
     assert win.isVisible()
     assert win.tabs.currentWidget() is win.watch_page
-    assert win.tabs.tabText(win.tabs.currentIndex()) == "自选股池"
+    assert win.tabs.tabText(win.tabs.currentIndex()) == "自选标的"
 
 
 def test_tray_menu_has_messages_item(win, cfg, qapp) -> None:
@@ -670,7 +670,7 @@ def test_tray_menu_has_pause_intraday_item(win, qapp) -> None:
     texts = [a.text() for a in win.tray_menu.actions()]
     # 2026-09-18 起这一项叫【消息】（打开消息列表），不再是【最近提醒】（弹浮窗）
     assert "显示主窗口" in texts and "消息" in texts and "退出" in texts
-    assert ui_app.BTN_START_TEXT in texts                    # 【开始选股】也在托盘上
+    assert ui_app.BTN_START_TEXT in texts                    # 【开始匹配】也在托盘上
     act = next(a for a in win.tray_menu.actions() if a.text() == "暂停提醒")
     assert act.isCheckable() is True
     assert act.isChecked() is False

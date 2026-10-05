@@ -131,10 +131,10 @@ REGISTRY: dict[str, SourceInfo] = {
         # 2026-09-20（用户："只保留当前用哪个来源 / 怎么申请 Key 这类有用的，纯解释的长句全删"）：
         # 这里原来是一段长文（能力清单 + config.toml 键名 + 环境变量 + 行为细节），
         # 现在只留"它是主源、要 Key、去哪申请"，外加半句**会影响用户下一步动作**的后果
-        # （没 Key 时选股会被数据自检拒绝）—— 其余属于实现细节，界面上不教。
+        # （没 Key 时匹配会被数据自检拒绝）—— 其余属于实现细节，界面上不教。
         note=(
             "主源：需要 Key，在 https://fuyao.aicubes.cn 申请后填在下面"
-            "（没配 Key 时选股会被数据自检拒绝）。"
+            "（没配 Key 时匹配会被数据自检拒绝）。"
         ),
         key_config="hithink_api_key",
     ),
@@ -142,14 +142,14 @@ REGISTRY: dict[str, SourceInfo] = {
         id="public",
         name="公开行情源（腾讯为主，免 Key）",
         needs_key=False,
-        #: ⚠️ 只声明**已经接进界面**的能力：目前生效范围是「自选股池」「持仓监控」
+        #: ⚠️ 只声明**已经接进界面**的能力：目前生效范围是「自选标的」「持仓监控」
         #: 两张表的 现价/涨幅/市值/换手（快照）。`public_quotes.daily()` 虽然能取单只
         #: 历史日K，但**还没接进下载/日更链路**，所以在界面上不声明它 ——
         #: 声明了却取不到，用户会以为"这个源坏了"（`eastmoney` 那条同理）。
         capabilities=frozenset({CAP_SNAPSHOT}),
         # 同上（2026-09-20）：原来那一大段（生效范围、能力边界、实测数字、限流故事、
         # 字段清单、单位差异）全部删除，只留一句**用户需要知道的那件事** ——
-        # 它免 Key、不用申请。"没 Key 时选股会被自检拒绝"这半句挪到了同花顺那一行
+        # 它免 Key、不用申请。"没 Key 时匹配会被自检拒绝"这半句挪到了同花顺那一行
         # （那才是用户会去找 Key 的地方）。
         note="兜底源：免 Key，不用申请、不用填。",
         key_config=None,
@@ -498,7 +498,7 @@ def snapshot_map(cfg: Any, symbols: list[str] | None = None) -> dict[str, dict]:
     return {}
 
 
-#: 主源**可能给不出来**的字段。目前只有这两个，「自选股池」「持仓监控」两张表各占一列。
+#: 主源**可能给不出来**的字段。目前只有这两个，「自选标的」「持仓监控」两张表各占一列。
 #:
 #: 为什么会有"主源给不出来"这回事：同花顺 fuyao 的 `/a-share/prices/snapshot` 只回
 #: `last_price / price_change / price_change_ratio_pct / open_price / high_price /

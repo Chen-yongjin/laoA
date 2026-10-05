@@ -1,5 +1,5 @@
 {
-  "version": "1.2.1",
-  "file": "LaoniuTrader-1.2.1.zip",
-  "note": "下载按钮会指向这个文件；换版本时只改本文件与 downloads/ 里的包名"
+  "version": "1.3.0",
+  "file": "CaishenTrader-1.3.0.zip",
+  "note": "下载按钮会指向这个文件；换版本时只改本文件与 downloads/ 里的包名（包由 CI 产出，改名后包名跟着新版走）"
 }

@@ -9,7 +9,7 @@
 * `formula.py` —— 引擎（文本 → 数组），Qt 无关、只依赖 numpy；
 * `formula_group.py` —— 跑用户在界面上勾选的公式，产出池子认的候选。
 
-想加一条自己的选股逻辑：**写公式文件**，不要往这里加 Python（见 `formulas.py`）。
+想加一条自己的匹配逻辑：**写公式文件**，不要往这里加 Python（见 `formulas.py`）。
 """
 
 __all__: list[str] = []

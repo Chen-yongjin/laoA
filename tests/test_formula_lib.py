@@ -5,7 +5,7 @@
 1. **目录定位** —— 源码运行 / 打包后（exe 同级）/ 环境变量覆盖，三种形态都测；
 2. **保存与读回** —— 名称必填、非法字符安全化、注释头、UTF-8/BOM 都能被
    `load_formula_files()` 原样读回（这一条把"界面存、引擎读"这条缝钉死）；
-3. **参与选股名单** —— 找不到的 / 语法错的公式名**忽略并记日志**；
+3. **参与匹配名单** —— 找不到的 / 语法错的公式名**忽略并记日志**；
 4. **连板()/涨停天数() 的历史坑** —— 用到就提醒，不用就不提醒；
 5. **试算** —— 合成小库上命中集合是**确定的**（不是"跑通就算过"）；
 6. **集成** —— 勾选的公式进池、来源标成「公式·名字」、推送行带公式名；
@@ -91,9 +91,9 @@ def test_formula_dir_source_run_is_repo_formulas(monkeypatch: pytest.MonkeyPatch
 
     assert folder == lib.repo_root() / "formulas"
     assert folder.is_dir()
-    # 仓库里那几条随包公式就在里面（"载入示例"靠它；`尾盘选股策略` 是 2026-09-18 内置的那条）
+    # 仓库里那几条随包公式就在里面（"载入示例"靠它；`尾盘匹配策略` 是 2026-09-18 内置的那条）
     assert {spec.name for spec in lib.formula_files(folder)} >= {
-        "放量上攻", "均线多头排列", "尾盘选股策略",
+        "放量上攻", "均线多头排列", "尾盘匹配策略",
     }
 
 
@@ -106,7 +106,7 @@ def test_formula_dir_frozen_uses_exe_sibling(
     Nuitka 那种布局见下一条用例（随包目录与用户目录**本来就是同一个**，不需要播种）。
     """
     monkeypatch.delenv(lib.FORMULA_DIR_ENV, raising=False)
-    exe = tmp_path / "dist" / "LaoniuTrader" / "老牛选股.exe"
+    exe = tmp_path / "dist" / "CaishenTrader" / "财神助手.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"fake")
     # 造一个"_MEIPASS"：里面放着随包公式（内容取自仓库里那份，保证与真实分发一致）
@@ -123,7 +123,7 @@ def test_formula_dir_frozen_uses_exe_sibling(
     assert folder == exe.parent / "formulas"
     assert folder.is_dir()          # 不存在就创建
     # 随包公式被复制进来了（否则新用户打开是空列表，第一步就走不下去）
-    assert {spec.name for spec in lib.formula_files(folder)} >= {"放量上攻", "尾盘选股策略"}
+    assert {spec.name for spec in lib.formula_files(folder)} >= {"放量上攻", "尾盘匹配策略"}
     # 而且**复制**的是随包那份，不是把用户目录指到解包目录里（只读盘上存不了公式）
     assert lib.bundled_formula_dir() == meipass / "formulas"
 
@@ -140,7 +140,7 @@ def test_formula_dir_nuitka_layout_is_its_own_user_dir(
     ② 它不会因为"随包=用户目录"而把用户自己的公式覆盖掉或反复复制。
     """
     monkeypatch.delenv(lib.FORMULA_DIR_ENV, raising=False)
-    exe = tmp_path / "dist" / "LaoniuTrader" / "老牛选股.exe"
+    exe = tmp_path / "dist" / "CaishenTrader" / "财神助手.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"fake")
     # Nuitka 产物里随包公式就在 exe 同级（构建脚本的 include-data-dir 落点）
@@ -161,7 +161,7 @@ def test_formula_dir_nuitka_layout_is_its_own_user_dir(
 
     assert folder == bundled                      # 用户目录就是随包目录
     names = {spec.name for spec in lib.formula_files(folder)}
-    assert {"放量上攻", "尾盘选股策略", "我的策略"} <= names
+    assert {"放量上攻", "尾盘匹配策略", "我的策略"} <= names
     assert mine.read_text(encoding="utf-8") == "# 名称: 我的策略\nC>MA(C,5)\n"   # 没被覆盖
 
 
@@ -178,7 +178,7 @@ def test_formula_dir_does_not_overwrite_user_files(tmp_path: Path, monkeypatch: 
     """用户已经存过同名公式时**绝不覆盖**，但其它随包公式照样补齐。
 
     2026-09-18 起这条规则从"只在空目录复制一次"改成"**缺哪条补哪条**"：
-    新版本多带的随包公式（例如内置的 `尾盘选股策略`）在**已经用过一段时间**的
+    新版本多带的随包公式（例如内置的 `尾盘匹配策略`）在**已经用过一段时间**的
     用户目录里也必须出现 —— 否则"内置"就只对全新安装的人有效。
     """
     target = tmp_path / "formulas"
@@ -193,21 +193,21 @@ def test_formula_dir_does_not_overwrite_user_files(tmp_path: Path, monkeypatch: 
     assert mine.read_text(encoding="utf-8") == "# 名称: 放量上攻\nC>MA(C,999)\n"
     # 其它随包公式补进来了（内置那几条）
     names = {p.name for p in target.iterdir()}
-    assert "均线多头排列.tvf" in names and "尾盘选股策略.txt" in names
+    assert "均线多头排列.tvf" in names and "尾盘匹配策略.txt" in names
 
 
 def test_formula_dir_never_resurrects_a_deleted_bundled_formula(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """用户删掉的随包公式**不会**在下次启动时长回来（那是"他不要"，不是"他还没有"）。
 
-    判据就是那条记录（`.laoa-seeded.json`）：播过种的名字记在里面，
+    判据就是那条记录（`.caishen-seeded.json`）：播过种的名字记在里面，
     之后目录里没了也只当"用户删了"。否则每次开机都长回来，用户会以为程序坏了。
     """
     target = tmp_path / "formulas"
     target.mkdir(parents=True)
     monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(target))
     lib.formula_dir()                      # 第一次：播种 + 记录
-    gone = target / "尾盘选股策略.txt"
+    gone = target / "尾盘匹配策略.txt"
     assert gone.exists()
 
     gone.unlink()                          # 用户删掉它
@@ -439,7 +439,7 @@ def test_delete_formula(tmp_path: Path) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 3) 参与选股名单（enabled_formulas）
+# 3) 参与匹配名单（enabled_formulas）
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -500,7 +500,7 @@ def test_preview_hits_known_symbols(formula_db: str) -> None:
 def test_preview_hits_respects_limit_and_names(formula_db: str) -> None:
     """`limit` 只截断**显示**（`shown`），`hits` 必须是**全量**。
 
-    为什么要钉住"全量"：界面上的【导出选股结果】写的就是 `hits`
+    为什么要钉住"全量"：界面上的【导出匹配结果】写的就是 `hits`
     （提示区只列前 20 只，文件里是全部命中）。哪天有人把 `hits[:limit]`
     改回来，用户导出的文件就会静默少票 —— 那种错在界面上完全看不出来。
     """
@@ -618,7 +618,7 @@ def test_bad_formula_is_isolated_from_the_rest_of_the_pool(engine, formulas_cfg:
     做法：让两条公式在求值时分别抛 `FormulaError` 与 `FormulaDataError`
     （真实场景就是"连板() 用的本地涨停池还没攒够历史""某只票的字段长度对不上"）。
     如果没有 `formula_group` 里那层逐票兜住，异常会一路冒到 `build_pool` ——
-    用户自己写坏的一条公式会把整轮选股带走。
+    用户自己写坏的一条公式会把整轮匹配带走。
 
     2026-09-18 起这条用例少了一半内容：它原来还要验"内置 5 条策略照常出票"，
     而内置策略已经改成随包公式、不再由 `rules.run_all()` 产出候选，
@@ -646,7 +646,7 @@ def test_bad_formula_is_isolated_from_the_rest_of_the_pool(engine, formulas_cfg:
     rows = pool.build_pool(engine, formulas_cfg, size=10, hot_only=False, report=report)
 
     # 候选只剩公式（随包的那几条 + 这几条），所以"照常出票"这句话现在只对公式成立
-    assert rows, "好公式必须照常出票（一条坏公式不能把整轮选股带走）"
+    assert rows, "好公式必须照常出票（一条坏公式不能把整轮匹配带走）"
     assert {row["strategy"] for row in rows} == {"公式·好公式"}
     # 两条坏公式不进池，但**都有原因**（状态栏/日志/报告三处都能看到）
     status = report["formulas"]["status"]
@@ -775,7 +775,7 @@ def test_push_title_mentions_formula_group(engine, formulas_cfg: Config, tmp_pat
 
 def test_formula_opt_in_writes_config_and_keeps_comments(formulas_cfg: Config,
                                                          tmp_path: Path) -> None:
-    """勾「参与选股」→ 写回 `enabled_formulas`，而且**用户自己的注释不许丢**。"""
+    """勾「参与匹配」→ 写回 `enabled_formulas`，而且**用户自己的注释不许丢**。"""
     formulas_cfg.source_path = tmp_path / "config.toml"
     formulas_cfg.source_path.write_text(
         "# 我自己写的注释，别动\n"
@@ -915,7 +915,7 @@ def test_build_strategy_rows_marks_auction_and_formula_rows(formulas_cfg: Config
     assert auction.is_auction and auction.read_only
     assert auction.key == fp.AUCTION_KEY and auction.name == fp.AUCTION_NAME
     assert auction.enabled is False                    # 竞价默认关（intraday_auction=false）
-    assert "不参与选股" in auction.note_tip and "无法回测" in auction.note_tip
+    assert "不参与匹配" in auction.note_tip and "无法回测" in auction.note_tip
     formula = rows[-1]
     assert formula.key == "放量上攻" and formula.note == "站上5日线"
     assert formula.enabled is True                     # 勾了才为真（写回 enabled_formulas）
@@ -970,7 +970,7 @@ def test_build_strategy_rows_shows_broken_and_runtime_errors(formulas_cfg: Confi
 #
 # 2026-09-18 用户给的那条策略要用「流通市值 10-300 亿 + 换手率 > 5%」，
 # 而这两个数**日线里没有**（同花顺的快照端点也不返回），只能从实时快照取一趟。
-# 这几条钉住三件事：取到了就真的参与选股、**不用它的公式一个请求都不发**、
+# 这几条钉住三件事：取到了就真的参与匹配、**不用它的公式一个请求都不发**、
 # 取不到时给一句人话（否则"勾了却没出票"会被当成公式写错）。
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -1015,7 +1015,7 @@ def _off_hours_now() -> datetime:
 def off_hours(monkeypatch: pytest.MonkeyPatch) -> None:
     """把"现在"钉在收盘后（见 `_off_hours_now`）。
 
-    为什么这些用例要钉死时钟：内置规则是"开盘时间里跑的选股用实时数据"
+    为什么这些用例要钉死时钟：内置规则是"开盘时间里跑的匹配用实时数据"
     （用户 2026-09-23 定），而"现在是不是开盘时间"只能看**真实时钟** ——
     不钉的话，同一个用例在 CI 的白天与深夜会走两条不同的路（一边取快照、一边不取），
     断言"一个请求都不发"就会变成"看跑测试的时间"。
@@ -1046,7 +1046,7 @@ def test_intraday_fields_use_the_snapshot_and_are_percentages(
 ) -> None:
     """盘中的四个字段（现价/现涨幅/现量比/现换手）由快照喂进来，且**涨幅用百分数**。
 
-    用户 2026-09-23 要的"开盘 5 分钟后选股"就是这个：盘中点【运行】时按那一刻的快照算。
+    用户 2026-09-23 要的"开盘 5 分钟后匹配"就是这个：盘中点【运行】时按那一刻的快照算。
     这里把 `pct=3.2` 注进去，公式写 `现涨幅>=1 AND 现涨幅<=5` —— 若哪天有人把
     `pct` 当小数（0.032）映射，这条会立刻红（这正是最容易悄悄错的地方）。
     """
@@ -1150,7 +1150,7 @@ def test_snapshot_extra_skips_symbols_without_values(formula_db: str,
 def test_run_enabled_formulas_uses_snapshot_fields(
     formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """选股链路同样把快照喂进公式（`enabled_formulas` 里勾了它才会跑）。"""
+    """匹配链路同样把快照喂进公式（`enabled_formulas` 里勾了它才会跑）。"""
     from laoa_trader.strategy import formula_group
 
     fx = formulas_cfg.data_dir / "formulas"
@@ -1230,16 +1230,16 @@ def test_hot_industry_counts_is_the_union_over_the_window(formula_db: str,
 # ══════════════════════════════════════════════════════════════════════════
 # K 线口径按时间自动切（主人 2026-09-23 定的内置规则）
 #
-# 原话："在软件内置规则里设定，开盘时间里运行的选股，都是实时的，不是开盘时间，
+# 原话："在软件内置规则里设定，开盘时间里运行的匹配，都是实时的，不是开盘时间，
 # 采用 K 线。" —— 同一天他又划掉了我加的那个开关："不需要加开关，按照我说的规则来"，
 # 所以这条规则是**无条件**的（下面 ④ 专门钉"关不掉"）。
-# 下面这几条就是这句话的四种情形 + 选股链路同口径：
+# 下面这几条就是这句话的四种情形 + 匹配链路同口径：
 #   ① 开盘时间 + 有快照   → 用现价拼出"今天"这根 K 线（口径写明"盘中实时"）
 #   ② 非开盘时间          → 用库里的日 K（**即使快照能用也不接**）
 #   ③ 开盘时间 + 没快照   → 退回日 K，并且必须说清（否则会被当成策略写错）
 #   ④ 没有任何开关能关掉它 → 配置里没有这个键、环境变量也没有、硬塞属性也不理
-#   ⑤ 选股链路（建池）用**同一个函数**取口径，与【运行】不可能不一致
-#   ⑥⑦ 「退回日 K」是告知不是错误（不能让一次成功的选股被判成失败）
+#   ⑤ 匹配链路（建池）用**同一个函数**取口径，与【运行】不可能不一致
+#   ⑥⑦ 「退回日 K」是告知不是错误（不能让一次成功的匹配被判成失败）
 # ══════════════════════════════════════════════════════════════════════════
 
 #: 盘中测试用的固定时刻：2026-09-14（周一）10:00 —— 夹具库的最后一天是 09-11（周五）
@@ -1309,7 +1309,7 @@ def test_preview_hits_uses_live_data_in_session(
     result = lib.preview_hits(formula, session_db, cfg=formulas_cfg)
 
     assert [hit["symbol"] for hit in result["hits"]] == ["600001"]
-    # 行情日显示**今天**（报成 09-11 会让用户以为程序在拿昨天的收盘数据选股）
+    # 行情日显示**今天**（报成 09-11 会让用户以为程序在拿昨天的收盘数据匹配）
     assert result["date"] == "2026-09-14"
     assert "盘中实时" in result["caliber"] and "2026-09-14" in result["caliber"]
     assert result["errors"] == []
@@ -1419,10 +1419,10 @@ def test_run_enabled_formulas_uses_live_data_in_session(
     session_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch,
     session_clock: None,
 ) -> None:
-    """⑤ 选股链路（建池）与【运行】用**同一个函数**取口径 ⇒ 结果必须一致。
+    """⑤ 匹配链路（建池）与【运行】用**同一个函数**取口径 ⇒ 结果必须一致。
 
     这是"漏接一根线"的典型：快照早就在试算那条路上接通了，建池却没有 ——
-    用户看到的是"点【运行】选出 3 只、点【开始选股】选出 1 只"，没有任何办法解释。
+    用户看到的是"点【运行】选出 3 只、点【开始匹配】选出 1 只"，没有任何办法解释。
     """
     fx = formulas_cfg.data_dir / "formulas"
     fx.mkdir(parents=True, exist_ok=True)

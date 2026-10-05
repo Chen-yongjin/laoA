@@ -6,7 +6,7 @@
 所以 CLI 必须做到：**任何异常都转成中文结论 + 非零退出码，绝不吐 traceback**；
 `--doctor` 更要在数据目录不可写时照样把问题报出来（那正是它存在的意义）。
 
-全部离线：无 Key 时走"结构化失败 + 用本地库继续选股"，不会联网
+全部离线：无 Key 时走"结构化失败 + 用本地库继续匹配"，不会联网
 （同时受 `conftest._block_network` 保护）。
 """
 
@@ -67,7 +67,7 @@ def blocked_config(tmp_path):
 def test_doctor_reports_paths_deps_and_data(capsys, config_file) -> None:
     assert cli(["--cli", "--doctor", "--config", config_file]) == 0
     out = capsys.readouterr().out
-    assert "老牛选股助手 —— 自检" in out
+    assert "财神助手 —— 自检" in out
     for key in ("程序版本", "Python", "配置来源", "数据目录", "数据库", "同花顺 Key",
                 "飞书凭证", "通知开关", "交易参数", "定时", "行情行数", "最新数据日期"):
         assert key in out, f"自检报告缺少「{key}」"
@@ -146,7 +146,7 @@ def test_pool_with_unwritable_dir_never_tracebacks(capsys, blocked_config) -> No
 
 
 def test_once_without_key_runs_local_pipeline(capsys, ready_config, ready_cfg) -> None:
-    """没配 Key 也能跑完整流程：数据同步失败→记录，选股建池照跑，不推送。"""
+    """没配 Key 也能跑完整流程：数据同步失败→记录，匹配建池照跑，不推送。"""
     assert cli(["--cli", "--once", "--no-notify", "--config", ready_config]) == 0
     out = capsys.readouterr().out
     assert "数据自检：ready" in out
@@ -175,7 +175,7 @@ def test_writes_are_refused_when_data_dir_unwritable(capsys, blocked_config) -> 
 def test_help_and_no_args(capsys) -> None:
     """不带动作（或 --help）时打印帮助并正常退出，不能因为数据目录不可写就报错。"""
     assert cli(["--cli"]) == 0
-    assert "老牛选股助手" in capsys.readouterr().out
+    assert "财神助手" in capsys.readouterr().out
 
     # --help 由 argparse 直接 SystemExit(0)，这是标准行为（退出码 0）
     with pytest.raises(SystemExit) as excinfo:
@@ -184,7 +184,7 @@ def test_help_and_no_args(capsys) -> None:
     assert "--doctor" in capsys.readouterr().out
 
 
-# ── 自选股命令行 ──
+# ── 自选标的命令行 ──
 
 
 @pytest.fixture()
@@ -201,7 +201,7 @@ def test_watchlist_add_autofills_name(capsys, watch_db, tmp_path) -> None:
     assert cli(["--cli", "--watchlist", "add", "600519", "--note", "龙头",
                 "--config", str(config)]) == 0
     out = capsys.readouterr().out
-    assert "已加入自选股：600519 贵州样本" in out
+    assert "已加入自选标的：600519 贵州样本" in out
     assert "龙头" in out
     with storage.connect(watch_db.db_path) as conn:
         rows = storage.load_watchlist(conn)
@@ -241,7 +241,7 @@ def test_watchlist_list_shows_status_and_pool(capsys, watch_db, tmp_path) -> Non
     capsys.readouterr()
     assert cli(["--cli", "--watchlist", "list", "--config", str(config)]) == 0
     out = capsys.readouterr().out
-    assert "自选股（1 只，上限 20）" in out
+    assert "自选标的（1 只，上限 20）" in out
     assert "600519 贵州样本" in out
     assert "启用" in out and "未进池" in out
     assert "备注 龙头" in out
@@ -295,7 +295,7 @@ def test_watchlist_unknown_action_and_missing_symbol(capsys, watch_db, tmp_path)
     assert cli(["--cli", "--watchlist", "add", "abc", "--config", str(config)]) == 1
     assert "代码格式不对" in capsys.readouterr().out
     assert cli(["--cli", "--watchlist", "enable", "600519", "--config", str(config)]) == 1
-    assert "未找到自选股" in capsys.readouterr().out
+    assert "未找到自选标的" in capsys.readouterr().out
 
 
 def test_pool_output_shows_source_and_note(capsys, watch_db, tmp_path) -> None:

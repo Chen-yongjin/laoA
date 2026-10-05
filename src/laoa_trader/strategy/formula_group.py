@@ -10,14 +10,14 @@
 两条硬规矩
 ----------
 1. **默认不参与**：`config.toml` 里 `enabled_formulas` 为空时，本方**一次库都不读**
-   （此时选股只剩自选股，有测试钉住）。
+   （此时匹配只剩自选标的，有测试钉住）。
 2. **失败隔离**：某条公式在运行时抛 `FormulaError` / `FormulaDataError`
    （典型例子：用了历史不完整的 `连板()`、或那只票的序列长度对不上），
    只做三件事 —— 记日志、把它记进 `status`（界面上标红给原因）、
    把它从本批候选里去掉。**其余公式照常出票，建池也不会失败。**
 
    为什么非要隔离：公式是**用户自己写的**，写错是常态而不是异常。一条写坏的公式
-   让整轮选股一起失败，等于"用户越敢试错，程序越不能用" ——
+   让整轮匹配一起失败，等于"用户越敢试错，程序越不能用" ——
    与 `formula.py` 里"逐文件报错、坏的不会拖垮好的"是同一条思路，只是这次
    发生在**运行期**而不是解析期。
 """
@@ -116,7 +116,7 @@ class FormulaRun:
     #: **告知**（不是错误）：典型是"盘中想用实时数据，但取不到快照 → 已退回日 K 线"。
     #: 与 `errors` 分开的理由：建池的"成功/失败"判据是"errors 是否为空"
     #: （`scheduler.Scheduler._report_succeeded`），把一句告知塞进 errors 会让一次
-    #: **正常完成**的选股被判成失败（票选出来了、推送也发了，状态却写"未成功"再补跑一遍）。
+    #: **正常完成**的匹配被判成失败（票选出来了、推送也发了，状态却写"未成功"再补跑一遍）。
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -138,7 +138,7 @@ def run_enabled_formulas(
     * 只看**每只票最后一根 K 线**，且该票的最后一根必须是全市场最新行情日
       （口径与内置策略、与界面【试算】完全一致）；
     * **K 线口径按时间自动切**：开盘时间里的那一轮用实时快照拼出"今天"这一根
-      （见 `formulas.prepare_inputs`），所以【试算】与【开始选股】的口径永远一致；
+      （见 `formulas.prepare_inputs`），所以【试算】与【开始匹配】的口径永远一致；
     * 数据长度不足 `min_history` 的票直接跳过（滚动窗口全是缺值 ⇒ 不可能出信号）。
 
     联网：只有"公式用到快照字段"或"此刻正走盘中实时口径"时才取**一趟**快照
@@ -168,18 +168,18 @@ def run_enabled_formulas(
     hits: dict[str, list[dict]] = {formula.label: [] for formula in active}
 
     # 输入（K 线口径 + 扩展字段）全部由 `lib.prepare_inputs` 一份逻辑给：
-    # "开盘时间里跑的选股都是实时的"这条规矩在**试算与建池两条路上必须是同一份实现** ——
-    # 各写一份迟早会出现"点【运行】选出 3 只、点【开始选股】选出 1 只"，而这种差异
+    # "开盘时间里跑的匹配都是实时的"这条规矩在**试算与建池两条路上必须是同一份实现** ——
+    # 各写一份迟早会出现"点【运行】选出 3 只、点【开始匹配】选出 1 只"，而这种差异
     # 用户没有任何办法解释。快照只在"公式真用到那些字段"或"此刻正走盘中口径"时才取一趟；
     # 一条都不需要时**一个请求都不发**（与"没这个功能"完全一样）。
     prepared = lib.prepare_inputs(cfg, db_path, active)
     # 库里最新的行情日**由 prepare_inputs 一起给出**（它自己也要用它判"要不要接今天那根"）：
-    # 这里不再查一次 —— 两次 MAX(date) 之间理论上还能变（数据一边更新一边选股），
+    # 这里不再查一次 —— 两次 MAX(date) 之间理论上还能变（数据一边更新一边匹配），
     # 于是"接没接今天那根"与"跳过哪些票"就可能按两个不同的日子判。
     day = prepared.kline_day
     result.caliber = prepared.caliber
     if prepared.caliber:
-        logger.info(f"策略选股 {prepared.caliber}")
+        logger.info(f"策略匹配 {prepared.caliber}")
     for note in prepared.notes:
         # 影响"选不选得出来"的提示（典型：快照取不到 ⇒ 用到那些字段的条件一律不成立）
         # 走 `errors`：界面会把它显示在状态栏/结果页上，不然用户看到的是
@@ -189,7 +189,7 @@ def run_enabled_formulas(
     for warning in prepared.warnings:
         # 口径类的**告知**进 `warnings`，不进 `errors` —— 建池的"成功/失败"判据是
         # "errors 是否为空"（`scheduler.Scheduler._report_succeeded`）：一句"退回了日 K"
-        # 会让一次正常完成、票也选出来了的选股被判成失败（还要在补跑点再跑一遍）。
+        # 会让一次正常完成、票也选出来了的匹配被判成失败（还要在补跑点再跑一遍）。
         result.warnings.append(warning)
         logger.warning(warning)
 
@@ -233,7 +233,7 @@ def run_enabled_formulas(
                     })
     except fm.FormulaDataError as exc:
         # 库不存在 / 读不出来这类**环境**问题：说清楚原因就返回，绝不让整轮建池失败
-        message = f"策略选股：{exc}"
+        message = f"策略匹配：{exc}"
         logger.warning(message)
         result.errors.append(message)
         for name in result.ran:
@@ -261,7 +261,7 @@ def run_enabled_formulas(
     _remember(result.status)
     if result.picks:
         logger.info(
-            "策略选股：" + "、".join(
+            "策略匹配：" + "、".join(
                 f"{formula_name_of(key)} {len(value)} 只"
                 for key, value in result.picks.items()
             )

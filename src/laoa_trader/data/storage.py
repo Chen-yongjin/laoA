@@ -21,9 +21,9 @@
     index_daily       指数与行业板块日线
     trading_calendar  官方交易日历
     limit_up_pool     涨停池（连板数/封单额/涨停时间/原因）
-    stock_pool        每日精选股票池
+    stock_pool        每日精匹配票池
     position          持仓台账
-    signal            选股信号落库
+    signal            匹配信号落库
     intraday_alert    盘中提醒去重表
     auction_scan      竞价扫描结果（全市场扫描的全部命中）
 """
@@ -199,7 +199,7 @@ SCHEMA: tuple[str, ...] = (
         updated_at TEXT
     );
     """,
-    # ── 选股信号 ──
+    # ── 匹配信号 ──
     """
     CREATE TABLE IF NOT EXISTS signal (
         signal_date TEXT NOT NULL,
@@ -261,7 +261,7 @@ SCHEMA: tuple[str, ...] = (
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_push_log_day ON push_log (day);",
-    # ── 自选股（用户手动加的，和策略标的并列进池、一起盯）──
+    # ── 自选标的（用户手动加的，和策略标的并列进池、一起盯）──
     """
     CREATE TABLE IF NOT EXISTS watchlist (
         symbol   TEXT PRIMARY KEY,
@@ -270,15 +270,15 @@ SCHEMA: tuple[str, ...] = (
         enabled  INTEGER NOT NULL DEFAULT 1,
         added_at TEXT,
         -- 加入当天的价格（不复权收盘价或当时的实时价）：
-        -- 「自选股池」的**盈亏**列 =（最新价 − added_price）/ added_price，
+        -- 「自选标的」的**盈亏**列 =（最新价 − added_price）/ added_price，
         -- 主人 2026-09-21 要求"盈亏从加入股池那天算"。老库里这一列是 NULL（迁移补的），
         -- 那时盈亏显示 `—`：**拿今天当加入日会凭空造出一个 0% 的假盈亏**。
         added_price REAL,
         -- **这一只是被哪条策略/公式选出来的**（写法与 `stock_pool.strategy` 一致：
-        -- 内部仍存 `公式·尾盘超短策略`，显示时剥成 `尾盘超短策略`；老内置策略存的是类名）。2026-09-21 主人实报"从选股列表加入
+        -- 内部仍存 `公式·尾盘超短策略`，显示时剥成 `尾盘超短策略`；老内置策略存的是类名）。2026-09-21 主人实报"从匹配列表加入
         -- 自选的票到股池里的来源都变成自选了"—— 根因就是加入时没把来源存下来。
         -- 纯手工加的票是 NULL（来源显示「自选」）；老数据也是 NULL，界面上退回「自选」，
-        -- 另外 `pool.watchlist_source_strategy()` 会试着从备注里的 `选股来源：X` 认一次。
+        -- 另外 `pool.watchlist_source_strategy()` 会试着从备注里的 `匹配来源：X` 认一次。
         source_strategy TEXT
     );
     """,
@@ -336,7 +336,7 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("watchlist", "added_price", "REAL"),
     # `watchlist.source_strategy`：加入时是哪条策略/公式选出来的（2026-09-21 加，
     # 见建表那里的说明）。老库补上这一列后值是 NULL —— 界面显示「自选」，
-    # 但会先从备注里的 `选股来源：X` 认一次（能救回一部分老数据）。
+    # 但会先从备注里的 `匹配来源：X` 认一次（能救回一部分老数据）。
     ("watchlist", "source_strategy", "TEXT"),
 )
 
@@ -674,10 +674,10 @@ def delete_pool_symbol(
 ) -> int:
     """从**某一天的池子**里删掉一只标的（GUI 右键【删除】用；返回删掉的行数）。
 
-    为什么允许删池子行：用户在「自选股池」里右键删一只策略选出来的票时，
+    为什么允许删池子行：用户在「自选标的」里右键删一只策略选出来的票时，
     期望的是"这张表里别再出现它"（自选那张表里删不掉它 —— 它本来就不是自选）。
     删的只是 `stock_pool` 里那一天的那一行，**不动** `signal` 台账；
-    下次【开始选股】会重新评估（策略又选中它的话它会回来，界面上把这句话写明了）。
+    下次【开始匹配】会重新评估（策略又选中它的话它会回来，界面上把这句话写明了）。
     """
     if day is None:
         row = conn.execute("SELECT MAX(date) FROM stock_pool").fetchone()
@@ -976,13 +976,13 @@ def load_stock_basic(conn: sqlite3.Connection) -> dict[str, str]:
     }
 
 
-# ── 自选股 ──
+# ── 自选标的 ──
 
 
 def load_watchlist(
     conn: sqlite3.Connection, enabled_only: bool = False
 ) -> list[dict]:
-    """读取自选股（按加入时间升序 = 用户添加顺序）。
+    """读取自选标的（按加入时间升序 = 用户添加顺序）。
 
     Args:
         enabled_only: 只要启用的（进池/盯盘用这个）；False 时连停用的一起返回（列表展示用）。
@@ -1013,7 +1013,7 @@ def upsert_watchlist(
     price: float | None = None,
     source_strategy: str | None = None,
 ) -> dict:
-    """添加/更新一只自选股（幂等：同一代码重复添加只会更新名称与备注）。
+    """添加/更新一只自选标的（幂等：同一代码重复添加只会更新名称与备注）。
 
     名称用 `COALESCE` 保护：添加时库里查得到就用库里的名字，
     但**不能**因为这次传了空名字就把已缓存的名字冲掉。
@@ -1078,7 +1078,7 @@ def fill_watchlist_source(
 
 
 def remove_watchlist(conn: sqlite3.Connection, symbol: str) -> bool:
-    """删除自选股（彻底移出列表）。"""
+    """删除自选标的（彻底移出列表）。"""
     cur = conn.execute("DELETE FROM watchlist WHERE symbol = ?", (symbol,))
     conn.commit()
     return bool(cur.rowcount)
@@ -1102,7 +1102,7 @@ def mark_pushed(
 ) -> bool:
     """记录"这一天、这一类、这份内容已经推过"，返回**是否首次**。
 
-    为什么需要：手动【立即选股并建池】与 19:15 的定时任务可能同一天都跑，
+    为什么需要：手动【立即匹配并建池】与 19:15 的定时任务可能同一天都跑，
     池子内容一样却推两遍 —— 用户会被同一批卡片刷屏。
     这里用内容指纹（`pipeline.pool_fingerprint()`）判重：
     池子没变就不重复推；变了（例如盘中补了数据）才再推一次。

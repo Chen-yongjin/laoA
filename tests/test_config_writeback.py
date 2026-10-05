@@ -24,7 +24,7 @@ from tests._toml import p, toml_str
 
 #: 模板：`{data_dir}` 处必须传**已转义**的路径（`tests._toml.p()`），
 #: 否则 Windows 的 `C:\Users\...` 会让 tomllib 解析失败、配置静默退回默认值。
-SAMPLE = '''# 老牛选股助手配置（这些注释必须活下来）
+SAMPLE = '''# 财神助手配置（这些注释必须活下来）
 # 第二行注释      # 行尾也有注释
 
 hithink_api_key = "abc123"       # 同花顺 Key
@@ -63,10 +63,10 @@ def test_render_keeps_comments_and_unknown_keys(tmp_path: Path) -> None:
     out = render_config_updates(text, {
         "notify_channels": ["feishu"],
         "notify_popup": True,
-        "enabled_formulas": ["尾盘选股策略"],
+        "enabled_formulas": ["尾盘匹配策略"],
     })
     # 注释全在
-    assert "# 老牛选股助手配置（这些注释必须活下来）" in out
+    assert "# 财神助手配置（这些注释必须活下来）" in out
     assert "# 第二行注释      # 行尾也有注释" in out
     assert "# 同花顺 Key" in out
     assert "# ── 策略组 ──" in out
@@ -93,7 +93,7 @@ def test_render_appends_missing_keys(tmp_path: Path) -> None:
     assert "以下由「设置」面板写入" in out
     # 追加不会破坏原有内容
     assert "[my_own_section]" in out
-    assert out.startswith("# 老牛选股助手配置")
+    assert out.startswith("# 财神助手配置")
 
 
 def test_render_does_not_touch_keys_inside_tables(tmp_path: Path) -> None:
@@ -129,13 +129,13 @@ def test_quotes_and_backslashes_are_escaped(tmp_path: Path) -> None:
 def test_update_config_file_roundtrip(sample_file: Path) -> None:
     """写回后必须仍然是**合法 TOML**，且新值能被 load_config 读到。"""
     update_config_file(sample_file, {
-        "enabled_formulas": ["尾盘选股策略"],
+        "enabled_formulas": ["尾盘匹配策略"],
         "notify_channels": ["tray"],
         "notify_tray_duration_ms": 3000,
         "feishu_on": False,
     })
     cfg = load_config(sample_file, use_env=False)
-    assert cfg.enabled_formulas == ["尾盘选股策略"]
+    assert cfg.enabled_formulas == ["尾盘匹配策略"]
     assert cfg.notify_channels == ["tray"]
     # 文件里那两行**退役键**（enabled_groups / enabled_strategies）原样留着：
     # 既不报错、也不被删掉（用户手写过的配置不该被程序悄悄改）
@@ -151,13 +151,13 @@ def test_update_config_file_roundtrip(sample_file: Path) -> None:
     assert "notify_windows" not in sample_file.read_text(encoding="utf-8")
     # 注释还在（逐字节再读一次原文）
     text = sample_file.read_text(encoding="utf-8")
-    assert "# 老牛选股助手配置（这些注释必须活下来）" in text
+    assert "# 财神助手配置（这些注释必须活下来）" in text
     assert 'future_key = "keep me"' in text
 
 
 def test_update_is_idempotent(sample_file: Path) -> None:
     """连续保存两次，第二次不该产生任何差异（否则每次保存都在堆注释）。"""
-    updates = {"notify_channels": ["windows"], "enabled_formulas": ["尾盘选股策略"]}
+    updates = {"notify_channels": ["windows"], "enabled_formulas": ["尾盘匹配策略"]}
     update_config_file(sample_file, updates)
     first = sample_file.read_text(encoding="utf-8")
     update_config_file(sample_file, updates)
@@ -166,11 +166,11 @@ def test_update_is_idempotent(sample_file: Path) -> None:
 
 def test_update_creates_file_when_missing(tmp_path: Path) -> None:
     target = tmp_path / "new" / "config.toml"
-    update_config_file(target, {"run_at": "20:00", "enabled_formulas": ["尾盘选股策略"]})
+    update_config_file(target, {"run_at": "20:00", "enabled_formulas": ["尾盘匹配策略"]})
     assert target.is_file()
     cfg = load_config(target, use_env=False)
     assert cfg.run_at == "20:00"
-    assert cfg.enabled_formulas == ["尾盘选股策略"]
+    assert cfg.enabled_formulas == ["尾盘匹配策略"]
 
 
 def test_update_does_not_leave_temp_file(sample_file: Path) -> None:
@@ -207,10 +207,10 @@ def test_writeback_escapes_windows_data_dir(tmp_path: Path) -> None:
     r"""界面里把数据目录设成 Windows 路径：写回的文件必须还能被解析出来。
 
     这是一条**产品流程**（不是测试自己拼字符串）：`_toml_value()` 会转义反斜杠，
-    所以 `C:\Users\me\LaoATrader\data` 写进 config.toml 后重新加载必须一字不差。
+    所以 `C:\Users\me\CaishenHelper\data` 写进 config.toml 后重新加载必须一字不差。
     如果哪天有人给 `_toml_value` "优化"掉转义，这里立刻红。
     """
-    win = r"C:\Users\me\AppData\Local\LaoATrader\data"
+    win = r"C:\Users\me\AppData\Local\CaishenHelper\data"
     target = tmp_path / "config.toml"
     target.write_text(f'data_dir = "{p(tmp_path / "old")}"\n', encoding="utf-8")
     cfg = Config(data_dir=tmp_path, source_path=target)
@@ -270,7 +270,7 @@ def test_update_config_file_roundtrips_windows_path(tmp_path: Path, win_path: st
     assert cfg.source_path == target
     # 注释与未知键照旧（写回没有因为转义而改坏文件结构）
     raw = target.read_text(encoding="utf-8")
-    assert "# 老牛选股助手配置（这些注释必须活下来）" in raw
+    assert "# 财神助手配置（这些注释必须活下来）" in raw
     assert "[my_own_section]" in raw
 
 

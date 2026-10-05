@@ -1,0 +1,16 @@
+# 名称: 尾盘匹配策略
+# 说明: 尾盘匹配：①流通市值 30~500 亿 ②换手率 >3% ③价格 3~50 元 ④当日涨幅 3%~5% ⑤成交量比昨日放大 30% ⑥均线多头排列（5>10>20 且站上 5 日线）⑦近 10 日有涨停 ⑧属于热门行业 ⑨排除 ST / 科创 / 北交所。随包预置，可改可删。⚠️ 市值与换手来自实时快照：非交易时段取不到，这两条一律不成立，可能一只都不出。
+ZC:=C/REF(C,1)-1
+J5:=MA(C,5)
+J10:=MA(C,10)
+J20:=MA(C,20)
+GAIN_OK:=ZC>=0.03 AND ZC<=0.05
+PRICE_OK:=C>=3 AND C<=50
+MKT_OK:=流通市值>=30 AND 流通市值<=500
+HSL_OK:=换手率>3
+VOL_OK:=V>REF(V,1)*1.3
+TREND_OK:=J5>J10 AND J10>J20 AND C>J5
+ZT_OK:=涨停天数(10)>=1
+HOT_OK:=热门行业>=1
+BOARD_OK:=ST=0 AND 科创=0 AND 北交所=0
+GAIN_OK AND PRICE_OK AND MKT_OK AND HSL_OK AND VOL_OK AND TREND_OK AND ZT_OK AND HOT_OK AND BOARD_OK

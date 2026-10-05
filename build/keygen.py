@@ -70,7 +70,7 @@ def _gui() -> int:
 
     app = QApplication.instance() or QApplication([])
     win = QWidget()
-    win.setWindowTitle("老牛选股 · 注册机（作者用）")
+    win.setWindowTitle("财神助手 · 注册机（作者用）")
     win.setMinimumWidth(460)
     layout = QVBoxLayout(win)
 

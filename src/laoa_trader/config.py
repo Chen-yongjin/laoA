@@ -18,7 +18,7 @@
     1. 显式传入的路径 / 环境变量 `LAOA_TRADER_CONFIG`
     2. 当前工作目录 `./config.toml`
     3. exe / 包所在目录的 `config.toml`（打包后就是 exe 旁边那个）
-    4. 用户目录 `%APPDATA%\\LaoATrader\\config.toml`（Windows）或 `~/.config/laoa-trader/config.toml`
+    4. 用户目录 `%APPDATA%\\CaishenHelper\\config.toml`（Windows）或 `~/.config/caishen-helper/config.toml`
 """
 
 from __future__ import annotations
@@ -38,10 +38,19 @@ from laoa_trader.log import get_logger
 logger = get_logger(__name__)
 
 #: 默认数据目录（Windows 用 LOCALAPPDATA，其它平台退回 ~/.local/share）
-#: 数据/配置目录名（`%LOCALAPPDATA%\LaoATrader`）。**故意保持旧名**：它是老用户
-#: 已经下好的历史数据库所在目录，改成新名字会让程序去空目录里找、逼用户重下 180MB。
-#: 产品显示名是「老牛选股助手」（见 `ui/app.py` 的 `APP_NAME`），两者不必一致。
-DEFAULT_APP_NAME = "LaoATrader"
+#: 数据/配置目录名（`%LOCALAPPDATA%\CaishenHelper`）。产品显示名是「财神助手」
+#: （见 `ui/app.py` 的 `APP_NAME`）。
+#:
+#: 2026-09-30 改名时**没有**只改这一行就完事：老用户的数据库（几年日线，几百 MB）
+#: 与授权状态都躺在旧目录里，直接换名等于让他重下一遍、试用天数还可能重置。
+#: 所以 `_migrate_legacy_dirs()` 会在第一次用到新目录时，把旧目录**整份搬过来**。
+DEFAULT_APP_NAME = "CaishenHelper"
+
+#: 改名前用过的目录名（Windows `%LOCALAPPDATA%`/`%APPDATA%` 下，以及 Linux 的
+#: `~/.local/share`、`~/.config`）。**只用来搬一次家**，不参与日常逻辑。
+LEGACY_APP_NAMES: tuple[str, ...] = ("LaoATrader",)
+#: Linux/macOS 上老位置用的目录名（小写连字符那种写法）
+LEGACY_SLUG_NAMES: tuple[str, ...] = ("laoa-trader",)
 
 #: 支持的通知频道（顺序 = 界面与 --doctor 的展示顺序）
 #: 支持的通知频道。**2026-09-18 起 `windows` 整路删除**（用户原话："windows系统通知删除，
@@ -147,20 +156,69 @@ _LEGACY_FIELD_ALIASES: dict[str, str] = {
 }
 
 
+def _migrate_legacy_dirs() -> None:
+    """把旧目录（改名前那套名字）整份搬到新位置。**幂等、绝不抛异常**。
+
+    为什么要搬而不是"读旧目录"：数据目录里同时住着 ① 几年日线（几百 MB，重下要几十分钟）
+    与 ② 授权/试用状态。让程序继续读旧目录，等于把老名字永远留在用户机器上；只改名字不搬，
+    等于让老用户重下一次并可能重置试用天数 —— 两条都不能接受，所以第一次用到新位置时搬。
+
+    三条规矩：
+    1. **只在新位置还不存在时搬**（第二次启动就是空操作，不会覆盖新数据）；
+    2. 用 `shutil.move`：先尝试改名（同盘瞬间完成），失败（跨盘）时自动退化成"复制 + 删源"，
+       复制没成功就不会删旧目录 —— 宁可留着旧目录，也不能把用户的数据弄丢；
+    3. 失败只记日志：这是"锦上添花"的步骤，不能拦住启动（`load_config` 的承诺是永不抛）。
+    """
+    dirs: list[tuple[Path, Path]] = []
+    local = os.environ.get("LOCALAPPDATA")
+    appdata = os.environ.get("APPDATA")
+    if local:
+        dirs.append((Path(local) / DEFAULT_APP_NAME, Path(local)))
+    if appdata:
+        dirs.append((Path(appdata) / DEFAULT_APP_NAME, Path(appdata)))
+    if not local and not appdata:
+        xdg_data = os.environ.get("XDG_DATA_HOME")
+        share = Path(xdg_data) if xdg_data else Path.home() / ".local" / "share"
+        dirs.append((share / DEFAULT_APP_NAME, share))
+        config_root = Path.home() / ".config"
+        dirs.append((config_root / "caishen-helper", config_root))
+
+    for target, parent in dirs:
+        try:
+            if target.exists():
+                continue
+            # 同一个 parent 下的候选：老目录名（Windows 风格）+ 老 slug（Linux 风格）
+            for names in (LEGACY_APP_NAMES, LEGACY_SLUG_NAMES):
+                for name in names:
+                    source = parent / name
+                    if not source.is_dir():
+                        continue
+                    shutil.move(str(source), str(target))
+                    logger.info(f"已把改名前的数据目录搬到新位置：{source} → {target}")
+                    break
+                else:
+                    continue
+                break
+        except Exception as exc:  # noqa: BLE001 - 见上面第 3 条
+            logger.warning(f"搬迁旧数据目录失败（不影响启动，可手动搬家）：{exc}")
+
+
 def default_data_dir() -> Path:
-    """默认数据目录：Windows `%LOCALAPPDATA%\\LaoATrader\\data`，其它平台同构。"""
+    """默认数据目录：Windows `%LOCALAPPDATA%\\CaishenHelper\\data`，其它平台同构。"""
     local = os.environ.get("LOCALAPPDATA")
     if local:
+        _migrate_legacy_dirs()
         return Path(local) / DEFAULT_APP_NAME / "data"
     # 非 Windows（开发和测试用）：保持同样的目录语义
     base = os.environ.get("XDG_DATA_HOME")
     root = Path(base) if base else Path.home() / ".local" / "share"
+    _migrate_legacy_dirs()
     return root / DEFAULT_APP_NAME / "data"
 
 
 def user_config_path() -> Path:
-    r"""**用户配置文件（持久位置）**：Windows `%APPDATA%\LaoATrader\config.toml`，
-    其它平台 `~/.config/laoa-trader/config.toml`。
+    r"""**用户配置文件（持久位置）**：Windows `%APPDATA%\CaishenHelper\config.toml`，
+    其它平台 `~/.config/caishen-helper/config.toml`。
 
     为什么必须有一个"exe 之外"的位置（用户 2026-09-20 实报"更新软件后飞书设置消失"）：
     老版本把 config.toml 写在 **exe 同级**目录，而更新软件就是"整包覆盖那个目录"——
@@ -169,8 +227,10 @@ def user_config_path() -> Path:
     """
     appdata = os.environ.get("APPDATA")
     if appdata:
+        _migrate_legacy_dirs()
         return Path(appdata) / DEFAULT_APP_NAME / "config.toml"
-    return Path.home() / ".config" / "laoa-trader" / "config.toml"
+    _migrate_legacy_dirs()
+    return Path.home() / ".config" / "caishen-helper" / "config.toml"
 
 
 def _legacy_config_candidates() -> list[Path]:
@@ -450,10 +510,10 @@ class Config:
     data_sources: list[str] = field(default_factory=lambda: ["hithink", "public"])
     data_dir: Path = field(default_factory=default_data_dir)
 
-    # ── 参与选股的东西（2026-09-18 起只剩"勾选的公式"）──
-    #: 参与选股的**公式**（`formulas/` 目录里的公式名，见 `formula_dir()`）。
+    # ── 参与匹配的东西（2026-09-18 起只剩"勾选的公式"）──
+    #: 参与匹配的**公式**（`formulas/` 目录里的公式名，见 `formula_dir()`）。
     #: 随包预置的那几条公式与用户自己写的一条**待遇完全相同**：勾上才跑。
-    #: **默认空 = 只盯自选股**（不会因为你用过一次示例公式就改变选股结果）。
+    #: **默认空 = 只盯自选标的**（不会因为你用过一次示例公式就改变匹配结果）。
     #: 界面上勾「策略选取」列时写回这个键；名字找不到文件 / 语法错 → 忽略并记日志
     #: （`formulas.enabled_names()`）。
     enabled_formulas: list[str] = field(default_factory=list)
@@ -487,10 +547,10 @@ class Config:
     #: `ready` 允许的最大落后交易日数（0 = 必须是最新交易日）
     max_stale_trading_days: int = 0
 
-    # ── 自选股（手动加的标的：和策略标的并列进池，一起盯）──
-    #: 自选股数量上限（超出的会在日志/界面提示，不静默丢弃）
+    # ── 自选标的（手动加的标的：和策略标的并列进池，一起盯）──
+    #: 自选标的数量上限（超出的会在日志/界面提示，不静默丢弃）
     watchlist_max: int = 20
-    #: 自选股是否并入股票池并参与盘中监控（false = 只记录不监控）
+    #: 自选标的是否并入股票池并参与盘中监控（false = 只记录不监控）
     watchlist_in_pool: bool = True
 
     # ── 通知 ──
@@ -565,9 +625,9 @@ class Config:
     intraday_interval: int = 60
     stop_loss: float = 0.05
     take_profit: float = 0.10
-    # ⚠️ 这里**没有**"盘中选股用不用实时数据"的开关，而且**不许加**：
+    # ⚠️ 这里**没有**"盘中匹配用不用实时数据"的开关，而且**不许加**：
     # 主人 2026-09-23 划掉了那条 —— "不需要加开关，按照我说的规则来"。
-    # 规则是内置的、无条件的：开盘时间（交易日 9:30–11:30 / 13:00–15:00）里跑的选股
+    # 规则是内置的、无条件的：开盘时间（交易日 9:30–11:30 / 13:00–15:00）里跑的匹配
     # 就是实时口径（用现价拼出"今天"这根 K 线），其余时间用库里的日 K；
     # 取不到实时快照时退回日 K，并把"本次用的是哪套"写在结果里（见 `formulas.prepare_inputs`）。
     # 有测试钉着"关不掉"（`tests/test_formula_lib.py` 里那条 `no_switch_...`）。
@@ -644,8 +704,8 @@ class Config:
 
     # ── 定时（config.toml 可改；改完**立即生效**，不用重启）──
     #: 是否每天自动运行（关掉则只在你手动点按钮时跑）。
-    #: **默认 false**（用户拍板：选股随时手动，不做定时运行）——
-    #: 所以出厂状态下**不会有一天自己跑起来**：数据增量、选股、建池、推送都要你点一下。
+    #: **默认 false**（用户拍板：匹配随时手动，不做定时运行）——
+    #: 所以出厂状态下**不会有一天自己跑起来**：数据增量、匹配、建池、推送都要你点一下。
     #: 改版前默认 true；`run_at` / `run_at_fallback` 两个时间键仍保留（改回 true 就照常用），
     #: 开发文档里"定时日更/定时推送"那一组界面入口按计划移除（阶段 B），
     #: 之后只剩配置文件/CLI 这条路。
@@ -901,7 +961,7 @@ class Config:
             return (
                 f"无法创建数据目录 {self.data_dir}：{exc}\n"
                 "请在 config.toml 里把 data_dir 改成一个有写权限的目录"
-                "（例如 D:\\LaoATrader\\data）。"
+                "（例如 D:\\CaishenHelper\\data）。"
             )
 
 
@@ -1292,7 +1352,7 @@ def update_config_file(
 
     Args:
         path: 配置文件路径；None 时用 `find_config_file()`，都没有则落到
-            `~/.config/laoa-trader/config.toml`（保证"保存"总有地方可写）。
+            `~/.config/caishen-helper/config.toml`（保证"保存"总有地方可写）。
         updates: {键: 新值}。
         create: 文件不存在时是否创建。
 

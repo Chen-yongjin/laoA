@@ -92,8 +92,8 @@ def test_feishu_skips_silently_without_credentials(cfg) -> None:
 
 def test_feishu_card_payload_shape(cfg) -> None:
     """卡片结构：header(plain_text) + elements(div/lark_md)，与服务器版同款。"""
-    card = feishu.build_card("📈 选股池", ["1. 甲（600001）", "2. 乙（600002）"])
-    assert card["header"]["title"]["content"] == "📈 选股池"
+    card = feishu.build_card("📈 标的池", ["1. 甲（600001）", "2. 乙（600002）"])
+    assert card["header"]["title"]["content"] == "📈 标的池"
     assert card["header"]["template"] == "blue"
     assert card["elements"][0]["text"]["tag"] == "lark_md"
     assert "600001" in card["elements"][0]["text"]["content"]
@@ -162,7 +162,7 @@ def test_feishu_discovers_chat_when_not_configured(cfg) -> None:
         "/auth/v3/tenant_access_token/internal": FakeResponse(
             {"code": 0, "tenant_access_token": "t-1", "expire": 7200}),
         "/im/v1/chats": FakeResponse({"code": 0, "data": {
-            "items": [{"chat_id": "auto-chat", "name": "选股群"}], "has_more": False}}),
+            "items": [{"chat_id": "auto-chat", "name": "匹配群"}], "has_more": False}}),
         "/im/v1/messages": FakeResponse({"code": 0, "data": {}}),
     })
     result = feishu.notify("标题", ["正文"], cfg=cfg, session=session)

@@ -47,7 +47,7 @@
 
 > ⚠️ **这两条提示是近似的、且无法回测**：只有 60 秒一张的行情快照，没有分时/逐笔/Level-2，
 > 更没有历史的分时数据来验证阈值 —— 这四个阈值是**手工设定的起点，不是拟合出来的**。
-> 它们**不参与选股、也不会混进当天的池子推送**，只走盘中提醒那几条通道。
+> 它们**不参与匹配、也不会混进当天的池子推送**，只走盘中提醒那几条通道。
 > 开关：`intraday_t`（**默认 false = 关**，用户拍板；想开就写 `intraday_t = true` 或环境变量 `INTRADAY_T=1`）。详见 README「持仓做T（近似提示）」。
 
 设计要点（继承服务器版）
@@ -137,13 +137,13 @@ ANOMALY_TAGS: dict[str, str] = {
 #: 异动原因文本截断长度：推送要一行看得完，完整原文交易所接口随时能再取
 ANOMALY_REASON_LIMIT = 120
 
-#: "选股完成"这一条消息的类型（**不是盘中提醒**：它由 `scheduler.run_daily()` 在
-#: 建池成功之后写入）。用户 2026-09-18 要求"通知仿 QQ：盘中提醒与选股推送都进同一个
+#: "匹配完成"这一条消息的类型（**不是盘中提醒**：它由 `scheduler.run_daily()` 在
+#: 建池成功之后写入）。用户 2026-09-18 要求"通知仿 QQ：盘中提醒与匹配推送都进同一个
 #: 消息列表"，所以它住在同一张表（`intraday_alert`）里、只是 kind 不同。
 KIND_POOL = "pool"
 
 KIND_LABELS = {
-    KIND_POOL: "📈 选股完成",
+    KIND_POOL: "📈 匹配完成",
     "stop_loss": "🛑 触及止损",
     "take_profit": "🎯 触及止盈",
     "break_ma5": "📉 跌破 5 日线",
@@ -375,7 +375,7 @@ def is_trading_day(db_path: str, day: str | None = None) -> bool:
 
 
 def _watch_label(note: str, cost: float | None) -> str:
-    """自选股的展示标签：`自选（龙头，成本 12.40）`。
+    """自选标的的展示标签：`自选（龙头，成本 12.40）`。
 
     把备注与成本写进提醒里，是为了让收到卡片的人**一眼知道为什么盯它**：
     备注是用户自己写的理由（"龙头""消息面"），成本则直接对应止损止盈的基准。
@@ -383,7 +383,7 @@ def _watch_label(note: str, cost: float | None) -> str:
     标签固定写「自选」：这条提醒本来就出自自选表，写「策略+自选」等于在一个
     自选名单里再解释一次"它也是自选"（2026-09-23 主人："为什么要+自选 什么策略
     跑出来的 直接记录策略名称 只有用户自己输入的才能算自选来源"）；是哪条策略
-    选出来的，看「自选股池」表的来源列。
+    选出来的，看「自选标的」表的来源列。
     """
     head = "自选"
     details = []
@@ -421,7 +421,7 @@ def recent_signal_symbols(
     """取最近 N 个交易日推送过的信号（作为卖出/风控观察池）。
 
     `allowed_strategies` 是**老调用方**留下的窄化参数（当年按启用的策略组过滤）；
-    2026-09-18 策略组机制删掉之后，选股只产出公式标的，所以现在一律传 None ——
+    2026-09-18 策略组机制删掉之后，匹配只产出公式标的，所以现在一律传 None ——
     参数保留只为兼容，传进来也照旧转给 storage（那是 SQL 层的过滤，没有副作用）。
     """
     with storage.connect(db_path) as conn:
@@ -434,11 +434,11 @@ def watch_targets(
     selection: Any = None,
     cfg: Config | None = None,
 ) -> tuple[dict[str, dict], set[str]]:
-    """盘中观察目标：**精选股票池优先**，近期推送信号兜底。
+    """盘中观察目标：**精匹配票池优先**，近期推送信号兜底。
 
     Args:
         selection: **2026-09-18 起不再使用**（原来按启用的策略组窄化观察面）。
-            策略组机制已删；池子里的标的现在一律来自勾选的公式与自选股。
+            策略组机制已删；池子里的标的现在一律来自勾选的公式与自选标的。
             None 时按配置解析（配置里两组都空 = 全选）。
         cfg: 配置（解析 selection 用）。
 
@@ -455,7 +455,7 @@ def watch_targets(
     # （优先级见 `monitor_off_symbols` 的说明）
     off = monitor_off_symbols(db_path)
     # 池子里的每一行都盯：当年这里按"启用的策略组"过滤，而策略组机制已经删掉，
-    # 现在进池的只可能是勾选的公式标的与自选股 —— 没有"该不该盯"这一层了。
+    # 现在进池的只可能是勾选的公式标的与自选标的 —— 没有"该不该盯"这一层了。
     pool_rows = list(pool_mod.load_pool(db_path))
     pool_symbols = {row["symbol"] for row in pool_rows}
     for row in pool_rows:
@@ -464,7 +464,7 @@ def watch_targets(
             "source": "pool", "strategy": row.get("strategy"),
         }
 
-    # ── 自选股：**无论策略池是否为空都要盯** ──
+    # ── 自选标的：**无论策略池是否为空都要盯** ──
     # 为什么直接从 watchlist 表读、而不是只依赖池子：用户刚加的自选要立刻生效，
     # 不必等到今晚重新建池；一条公式都没勾（池子只剩自选）时也一样盯。
     if getattr(cfg, "watchlist_in_pool", True):
@@ -492,7 +492,7 @@ def watch_targets(
             # 自选也要吃"池内回踩买点"这类买点规则
             pool_symbols.add(symbol)
     # 有股票池就**只盯池子**（池子是精选的热门行业标的，盯得过来、响应快）；
-    # 池子为空时才退回"近期信号"（例如当晚选股还没跑）。
+    # 池子为空时才退回"近期信号"（例如当晚匹配还没跑）。
     if targets and os.environ.get("INTRADAY_POOL_ONLY", "1") != "0":
         return _drop_unmonitored(targets, pool_symbols, off)
     for symbol, info in recent_signal_symbols(db_path, days, allowed).items():
@@ -1192,7 +1192,7 @@ def format_message(
 def report_text(report: dict | None) -> str:
     """把 `run_once` 的 report 翻成一句中文（【检查盘面】按钮与状态栏用）。
 
-    为什么专门翻这一句：界面原来把它丢进了"选股流程"那个分支，显示成
+    为什么专门翻这一句：界面原来把它丢进了"匹配流程"那个分支，显示成
     `盘中检查完成： 池子 0 只` —— 点了按钮只看到"池子 0 只"，既不知道盯了几只，
     也不知道为什么一条都没提醒（不是交易日 / 不在交易时段 / 没配 API Key /
     全被当天去重挡了）。**"没有提醒"与"提醒跑不起来"是两件完全不同的事**，

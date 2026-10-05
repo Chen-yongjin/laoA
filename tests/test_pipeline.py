@@ -6,7 +6,7 @@
 - CLI `--groups` / `--strategies` 临时覆盖、`--once` / `--pool` 可用；
 - 观察池（盘中提醒）只含**勾选公式**产生的标的。
 
-2026-09-18（用户要求）：候选**只来自勾选的公式** —— 5 条内置策略退出了选股链路，
+2026-09-18（用户要求）：候选**只来自勾选的公式** —— 5 条内置策略退出了匹配链路，
 所以下面凡是要"池子里有票"的用例，都必须先勾上一条公式（`_enable_formulas`）。
 """
 
@@ -85,8 +85,8 @@ def test_run_twice_is_idempotent_for_signals_and_watchlist_rows(
         ready_db, tmp_path, monkeypatch) -> None:
     """同一天跑两次：`signal` 不产生重复行；`stock_pool` 里也**只有自选那一行**。
 
-    2026-09-21（主人要求"选股结果不自动加入股池"）：选出来的票不再写进 `stock_pool`，
-    所以"池子行不重复"这件事现在由**自选股**那条路来验 —— 先加一只自选，再跑两轮，
+    2026-09-21（主人要求"匹配结果不自动加入股池"）：选出来的票不再写进 `stock_pool`，
+    所以"池子行不重复"这件事现在由**自选标的**那条路来验 —— 先加一只自选，再跑两轮，
     库里应当恰好一行（不是两行、也不是三行）。
     """
     cfg = ready_db
@@ -210,7 +210,7 @@ def test_enabled_formula_flows_to_pool_signals_and_watch(
         strategies = {r[0] for r in conn.execute("SELECT DISTINCT strategy FROM signal")}
         stored = [r["symbol"] for r in conn.execute("SELECT symbol FROM stock_pool")]
     assert strategies == {"公式·反转"}          # 信号表里的正是这一轮跑的公式
-    # ⚠️ 2026-09-21（主人要求）：**选股结果不再自动进股池** —— 库里一行都不该有
+    # ⚠️ 2026-09-21（主人要求）：**匹配结果不再自动进股池** —— 库里一行都不该有
     assert stored == [], "选出来的票不该自动写进 stock_pool"
 
     # 观察池：`stock_pool` 是空的（没进池），所以它走"池子为空 → 退回近期信号"那条兜底
@@ -222,7 +222,7 @@ def test_enabled_formula_flows_to_pool_signals_and_watch(
 
     # 用户在结果页面点【加入自选】之后（= 写进 watchlist），它才进池、才被盯
     with storage.connect(cfg.db_path) as conn:
-        storage.upsert_watchlist(conn, "600003", name="丙样本", note="选股来源：公式·反转")
+        storage.upsert_watchlist(conn, "600003", name="丙样本", note="匹配来源：公式·反转")
     report2 = _run(cfg, monkeypatch, notify=False, with_data=False)
     assert [row["symbol"] for row in report2["pool"]] == ["600003"]
     with storage.connect(cfg.db_path) as conn:
@@ -236,7 +236,7 @@ def test_watch_targets_watches_every_stored_pool_row(cfg, monkeypatch) -> None:
     """库里存着上一轮的池子时，**每一行都盯**（不再有"按策略组过滤"这一层）。
 
     2026-09-18 之前这里会按"启用的策略组"把被停用组的标的剔掉；策略组机制删掉之后，
-    进池的只可能是勾选的公式标的与自选股 —— 没有"该不该盯"的第二套判断。
+    进池的只可能是勾选的公式标的与自选标的 —— 没有"该不该盯"的第二套判断。
     （老库里的行还带着 `LowPriceStrategy` 这种历史类名，照旧一视同仁。）
     """
     storage.init_db(cfg.db_path)
@@ -279,7 +279,7 @@ def test_watch_targets_falls_back_to_recent_signals(cfg) -> None:
 
 def test_run_daily_without_any_formula_is_normal_not_an_error(
         ready_db, monkeypatch) -> None:
-    """**一条公式都没勾 = 只盯自选股**：不报错、不落信号、照常往下走。
+    """**一条公式都没勾 = 只盯自选标的**：不报错、不落信号、照常往下走。
 
     2026-09-18 起公式默认一条都不勾，所以这是**最常见的正常状态**（不是配置错误）——
     老版本的"没有启用任何策略"报错口径（selection 解析为空 → 写 errors）已经作废。
@@ -296,7 +296,7 @@ def test_run_daily_without_any_formula_is_normal_not_an_error(
 
 
 def test_refresh_data_only_syncs(ready_db, monkeypatch) -> None:
-    """【只刷新数据】：只跑同步，不选股、不落信号、不建池、不推送。"""
+    """【只刷新数据】：只跑同步，不匹配、不落信号、不建池、不推送。"""
     cfg = ready_db
     calls: list[str] = []
 
@@ -342,7 +342,7 @@ def test_run_daily_reports_stage_names(ready_db, tmp_path, monkeypatch) -> None:
     _run(cfg, monkeypatch, notify=True, with_data=True, stage_cb=stages.append)
     assert stages[:1] == ["数据增量"]
     assert "建池" in stages and "推送通知" in stages
-    assert "跑策略" not in stages        # 内置策略退出选股链路后不再有这一档
+    assert "跑策略" not in stages        # 内置策略退出匹配链路后不再有这一档
 
 
 def test_broken_stage_callback_does_not_break_run(ready_db, tmp_path, monkeypatch) -> None:

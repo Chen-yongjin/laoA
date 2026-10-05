@@ -1,4 +1,4 @@
-"""公式驱动的 CLI：`--once` / `--pool` + 老配置里的退役键不再影响选股。
+"""公式驱动的 CLI：`--once` / `--pool` + 老配置里的退役键不再影响匹配。
 
 ⚠️ 2026-09-18（用户要求）**口径变过，入口也变过**：候选只来自勾选的公式，
 `enabled_groups` / `enabled_strategies` 两个配置键**删除**（老的 config.toml 里那两行
@@ -29,13 +29,13 @@ from tests.conftest import READY_THRESHOLDS
 def seeded(cfg, tmp_path):
     """一份能跑出候选的库 + 指向它的 config.toml（内容固定，便于比对是否被改动）。
 
-    ⚠️ 别把这份 fixture 读成"没 Key 也能选股"（2026-09-18 用户核实后要求写准）：
+    ⚠️ 别把这份 fixture 读成"没 Key 也能匹配"（2026-09-18 用户核实后要求写准）：
     这份库是**手工造的就绪库** —— 复权事件与行业归属都是这里显式写进去的（只有同花顺那条
     dump 路给得到这两样），`hithink_api_key = ""` 只是为了让用例不发任何请求。
-    真实情形是：**没 Key 时只能用免 Key 公开源，而公开源给不出这两样，选股永远过不了
+    真实情形是：**没 Key 时只能用免 Key 公开源，而公开源给不出这两样，匹配永远过不了
     数据闸门**（见 `tests/test_public_sync.py` 里
     `test_public_source_data_can_never_pass_the_stock_picking_gate`）。
-    本文件测的是"数据已经就绪之后，选股/覆盖参数本身对不对" —— 那是纯本地的事。
+    本文件测的是"数据已经就绪之后，匹配/覆盖参数本身对不对" —— 那是纯本地的事。
     """
     end = datetime(2026, 9, 11).date()
     days: list[str] = []
@@ -128,7 +128,7 @@ def test_formula_decides_the_picks(capsys, seeded, tmp_path, monkeypatch) -> Non
         pool_strategies = {r[0] for r in conn.execute(
             "SELECT DISTINCT strategy FROM stock_pool")}
     assert strategies == {"公式·反转"}            # 信号表里就是这一轮跑的公式
-    # 2026-09-21（主人要求"选股结果不自动加入股池"）：`stock_pool` 里**不再有它**
+    # 2026-09-21（主人要求"匹配结果不自动加入股池"）：`stock_pool` 里**不再有它**
     assert pool_strategies == set()
     # 老配置里的退役键**原样留着**（用户文件不被改坏），文件字节不变
     assert seeded["config"].read_text(encoding="utf-8") == before
@@ -150,7 +150,7 @@ def test_config_groups_no_longer_decide_the_picks(capsys, seeded,
     )
     assert cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"])]) == 0
     out = capsys.readouterr().out
-    assert "本次按勾选的策略选股：低价" in out
+    assert "本次按勾选的策略匹配：低价" in out
     # 候选由勾的公式决定：库里 signal 表记着这一轮的结果（stock_pool 不再自动落它）
     with storage.connect(seeded["cfg"].db_path) as conn:
         picked = {r[0] for r in conn.execute("SELECT DISTINCT symbol FROM signal")}
@@ -161,9 +161,9 @@ def test_config_groups_no_longer_decide_the_picks(capsys, seeded,
 
 def test_pool_command_shows_the_source_column(capsys, seeded,
                                              tmp_path, monkeypatch) -> None:
-    """`--pool` 打出池子表；来源列现在是 `自选`（选股结果不再自动进池，见下）。
+    """`--pool` 打出池子表；来源列现在是 `自选`（匹配结果不再自动进池，见下）。
 
-    2026-09-21（主人要求"选股结果不自动加入股池"）：`stock_pool` 里只剩**自选** ——
+    2026-09-21（主人要求"匹配结果不自动加入股池"）：`stock_pool` 里只剩**自选** ——
     所以这条用例先加一只自选（这一只既是自选、又恰好被勾的公式选中 → 来源是
     `公式·反转+自选`），再断言 `--pool` 打得出来源列。
     """

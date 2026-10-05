@@ -3,7 +3,7 @@
 为什么值得单独测
 ----------------
 分发出去的是一个 exe（用户看不到源码），他报障时说的是"【关于】里写着 v0.1.0"，
-而安装包叫 `LaoATrader-0.2.0` / 打包脚本读的是 `pyproject.toml` 的 `version`。
+而安装包叫 `CaishenHelper-0.2.0` / 打包脚本读的是 `pyproject.toml` 的 `version`。
 两处一旦漂移，就会出现"界面说这个版本、包是那个版本"的错位 ——
 排查起来极其费劲（而且这种错位没人会主动发现），所以用一条用例钉死。
 """
@@ -37,17 +37,20 @@ def test_pyproject_declares_author() -> None:
 #: 改名前的旧名：任何"用户看得见"的地方都不许再出现它。
 #: 为什么要钉住：改名最容易漏（窗口标题改了、托盘/通知没改，或者推送标题还是旧名），
 #: 而这种不一致只有用户自己发现得了。
-LEGACY_NAME = "老牛选股法师"
-#: 用户 2026-09-20 定的口径：**软件名 = 老牛选股**（窗口标题 / 托盘 / 任务栏 / exe / 打包目录），
-#: 而通知、导出文件名、"助手"自称仍用 `ASSISTANT_NAME`（见 `ui/app.py`）。
-NEW_NAME = "老牛选股"
-ASSISTANT_NAME = "老牛选股助手"
-#: 打包产物**目录/压缩包/artifact** 用的 ASCII 名（用户 2026-09-20 定）。
-#: ⚠️ 压缩包名**不要**改成中文：下载直链里带着它，改了会让已经发出去的链接失效。
-ARTIFACT_NAME = "LaoniuTrader"
-#: 包里那个可执行文件的名字：**中文**（主人 2026-09-21 要求改名成 老牛选股.exe）。
-#: exe 名是用户在资源管理器里双击的那一个，中文更直观；目录名保持 ASCII。
-EXE_NAME = "老牛选股"
+#: 2026-09-30 主人把产品名改成「财神助手」（平台不许发带"选股/荐股"字样的东西），
+#: 旧名就是那四个字，用例跟着改。
+LEGACY_NAME = "老牛选股"
+#: 2026-09-30 定的口径：**软件名 = 财神助手**（窗口标题 / 托盘 / 任务栏 / exe / 打包目录）。
+#: 通知、导出文件名、"助手"自称以前另有一个带"助手"尾缀的别名，改名后合并成同一个名字。
+NEW_NAME = "财神助手"
+ASSISTANT_NAME = "财神助手"
+#: 打包产物**目录/压缩包/artifact** 用的 ASCII 名（2026-09-30 随产品改名一起改）。
+#: 改名前后都**没对外发过包**，所以不存在"旧下载链接失效"的问题；
+#: 从今往后这个名字就是下载直链的一部分，别再动它。
+ARTIFACT_NAME = "CaishenTrader"
+#: 包里那个可执行文件的名字：**中文** —— 用户在资源管理器里双击的那一个，
+#: 中文更直观；目录名保持 ASCII（命令行、下载链接、别的机器上都不会有编码麻烦）。
+EXE_NAME = "财神助手"
 
 
 def test_user_visible_names_use_the_new_product_name() -> None:
@@ -68,9 +71,9 @@ def test_user_visible_names_use_the_new_product_name() -> None:
     title = scheduler.pool_push_title("2026-09-14") if hasattr(scheduler, "pool_push_title") else None
     if title is None:                                  # 没有抽成函数就直接读源码里的字面量
         source = (ROOT / "src" / "laoa_trader" / "scheduler.py").read_text(encoding="utf-8")
-        # 推送标题属于"助手"语气那一类（用户 2026-09-20：通知/推送用「老牛选股助手」）
-        assert f"{ASSISTANT_NAME}-选股池" in source
-        assert f"{LEGACY_NAME}-选股池" not in source
+        # 推送标题属于"助手"语气那一类（用户 2026-09-20：通知/推送用「财神助手」）
+        assert f"{ASSISTANT_NAME}-标的池" in source
+        assert f"{LEGACY_NAME}-标的池" not in source
     else:
         assert NEW_NAME in title and LEGACY_NAME not in title
 
@@ -105,9 +108,9 @@ def test_executable_is_named_after_the_product() -> None:
 
     三层口径（别再混起来）：
     * **界面**（标题栏、托盘、关于页）= 中文 `NEW_NAME` / `ASSISTANT_NAME`；
-    * **目录与压缩包/artifact** = ASCII `LaoniuTrader` —— 命令行、下载链接、别的机器上
+    * **目录与压缩包/artifact** = ASCII `CaishenTrader` —— 命令行、下载链接、别的机器上
       都不会有编码麻烦；而且**改 zip 名会让已经发出去的下载链接失效**；
-    * **exe** = 中文 `老牛选股.exe` —— 用户在资源管理器里双击的就是它。
+    * **exe** = 中文 `财神助手.exe` —— 用户在资源管理器里双击的就是它。
     """
     from laoa_trader.ui import app as ui_app
 

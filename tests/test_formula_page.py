@@ -1,7 +1,7 @@
-"""「策略选股」页（`ui/formula_page.py`）的**离屏**界面测试。
+"""「策略匹配」页（`ui/formula_page.py`）的**离屏**界面测试。
 
 这一页现在是三块（`docs/开发文档.md`）：统一策略列表（内置 + 公式同一张表）、
-按需展开的傻瓜式公式编辑器、以及【开始选股】。最容易做错、又最难在代码里看出来的
+按需展开的傻瓜式公式编辑器、以及【开始匹配】。最容易做错、又最难在代码里看出来的
 是**交互细节**，所以这里逐条钉住：
 
 * 点按钮是**插到光标处**还是追加到末尾（追加也能"跑通"，但会把用户改到一半的公式
@@ -12,8 +12,8 @@
   `enabled_groups` + `enabled_strategies`（只写一个会踩交集语义的坑，见页面里的注释）；
 * 右键菜单：内置可启停但**不可删**（置灰 + 理由），公式可删（二次确认）；
 * 备注能写进公式文件的 `# 说明:` 注释头、也能从那里读回界面；
-* 【开始选股】**只 emit `start_pick_requested`**，自己绝不跑流程；
-* **选股结果不在这一页**（用户要求"只要显示策略"）：结果进「自选股池」+ 导出一份到桌面，
+* 【开始匹配】**只 emit `start_pick_requested`**，自己绝不跑流程；
+* **匹配结果不在这一页**（用户要求"只要显示策略"）：结果进「自选标的」+ 导出一份到桌面，
   这一页只留一句"结果去哪了"的说明；主窗口仍在调的那个 `show_pick_result()` 是空实现
   （留着以免 `ui/app.py` 那边 `AttributeError`）；
 * 【试算】**在后台线程里跑**（用户实报过"窗口未响应"）。
@@ -539,12 +539,12 @@ def test_exclude_buttons_are_flags_the_engine_knows(page) -> None:
 
 def test_page_hint_is_two_lines_and_gray(page) -> None:
     """顶部那行灰字说明要在（且是"点一下就知道下一步"这种一句话级别）。"""
-    assert "策略选取" in fp.PAGE_HINT and "开始选股" in fp.PAGE_HINT
+    assert "策略选取" in fp.PAGE_HINT and "开始匹配" in fp.PAGE_HINT
     assert len(fp.PAGE_HINT.splitlines()) <= 2
     assert page.page_hint.objectName() == "statusTag"     # 小号灰字（主题里定义）
     # 编辑器自己那行说明（旧版顶部那句话，现在跟着编辑器一起展开）**一个字都没丢**
     assert "点右边的按钮就能插入" in fp.EDITOR_HINT
-    assert "最后一行是选股条件" in fp.EDITOR_HINT
+    assert "最后一行是匹配条件" in fp.EDITOR_HINT
     assert page.editor_hint.text() == fp.EDITOR_HINT
 
 
@@ -734,7 +734,7 @@ def test_preview_hit_message_puts_the_candle_caliber_on_the_first_line(
         page, qapp, monkeypatch: pytest.MonkeyPatch) -> None:
     """**这一轮用的是哪套 K 线**必须显示在最前面（同日同时辰的口径差别全靠它解释）。
 
-    这份程序的内置规则是"开盘时间里跑的选股都是实时的，不是开盘时间才用 K 线"
+    这份程序的内置规则是"开盘时间里跑的匹配都是实时的，不是开盘时间才用 K 线"
     （用户 2026-09-23 定）。同一份公式、同一个按钮，盘中与收盘后本来就会选出不同的票 ——
     界面上不写这一行，用户只会以为程序不稳定。
     """
@@ -880,14 +880,14 @@ def test_preview_unexpected_error_is_reported_in_chinese(page, qapp,
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 6.5) 【运行】+【导出选股结果】（用户 2026-09-18 要求）
+# 6.5) 【运行】+【导出匹配结果】（用户 2026-09-18 要求）
 #
-# 用户原话：「把策略编辑下面的试算直接改成运行，后面再加上导出选股结果
+# 用户原话：「把策略编辑下面的试算直接改成运行，后面再加上导出匹配结果
 # （导出到桌面文档）」。所以这一段钉住三件事：
 #   1. 按钮上的字是【运行】（"试算"这个词从界面上消失）；
 #   2. 导出的是**上一次【运行】的全量命中**（提示区只列 20 只，文件里是全部）；
-#   3. 导出的版式与「开始选股」建池时那份**同一个函数**产的（来源列写
-#      `公式·<公式名>`，与「自选股池」表格里同一个词）。
+#   3. 导出的版式与「开始匹配」建池时那份**同一个函数**产的（来源列写
+#      `公式·<公式名>`，与「自选标的」表格里同一个词）。
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -913,10 +913,10 @@ def _run(page, qapp) -> None:
 
 
 def test_pick_buttons_are_run_and_export(page) -> None:
-    """按钮文案：原来叫【试算】，用户要求改成【运行】；右边多一个【导出选股结果】。"""
+    """按钮文案：原来叫【试算】，用户要求改成【运行】；右边多一个【导出匹配结果】。"""
     assert page.btn_preview.text().startswith("运行")
     assert "试算" not in page.btn_preview.text()
-    assert page.btn_export.text() == "导出选股结果"
+    assert page.btn_export.text() == "导出匹配结果"
     # 用户点之前要知道"导出的是什么、导到哪去"
     tip = page.btn_export.toolTip()
     assert "桌面" in tip and "运行" in tip
@@ -926,7 +926,7 @@ def test_pick_buttons_are_run_and_export(page) -> None:
 
 def test_export_after_run_writes_every_hit_to_the_desktop(
         page, tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch) -> None:
-    """点【导出选股结果】→ 桌面目录里出现那份文件，里面是**全部**命中。
+    """点【导出匹配结果】→ 桌面目录里出现那份文件，里面是**全部**命中。
 
     `shown=1` 是故意的：界面提示区只列 1 只（真实场景是 20 只），文件里必须 3 只都有
     —— "文件里少几只"在界面上完全看不出来，只能靠这条断言守。
@@ -937,12 +937,12 @@ def test_export_after_run_writes_every_hit_to_the_desktop(
     _fake_preview(monkeypatch, hits, shown=1)
     toasts: list[str] = []
     page.status_cb = toasts.append        # 页面调它时会现取，所以直接挂上就行
-    page.name_edit.setText("尾盘选股策略")
+    page.name_edit.setText("尾盘匹配策略")
     page.editor.setPlainText("C>MA(C,5)")
     _run(page, qapp)
 
     assert page.last_run is not None
-    assert page.last_run["name"] == "尾盘选股策略"
+    assert page.last_run["name"] == "尾盘匹配策略"
     assert len(page.last_run["hits"]) == 3           # 全量存下来给导出用
     assert "只列前 1 只" in page.hint_text            # 界面显示确实截断了
 
@@ -958,13 +958,13 @@ def test_export_after_run_writes_every_hit_to_the_desktop(
     assert "共 3 只（策略 3 · 自选 0）" in text
     for symbol in ("600001", "600002", "600003"):
         assert f"({symbol})" in text, f"{symbol} 没写进文件（提示区截断不能影响导出）"
-    # 「来源」列与「自选股池」表格同一个词：公式选中 → `公式·<公式名>`
-    assert "来源：尾盘选股策略" in text
+    # 「来源」列与「自选标的」表格同一个词：公式选中 → `公式·<公式名>`
+    assert "来源：尾盘匹配策略" in text
     assert "行情日 2026-09-11" in text
     assert "现价" in text                    # 库里有两个交易日 → 现价与涨跌幅都算得出来
     # 导出是**成功操作**：按 2026-09-18 的新口径**不再弹提示**，
     # 但文件位置必须写在提示区里（那是静态回显，不是一闪而过的提醒）
-    assert "已导出选股结果" in page.hint_text and files[0].name in page.hint_text
+    assert "已导出匹配结果" in page.hint_text and files[0].name in page.hint_text
     assert str(files[0]) in page.hint_text
     assert not any("已导出" in t for t in toasts), toasts
 
@@ -1241,7 +1241,7 @@ def test_auction_row_is_first_and_formulas_follow(page) -> None:
     老版本这里依次是 5 条内置策略 + 竞价策略 + 公式；所以这条用例原来叫
     `test_builtin_rows_come_first_and_show_real_evidence`，还逐条核对过内置策略
     「备注」列里的证据数字来自 `rules.py` / `groups.py` 的字段。现在那些行没有了，
-    于是它改成钉住**新的列表构成**：第一行是竞价策略（唯一不是选股策略的行），
+    于是它改成钉住**新的列表构成**：第一行是竞价策略（唯一不是匹配策略的行），
     后面每一行都必须有对应的公式文件（不允许出现"没有文件的幽灵行"）。
     """
     _write_formula(page.directory, "我的公式", "C>MA(C,5)", "站上5日线")
@@ -1359,7 +1359,7 @@ def test_clicking_readonly_row_shows_detail_and_copy_works(page, qapp) -> None:
 def test_readonly_detail_state_follows_the_checkbox(page, qapp) -> None:
     """勾上「竞价策略」后，详情里的"当前状态"立刻跟着变（两处说法不能打架）。
 
-    原来是钉内置策略的（勾上 → 详情显示"✅ 参与选股"）；内置行没了之后，
+    原来是钉内置策略的（勾上 → 详情显示"✅ 参与匹配"）；内置行没了之后，
     同一条规矩落在竞价那一行上：勾上写 `intraday_auction`，详情里那句
     "当前状态"必须同步 —— 否则用户勾完去看详情，会以为没生效。
     """
@@ -1434,7 +1434,7 @@ def test_reload_keeps_enabled_checkbox_state_from_config(page, page_cfg) -> None
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 10) 勾「参与选股」→ 写回 config.toml（**三种键**）
+# 10) 勾「参与匹配」→ 写回 config.toml（**三种键**）
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -1442,7 +1442,7 @@ def test_enable_checkbox_writes_config_toml(page, page_cfg, qapp) -> None:
     """勾公式 → config.toml 出现 enabled_formulas，**用户注释与未知键都保留**。
 
     公式在这里**直接落文件**、不走编辑器保存：编辑器保存会按 2026-09-18 的新行为
-    自动勾上「参与选股」（用户实报"存了却不参与"之后改的），而这条用例要测的是
+    自动勾上「参与匹配」（用户实报"存了却不参与"之后改的），而这条用例要测的是
     "勾选动作写回哪个键"，所以需要一个**存在但未启用**的公式当起点。
     """
     _write_formula(page.directory, "放量上攻", "C>MA(C,5)")
@@ -1460,7 +1460,7 @@ def test_enable_checkbox_writes_config_toml(page, page_cfg, qapp) -> None:
     assert "# 用户自己的注释（保存设置后必须还在）" in text
     assert 'my_own_key = "别动我"' in text
     assert page_cfg.enabled_formulas == ["放量上攻"]
-    assert "已加入选股" in page.hint_text
+    assert "已加入匹配" in page.hint_text
 
 
 def test_uncheck_enable_removes_from_config(page, page_cfg, qapp,
@@ -1476,7 +1476,7 @@ def test_uncheck_enable_removes_from_config(page, page_cfg, qapp,
 
     assert page_cfg.enabled_formulas == []
     assert "enabled_formulas = []" in page_cfg.source_path.read_text(encoding="utf-8")
-    assert "已退出选股" in page.hint_text
+    assert "已退出匹配" in page.hint_text
 
 
 def test_enable_write_failure_reverts_checkbox(page, page_cfg, qapp,
@@ -1554,7 +1554,7 @@ def test_uncheck_one_formula_keeps_the_others(page, page_cfg, qapp) -> None:
 
 
 def test_uncheck_all_formulas_writes_an_empty_list(page, page_cfg, qapp) -> None:
-    """全部取消勾选 → `enabled_formulas = []`（= 只盯自选股），**不写** `["none"]`。
+    """全部取消勾选 → `enabled_formulas = []`（= 只盯自选标的），**不写** `["none"]`。
 
     老版本这条是内置策略的（`test_uncheck_all_builtins_writes_explicit_off`）：
     那时"全部关掉"必须写 `enabled_groups = ["none"]`，因为那两个键"都空 = 全选"。
@@ -1571,7 +1571,7 @@ def test_uncheck_all_formulas_writes_an_empty_list(page, page_cfg, qapp) -> None
     assert page_cfg.enabled_formulas == []
     assert 'enabled_formulas = []' in page_cfg.source_path.read_text(encoding="utf-8")
     assert "none" not in page_cfg.source_path.read_text(encoding="utf-8")
-    assert "已退出选股" in page.hint_text
+    assert "已退出匹配" in page.hint_text
 
 
 def test_auction_toggle_write_failure_reverts_checkbox(page, page_cfg, qapp,
@@ -1680,7 +1680,7 @@ def test_row_menu_toggle_matches_and_updates_the_row_state(page, page_cfg, qapp)
     assert page._row_boxes["放量上攻"].isChecked() is True
     # 状态变了 → 菜单文案必须跟着变（不跟着变就等于告诉用户相反的事实）
     assert page.row_menu(page.row_of("放量上攻")).toggle.text() == "关闭"
-    assert "已加入选股" in page.hint_text
+    assert "已加入匹配" in page.hint_text
 
     page.row_menu(page.row_of("放量上攻")).toggle.trigger()
     qapp.processEvents()
@@ -1693,7 +1693,7 @@ def test_row_menu_toggle_matches_and_updates_the_row_state(page, page_cfg, qapp)
 #
 # 它是列表的**第一行**（2026-09-18 之前排在 5 条内置策略之后；内置策略改成随包公式后，
 # 前面那 5 行没了，它就成了第一行）；勾它开关的是**盘中竞价扫描**（`intraday_auction`），
-# 而**不是**"参与选股" —— 这几条用例里最要紧的就是把这条界线钉死：
+# 而**不是**"参与匹配" —— 这几条用例里最要紧的就是把这条界线钉死：
 # 勾完以后 `enabled_groups` / `enabled_strategies` / `enabled_formulas` 一个都不许变。
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -1703,7 +1703,7 @@ def test_auction_row_is_the_only_fixed_row_and_reads_config(page) -> None:
 
     老版本这条叫 `test_auction_row_sits_between_builtins_and_formulas`：那时它排在
     5 条内置策略**之后**、公式**之前**。内置策略改成随包公式之后，前面那 5 行没了，
-    于是它成了列表的**第一行** —— 位置变了，但"数字来自 config、不参与选股写在最前面"
+    于是它成了列表的**第一行** —— 位置变了，但"数字来自 config、不参与匹配写在最前面"
     这两条口径一个字都没变。
     """
     _write_formula(page.directory, "我的公式", "C>MA(C,5)")
@@ -1714,8 +1714,8 @@ def test_auction_row_is_the_only_fixed_row_and_reads_config(page) -> None:
     # 说明列的数字来自 config（不是界面编的）：改一个数，说明跟着变
     note = page.table.item(0, 1).text()
     assert "涨幅 2.0~9.0%" in note
-    # 「不参与选股」必须在**最前面**：说明列会被省略号截断，结论不能被截掉
-    assert note.startswith("只做盘中提示、不参与选股")
+    # 「不参与匹配」必须在**最前面**：说明列会被省略号截断，结论不能被截掉
+    assert note.startswith("只做盘中提示、不参与匹配")
     page.cfg.auction_min_pct = 5.0
     page.reload()
     assert "涨幅 5.0~9.0%" in page.table.item(0, 1).text()
@@ -1729,9 +1729,9 @@ def test_auction_row_toggle_writes_intraday_auction_only(page, page_cfg, qapp) -
     qapp.processEvents()
 
     assert page_cfg.intraday_auction is True
-    assert page_cfg.enabled_formulas == formulas_before      # 不参与选股 = 这个键不变
+    assert page_cfg.enabled_formulas == formulas_before      # 不参与匹配 = 这个键不变
     assert "竞价策略已开启" in page.hint_text
-    assert "不参与选股" in page.hint_text
+    assert "不参与匹配" in page.hint_text
     # 写进 config.toml 的就是那个键，而且**不写**任何已退役的键
     text = page_cfg.source_path.read_text(encoding="utf-8")
     assert "intraday_auction" in text
@@ -1761,9 +1761,9 @@ def test_clicking_auction_row_opens_readonly_detail_not_editor(page, qapp) -> No
 
     assert page.bottom_stack.currentWidget() is page.detail_page
     assert "竞价扫描开关" in page.detail_title.text()
-    assert "无法回测" in page.detail_text and "不参与选股" in page.detail_text
+    assert "无法回测" in page.detail_text and "不参与匹配" in page.detail_text
     assert page.editor.toPlainText() == "C>MA(C,5)"      # 草稿没被动过
-    assert "不是选股策略" in page.hint_text
+    assert "不是匹配策略" in page.hint_text
 
 
 def test_auction_row_menu_cannot_delete_and_says_why(page) -> None:
@@ -1794,16 +1794,16 @@ def test_right_click_wires_to_show_menu_for_the_clicked_row(page, qapp, monkeypa
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 12) 【开始选股】：只 emit 信号（流程在主窗口里）
+# 12) 【开始匹配】：只 emit 信号（流程在主窗口里）
 # ══════════════════════════════════════════════════════════════════════════
 
 
 def test_start_pick_only_emits_the_signal(page, monkeypatch) -> None:
-    """点【开始选股】→ `start_pick_requested` 出手；**这一页自己不跑流程**。"""
+    """点【开始匹配】→ `start_pick_requested` 出手；**这一页自己不跑流程**。"""
     from laoa_trader import scheduler
 
-    def boom(*_args, **_kwargs):               # 谁在这里调选股流程，这条就会炸
-        raise AssertionError("公式页自己跑起了选股流程（应该只 emit 信号）")
+    def boom(*_args, **_kwargs):               # 谁在这里调匹配流程，这条就会炸
+        raise AssertionError("公式页自己跑起了匹配流程（应该只 emit 信号）")
 
     monkeypatch.setattr(scheduler, "run_daily", boom)
     seen: list = []
@@ -1814,7 +1814,7 @@ def test_start_pick_only_emits_the_signal(page, monkeypatch) -> None:
     page.btn_start_pick.click()
 
     assert seen == ["go"]
-    assert told and "开始选股" in told[0]
+    assert told and "开始匹配" in told[0]
 
 
 def test_start_pick_signal_is_a_real_signal_on_the_page(page) -> None:
@@ -1826,30 +1826,30 @@ def test_start_pick_signal_is_a_real_signal_on_the_page(page) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 13) 选股结果**就在这一页**（2026-09-18 用户改口径）+ 加自选 / 导出
+# 13) 匹配结果**就在这一页**（2026-09-18 用户改口径）+ 加自选 / 导出
 # ══════════════════════════════════════════════════════════════════════════
 #
 # 口径变过一次，两边的原话都留在这里，免得下一个人以为哪一版是漏改：
 #
-# * 2026-09-17：「策略选股只要显示策略，不显示选股结果，选股结果直接进自选股池，
+# * 2026-09-17：「策略匹配只要显示策略，不显示匹配结果，匹配结果直接进自选标的，
 #   可以在股池再添加删除。（也可以同时 output 一个文件到桌面）」→ 当时把结果表、
 #   结论、【全部加为自选】整体删了；
-# * 2026-09-18：「选股状态时，策略列表界面变为选股结果界面（选股结果界面平时隐藏），
+# * 2026-09-18：「匹配状态时，策略列表界面变为匹配结果界面（匹配结果界面平时隐藏），
 #   结果可以一键加入自选和导出。」→ 结果表回来了，但**换了位置与呈现方式**：
-#   它与策略列表**共用同一块地方**（QStackedWidget），平时显示列表，点【开始选股】
+#   它与策略列表**共用同一块地方**（QStackedWidget），平时显示列表，点【开始匹配】
 #   才切过去。所以"平时隐藏"这条是硬要求，必须有用例守着。
 #
 # 要钉住的四件事：
-#   1. 结果页在、平时隐藏、点【开始选股】切过去、能切回来；
-#   2. `show_pick_result()` 把结果填进表里（主窗口每轮选股后调它），且**不写库**；
+#   1. 结果页在、平时隐藏、点【开始匹配】切过去、能切回来；
+#   2. `show_pick_result()` 把结果填进表里（主窗口每轮匹配后调它），且**不写库**；
 #   3. 【一键加入自选】尊重自选上限、不重复添加、不改用户备注；
 #   4. 【导出结果到桌面】走的是 `pool.export_pick_file`（与自动导出同一个函数）。
 
 
 def test_result_page_replaces_the_list_while_picking(page) -> None:
-    """结果页在、**平时隐藏**、点【开始选股】切过去、能切回来（2026-09-18 用户要求）。
+    """结果页在、**平时隐藏**、点【开始匹配】切过去、能切回来（2026-09-18 用户要求）。
 
-    用户原话："选股状态时，策略列表界面变为选股结果界面（选股结果界面平时隐藏），
+    用户原话："匹配状态时，策略列表界面变为匹配结果界面（匹配结果界面平时隐藏），
     结果可以一键加入自选和导出。"
     """
     for name in ("result_table", "result_hint", "btn_add_all", "btn_export_result",
@@ -1862,11 +1862,11 @@ def test_result_page_replaces_the_list_while_picking(page) -> None:
     assert page.list_stack.currentWidget() is page.list_page
     assert page.result_page.isVisible() is False
 
-    # 点【开始选股】→ 立刻切过去，并先摆一句"正在选股…"
+    # 点【开始匹配】→ 立刻切过去，并先摆一句"正在匹配…"
     page.btn_start_pick.click()
     assert page.list_stack.currentWidget() is page.result_page
     assert page.result_page.isVisible() is True
-    assert "正在选股" in page.result_hint.text()
+    assert "正在匹配" in page.result_hint.text()
 
     # 跑完（主窗口调 show_pick_result）→ 结果进表
     page.show_pick_result({"data_date": "2026-09-11",
@@ -1898,8 +1898,8 @@ def test_result_page_replaces_the_list_while_picking(page) -> None:
 def test_each_result_row_has_an_add_button_that_records_the_price(page, page_cfg) -> None:
     """结果表每一行的【加入自选】：写进自选表、**记下加入价**、按完变成"已在自选"。
 
-    2026-09-21（主人要求）：选股结果**不再自动进股池**，所以"要不要留下这一只"
-    由用户在这一列点。加入价是「自选股池」盈亏列的基准（见 storage 建表那里的说明）。
+    2026-09-21（主人要求）：匹配结果**不再自动进股池**，所以"要不要留下这一只"
+    由用户在这一列点。加入价是「自选标的」盈亏列的基准（见 storage 建表那里的说明）。
     """
     page.show_pick_result({"data_date": "2026-09-11",
                            "pool": [{"symbol": "600003", "name": "丙样本",
@@ -1913,7 +1913,7 @@ def test_each_result_row_has_an_add_button_that_records_the_price(page, page_cfg
     with storage.connect(page_cfg.db_path) as conn:
         rows = storage.load_watchlist(conn, enabled_only=False)
     assert [r["symbol"] for r in rows] == ["600003"]
-    assert "选股来源" in str(rows[0]["note"])
+    assert "匹配来源" in str(rows[0]["note"])
     # 加入价记下来了（本地最近收盘价 —— 显示时四舍五入成 6.74，存的是原值），
     # 盈亏才有基准
     assert float(rows[0]["added_price"]) == pytest.approx(6.7392445766645315)
@@ -1966,9 +1966,9 @@ def test_quotes_provider_fills_price_cap_and_turnover(page) -> None:
 
 
 def test_result_view_only_lists_picks_not_my_own_watchlist(page) -> None:
-    """结果表只列**这次选出来的**票：`run_daily` 池子里混着的自选股不算。
+    """结果表只列**这次选出来的**票：`run_daily` 池子里混着的自选标的不算。
 
-    （自选股是"我自己加的"，列进"本次选股结果"会让人以为它是被选出来的。）
+    （自选标的是"我自己加的"，列进"本次匹配结果"会让人以为它是被选出来的。）
     """
     page.show_pick_result({
         "data_date": "2026-09-11",
@@ -2016,7 +2016,7 @@ def test_result_view_without_a_caliber_is_unchanged(page) -> None:
     })
 
     assert "本次口径" not in page.result_hint.text()
-    assert "本次选股结果：共 1 只" in page.result_hint.text()
+    assert "本次匹配结果：共 1 只" in page.result_hint.text()
 
 
 def test_show_pick_result_keeps_the_signature_the_main_window_uses(page, page_cfg) -> None:
@@ -2040,7 +2040,7 @@ def test_show_pick_result_keeps_the_signature_the_main_window_uses(page, page_cf
 
 
 def test_add_all_to_watchlist_writes_rows_with_source_note(page, page_cfg) -> None:
-    """【一键加入自选】：写进 `watchlist`，备注记下"选股来源"，再点一次不重复加。"""
+    """【一键加入自选】：写进 `watchlist`，备注记下"匹配来源"，再点一次不重复加。"""
     page.show_pick_result({"data_date": "2026-09-11",
                            "pool": [{"symbol": "600003", "name": "丙样本",
                                      "strategy": "公式·放量上攻"}]})
@@ -2050,7 +2050,7 @@ def test_add_all_to_watchlist_writes_rows_with_source_note(page, page_cfg) -> No
     with storage.connect(page_cfg.db_path) as conn:
         rows = storage.load_watchlist(conn, enabled_only=False)
     assert [r["symbol"] for r in rows] == ["600003"]
-    assert "选股来源" in str(rows[0].get("note") or "")
+    assert "匹配来源" in str(rows[0].get("note") or "")
     assert "已加 1 只" in page.hint_text
 
     page.btn_add_all.click()                       # 再点一次：不重复添加
@@ -2090,32 +2090,32 @@ def test_export_result_writes_the_desktop_file(page, page_cfg, tmp_path) -> None
     assert len(files) == 1
     text = files[0].read_text(encoding="utf-8-sig")
     assert "甲样本(600001)" in text and "放量上攻" in text
-    assert "已导出选股结果" in page.hint_text
+    assert "已导出匹配结果" in page.hint_text
 
 
 def test_export_result_without_any_result_tells_the_user_to_run_first(page, tmp_path) -> None:
-    """还没有结果就点导出：提示先去选股，不落空文件。"""
+    """还没有结果就点导出：提示先去匹配，不落空文件。"""
     page.btn_export_result.click()
 
-    assert "先点【开始选股】" in page.hint_text
+    assert "先点【开始匹配】" in page.hint_text
     assert not list((tmp_path / "desktop-export").glob("*.txt"))
 
 
 def test_page_tells_the_user_where_the_results_go(page) -> None:
     """"结果去哪了"必须在**界面上**说清（不许静默消失）。
 
-    三处文案：顶部灰字、【开始选股】的 tooltip、点下去那一刻的提示 —
-    少一处，用户点完【开始选股】就会以为"什么都没发生"。
+    三处文案：顶部灰字、【开始匹配】的 tooltip、点下去那一刻的提示 —
+    少一处，用户点完【开始匹配】就会以为"什么都没发生"。
     """
-    assert "自选股池" in page.page_hint.text() and "桌面" in page.page_hint.text()
+    assert "自选标的" in page.page_hint.text() and "桌面" in page.page_hint.text()
 
     tip = page.btn_start_pick.toolTip()
-    assert "自选股池" in tip and "桌面" in tip
+    assert "自选标的" in tip and "桌面" in tip
 
     told: list[str] = []
     page.status_cb = told.append
     page.btn_start_pick.click()
-    assert told and "自选股池" in told[0] and "桌面" in told[0]
+    assert told and "自选标的" in told[0] and "桌面" in told[0]
 
 
 
@@ -2271,13 +2271,13 @@ def test_long_hint_is_trimmed_but_kept_in_full(page) -> None:
     assert f"还有 {30 - fp.HINT_MAX_LINES} 行没显示" in page.hint_label.text()
 
 
-# ── 保存之后：用户必须**一眼看得出它进了列表、而且参与选股**（2026-09-18 用户实报）──
+# ── 保存之后：用户必须**一眼看得出它进了列表、而且参与匹配**（2026-09-18 用户实报）──
 #
 # 用户原话：「编辑器保存了 策略里就不显示，这个问题很严重」。
 # 我在源码环境里复现不出来（列表确实会立刻多一行），但顺着这句话查出三件事会让用户
 # 产生同样的感觉，所以三条都改掉并钉住：
 #   1. 公式追加在**列表末尾**，窗口小的时候它在视野外 → 保存后要滚到那一行并说出第几行；
-#   2. 新存的公式**默认不参与选股**（要用户自己再找一个勾选框勾一下）→ 现在保存即参与；
+#   2. 新存的公式**默认不参与匹配**（要用户自己再找一个勾选框勾一下）→ 现在保存即参与；
 #   3. 保存**失败**时只写提示区、不弹 toast，而提示区在编辑器底部、窗口小就看不见 →
 #      现在失败一定弹 toast，并写出公式目录的绝对路径与最可能的原因。
 
@@ -2329,7 +2329,7 @@ def test_saving_successfully_clears_an_old_failure_hint(page, page_cfg, qapp,
 
 
 def test_saving_a_broken_formula_saves_it_as_a_draft(page, page_cfg, qapp) -> None:
-    """编译不过的公式也**照样存下来**（不拦着用户存草稿），只是**不参与选股**。
+    """编译不过的公式也**照样存下来**（不拦着用户存草稿），只是**不参与匹配**。
 
     这条是"用户拿还没接进引擎的字段写公式"时的正确反馈：文件在、列表里有它，
     勾选框是灰的、鼠标停上去能看到引擎给的中文原因（例如 `流通市值` 现在还不存在）。
@@ -2526,7 +2526,7 @@ def test_space_button_does_not_break_the_other_palette_buttons(page) -> None:
 
 # ══════════════════════════════════════════════════════════════════════════
 # 3.9) 结果表最后一列【加入自选】的**尺寸**（用户 2026-09-21：
-#      「选股结果界面的加入自选调整一下大小，框体有点小，字显示不全」）
+#      「匹配结果界面的加入自选调整一下大小，框体有点小，字显示不全」）
 # ══════════════════════════════════════════════════════════════════════════
 # 为什么单独有一节：这一格是**表里唯一一个"控件放在单元格里"的地方**，它的宽度不是
 # 表格按文字算的，而是控件自己的最小尺寸决定的 —— 实测过一次真实的切字：
@@ -2685,7 +2685,7 @@ def test_result_table_columns_have_room_for_their_text(page) -> None:
 
 # ══════════════════════════════════════════════════════════════════════════
 # 3.10) 【加入自选】之后股池里的「来源」不能变成「自选」（2026-09-21 主人实报：
-#       「新版本从选股列表加入自选的票到股池里的来源都变成自选了，需要改一下」）
+#       「新版本从匹配列表加入自选的票到股池里的来源都变成自选了，需要改一下」）
 # ══════════════════════════════════════════════════════════════════════════
 # 修的是"加入时没把来源存下来"：结果页那一格知道它是被哪条公式选出来的
 # （`row["strategy"]`），但加进自选表时只写进了备注，股池那一列读的是
@@ -2694,7 +2694,7 @@ def test_result_table_columns_have_room_for_their_text(page) -> None:
 
 
 def _pool_row(page_cfg, symbol: str) -> dict:
-    """「自选股池」页那一行（主窗口刷新表格读的就是这个函数）。"""
+    """「自选标的」页那一行（主窗口刷新表格读的就是这个函数）。"""
     rows = {r["symbol"]: r for r in fp.pool_mod.pool_page_rows(page_cfg.db_path)}
     assert symbol in rows, f"股池页里没有 {symbol}：{sorted(rows)}"
     return rows[symbol]

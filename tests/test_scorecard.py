@@ -224,7 +224,7 @@ def test_limit_up_open_is_dropped_and_excluded(tmp_path: Path):
     db = build_db(tmp_path / "limit_up.db", days, series)
 
     def first_day_only(day_panel: pd.DataFrame) -> list[str]:
-        # 只在第一个交易日选股：否则第二天也会出信号，把"剔除 vs 没剔除"的区别冲掉
+        # 只在第一个交易日匹配：否则第二天也会出信号，把"剔除 vs 没剔除"的区别冲掉
         return ["600001", "600002"] if day_panel["date"].max() == days[0] else []
 
     market = {(days[0], "T+1"): 0.0}
@@ -254,7 +254,7 @@ def test_following_the_market_gives_zero_alpha(tmp_path: Path):
     row = result["rows"][0]
     assert row["n"] == 4
     assert row["avg_ret_pct"] == pytest.approx(10.0, abs=1e-6)    # 绝对收益 > 0（行情好）
-    assert row["avg_alpha_pct"] == pytest.approx(0.0, abs=1e-6)   # 但 α = 0（没有选股能力）
+    assert row["avg_alpha_pct"] == pytest.approx(0.0, abs=1e-6)   # 但 α = 0（没有匹配能力）
 
 
 def test_market_benchmark_is_equal_weighted():
@@ -379,7 +379,7 @@ def test_custom_spec_filters_and_ranks(tmp_path: Path):
     """自定义 spec 的老路照旧能用：`spec_from_signal` + 排序 + 取前 N。
 
     （原来这条测的是内置「低价股」spec，它随策略引擎删掉了；这里改成自己写一个
-    等价的信号函数 —— 恰恰就是"用户想评估自己的选股逻辑"时走的那条路。）
+    等价的信号函数 —— 恰恰就是"用户想评估自己的匹配逻辑"时走的那条路。）
     """
     days = workdays("2024-09-02", 25)          # 需要 20 日均额
     series = {

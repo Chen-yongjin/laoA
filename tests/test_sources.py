@@ -319,7 +319,7 @@ def test_source_states_default_order_and_texts() -> None:
     # Key 这类有用的，纯解释的长句全删"）。钉住的是"留下的是哪两件有用的事"：
     assert "主源" in hx_note and "申请" in hx_note             # 同花顺 = 主源 + 去哪申请
     assert "fuyao.aicubes.cn" in hx_note                        # 申请地址必须还在（可点）
-    assert "选股" in hx_note                                    # 没 Key 的后果：选股被自检拒绝
+    assert "匹配" in hx_note                                    # 没 Key 的后果：匹配被自检拒绝
     assert "config.toml" not in hx_note and "环境变量" not in hx_note   # 实现细节不上界面
     assert pub_note == "兜底源：免 Key，不用申请、不用填。"
     # 两句话都必须短（长文就是这次要清掉的东西）
@@ -898,7 +898,7 @@ def test_quotes_service_gate_follows_usable_sources(
         assert both.should_request() is True              # 同花顺没 Key，公开源接管
         assert em_only.should_request() is True           # 只要东方财富也行
         assert none.should_request() is False             # 一个来源都没启用
-        # 非交易时段：**当天还没成功取过就补一次**（2026-09-18 用户实报"自选股池/持仓监控里
+        # 非交易时段：**当天还没成功取过就补一次**（2026-09-18 用户实报"自选标的/持仓监控里
         # 的市值和换手一直是空的" —— 那两列只有实时快照才给，而原来非交易时段一律不发请求，
         # 于是晚上打开软件时"现价有数（退回本地收盘价）、这两列却是 —"）。
         # 取到当天就收工：价格不会变，整天反复取纯属浪费配额。

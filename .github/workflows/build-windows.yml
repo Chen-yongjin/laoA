@@ -1,12 +1,12 @@
-# 在 GitHub 的 Windows 运行器上自动打包「老牛选股」
+# 在 GitHub 的 Windows 运行器上自动打包「财神助手」
 #
 # 用法（你本机不需要装 Python）：
 #   1. 代码推到 main 后会自动构建；也可以在 Actions 页面点 "Run workflow" 手动触发
 #   2. 构建完成后，**优先去 Release 页面下载**（固定链接，不受 artifact 额度影响）：
 #      https://github.com/Chen-yongjin/laoA/releases/tag/latest
-#      直链：https://github.com/Chen-yongjin/laoA/releases/download/latest/LaoniuTrader.zip
-#   3. 解压后双击 老牛选股.exe 即可（首次运行会走数据自检 → 下载向导）
-#   注：该次运行页面底部的 Artifacts 里也有一份（LaoniuTrader），但 artifact 有额度限制，
+#      直链：https://github.com/Chen-yongjin/laoA/releases/download/latest/CaishenTrader.zip
+#   3. 解压后双击 财神助手.exe 即可（首次运行会走数据自检 → 下载向导）
+#   注：该次运行页面底部的 Artifacts 里也有一份（CaishenTrader），但 artifact 有额度限制，
 #       额度满了那一步会失败 —— 所以 Release 才是主下载通道（见下面 step_release）。
 #   注册机（作者专用）**不在这个包里**：手动跑下面的 keygen job，产物是同一个 Release
 #   页面 Assets 里的 ``keygen.zip``（解压得 ``keygen.exe``）。
@@ -246,15 +246,15 @@ jobs:
         name: 检查产物
         shell: pwsh
         run: |
-          if (-not (Test-Path "dist/LaoniuTrader/老牛选股.exe")) { throw "没找到 dist/LaoniuTrader/老牛选股.exe" }
-          $size = (Get-ChildItem -Recurse 'dist/LaoniuTrader' | Measure-Object -Property Length -Sum).Sum / 1MB
+          if (-not (Test-Path "dist/CaishenTrader/财神助手.exe")) { throw "没找到 dist/CaishenTrader/财神助手.exe" }
+          $size = (Get-ChildItem -Recurse 'dist/CaishenTrader' | Measure-Object -Property Length -Sum).Sum / 1MB
           Write-Host ("产物大小：{0:N1} MB" -f $size)
           # ⚠️ 2026-09-21 主人要求：「下面的包不要带注册机了，我已经保存了」——
           # 所以主程序包里**必须没有注册机**（这条也是"谁顺手把注册机塞进 spec/DATAS"的拦截：
           # 注册机里有签发算法，混进用户包等于授权形同虚设）。
           # 作者要用注册机走另一条路：手动跑 keygen job（见文件末尾那个 job），
           # 产物挂在同一个 Release 上的 keygen.zip。
-          $stray = Get-ChildItem -Recurse 'dist/LaoniuTrader' -Include 'keygen*','*注册机*' -ErrorAction SilentlyContinue
+          $stray = Get-ChildItem -Recurse 'dist/CaishenTrader' -Include 'keygen*','*注册机*' -ErrorAction SilentlyContinue
           if ($stray) {
             throw ("包里不该有注册机（主人 2026-09-21 要求）：" + ($stray.Name -join ', '))
           }
@@ -262,7 +262,7 @@ jobs:
 
           # 顺手确认关键依赖真的打进去了（缺了会造成运行期报错）
           foreach ($p in @("pandas", "pyarrow", "PySide6")) {
-            if (-not (Get-ChildItem -Recurse 'dist/LaoniuTrader' -Filter "*$p*" -ErrorAction SilentlyContinue)) {
+            if (-not (Get-ChildItem -Recurse 'dist/CaishenTrader' -Filter "*$p*" -ErrorAction SilentlyContinue)) {
               Write-Warning "产物里似乎没找到 $p"
             }
           }
@@ -296,10 +296,10 @@ jobs:
           [System.IO.File]::WriteAllText($cfg, $content, (New-Object System.Text.UTF8Encoding($false)))
           Add-Content $log "配置文件：$cfg → $content"
 
-          $exe = "dist/LaoniuTrader/老牛选股.exe"
+          $exe = "dist/CaishenTrader/财神助手.exe"
           Add-Content $log ("exe 存在：{0}  大小：{1} 字节" -f (Test-Path $exe), (Get-Item $exe -ErrorAction SilentlyContinue).Length)
-          Add-Content $log "----- dist/LaoniuTrader 前 25 项 -----"
-          Get-ChildItem "dist/LaoniuTrader" -ErrorAction SilentlyContinue |
+          Add-Content $log "----- dist/CaishenTrader 前 25 项 -----"
+          Get-ChildItem "dist/CaishenTrader" -ErrorAction SilentlyContinue |
             Select-Object -First 25 | ForEach-Object { Add-Content $log ("  " + $_.Name) }
 
           # 为什么每个子进程都重定向到文件：GUI 子系统的 exe 没有控制台，`Write-Host` 抓不到它的输出，
@@ -330,7 +330,7 @@ jobs:
           $report = $null
           for ($i = 0; $i -lt 20 -and -not $report; $i++) {
             Start-Sleep -Milliseconds 500
-            $dirs = @("$dataDir/logs", (Join-Path $env:LOCALAPPDATA "LaoATrader/data/logs"))
+            $dirs = @("$dataDir/logs", (Join-Path $env:LOCALAPPDATA "CaishenHelper/data/logs"))
             foreach ($d in $dirs) {
               $found = Get-ChildItem $d -Filter *.txt -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -342,7 +342,7 @@ jobs:
           Get-ChildItem -Recurse -Force $dataDir -ErrorAction SilentlyContinue |
             Select-Object -First 40 | ForEach-Object { Add-Content $log ("  " + $_.FullName) }
           Add-Content $log "----- 默认数据目录（%LOCALAPPDATA%）-----"
-          Get-ChildItem -Recurse -Force (Join-Path $env:LOCALAPPDATA "LaoATrader/data") -ErrorAction SilentlyContinue |
+          Get-ChildItem -Recurse -Force (Join-Path $env:LOCALAPPDATA "CaishenHelper/data") -ErrorAction SilentlyContinue |
             Select-Object -First 40 | ForEach-Object { Add-Content $log ("  " + $_.FullName) }
 
           if (-not $report) {
@@ -397,15 +397,15 @@ jobs:
           # 而打包与检查都是 success —— 也就是说"包做好了、只是没传上去"）。
           # 打成**单个文件**上传更稳、也更快：dist 目录里有一万多个小文件
           # （PySide6/pyarrow 那一堆），逐个小文件走 artifact 服务既慢又容易在
-          # 某一步上翻车；用户下载回来同样是"解压 → 进 LaoniuTrader 目录 → 双击 exe"。
-          Compress-Archive -Path 'dist/LaoniuTrader' -DestinationPath 'LaoniuTrader.zip' -Force
+          # 某一步上翻车；用户下载回来同样是"解压 → 进 CaishenTrader 目录 → 双击 exe"。
+          Compress-Archive -Path 'dist/CaishenTrader' -DestinationPath 'CaishenTrader.zip' -Force
           # 2026-09-30 用户要求：另外留一份**带版本号**的包，方便一眼认出是哪个版本。
-          # 固定名 LaoniuTrader.zip 继续保留（Release 固定直链、站点兜底都靠它，不能改掉）。
+          # 固定名 CaishenTrader.zip 继续保留（Release 固定直链、站点兜底都靠它，不能改掉）。
           $ver = (Select-String -Path 'src/laoa_trader/__init__.py' -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          Copy-Item 'LaoniuTrader.zip' "LaoniuTrader-$ver.zip" -Force
+          Copy-Item 'CaishenTrader.zip' "CaishenTrader-$ver.zip" -Force
           "ver=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          $zip = Get-Item 'LaoniuTrader.zip'
-          Write-Host ("压缩包：{0:N1} MB   带版本号的副本：LaoniuTrader-{1}.zip" -f ($zip.Length / 1MB), $ver)
+          $zip = Get-Item 'CaishenTrader.zip'
+          Write-Host ("压缩包：{0:N1} MB   带版本号的副本：CaishenTrader-{1}.zip" -f ($zip.Length / 1MB), $ver)
 
       - id: zipcheck
         name: 包内容自检：解压确认 exe 在、且没有注册机
@@ -416,7 +416,7 @@ jobs:
           # ci-log/zipcheck.log + meta.txt（附件名/字节数/sha256 就是"包真的完整"的证据）。
           $log = "zipcheck.log"
           "===== 包内容自检 =====" | Set-Content $log
-          $zip = Get-Item 'LaoniuTrader.zip'
+          $zip = Get-Item 'CaishenTrader.zip'
           $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
           Add-Content $log ("文件：{0}  字节：{1}  sha256：{2}" -f $zip.Name, $zip.Length, $hash)
           "zip_name=$($zip.Name)" | Set-Content zip-meta.txt
@@ -430,11 +430,11 @@ jobs:
           try {
             $names = $archive.Entries | ForEach-Object { $_.FullName }
             $names | Select-Object -First 15 | ForEach-Object { Add-Content $log ("  " + $_) }
-            $exeEntry = $names | Where-Object { $_ -match 'LaoniuTrader/老牛选股\.exe$' }
+            $exeEntry = $names | Where-Object { $_ -match 'CaishenTrader/财神助手\.exe$' }
             if (-not $exeEntry) {
-              Add-Content $log "❌ 包里没有 LaoniuTrader/老牛选股.exe"
+              Add-Content $log "❌ 包里没有 CaishenTrader/财神助手.exe"
               Get-Content $log | Write-Host
-              throw "产出的 zip 里没有 LaoniuTrader/老牛选股.exe（详见 ci-log/zipcheck.log）"
+              throw "产出的 zip 里没有 CaishenTrader/财神助手.exe（详见 ci-log/zipcheck.log）"
             }
             Add-Content $log "✅ 主程序在：$exeEntry"
             # 注册机绝不能进用户的包（里面带签发算法）—— 反向检查，出现就红
@@ -465,10 +465,10 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: LaoniuTrader
+          name: CaishenTrader
           path: |
-            LaoniuTrader.zip
-            LaoniuTrader-${{ steps.zip.outputs.ver }}.zip
+            CaishenTrader.zip
+            CaishenTrader-${{ steps.zip.outputs.ver }}.zip
           # ⚠️ 2 天而不是 14：私有仓库的 Actions 存储有硬额度（免费额度 500MB），
           # 而这份产物压缩后就有几百 MB —— 攒十几次就把额度顶爆，之后**上传必失败**
           # （2026-09-21 实测：测试/打包/检查全 success，只有 step_upload=failure）。
@@ -483,19 +483,19 @@ jobs:
         run: |
           # 这一步不会让 job 变红（额度问题是账号侧的事），但必须**显眼且可操作**：
           # 用户看到这条就知道"包没出来"是存储额度满了，去清理旧产物即可。
-          Write-Host "::warning::产物没传上 artifact（多半是私有仓库的 Actions 存储额度已满）—— 不影响下载：请去 Release 页面取 https://github.com/Chen-yongjin/laoA/releases/tag/latest （直链 …/releases/download/latest/LaoniuTrader.zip）。想恢复 artifact 通道就到 Actions 里删掉一批旧运行。"
+          Write-Host "::warning::产物没传上 artifact（多半是私有仓库的 Actions 存储额度已满）—— 不影响下载：请去 Release 页面取 https://github.com/Chen-yongjin/laoA/releases/tag/latest （直链 …/releases/download/latest/CaishenTrader.zip）。想恢复 artifact 通道就到 Actions 里删掉一批旧运行。"
 
       - name: 上传产物（失败时换名再试一次）
         # 主上传失败不一定是"包有问题"（可能是同名冲突 / 服务端抖动 / 存储额度），
         # 所以再给一次机会、换个名字 —— 用户至少能拿到包。
-        if: failure() && hashFiles('LaoniuTrader.zip') != ''
+        if: failure() && hashFiles('CaishenTrader.zip') != ''
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: LaoniuTrader-retry-${{ github.run_id }}
+          name: CaishenTrader-retry-${{ github.run_id }}
           path: |
-            LaoniuTrader.zip
-            LaoniuTrader-${{ steps.zip.outputs.ver }}.zip
+            CaishenTrader.zip
+            CaishenTrader-${{ steps.zip.outputs.ver }}.zip
           retention-days: 2
           if-no-files-found: ignore
 
@@ -507,7 +507,7 @@ jobs:
       # 用户就**没有包可下载**（测试/打包/检查全都是 success，唯独传不上去）。
       # Release 附件与 artifact 额度是两回事，而且下载链接**固定不变**，所以把它当主通道：
       #   页面 https://github.com/Chen-yongjin/laoA/releases/tag/latest
-      #   直链 https://github.com/Chen-yongjin/laoA/releases/download/latest/LaoniuTrader.zip
+      #   直链 https://github.com/Chen-yongjin/laoA/releases/download/latest/CaishenTrader.zip
       # 用 runner 自带的 `gh`（不引第三方 action，少一个失败点）；
       # 同一个 tag 每次覆盖同名附件（`--clobber`），所以链接永远是那一个。
       # 附件名**不带 SHA**：带 SHA 会每轮多一份几百 MB 的附件、把 Release 也撑爆；
@@ -524,31 +524,31 @@ jobs:
         run: |
           $tag = "latest"
           $notes = @"
-          ## 老牛选股 · 最新构建
+          ## 财神助手 · 最新构建
 
           - 提交：``$env:GITHUB_SHA``
           - 构建：run $env:GITHUB_RUN_ID
-          - 下载：``LaoniuTrader.zip``（解压 → 进 LaoniuTrader 目录 → 双击 老牛选股.exe）
+          - 下载：``CaishenTrader.zip``（解压 → 进 CaishenTrader 目录 → 双击 财神助手.exe）
           - 注册机（作者专用）：**不在这个包里**，手动跑 keygen job 后从同一个 Release 取 ``keygen.zip``
           "@
           # 先看 Release 在不在（不在就建一个，tag 指向默认分支即可 —— 我们要的是附件，不是 tag 本身）
           gh release view $tag --json tagName *> $null
           if ($LASTEXITCODE -ne 0) {
             Write-Host "Release $tag 不存在，创建"
-            gh release create $tag --title "老牛选股 · 最新构建" --notes $notes
+            gh release create $tag --title "财神助手 · 最新构建" --notes $notes
             if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
           }
           $ver = "${{ steps.zip.outputs.ver }}"
-          gh release upload $tag LaoniuTrader.zip "LaoniuTrader-$ver.zip" --clobber
+          gh release upload $tag CaishenTrader.zip "CaishenTrader-$ver.zip" --clobber
           if ($LASTEXITCODE -ne 0) { throw "上传 Release 附件失败" }
           gh release edit $tag --notes $notes
-          Write-Host "::notice::已挂到 Release：https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/LaoniuTrader.zip"
+          Write-Host "::notice::已挂到 Release：https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/CaishenTrader.zip"
 
       - name: 打 tag 时创建 Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: LaoniuTrader.zip
+          files: CaishenTrader.zip
           generate_release_notes: true
 
       # ── 构建结果回写 ci-log 分支 ──
@@ -611,7 +611,7 @@ jobs:
           if (Test-Path nuitka.log) { Get-Content nuitka.log -Tail 200 | Set-Content ci-log/build-tail.log }
           if (Test-Path zip-meta.txt) { Get-Content zip-meta.txt | Add-Content ci-log/meta.txt }
           # 报告文件本身也留一份（exe 的输出在 GUI 子系统下拿不到，这份是它自己写的）
-          foreach ($f in @("ci-smoke-data/logs/*.txt", (Join-Path $env:LOCALAPPDATA "LaoATrader/data/logs/*.txt"))) {
+          foreach ($f in @("ci-smoke-data/logs/*.txt", (Join-Path $env:LOCALAPPDATA "CaishenHelper/data/logs/*.txt"))) {
             Get-ChildItem $f -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending |
               Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName ci-log/smoke-report.txt -Force }
           }
@@ -625,7 +625,7 @@ jobs:
   #
   # 为什么不并进 build job、也不放进主 artifact：
   #   注册机里带着签发密钥的算法 —— 谁能拿到它，谁就能给任意机器码算出注册码。
-  #   主 artifact（LaoniuTrader）是发给用户的，注册机只能作者自己拿，所以两边必须分开。
+  #   主 artifact（CaishenTrader）是发给用户的，注册机只能作者自己拿，所以两边必须分开。
   #
   # 为什么只在手动触发时跑：
   #   它跟"用户拿到的那一版"没关系，每次 push 都白跑一个 Windows runner 没必要。
@@ -684,7 +684,7 @@ jobs:
       # 为什么不再只靠 artifact（2026-09-21 的教训）：私有仓库的 artifact 存储有硬额度
       # （免费 500MB，主包一封就几百 MB），额度满了**上传必失败** —— 主人手动跑了
       # workflow 也拿不到注册机。Release 附件与那份额度是两回事、链接还固定，
-      # 所以从这里下载：Release 页面 → Assets → keygen.exe（与 LaoniuTrader.zip 同一个页面）。
+      # 所以从这里下载：Release 页面 → Assets → keygen.exe（与 CaishenTrader.zip 同一个页面）。
       - id: keygen_release
         name: 把注册机挂到滚动 Release（与主程序同一个页面）
         # ⚠️ 这一步**故意不写 continue-on-error**（与主程序那一步相反）：注册机没有第二个
@@ -699,7 +699,7 @@ jobs:
           gh release view $tag --json tagName *> $null
           if ($LASTEXITCODE -ne 0) {
             Write-Host "Release $tag 不存在，先创建一个（主程序那一轮通常会先建好）"
-            gh release create $tag --title "老牛选股 · 最新构建" --notes "见 Assets：主程序与注册机"
+            gh release create $tag --title "财神助手 · 最新构建" --notes "见 Assets：主程序与注册机"
             if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
           }
           # 打成 keygen.zip 再挂：与主程序同一个页面、同一个附件风格（解压即得 keygen.exe），

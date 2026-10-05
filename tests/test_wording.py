@@ -2,7 +2,7 @@
 
 （前情：2026-09-22 主人说过"把公式都改成策略吧"，那版把来源列显示成 `策略·X`；
 2026-09-23 他要求连这个前缀也去掉，于是 `公式·X` / 老的 `策略·X` / 老类名
-三条路都剥成同一个名字，如 `尾盘选股策略`、`短期反转`。）
+三条路都剥成同一个名字，如 `尾盘匹配策略`、`短期反转`。）
 
 这一条口径有两半，**必须分清楚**，否则改起来一定出错：
 
@@ -67,7 +67,7 @@ def test_display_strategy_strips_the_prefix_and_nothing_else() -> None:
     """
     assert wording.display_strategy("公式·放量上攻") == "放量上攻"
     assert wording.display_strategy("策略·短期反转") == "短期反转"          # 老显示写法
-    assert wording.display_strategy("尾盘选股策略") == "尾盘选股策略"       # 本来就干净
+    assert wording.display_strategy("尾盘匹配策略") == "尾盘匹配策略"       # 本来就干净
     assert wording.display_strategy("我的策略一") == "我的策略一"           # 用户的名字
     assert wording.display_strategy("公式·我的公式一") == "我的公式一"
     assert wording.display_strategy("公式·我的策略一") == "我的策略一"
@@ -117,13 +117,13 @@ def test_source_label_never_says_watchlist_for_a_strategy_pick() -> None:
     2026-09-23 主人原话："为什么要+自选 什么策略跑出来的 直接记录策略名称
     只有用户自己输入的才能算自选来源"。
     """
-    picked = {"strategy": "公式·尾盘选股策略", "strategies": "公式·尾盘选股策略"}
+    picked = {"strategy": "公式·尾盘匹配策略", "strategies": "公式·尾盘匹配策略"}
     manual = {"symbol": "600002", "watchlist": True}
 
     # 选出来的票：在自选里 / 不在自选里，来源列**同一个词**
-    assert pool.source_label(picked, None) == "尾盘选股策略"
-    assert pool.source_label(picked, {"enabled": 1}) == "尾盘选股策略"
-    assert pool.source_label(picked, {"enabled": 0}) == "尾盘选股策略"
+    assert pool.source_label(picked, None) == "尾盘匹配策略"
+    assert pool.source_label(picked, {"enabled": 1}) == "尾盘匹配策略"
+    assert pool.source_label(picked, {"enabled": 0}) == "尾盘匹配策略"
     # 只有用户自己加的才算「自选」
     assert pool.source_label(manual, {"enabled": 1}) == "自选"
     assert pool.source_label(manual, None) == "自选"
@@ -158,7 +158,7 @@ def qapp():
 
 @pytest.fixture()
 def page(cfg, qapp, tmp_path):
-    """「策略选股」页（公式目录指到 tmp_path，绝不碰仓库里那份）。"""
+    """「策略匹配」页（公式目录指到 tmp_path，绝不碰仓库里那份）。"""
     storage.init_db(cfg.db_path)
     cfg.source_path = tmp_path / "config.toml"
     cfg.source_path.write_text("# 用户自己的注释\n", encoding="utf-8")
@@ -238,12 +238,12 @@ def _assert_no_formula_word(pairs: list[tuple[str, str]]) -> None:
 
 
 def test_no_formula_word_in_user_visible_text(window, qapp) -> None:
-    """主窗口（含「策略选股」页与编辑器）里，**控件上任何一处都不许出现"公式"**。"""
+    """主窗口（含「策略匹配」页与编辑器）里，**控件上任何一处都不许出现"公式"**。"""
     pairs = _widget_texts(window)
     assert pairs, "一个控件都没扫到，这条用例就没意义了"
     # canary：确认编辑器那一页真的被扫到了（它平时是隐藏的，但控件一直存在）
     blob = "\n".join(text for _, text in pairs)
-    assert "策略名称" in blob and "策略选股" in blob, "没扫到「策略选股」页，判据不成立"
+    assert "策略名称" in blob and "策略匹配" in blob, "没扫到「策略匹配」页，判据不成立"
     _assert_no_formula_word(pairs)
 
 

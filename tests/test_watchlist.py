@@ -1,8 +1,8 @@
-"""自选股并入股票池：豁免热门行业、不占名额、去重、监控、上限、停用、自动补名称。
+"""自选标的并入股票池：豁免热门行业、不占名额、去重、监控、上限、停用、自动补名称。
 
-覆盖需求「自选股并入股票池，一起实时监控」的全部验收点：
-    1. 自选股**豁免**热门行业过滤；
-    2. 自选股**不占**策略名额；
+覆盖需求「自选标的并入股票池，一起实时监控」的全部验收点：
+    1. 自选标的**豁免**热门行业过滤；
+    2. 自选标的**不占**策略名额；
     3. 既是策略又是自选 → 池里**一行**、来源「策略+自选」；
     4. **策略池为空也必须盯自选**；
     5. `watchlist_max` 超限**提示**而非静默丢弃；
@@ -39,7 +39,7 @@ def _days(count: int = 40) -> list[str]:
 def _enable_formulas(monkeypatch, tmp_path, cfg, formulas: dict[str, str]) -> None:
     """把公式目录指到临时目录、写好几条公式、并在配置里**勾上**它们。
 
-    2026-09-18（用户要求）起**候选只来自勾选的公式** —— 内置策略退出了选股链路，
+    2026-09-18（用户要求）起**候选只来自勾选的公式** —— 内置策略退出了匹配链路，
     所以"想让池子里有票"这件事在测试里也必须走同一条路：写公式文件 → 勾上 → 建池。
 
     为什么不用打桩（monkeypatch `run_enabled_formulas`）：这条链路的重点正是
@@ -87,7 +87,7 @@ def wl_db(cfg):
             _bars("600001", [3.0] * n, [2e7] * n)
             + _bars("600003", [20.0 * (0.988 ** i) for i in range(n)], [2e7] * n)
             # 自选专用标的：成交量极低（日均成交额 ≈ 80 万 < 3000 万），
-            # 因此**任何策略都不会选中它们** —— 测试才能干净地只验证自选股那条路径
+            # 因此**任何策略都不会选中它们** —— 测试才能干净地只验证自选标的那条路径
             + _bars("600100", [8.0] * n, [1e5] * n)
             + _bars("600200", [12.0] * n, [1e5] * n),
         )
@@ -167,7 +167,7 @@ def test_data_summary_counts_enabled_watchlist(wl_db) -> None:
 
 def test_watchlist_and_formula_rows_are_exempt_from_hot_industry_filter(
         engine, wl_db, tmp_path, monkeypatch) -> None:
-    """自选股与**公式候选**都不在热门行业里，也必须留在池子里。
+    """自选标的与**公式候选**都不在热门行业里，也必须留在池子里。
 
     2026-09-18 起候选只来自勾选的公式：公式标的**故意不过**热门行业收敛
     （条件是用户自己写明的，再被他没看见的行业过滤删掉最莫名其妙），
@@ -201,7 +201,7 @@ def test_watchlist_not_in_pool_when_disabled_by_config(engine, wl_db) -> None:
 
 def test_watchlist_does_not_consume_strategy_quota(
         engine, wl_db, tmp_path, monkeypatch) -> None:
-    """池子大小只限制**公式标的**：公式取满 1 只时，自选股仍全部在池。
+    """池子大小只限制**公式标的**：公式取满 1 只时，自选标的仍全部在池。
 
     （2026-09-18 起"策略标的"就是"公式标的" —— 候选只来自勾选的公式。）
     """
@@ -217,7 +217,7 @@ def test_watchlist_does_not_consume_strategy_quota(
 
 
 def test_strategy_rows_still_capped_by_size(engine, wl_db, tmp_path, monkeypatch) -> None:
-    """没有自选股时 size 仍然生效（4 只候选里只留 1 只）。
+    """没有自选标的时 size 仍然生效（4 只候选里只留 1 只）。
 
     2026-09-18 起候选来自勾选的公式：这里用 `C>0` 把库里 4 只都选出来，
     再让 `size=1` 砍到 1 只 —— 断言的是"池子大小对公式标的照样生效"。
@@ -230,7 +230,7 @@ def test_strategy_rows_still_capped_by_size(engine, wl_db, tmp_path, monkeypatch
 def test_strategy_rows_come_first(engine, wl_db, tmp_path, monkeypatch) -> None:
     """顺序：公式标的（按分数降序）在前，纯自选在后。
 
-    （**必须勾一条公式**：不勾的话池子里只有自选股，"前半段全是策略行"就变成
+    （**必须勾一条公式**：不勾的话池子里只有自选标的，"前半段全是策略行"就变成
     空真 —— 那种测试看着绿，其实什么都没验。）
     """
     _enable_formulas(monkeypatch, tmp_path, wl_db, {"低价": "C<5", "反转": "C>15"})
@@ -265,7 +265,7 @@ def test_pool_table_rows_source_labels(engine, wl_db, tmp_path, monkeypatch) -> 
 
     2026-09-18 起候选只来自勾选的公式，所以这一列的主形态是公式名；
     `X`（内置策略中文名）仍在 `source_label()` 里支持（老池子行/老库还读得到），
-    但新选出来的票不会再是它 —— 那条路已经退出选股链路。
+    但新选出来的票不会再是它 —— 那条路已经退出匹配链路。
     """
     _enable_formulas(monkeypatch, tmp_path, wl_db, {"低价": "C<5"})   # 600001（3 元）
     _add(wl_db, "600001", note="老朋友")     # 公式 + 自选
@@ -291,7 +291,7 @@ def test_pool_table_rows_source_labels(engine, wl_db, tmp_path, monkeypatch) -> 
 
 
 def test_save_pool_persists_watchlist_rows(engine, wl_db) -> None:
-    """自选股要真的落到 stock_pool 里（盘中提醒按池子盯）。"""
+    """自选标的要真的落到 stock_pool 里（盘中提醒按池子盯）。"""
     _add(wl_db, "600100", name="冷门样本", note="龙头")
     pool.build_pool(engine, wl_db, hot_only=False, save=True, day="2026-09-11")
     stored = {r["symbol"]: r for r in pool.load_pool(wl_db.db_path)}
@@ -304,7 +304,7 @@ def test_save_pool_persists_watchlist_rows(engine, wl_db) -> None:
 
 
 def test_watch_targets_monitors_watchlist_with_empty_pool(wl_db) -> None:
-    """策略池为空（库里没有任何池子）→ 依然盯自选股。"""
+    """策略池为空（库里没有任何池子）→ 依然盯自选标的。"""
     _add(wl_db, "600100", name="冷门样本", note="龙头")
     targets, pool_symbols = intraday.watch_targets(wl_db.db_path)
     assert set(targets) == {"600100"}
@@ -386,7 +386,7 @@ def test_monitor_off_read_failure_does_not_silence_everything(wl_db, monkeypatch
 
 
 def test_run_daily_with_strategies_off_still_pools_watchlist(wl_db, monkeypatch) -> None:
-    """一条公式都没勾（选股只剩自选股）→ 池子里只有自选股，且不报错。
+    """一条公式都没勾（匹配只剩自选标的）→ 池子里只有自选标的，且不报错。
 
     老口径是 `enabled_groups = ["none"]`（策略全关）；那两个键 2026-09-18 已退役，
     现在决定"有没有公式标的"的只有 `enabled_formulas`（这里故意留空）。
@@ -570,7 +570,7 @@ def test_watchlist_alert_text_includes_note(wl_db) -> None:
 
 
 def test_watchlist_gets_pool_buy_rules(wl_db) -> None:
-    """自选股适用「池内回踩买点 / 放量突破20日高」两类买点规则。"""
+    """自选标的适用「池内回踩买点 / 放量突破20日高」两类买点规则。"""
     _add(wl_db, "600100", name="冷门样本")
     _, pool_symbols = intraday.watch_targets(wl_db.db_path, cfg=wl_db)
     assert "600100" in pool_symbols       # 池内买点（回踩 5 日线）
@@ -581,7 +581,7 @@ def test_watchlist_gets_pool_buy_rules(wl_db) -> None:
 
 
 def test_watchlist_alerts_use_same_notify_channels(wl_db, monkeypatch) -> None:
-    """自选股提醒走同一套 notify_channels（不搞特殊分支）。
+    """自选标的提醒走同一套 notify_channels（不搞特殊分支）。
 
     2026-09-18：Windows 通知那一路删除，这里只剩飞书与托盘两路。
     """
@@ -607,7 +607,7 @@ def test_watchlist_alerts_use_same_notify_channels(wl_db, monkeypatch) -> None:
 
 
 def test_watchlist_kept_even_when_no_formula_is_enabled(wl_db) -> None:
-    """一条公式都没勾（候选为空）时，池子里仍要有自选股。"""
+    """一条公式都没勾（候选为空）时，池子里仍要有自选标的。"""
     _add(wl_db, "600100", name="冷门样本")
     rows = pool.build_pool(DataEngine(wl_db.db_path), wl_db, hot_only=True,
                            save=False, picks={})
@@ -616,7 +616,7 @@ def test_watchlist_kept_even_when_no_formula_is_enabled(wl_db) -> None:
 
 def test_selection_argument_no_longer_filters_anything(
         wl_db, tmp_path, monkeypatch) -> None:
-    """`selection` 参数**已经不起作用**（2026-09-18）：选股只看勾了哪些公式。
+    """`selection` 参数**已经不起作用**（2026-09-18）：匹配只看勾了哪些公式。
 
     用户把内置策略整体改成随包公式之后，"跑哪些策略"没有第二套答案了 ——
     老调用方可能还在传 `selection`（签名里保留了它），但它不该把公式候选剔掉
@@ -627,7 +627,7 @@ def test_selection_argument_no_longer_filters_anything(
     rows = pool.build_pool(DataEngine(wl_db.db_path), wl_db, hot_only=False,
                            save=False, selection=object())
     symbols = [r["symbol"] for r in rows]
-    assert "600100" in symbols          # 自选股照旧不受影响
+    assert "600100" in symbols          # 自选标的照旧不受影响
     assert "600001" in symbols          # 公式候选**也不会**被 selection 剔掉
 
 
@@ -635,12 +635,12 @@ def test_selection_argument_no_longer_filters_anything(
 
 
 def test_cli_once_without_formulas_pools_watchlist(wl_db, tmp_path, capsys, monkeypatch) -> None:
-    """`--once` 没有任何公式时不该报错退出，而要只处理自选股。
+    """`--once` 没有任何公式时不该报错退出，而要只处理自选标的。
 
     2026-09-18（用户要求）：候选只来自勾选的公式 —— `enabled_groups=["none"]`
-    （老口径的"策略全关"）已经不影响选股了，真正决定"有没有公式标的"的是
+    （老口径的"策略全关"）已经不影响匹配了，真正决定"有没有公式标的"的是
     `enabled_formulas`。所以这条改成"一条公式都没勾"，行为与老口径一致：
-    退出码 0、自选股照常进池、状态栏能看出这一轮只有自选。
+    退出码 0、自选标的照常进池、状态栏能看出这一轮只有自选。
     """
     import laoa_trader.scheduler as sched
     from laoa_trader.__main__ import cli
@@ -662,12 +662,12 @@ def test_cli_once_without_formulas_pools_watchlist(wl_db, tmp_path, capsys, monk
 
 def test_cli_once_ignores_a_typo_in_the_config_groups(wl_db, tmp_path, capsys,
                                                      monkeypatch) -> None:
-    """老配置里的退役键（组名拼错也一样）**不再拦路** —— 选股只看勾了哪些公式。
+    """老配置里的退役键（组名拼错也一样）**不再拦路** —— 匹配只看勾了哪些公式。
 
     2026-09-18 口径：`enabled_groups` / `enabled_strategies` 已经从配置里删掉，
     `load_config()` 把它们当**未知键**忽略（用户文件里的其它内容一字不动）。
-    所以配置文件里写了个不存在的组名，这轮选股照跑（只盯自选股），
-    不该像老口径那样直接退出 1 —— 那会让人以为"选股坏了"。
+    所以配置文件里写了个不存在的组名，这轮匹配照跑（只盯自选标的），
+    不该像老口径那样直接退出 1 —— 那会让人以为"匹配坏了"。
     """
     import laoa_trader.scheduler as sched
     from laoa_trader.__main__ import cli
@@ -714,16 +714,16 @@ def test_push_lines_mark_strategy_plus_watchlist(wl_db) -> None:
 
 # ══════════════════════════════════════════════════════════════════════════
 # 9) 自选表里的「来源」：从结果页加入自选的票要记得**当初是哪条公式选出来的**
-#    （2026-09-21 主人实报："新版本从选股列表加入自选的票到股池里的来源都变成自选了"）
+#    （2026-09-21 主人实报："新版本从匹配列表加入自选的票到股池里的来源都变成自选了"）
 # ══════════════════════════════════════════════════════════════════════════
 #
-# 根因：加入自选时只把来源写进了**备注**（`选股来源：公式·X`），而「自选股池」那一列
+# 根因：加入自选时只把来源写进了**备注**（`匹配来源：公式·X`），而「自选标的」那一列
 # 读的是 `watchlist_only_rows()` —— 那里对不在池子里的自选行**写死**成「自选」。
 # 结果：票只要不在今天的池子里（从结果页刚加的票就是这种），来源列永远显示「自选」。
 #
 # 修法：给自选表加一列 `source_strategy`（写法与 `stock_pool.strategy` 一致），
 # 加入时写进去；显示时**照旧走 `source_label()` / `source_kind()`**（不另拼一套）。
-# 老数据没有这一列：先从备注里的 `选股来源：X` 认一次，认不出就当没有 → 显示「自选」。
+# 老数据没有这一列：先从备注里的 `匹配来源：X` 认一次，认不出就当没有 → 显示「自选」。
 
 
 def _watch_add(cfg, symbol: str, *, name: str = "", note: str = "",
@@ -745,7 +745,7 @@ def test_watchlist_source_is_persisted_and_shown_as_the_plain_strategy(wl_db) ->
     只有用户自己输入的才能算自选来源" —— 所以哪怕它同时在自选表里，来源列也只写策略名。
     """
     _watch_add(wl_db, "600100", name="冷门样本",
-               note="选股来源：公式·尾盘超短策略",
+               note="匹配来源：公式·尾盘超短策略",
                source_strategy="公式·尾盘超短策略")
 
     row = _page_rows(wl_db)["600100"]
@@ -769,12 +769,12 @@ def test_manually_added_watchlist_row_still_says_only_self_selected(wl_db) -> No
 
 
 def test_old_watchlist_row_recovers_the_source_from_the_note(wl_db) -> None:
-    """老数据：来源写在备注里（`选股来源：短期反转`）→ 认出来并原样显示策略名。
+    """老数据：来源写在备注里（`匹配来源：短期反转`）→ 认出来并原样显示策略名。
 
     这一条救的是"升级之前加的自选"：那时还没有 `source_strategy` 这一列。
     备注里的 `公式·` / `策略·` 前缀要去掉再当策略名用。
     """
-    _watch_add(wl_db, "600200", name="自选二号", note="选股来源：短期反转")
+    _watch_add(wl_db, "600200", name="自选二号", note="匹配来源：短期反转")
 
     row = _page_rows(wl_db)["600200"]
 
@@ -885,7 +885,7 @@ def test_old_database_gets_the_source_column_added(tmp_path) -> None:
 
 def test_push_and_pool_table_use_the_same_source_word(wl_db) -> None:
     """推送正文与股池表**同一个词**：加了自选之后两边都还是那条公式名。"""
-    _watch_add(wl_db, "600100", name="冷门样本", note="选股来源：公式·尾盘超短策略",
+    _watch_add(wl_db, "600100", name="冷门样本", note="匹配来源：公式·尾盘超短策略",
                source_strategy="公式·尾盘超短策略")
 
     table_label = _page_rows(wl_db)["600100"]["source_label"]

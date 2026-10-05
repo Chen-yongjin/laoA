@@ -1,14 +1,14 @@
 """调度器数据闸门：**数据没就绪（或正在下载）时，绝不跑策略/建池/推通知**。
 
 对应用户实际遇到的 bug（缺陷单第 3 项）：「下载历史数据没有显示进度，
-但是已经运行弹出策略自动选股，选了一只股票了」——
+但是已经运行弹出策略自动匹配，选了一只股票了」——
 根因是 `Scheduler._maybe_daily()` 直接 `run_daily_now()`，既没走自检、
 也没有"正在下载"的互斥，于是在空库/半截数据上跑出了**看似正常但错误**的结果。
 
 这一组的由来（用户实测的分发前严重 bug）
 --------------------------------------
 程序启动 → 自检 `needs_full` → 弹首次向导开始下载 ✓；
-**同时**调度线程因为"今天已过主跑时间且今天没跑过"触发了日常选股 ✗
+**同时**调度线程因为"今天已过主跑时间且今天没跑过"触发了日常匹配 ✗
 → 在**只写了一半的库**上跑策略 → 选出 1 只 → 建池（还可能推了通知）。
 
 两道闸门（`scheduler.data_gate` + `Scheduler._maybe_daily` / `_block_daily`）：
@@ -17,7 +17,7 @@
 2. **本地数据 `needs_full`** → 跳过，同样不写标记 —— 所以数据下好之后
    当天仍然会补跑一次（用户预期："下完就该自动选一次"）。
 
-手动入口（界面【立即选股并建池】、CLI `--once`）走同一口径：**明确拒绝 + 指路**，
+手动入口（界面【立即匹配并建池】、CLI `--once`）走同一口径：**明确拒绝 + 指路**，
 而不是"静默跑出个空池子"。
 
 全部离线：合成小库 + 假客户端，不联网（另有 `conftest._block_network` 兜底）。
@@ -114,7 +114,7 @@ def test_needs_full_blocks_scheduled_run(cfg, monkeypatch, log_records) -> None:
     assert s._last_daily_date is None                # **没写"今天已完成"标记**
     assert s._daily_failed_date is None              # 也不算"失败"（那是另一回事）
     text = messages(log_records)
-    assert "本地数据不可用" in text and "跳过本次自动选股" in text
+    assert "本地数据不可用" in text and "跳过本次自动匹配" in text
     assert "needs_full" not in text                  # 给用户看的是中文，不是状态码
     assert "复权事件" in text or "还没有数据库" in text or "空的" in text   # 说清具体原因
     assert "请先下载" in text                          # 日志里有下一步（不用翻文档猜）
@@ -122,7 +122,7 @@ def test_needs_full_blocks_scheduled_run(cfg, monkeypatch, log_records) -> None:
     assert "【刷新数据】" in text                      # 轻量项（行业/日历）那条路也写清楚
     st = s.status()
     assert "数据不可用" in st["skipped_reason"]       # 状态栏能直接显示原因
-    assert "跳过本次自动选股" in st["skipped_reason"]
+    assert "跳过本次自动匹配" in st["skipped_reason"]
     assert st["preflight_status"] == "needs_full"    # 自检结论也暴露出来
     assert st["daily_skipped_today"] is True         # 记下"今天还没跑"（不是失败、更不是已完成）
     assert st["last_daily_date"] is None             # 但**没有**被永久标记成今天已跑
@@ -152,7 +152,7 @@ def test_blocked_log_is_throttled(cfg, monkeypatch, log_records) -> None:
     s, _ = _scheduler(cfg, str(cfg.db_path), monkeypatch)
     for _ in range(50):
         s._maybe_daily(_moment_after_run_at())
-    hits = [r for r in log_records if "跳过本次自动选股" in r.getMessage()]
+    hits = [r for r in log_records if "跳过本次自动匹配" in r.getMessage()]
     assert len(hits) == 1, [r.getMessage() for r in hits]
 
 
@@ -160,7 +160,7 @@ def test_blocked_log_is_throttled(cfg, monkeypatch, log_records) -> None:
 
 
 def test_downloading_blocks_scheduled_run(cfg, monkeypatch, log_records) -> None:
-    """下载进行中 → 自动选股直接跳过（**即使数据本来就是 ready**），且不写标记。"""
+    """下载进行中 → 自动匹配直接跳过（**即使数据本来就是 ready**），且不写标记。"""
     _ready_db(cfg)
     cfg.run_at, cfg.run_at_fallback, cfg.auto_run = "16:00", "19:15", True
     s, calls = _scheduler(cfg, str(cfg.db_path), monkeypatch)
@@ -235,7 +235,7 @@ def test_ready_runs_normally(cfg, monkeypatch) -> None:
     assert s._last_daily_date == _today()
 
 
-# ── 4) needs_incremental：先增量、再选股 ──
+# ── 4) needs_incremental：先增量、再匹配 ──
 
 
 def test_needs_incremental_gate_allows_run(cfg) -> None:
@@ -283,7 +283,7 @@ def test_needs_incremental_without_auto_download_still_runs(cfg, monkeypatch,
 
     为什么这样定：落后几个交易日的数据**是可用的**（自检就把它当"能用但不新鲜"），
     所以不该像 `needs_full` 那样整轮跳过；而日更流程的第一步本来就是增量同步，
-    于是"先补数据再选股"这个顺序天然成立。区别只在日志里说清
+    于是"先补数据再匹配"这个顺序天然成立。区别只在日志里说清
     "没有因为 auto_download_on_start=false 而额外去补数据"。
     """
     cfg.auto_run = True            # `auto_run` 默认已关；这条验的是闸门与顺序
@@ -304,7 +304,7 @@ def test_needs_incremental_without_auto_download_still_runs(cfg, monkeypatch,
     assert obj._last_daily_date == _today()
     text = messages(log_records)
     assert "auto_download_on_start=false" in text      # 日志说明为什么没去额外补数据
-    assert "先增量再选股" in text
+    assert "先增量再匹配" in text
     assert obj.status()["skipped_reason"] is None       # 这一轮不是"被跳过"
 
 
@@ -470,10 +470,10 @@ def test_stale_helper_produces_expected_lag(cfg) -> None:
     assert preflight.check(cfg.db_path, cfg)["stale_trading_days"] == 3
 
 
-# ── 6) 桌面导出：建池成功后写一份到桌面；导出失败**不影响**选股 ──
+# ── 6) 桌面导出：建池成功后写一份到桌面；导出失败**不影响**匹配 ──
 #
-# 用户要求："选股结果直接进自选股池……（也可以同时 output 一个文件到桌面）"。
-# 导出挂在 `run_daily` 里**建池成功之后**（三条路——界面【开始选股】、定时日更、
+# 用户要求："匹配结果直接进自选标的……（也可以同时 output 一个文件到桌面）"。
+# 导出挂在 `run_daily` 里**建池成功之后**（三条路——界面【开始匹配】、定时日更、
 # CLI `--once`——都经过它），所以这里用真的 `run_daily` 跑一遍钉住接线。
 #
 # **一律注入 `export_dir=tmp_path`**：不注入就会去找真桌面
@@ -502,7 +502,7 @@ def _patch_formulas(monkeypatch) -> None:
 
 
 def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_path) -> None:
-    """建池成功 → 往 `<export_dir>/老牛选股助手-选股结果-<今天>.txt` 写一份结果。
+    """建池成功 → 往 `<export_dir>/财神助手-匹配结果-<今天>.txt` 写一份结果。
 
     文件里的数量/每一行都与**这一轮**的池子对得上，标题里带行情日；
     状态栏（`stage_cb`）还要收到那句"结果已导出到 <路径>"（用户明确要求写了就说）。
@@ -520,21 +520,21 @@ def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_pa
     assert report["export_path"], report
     path = Path(report["export_path"])
     assert path.parent == desk and desk.is_dir()
-    assert path.name.startswith("老牛选股助手-选股结果-")
+    assert path.name.startswith("财神助手-匹配结果-")
     assert path.name.endswith(".txt")
-    # 文件名带日期（用户给定：`老牛选股助手-选股结果-2026-09-18.txt`）
-    assert path.name == f"老牛选股助手-选股结果-{_today()}.txt"
+    # 文件名带日期（用户给定：`财神助手-匹配结果-2026-09-18.txt`）
+    assert path.name == f"财神助手-匹配结果-{_today()}.txt"
     # 状态栏也说了这一句（界面上的 `_set_status` 就是接在这个回调上的）
     assert f"结果已导出到 {path}" in stages, stages
 
     text = path.read_text(encoding="utf-8-sig")
     lines = text.splitlines()
-    assert lines[0] == f"老牛选股助手 · 选股结果 · {_today()}（行情日 {report['data_date']}）"
+    assert lines[0] == f"财神助手 · 匹配结果 · {_today()}（行情日 {report['data_date']}）"
     assert lines[1] == f"共 {len(report['pool'])} 只（策略 1 · 自选 0）"
     assert "1. 反转样本(600001)" in lines[2]
     assert "现价" in lines[2]                        # 库里有收盘价 → 写上现价
     assert lines[-1] == pool.EXPORT_FOOTER
-    # 2026-09-21（主人要求"选股结果不自动加入股池"）：**选出来的票不再落库** ——
+    # 2026-09-21（主人要求"匹配结果不自动加入股池"）：**选出来的票不再落库** ——
     # 导出是附赠产物，池子只留自选。所以这里断言"库里是空的、而导出的文件里是有的"。
     assert set(pool.pool_symbols(cfg.db_path)) == set()
     assert {row["symbol"] for row in report["pool"]} == {"600001"}
@@ -542,11 +542,11 @@ def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_pa
 
 def test_export_failure_does_not_break_the_pipeline(cfg, monkeypatch, tmp_path,
                                                    log_records) -> None:
-    """导出抛异常 → 选股/建池照旧跑完，原因进 `report["errors"]`（**不静默**）。
+    """导出抛异常 → 匹配/建池照旧跑完，原因进 `report["errors"]`（**不静默**）。
 
     删掉 `run_daily` 里那圈 try/except，这个用例就会红：异常会从这里冒出去，
-    `report` 根本拿不到 —— 而用户点的是一次【开始选股】，不该因为桌面写不出去
-    就没选股。"记日志 + 说出来"是这一条的完整要求，只记日志不说也不行。
+    `report` 根本拿不到 —— 而用户点的是一次【开始匹配】，不该因为桌面写不出去
+    就没匹配。"记日志 + 说出来"是这一条的完整要求，只记日志不说也不行。
     """
     _ready_db(cfg)
     _patch_formulas(monkeypatch)
@@ -560,13 +560,13 @@ def test_export_failure_does_not_break_the_pipeline(cfg, monkeypatch, tmp_path,
                              with_data=False, export_dir=tmp_path / "桌面")
 
     assert report["pool"], "导出失败不该影响建池"
-    # 选股结果不再自动进池，所以"库里有行"这件事要靠自选；这里只要求建池本身没被影响
+    # 匹配结果不再自动进池，所以"库里有行"这件事要靠自选；这里只要求建池本身没被影响
     assert {row["symbol"] for row in report["pool"]} == {"600001"}
     assert report["export_path"] is None
     errors = "\n".join(report["errors"])
     assert "导出桌面文件" in errors and "RuntimeError" in errors
     text = messages(log_records)
-    assert "导出选股结果失败（不影响选股与推送）" in text
+    assert "导出匹配结果失败（不影响匹配与推送）" in text
     assert "桌面写不出去（模拟）" in text
 
 

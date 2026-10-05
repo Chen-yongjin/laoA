@@ -9,7 +9,7 @@
 
 * **目录定位** —— `formula_dir()` 同时支持源码运行与打包后的 exe（见下）；
 * **保存/删除** —— 文件名安全化 + 引擎认的注释头（`# 名称:` / `# 说明:`）；
-* **参与选股名单** —— `enabled_names()`：把 `config.toml` 里的 `enabled_formulas`
+* **参与匹配名单** —— `enabled_names()`：把 `config.toml` 里的 `enabled_formulas`
   收紧成"目录里真实存在且语法通过"的名字，**找不到/写错的忽略并记日志**；
 * **运行 / 成绩单** —— 供界面上的【运行】（原【试算】）用（只读本地库，不联网）。
 
@@ -112,7 +112,7 @@ DEFAULT_CONVENTION_KEY = "B"
 
 #: 【运行】的结果**显示**最多列出多少只（名称（代码）格式太长，列满一屏就够了）。
 #: 注意：它只影响界面显示（返回值里的 `shown`），**不影响 `hits`** ——
-#: 【导出选股结果】写的是全量命中（见 `preview_hits` 的 Returns）。
+#: 【导出匹配结果】写的是全量命中（见 `preview_hits` 的 Returns）。
 PREVIEW_LIMIT = 20
 
 #: 成绩单的进度回调类型（与本项目其它进度回调同一个签名：阶段 + 已完成 + 总数）
@@ -153,7 +153,13 @@ def bundled_formula_dir() -> Path | None:
 #: 用户的目录里已经有自己存的公式了 —— 旧规则（"只在空目录复制"）会让那条新公式**永远不出现**；
 #: 而直接"缺哪条补哪条"又会让**用户删掉的那条**每次启动都长回来。
 #: 只有记下"播过哪些"，才分得清"还没给他"与"他不要"。
-SEED_STATE_NAME = ".laoa-seeded.json"
+SEED_STATE_NAME = ".caishen-seeded.json"
+
+#: 改名前的播种记录文件名（2026-09-30 产品改名时留的一行兼容）。
+#: 为什么要认它：这份记录记的是"哪些随包公式已经给过、用户删掉的不许再补"。
+#: 换了名字就当"没有记录"的话，所有随包公式会被判成"还没给他"→ **用户删掉的那条会长回来**，
+#: 而这恰恰是这份记录存在的全部意义。所以旧名有、新名没有时，先沿用旧的。
+LEGACY_SEED_STATE_NAMES: tuple[str, ...] = (".laoa-seeded.json",)
 
 #: **退役的随包公式**：文件名 → 老版本随包内容的 sha256。
 #:
@@ -171,16 +177,23 @@ RETIRED_BUNDLED_FORMULAS: dict[str, str] = {
 
 def _read_seed_state(target: Path) -> set[str]:
     """读播种记录（读不出来就当没播过 —— 宁可多复制一份，也别让新公式不出现）。"""
-    try:
-        data = json.loads((target / SEED_STATE_NAME).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return set()
-    except (OSError, ValueError) as exc:
-        logger.debug(f"读随包策略播种记录失败（当作没播过）：{exc}")
-        return set()
-    if not isinstance(data, list):
-        return set()
-    return {str(name) for name in data}
+    for state_name in (SEED_STATE_NAME, *LEGACY_SEED_STATE_NAMES):
+        path = target / state_name
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            logger.debug(f"读随包策略播种记录失败（当作没播过）：{exc}")
+            return set()
+        if not isinstance(data, list):
+            return set()
+        recorded = {str(item) for item in data}
+        if state_name != SEED_STATE_NAME:
+            # 老名字读到了：顺手落到新名字上（下一轮就不用再认旧名）
+            _write_seed_state(target, recorded)
+        return recorded
+    return set()
 
 
 def _write_seed_state(target: Path, seeded: set[str]) -> None:
@@ -283,7 +296,7 @@ def _seed_samples(target: Path, seeded: set[str]) -> None:
 def _sync_bundled_formulas(target: Path) -> None:
     """随包公式的**一站式同步**：先退役旧的、再逐条补齐缺的，最后把名单落盘。
 
-    为什么合成一个入口：这两件事共用同一份状态文件（`.laoa-seeded.json`），
+    为什么合成一个入口：这两件事共用同一份状态文件（`.caishen-seeded.json`），
     各自读一遍写一遍的话，后写的那次会把前一次刚记下的名字冲掉 ——
     退役名单就会"每轮重新判断"，补齐逻辑也会把退役文件当"还没给过他"补回来。
 
@@ -422,7 +435,7 @@ def save_formula(
 
     Args:
         name: 公式名称（会做安全化；**空名拒绝**）。
-        body: 公式正文（多行，最后一行是选股条件）。
+        body: 公式正文（多行，最后一行是匹配条件）。
         description: 说明；None = 用 `describe_for_save()` 自动生成。
         directory: 公式目录；None = `formula_dir()`。
 
@@ -465,17 +478,17 @@ def delete_formula(name: str, directory: str | Path | None = None) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 参与选股名单（config.toml 的 enabled_formulas）
+# 参与匹配名单（config.toml 的 enabled_formulas）
 # ══════════════════════════════════════════════════════════════════════════
 
 
 def enabled_names(cfg: Any = None, directory: str | Path | None = None) -> list[str]:
-    """本次**真正参与选股**的公式名（按目录里的顺序）。
+    """本次**真正参与匹配**的公式名（按目录里的顺序）。
 
     三道收紧，缺一不可：
 
     1. 名字写在 `config.toml` 里、但 `formulas/` 里**没有这个文件** → 忽略 + 记日志
-       （用户删了文件、或改名了；静默失败会让他以为"公式选股坏了"）；
+       （用户删了文件、或改名了；静默失败会让他以为"公式匹配坏了"）；
     2. 文件有、但公式**语法错** → 忽略 + 记日志（坏公式不该拖垮其它公式）；
     3. 名字里的首尾空格、重复项 → 去掉。
 
@@ -497,12 +510,12 @@ def enabled_names(cfg: Any = None, directory: str | Path | None = None) -> list[
         spec = by_name.get(name)
         if spec is None:
             logger.warning(
-                f"策略选股：config.toml 里的 enabled_formulas 写着 {name!r}，"
+                f"策略匹配：config.toml 里的 enabled_formulas 写着 {name!r}，"
                 f"但策略目录里没有这条策略，已忽略"
             )
             continue
         if not spec.ok:
-            logger.warning(f"策略选股：{name} 语法有错（{spec.error_text}），本次不参与")
+            logger.warning(f"策略匹配：{name} 语法有错（{spec.error_text}），本次不参与")
             continue
         if name not in picked:
             picked.append(name)
@@ -573,7 +586,7 @@ def latest_trading_day(db_path: str | Path) -> str | None:
 #: 分两类口径：
 #:   * 收盘型：`流通市值` / `换手率` —— 日线里没有，快照给的是"今天"的值；
 #:   * 盘中型（2026-09-23 加，用户："必须加进去啊"）：`现价` / `现涨幅` / `现量比` / `现换手`
-#:     —— 语义是"**现在这一刻**的盘面"，用户在盘中点【运行】/【开始选股】时按当时的快照算；
+#:     —— 语义是"**现在这一刻**的盘面"，用户在盘中点【运行】/【开始匹配】时按当时的快照算；
 #:     非交易时段取不到（条件不成立、一只都不出），而且**没有历史、不能回测**。
 SNAPSHOT_FIELDS: tuple[str, ...] = ("流通市值", "换手率", "现价", "现涨幅", "现量比", "现换手")
 
@@ -639,7 +652,7 @@ def snapshot_extra(
     """给公式用的快照字段 → `({代码: {"流通市值": 亿, "换手率": %}}, 提示语)`。
 
     为什么要这一步：`流通市值` / `换手率` 日线里没有（同花顺的快照端点也不返回，
-    见 `data/sources.py` 的 `SUPPLEMENT_FIELDS`），而用户点名要拿它们选股 ——
+    见 `data/sources.py` 的 `SUPPLEMENT_FIELDS`），而用户点名要拿它们匹配 ——
     所以按 `sources.snapshot_map()`（含"按字段从后面来源补齐"）取一趟，
     再铺成公式认的 `Series.extra`。
 
@@ -674,7 +687,7 @@ def snapshot_extra(
 
 
 def all_symbols(db_path: str | Path) -> list[str]:
-    """库里有行情的全部代码（试算/选股要拿它去取快照）。读不出来就返回空列表。
+    """库里有行情的全部代码（试算/匹配要拿它去取快照）。读不出来就返回空列表。
 
     为什么单独一个函数：`load_series()` 是**逐只 yield** 的生成器（内存友好），
     拿不到"一共有哪些代码"；而取快照必须先把代码表交出去。直接 `list(load_series())`
@@ -694,11 +707,11 @@ def all_symbols(db_path: str | Path) -> list[str]:
 # K 线口径：按时间自动在「日 K 线」与「盘中实时」之间切换
 #
 # 主人 2026-09-23 的原话（这就是本段全部的规格）：
-#     "在软件内置规则里设定，开盘时间里运行的选股，都是实时的，不是开盘时间，采用 K 线。"
+#     "在软件内置规则里设定，开盘时间里运行的匹配，都是实时的，不是开盘时间，采用 K 线。"
 # 同一天他又划掉了我加的那个开关："不需要加开关，按照我说的规则来" ——
 # 所以这里是**无条件**的规则，没有配置键、界面上也没有勾选框（有用例钉着"关不掉"）。
 #
-# 也就是说：**这件事不该由用户写进策略、也不该由他决定开关**。他在盘中点【运行】/【开始选股】，
+# 也就是说：**这件事不该由用户写进策略、也不该由他决定开关**。他在盘中点【运行】/【开始匹配】，
 # 用的就该是此刻的盘面；收盘之后（或周末、或没网）再用库里那根日 K。
 # 于是策略里的 `C`、`C/REF(C,1)-1`、`量比()`、`C>MA(C,5)` 一个字都不用改，
 # 就自动变成盘中口径 —— 这是"内置规则"与"再教用户写一条盘中策略"的区别。
@@ -713,7 +726,7 @@ def all_symbols(db_path: str | Path) -> list[str]:
 
 
 def caliber_now() -> datetime:
-    """这次选股看到的「现在」（**北京时间**的墙上时间）。
+    """这次匹配看到的「现在」（**北京时间**的墙上时间）。
 
     为什么单独一个函数而不是到处 `datetime.now()`：交易时段、交易日、口径文案全都挂在
     它上面，而测试要能钉死"现在是开盘时间"（`monkeypatch.setattr(lib, "caliber_now", …)`）。
@@ -740,7 +753,7 @@ def _quote_rows(cfg: Any, codes: Sequence[str]) -> dict[str, dict]:
 
     单独抽出来是因为实时口径要**一趟快照干两件事**：拼"今天"这根 K 线（价格/量）
     与填 `流通市值 / 换手率 / 现价 / 现涨幅 / 现量比 / 现换手`（扩展字段）。
-    早先这两件事各取一次的话，同一轮选股会看到两个时刻的盘面 —— 那是最没法解释的
+    早先这两件事各取一次的话，同一轮匹配会看到两个时刻的盘面 —— 那是最没法解释的
     一类不一致（涨幅与 K 线对不上，用户只能怀疑程序坏了）。
     """
     from laoa_trader.data import sources
@@ -790,11 +803,11 @@ def live_bars_from_quotes(quotes: dict[str, dict] | None) -> dict[str, fm.LiveBa
 
 @dataclass
 class Prepared:
-    """一次选股要交给公式引擎的**全部输入**（含"用哪套 K 线口径"的结论）。
+    """一次匹配要交给公式引擎的**全部输入**（含"用哪套 K 线口径"的结论）。
 
     为什么打包成一个对象而不是让每个调用方自己拼：试算（`preview_hits`）与建池
     （`formula_group.run_enabled_formulas`）必须**完全同口径** —— 要是各写一份，
-    迟早出现"点【运行】选出 3 只、点【开始选股】选出 1 只"这种没法解释的差异。
+    迟早出现"点【运行】选出 3 只、点【开始匹配】选出 1 只"这种没法解释的差异。
     """
     #: 库里最新的行情日（K 线口径的"今天"）
     kline_day: str | None = None
@@ -815,7 +828,7 @@ class Prepared:
     #: **告知**（不是错误）：典型是"盘中想用实时数据，但取不到快照 → 已退回日 K 线"。
     #: 为什么必须与 `notes` 分开：建池的"成功/失败"判据是"errors 是否为空"
     #: （`scheduler.Scheduler._report_succeeded`）—— 把一句"退回了日 K"塞进 errors，
-    #: 会让一次**正常完成**的选股被判成失败（表现：明明选出了票、推送也发了，
+    #: 会让一次**正常完成**的匹配被判成失败（表现：明明选出了票、推送也发了，
     #: 状态却写"未成功"，还要在补跑时间再跑一遍）。
     warnings: list[str] = field(default_factory=list)
 
@@ -839,7 +852,7 @@ def _live_decision(cfg: Any, db_path: str | Path, kline_day: str | None,
     # ⚠️ 这里**没有**"用不用实时"的开关可查，而且不许加（主人 2026-09-23：
     # "不需要加开关，按照我说的规则来"）：判据只有时间、交易日、库里的数据这三条。
     # 延迟导入：`intraday` 会拉起数据层一大片（hithink/engine/storage），
-    # 而这个判据只有"真要跑选股"时才用到；模块级导入会让 `import formulas`
+    # 而这个判据只有"真要跑匹配"时才用到；模块级导入会让 `import formulas`
     # 顺带把网络栈与数据库层拉进来（成绩单/策略列表页用不到它们）。
     from laoa_trader import intraday
 
@@ -865,7 +878,7 @@ def prepare_inputs(
     *,
     now: datetime | None = None,
 ) -> Prepared:
-    """按"现在是不是开盘时间"准备这次选股的全部输入（K 线口径 + 扩展字段）。
+    """按"现在是不是开盘时间"准备这次匹配的全部输入（K 线口径 + 扩展字段）。
 
     Args:
         cfg: 配置（None = 没有配置：不联网、不取快照，纯日 K 口径）。
@@ -899,11 +912,11 @@ def prepare_inputs(
         if not prepared.live_bars:
             # 想实时却拿不到数据：退回日 K，并且**必须说清**（不然用户看到的是
             # "条件成立却一只都不出"，只能怀疑策略写错了）。
-            # 走 `warnings` 而不是 `notes`：这是一句**告知**，这次选股本身是正常完成的
-            # （建池那边把 `notes` 当错误，会让一次成功的选股被判成"未成功"并安排补跑）。
+            # 走 `warnings` 而不是 `notes`：这是一句**告知**，这次匹配本身是正常完成的
+            # （建池那边把 `notes` 当错误，会让一次成功的匹配被判成"未成功"并安排补跑）。
             live, why = False, "盘中取不到实时快照"
             prepared.warnings.append(
-                "⚠️ 现在是开盘时间，本该按实时数据选股，但取不到实时快照 → "
+                "⚠️ 现在是开盘时间，本该按实时数据匹配，但取不到实时快照 → "
                 "本次已退回日 K 线口径（收盘数据）。用到「现价 / 现涨幅 / 现量比 / 现换手」"
                 "的条件不会成立；市值/换手也一样取不到。"
                 "可稍后重试，或在「系统设置 → 数据来源」里确认来源与 Key 可用。"
@@ -926,7 +939,7 @@ def prepare_inputs(
     ) else {}
 
     if prepared.today:
-        # ⚠️ 这句是**纯文本**（进 QLabel 的提示区、进选股完成的结论），不是 markdown ——
+        # ⚠️ 这句是**纯文本**（进 QLabel 的提示区、进匹配完成的结论），不是 markdown ——
         # 写 `**加粗**` 的话用户看到的就是两个星号（用户明确说过不喜欢这种星号）。
         prepared.caliber = (f"📊 本次口径：盘中实时（{moment:%H:%M}，"
                             f"用现价拼出今天 {today} 这根 K 线）")
@@ -969,7 +982,7 @@ def preview_hits(
          "caliber": 这次用的 K 线口径（一句中文，界面直接显示）}
 
         `hits` 是**全量**命中清单（按代码排序、不截断），`limit` 只决定 `shown`：
-        界面按 `shown` 截断**显示**（提示区一行放不下 60 只票），而【导出选股结果】
+        界面按 `shown` 截断**显示**（提示区一行放不下 60 只票），而【导出匹配结果】
         要写**完整**的一份 —— 给用户的文件里少几只，是最难被发现的那种错。
     """
     hits: list[dict] = []
@@ -983,7 +996,7 @@ def preview_hits(
     skipped = 0
     # 输入（K 线口径 + 扩展字段）全部由 `prepare_inputs` 一份逻辑给 —— 建池那条路
     # （`formula_group.run_enabled_formulas`）用的是**同一个函数**，所以
-    # 【运行】与【开始选股】不可能出现两套口径。
+    # 【运行】与【开始匹配】不可能出现两套口径。
     prepared = prepare_inputs(cfg, db_path, [formula], symbols, now=now)
     day = prepared.kline_day
     # 试算这里两类提示都并进 `notes`（界面对它们一视同仁：都渲染成单独一行）——
@@ -1008,7 +1021,7 @@ def preview_hits(
         try:
             mask = formula.eval(series)
         except (fm.FormulaError, fm.FormulaDataError) as exc:
-            # 一只票算不出来不该让整次试算失败（与选股链路的隔离口径一致）
+            # 一只票算不出来不该让整次试算失败（与匹配链路的隔离口径一致）
             # 标的写法统一成**半角** `名称(代码)`（见 docs/开发文档.md）
             errors.append(f"{series.name}({series.symbol})：{exc}")
             continue
@@ -1017,7 +1030,7 @@ def preview_hits(
     hits.sort(key=lambda hit: hit["symbol"])
     return {
         # 实时口径下"行情日"就是**今天**：这一轮选的正是此刻的盘面，
-        # 报成"最近交易日 2026-09-22"会让用户以为程序在拿昨天的收盘数据选股
+        # 报成"最近交易日 2026-09-22"会让用户以为程序在拿昨天的收盘数据匹配
         "date": prepared.display_day,
         "count": len(hits),
         # 全量（界面自己按 `shown` 截断显示，导出要全量）
@@ -1086,7 +1099,7 @@ def run_scorecard(
 
     # ⚠️ 成绩单**永远只用库里的日 K**（不带 `today`/`live_bars`）：它算的是"这条公式
     # 在历史上行不行"。塞一根盘中的"今天"进去，等于拿一个还没有收盘结果的样本去算胜率
-    # （而且同一份历史每次点都得到不同的数）。实时口径只属于【运行】/【开始选股】那条路。
+    # （而且同一份历史每次点都得到不同的数）。实时口径只属于【运行】/【开始匹配】那条路。
     series_iter = fm.load_series(db_path, symbols=symbols, start=start)
     # 进度需要"总数"，而 `load_series` 是生成器（不知道总数）—— 先按库里的代码数
     # 报总步数：比"进度条永远停在 0%"好得多，且不额外读行情。

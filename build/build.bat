@@ -49,8 +49,8 @@ echo.
 .venv\Scripts\python build\nuitka_build.py || goto :err
 
 echo.
-echo Done. Output folder: dist\LaoniuTrader
-dir /b dist\LaoniuTrader\*.exe
+echo Done. Output folder: dist\CaishenTrader
+dir /b dist\CaishenTrader\*.exe
 echo   Fallback (PyInstaller): .venv\Scripts\pyinstaller --noconfirm --clean build\laoa_trader.spec
 echo.
 echo Quick self-test: run that exe with --version and --doctor (see docs, code 6).

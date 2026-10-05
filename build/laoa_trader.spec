@@ -5,7 +5,7 @@
     build\\build.bat                       # 一键：建 venv → 装依赖 → 打包
     pyinstaller --noconfirm --clean build\\laoa_trader.spec
 
-产出：`dist\LaoniuTrader\老牛选股.exe`（**onedir** 目录版；目录名 ASCII、exe 名中文）。
+产出：`dist\CaishenTrader\财神助手.exe`（**onedir** 目录版；目录名 ASCII、exe 名中文）。
 
 为什么是 onedir 而不是 onefile
 ------------------------------
@@ -15,7 +15,7 @@ onefile 每次启动都要把几百 MB 依赖解压到临时目录：启动要 5
 为什么 --noconsole（windowed）
 ------------------------------
 这是桌面程序，双击运行时不该弹黑框。副作用是**看不到 stdout** ——
-所以 `log.py` 会同时把日志写进 `<data_dir>/logs/laoa-trader.log`，
+所以 `log.py` 会同时把日志写进 `<data_dir>/logs/caishen-helper.log`，
 出问题时让用户把那个文件发过来即可。
 
 打包要点
@@ -136,7 +136,7 @@ DATAS = [
     # 图标要打进包里：窗口 / 托盘 / 关于页都从 `laoa_trader/assets/` 取
     # （位置解析集中在 `laoa_trader/assets.py`，spec 这里只负责把文件放进去）
     (str(SRC / "laoa_trader" / "assets"), "laoa_trader/assets"),
-    # 示例公式（随包分发）：解到 `_MEIPASS/formulas`，第一次打开「公式选股」页时
+    # 示例公式（随包分发）：解到 `_MEIPASS/formulas`，第一次打开「公式匹配」页时
     # 由 `formulas.formula_dir()` 复制到 **exe 同级的 formulas/**（那才是用户自己的目录，
     # 可写、看得见、能备份）。少这一步的话，新用户打开那一页是个空列表，
     # 连【载入示例】都没得载。
@@ -193,11 +193,11 @@ exe = EXE(  # noqa: F821
     a.scripts,
     [],
     exclude_binaries=True,
-    # exe 名：**中文「老牛选股」**（主人 2026-09-21 要求：包里那个可执行文件叫老牛选股.exe）。
-    # 目录名（COLLECT）与压缩包名仍是 ASCII 的 LaoniuTrader —— 那两个是"下载/解压/命令行"
+    # exe 名：**中文「财神助手」**（主人 2026-09-21 要求：包里那个可执行文件叫财神助手.exe）。
+    # 目录名（COLLECT）与压缩包名仍是 ASCII 的 CaishenTrader —— 那两个是"下载/解压/命令行"
     # 上会用到的东西，中文名在别的机器或工具里可能变成乱码；exe 名是用户在资源管理器里
     # 双击的那一个，中文更合适。
-    name="老牛选股",
+    name="财神助手",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -218,7 +218,7 @@ coll = COLLECT(  # noqa: F821
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="LaoniuTrader",   # 产出 dist/LaoniuTrader/老牛选股.exe（目录名保持 ASCII，见上）
+    name="CaishenTrader",   # 产出 dist/CaishenTrader/财神助手.exe（目录名保持 ASCII，见上）
 )
 
 if sys.platform != "win32":

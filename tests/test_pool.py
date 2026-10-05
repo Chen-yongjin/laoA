@@ -19,7 +19,7 @@ def _enable_formulas(monkeypatch, tmp_path, cfg, formulas: dict[str, str]) -> No
     """把公式目录指到临时目录、写好几条公式、并在配置里**勾上**它们。
 
     2026-09-18（用户要求）起**候选只来自勾选的公式** —— 5 条写在代码里的 Python 策略
-    退出了选股链路，所以"池子里要有票"这件事在测试里也必须走同一条路：
+    退出了匹配链路，所以"池子里要有票"这件事在测试里也必须走同一条路：
     写公式文件 → 勾上 → 建池。这里用价格条件选票（小库价格是确定的）：
 
         600001 ≈ 1.85 元、600002 ≈ 12.5 元、600003 ≈ 18.7 元、300001 ≈ 26 元
@@ -46,7 +46,7 @@ def test_weight_of_formula_and_unknown() -> None:
     from laoa_trader.strategy.formula_group import FORMULA_WEIGHT
 
     assert not hasattr(pool, "POOL_STRATEGIES"), "权重表应该已经删掉"
-    assert pool.weight_of("公式·尾盘选股策略") == FORMULA_WEIGHT == 2
+    assert pool.weight_of("公式·尾盘匹配策略") == FORMULA_WEIGHT == 2
     assert pool.weight_of("SomeNewStrategy") == 1
     assert pool.weight_of("") == 1
     assert pool.MAX_PER_STRATEGY == 3
@@ -349,7 +349,7 @@ def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> 
     assert pool.source_label(row, None) == "短期反转"
     line = pool.format_pool_lines([row])[0]
     assert line == "1. 半导体甲(600002)短期反转、地量后放量变盘｜缩量回踩"
-    # 推送标签里的每个中文名，都能在「策略选股」列表里找到（同一份翻译表）
+    # 推送标签里的每个中文名，都能在「策略匹配」列表里找到（同一份翻译表）
     from laoa_trader import legacy
 
     for name in pool.strategy_names(row):
@@ -357,12 +357,12 @@ def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> 
                         legacy.strategy_label("DryUpExpansionStrategy"))
 
 
-# ── 选出来的票在「自选股池」里能删、能手工再加（用户要求）──
+# ── 选出来的票在「自选标的」里能删、能手工再加（用户要求）──
 #
-# 用户原话：「策略选股只要显示策略，不显示选股结果，选股结果直接进自选股池，
+# 用户原话：「策略匹配只要显示策略，不显示匹配结果，匹配结果直接进自选标的，
 # **可以在股池再添加删除**」。
 #
-# 结果现在不再显示在「策略选股」页，入口收敛到「自选股池」那一张表：
+# 结果现在不再显示在「策略匹配」页，入口收敛到「自选标的」那一张表：
 # 右键【删除】走 `storage.delete_pool_symbol()`，手工再加走
 # `storage.upsert_watchlist()`（界面上是【添加自选】/回车）。
 # 界面那两步的接线在 `ui/app.py`（属于另一个改动方），这里钉住**后端这两个入口**
@@ -382,7 +382,7 @@ def _saved_pool_with_one_pick(engine, cfg, tmp_path, monkeypatch) -> None:
 
 def test_a_picked_symbol_can_be_deleted_from_the_pool_page(
         engine, cfg, tmp_path, monkeypatch) -> None:
-    """右键【删除】的后端：`delete_pool_symbol` 之后「自选股池」不再显示这只票。"""
+    """右键【删除】的后端：`delete_pool_symbol` 之后「自选标的」不再显示这只票。"""
     _saved_pool_with_one_pick(engine, cfg, tmp_path, monkeypatch)
     assert [row["symbol"] for row in pool.pool_page_rows(cfg.db_path)] == ["600002"]
 
@@ -422,7 +422,7 @@ def test_deleting_a_symbol_that_is_not_in_the_pool_is_a_no_op(cfg) -> None:
     assert pool.pool_page_rows(cfg.db_path) == []
 
 
-# ── 「选股候选只来自公式」这条口径的兜底（2026-09-18 从 test_groups.py 搬过来）──
+# ── 「匹配候选只来自公式」这条口径的兜底（2026-09-18 从 test_groups.py 搬过来）──
 #
 # 原来这三条住在 `tests/test_groups.py`（那个文件随策略组机制一起删了）。
 # 它们的断言对象其实是 **pool.py 的行为**，与"策略组"无关，所以搬到这里继续守着。
@@ -453,7 +453,7 @@ def test_selection_argument_does_not_filter_candidates(engine, cfg, monkeypatch)
 def test_pool_drops_candidates_that_are_not_formulas(engine, cfg) -> None:
     """调用方传进来的**非公式候选**（老策略类名）一律丢掉。
 
-    那 5 条内置策略已经退出选股链路，界面上再也选不出它们 —— 让这种键进池子
+    那 5 条内置策略已经退出匹配链路，界面上再也选不出它们 —— 让这种键进池子
     只会让「来源」列出现一个用户找不到对应行的"X"。公式候选照常保留。
     """
     picks = {
