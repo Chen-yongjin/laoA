@@ -231,29 +231,38 @@ def test_history_context_skips_symbols_without_enough_history(db) -> None:
 # ── 观察池 ──
 
 
-def test_watch_targets_prefers_pool(db) -> None:
+def test_pool_rows_are_not_watched_until_the_user_opens_them(db) -> None:
+    """**池子里的票默认不盯**（2026-10-05 主人："默认只监控持仓股票"）。
+
+    匹配只产出候选：跑完一轮选出几十只，桌面上不会几十只一起响。要盯哪一只，
+    用户在「自选标的」里点那一行的监控开关（写进 `watchlist.enabled`）——
+    这个用例把"打开之前 / 打开之后"两半都钉住。
+    """
     from laoa_trader import pool
 
-    # 用默认启用组（`short`）里的策略：盘中观察池只盯**启用组**产生的标的，
-    # 塞一条停用组（swing 的低价股）的策略进去，它压根不会被盯（那是另一个用例的事）
     pool.save_pool(db, [{"symbol": "600002", "name": "半导体甲", "score": 1.0,
                          "strategy": "ReversalStrategy"}], "2026-09-11")
     targets, symbols = intraday.watch_targets(db)
+    assert targets == {} and symbols == set(), "池子里的票不该自动进观察面"
+
+    # 用户点开那一行的监控开关 → 收进自选并开始盯（这是 `on_watch_follow` 做的事）
+    with storage.connect(db) as conn:
+        storage.upsert_watchlist(conn, "600002", name="半导体甲", enabled=True,
+                                 source_strategy="ReversalStrategy")
+    targets, symbols = intraday.watch_targets(db)
     assert set(targets) == {"600002"}
-    assert symbols == {"600002"}
-    assert targets["600002"]["source"] == "pool"
+    assert symbols == {"600002"}                 # 用户点名要盯的票照给"池内买点"提示
+    assert targets["600002"]["source"] == "策略+自选"
 
 
-def test_watch_targets_falls_back_to_recent_signals(db, monkeypatch) -> None:
-    """池子为空时退回"近期信号"，避免盘中无事可盯。"""
+def test_recent_signals_are_no_longer_a_fallback(db, monkeypatch) -> None:
+    """**不再**"池子为空就退回近期推送信号"：那条兜底会把刚选出来的票又变成提醒。"""
     monkeypatch.setenv("INTRADAY_POOL_ONLY", "1")
     with storage.connect(db) as conn:
         storage.write_signals(conn, [("2026-09-11", "ReversalStrategy", "600003",
                                       "半导体乙", 18.0, None, "短期反转")])
     targets, symbols = intraday.watch_targets(db)
-    assert set(targets) == {"600003"}
-    assert symbols == set()
-    assert targets["600003"]["source"] == "signal"
+    assert targets == {} and symbols == set()
 
 
 # ── 一轮执行（含去重与推送）──
@@ -269,6 +278,8 @@ def test_run_once_records_and_dedupes(db, cfg, monkeypatch) -> None:
                        "2026-09-11")
     with storage.connect(db) as conn:
         storage.write_calendar(conn, [now_shanghai().strftime("%Y-%m-%d")])
+        # 2026-10-05 起：池子里的票默认不盯，得先被"收下"才进观察面
+        storage.upsert_watchlist(conn, "600002", name="半导体甲", enabled=True)
 
     engine = DataEngine(db)
     client = FakeClient(snapshots=[{

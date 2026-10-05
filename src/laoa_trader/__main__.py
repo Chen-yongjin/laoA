@@ -269,7 +269,7 @@ def _preflight_gate(cfg, auto_download: bool) -> int | None:
     return None
 
 
-def _watchlist_command(cfg, values: list[str], note: str) -> int:
+def _watchlist_command(cfg, values: list[str], note: str, *, remind: bool = False) -> int:
     """自选标的命令行：add / list / remove / enable / disable。
 
     名称**自动从本地库补**（`stock_basic`）；查不到也允许添加，只是提示一下 ——
@@ -321,11 +321,15 @@ def _watchlist_command(cfg, values: list[str], note: str) -> int:
             print(f"⚠️ 本地库里没有 {symbol} 的名称（可能还没下载数据，或代码有误）——"
                   "仍按你给的信息添加，稍后同步数据会自动补上。")
         with storage.connect(cfg.db_path) as conn:
-            storage.upsert_watchlist(conn, symbol, name=name, note=note, enabled=True)
+            # 默认**不提醒**（2026-10-05 主人的口径："默认只监控持仓股票"）；
+            # 要在盘中盯它，用界面点那一行的监控开关（或直接改 watchlist.enabled）
+            storage.upsert_watchlist(conn, symbol, name=name, note=note,
+                                     enabled=True if remind else None)
             total = len(storage.load_watchlist(conn, enabled_only=True))
         print(f"✅ 已加入自选标的：{symbol} {name or ''}"
               + (f"（备注 {note}）" if note else "")
-              + f"；当前启用 {total} 只（上限 {cfg.watchlist_max}）")
+              + ("；已开始盯它" if remind else "；默认不提醒（加 --remind 才会盯）")
+              + f"；当前盯着 {total} 只（上限 {cfg.watchlist_max}）")
         if total > cfg.watchlist_max:
             print(f"⚠️ 已超过上限 {cfg.watchlist_max}：盘中只会监控前 {cfg.watchlist_max} 只，"
                   "请在 config.toml 提高 watchlist_max，或停用暂时不看的。")
@@ -502,6 +506,11 @@ def cli(argv: list[str] | None = None) -> int:
              "（add 时名称自动从本地库补，可用 --note 写备注）",
     )
     parser.add_argument("--note", default="", help="配合 --watchlist add：备注（例如 龙头）")
+    parser.add_argument(
+        "--remind", action="store_true",
+        help="配合 --watchlist add：立刻开始盯这只票（默认加进来**不提醒** ——"
+             "2026-10-05 起默认只监控持仓股票）",
+    )
     parser.add_argument("--serve", action="store_true", help="常驻：定时日更 + 盘中提醒")
     parser.add_argument(
         "--version", action="store_true",
@@ -543,7 +552,7 @@ def cli(argv: list[str] | None = None) -> int:
     logger.info(f"数据目录：{cfg.data_dir}（配置来源：{cfg.source_path or '内置默认值'}）")
 
     if args.watchlist:
-        return _watchlist_command(cfg, args.watchlist, args.note)
+        return _watchlist_command(cfg, args.watchlist, args.note, remind=args.remind)
 
     # ── 进入正题前先自检（本地、秒级、不联网）──
     # 数据目录都建不出来时跳过自检：那种情况下真正的病根是目录/权限，

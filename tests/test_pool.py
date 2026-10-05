@@ -404,7 +404,9 @@ def test_a_manually_added_symbol_comes_back_into_the_pool_page(engine, cfg, tmp_
     _saved_pool_with_one_pick(engine, cfg, tmp_path, monkeypatch)
     with storage.connect(cfg.db_path) as conn:
         storage.delete_pool_symbol(conn, "600002")        # 先删掉（上一个用例的动作）
-        storage.upsert_watchlist(conn, "600002", name="半导体甲", note="手工加的")
+        # 加自选默认不提醒（2026-10-05），所以来源列会带「（已停用）」尾巴
+        storage.upsert_watchlist(conn, "600002", name="半导体甲", note="手工加的",
+                                 enabled=True)
 
     rows = pool.pool_page_rows(cfg.db_path)
 

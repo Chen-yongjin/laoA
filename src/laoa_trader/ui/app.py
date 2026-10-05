@@ -2193,11 +2193,30 @@ if QT_AVAILABLE:
             self.watch_note.returnPressed.connect(self.on_watch_add)
             self.btn_watch_add = QPushButton("添加自选")
             self.btn_watch_add.setObjectName("primaryAction")   # 主操作按钮（见 theme.py）
-            self.btn_watch_add.setToolTip("加入自选并立刻出现在下面的表里（回车即加）")
+            self.btn_watch_add.setToolTip(
+                "加入自选并立刻出现在下面的表里（回车即加）。\n"
+                "加进来**默认不提醒**：要盯哪一只，点它那一行的「监控开关」"
+                "（2026-10-05 主人的口径：默认只监控持仓股票）"
+            )
             self.btn_watch_add.clicked.connect(self.on_watch_add)
             row.addWidget(self.watch_symbol, 1)
             row.addWidget(self.watch_note, 2)
             row.addWidget(self.btn_watch_add)
+            # 两张"整表开关"：默认只盯持仓之后，用户手里往往已经有一串开着的自选，
+            # 逐只点太慢 —— 一次全关 / 一次全开（只看**自选**，持仓的开关不在这里动）
+            self.btn_watch_mute_all = QPushButton("全部关闭提醒")
+            self.btn_watch_mute_all.setToolTip(
+                "把「自选标的」里所有票的监控开关一次关掉（**持仓不受影响**）。\n"
+                "关掉 = 这只票不再产生任何盘中提醒；它仍然留在表里，随时能再打开"
+            )
+            self.btn_watch_mute_all.clicked.connect(lambda: self.on_watch_bulk(False))
+            row.addWidget(self.btn_watch_mute_all)
+            self.btn_watch_unmute_all = QPushButton("全部打开提醒")
+            self.btn_watch_unmute_all.setToolTip(
+                "把「自选标的」里所有票的监控开关一次打开（盯上止损/止盈/跌破5日线等）"
+            )
+            self.btn_watch_unmute_all.clicked.connect(lambda: self.on_watch_bulk(True))
+            row.addWidget(self.btn_watch_unmute_all)
             row.addStretch(1)
             return row
 
@@ -4726,14 +4745,18 @@ if QT_AVAILABLE:
                 industry_item = self._tag_item(str(row.get("industry") or market.DASH), symbol)
                 source_item = self._tag_item(str(row.get("source_label") or market.DASH),
                                              symbol)
-                # 「监控开关」：自选行可切换；**策略/公式选中的票不是自选**，
-                # 没有"停用"这一说（与右键菜单里那项灰掉是同一个判据）
+                # 「监控开关」：**只有自选标的才有"要不要盯"这一说**。
+                #
+                # 2026-10-05 主人："默认只监控持仓股票。" —— 于是策略/公式选中的票
+                # **默认就是不盯的**（它们在「自选标的」页里只是候选），点这一格 =
+                # 把这只票收进来盯着（顺便进自选表，state 存在 `watchlist.enabled`）；
+                # 已经是自选行的，点一下开/关。
                 entry = watchlist.get(symbol)
                 if entry is None:
                     monitor_item = self._monitor_cell(
-                        symbol, True, alert, togglable=False,
-                        why="这只票是策略选中的（不是自选）：要停止盯它在"
-                            "「策略匹配」里关掉对应策略，或右键【删除】这一行",
+                        symbol, False, alert,
+                        why="这只票是匹配选出来的（还不是自选）：点这一格就把它收进"
+                            "「自选标的」并开始盯它（止损/止盈/跌破5日线…）",
                     )
                 else:
                     monitor_item = self._monitor_cell(
@@ -4874,10 +4897,11 @@ if QT_AVAILABLE:
             if column == WATCH_MONITOR_COLUMN and table is self.pool_table:
                 entry = self._watchlist_map().get(symbol)
                 if entry is None:
-                    self._toast(
-                        "这只票是策略选中的（不是自选）：不能在这里单独关掉监控 ——"
-                        "在「策略匹配」里关掉对应策略，或右键【删除】这一行"
-                    )
+                    # 2026-10-05：匹配选出来的票默认**不盯**，点这一格 = "收下它、开始盯"
+                    # —— 顺手写进自选表（"要不要盯"只有 `watchlist.enabled` 一处状态，
+                    # 见 `storage.upsert_watchlist`）。以前这里是"不能单独关掉监控"，
+                    # 那是因为当时池子里的每一行都自动盯着；现在默认反过来了。
+                    self.on_watch_follow(symbol)
                     return
                 self.on_watch_toggle(not bool(int(entry.get("enabled", 1) or 0)), symbol)
                 return
@@ -4927,13 +4951,16 @@ if QT_AVAILABLE:
                 )
                 enabled = self._pool_row_watch_enabled(symbol)
                 if enabled is None:
-                    # 策略/公式选中的票不是自选，没有"停用监控"这一说 ——
-                    # 灰掉并把理由写在 tooltip 里（比一个点了没反应的菜单项好）
-                    act_toggle = QAction("关闭监控", menu)
-                    act_toggle.setEnabled(False)
+                    # 匹配选出来的票、还不是自选：默认**没有**在盯 ——
+                    # 这一项可用的【打开监控】就是"收下它、开始盯"（2026-10-05 起；
+                    # 在那之前池子里的每一行都自动盯着，所以这里曾经是灰掉的【关闭监控】）
+                    act_toggle = QAction("打开监控", menu)
                     act_toggle.setToolTip(
-                        "这只票是策略选中的（不是自选）。要停止盯它，"
-                        "去「策略匹配」关掉对应策略，或直接【删除】这一行"
+                        "收进「自选标的」并开始盯它：止损、止盈、跌破 5 日线等触发就提醒你。\n"
+                        "默认只监控持仓股票 —— 匹配选出来的票要盯哪只，由你在这里点"
+                    )
+                    act_toggle.triggered.connect(
+                        lambda _=False, s=symbol: self.on_watch_follow(s)
                     )
                 else:
                     act_toggle = QAction("关闭监控" if enabled else "打开监控", menu)
@@ -5186,9 +5213,12 @@ if QT_AVAILABLE:
                 name = self.engine.get_stock_names([symbol]).get(symbol)
                 hint = "（本地库没有它的名称，已按代码添加）" if not name else ""
                 with self.engine.connect() as conn:
-                    storage.upsert_watchlist(conn, symbol, name=name, note=note, enabled=True)
+                    # `enabled` 不传（None）= 新加的**默认不提醒**，已在自选里的保持原开关
+                    # （2026-10-05 主人："默认只监控持仓股票"）
+                    storage.upsert_watchlist(conn, symbol, name=name, note=note)
                     enabled_count = len(storage.load_watchlist(conn, enabled_only=True))
-                text = f"已加自选：{symbol} {name or ''}{hint}"
+                text = (f"已加自选：{symbol} {name or ''}{hint}"
+                        "；默认不提醒 —— 要盯它就点那一行的「监控开关」")
                 if enabled_count > self.cfg.watchlist_max:
                     text += (f"；⚠️ 自选 {enabled_count} 只已超过上限 "
                              f"{self.cfg.watchlist_max}，盘中只监控前 {self.cfg.watchlist_max} 只")
@@ -5246,6 +5276,71 @@ if QT_AVAILABLE:
             if not removed:
                 self._toast(f"未找到自选 {symbol}")
             self._pool_signature = None
+            self._tick()
+
+        def on_watch_bulk(self, enabled: bool) -> None:
+            """把**所有自选标的**的监控开关一次打开/关掉（持仓的开关不在这里动）。
+
+            为什么要这个按钮（2026-10-05 主人："默认只监控持仓股票"）：默认改过来之后，
+            老用户手里那串自选还是开着的，一只一只点太慢；而"全关"正是他想要的起点 ——
+            先安静下来，再逐只决定盯谁。
+            """
+            self._invalidate_summary()
+            from laoa_trader.data import storage
+
+            try:
+                with self.engine.connect() as conn:
+                    rows = storage.load_watchlist(conn, enabled_only=False)
+                    changed = 0
+                    for row in rows:
+                        if bool(int(row.get("enabled", 1) or 0)) != bool(enabled):
+                            changed += int(storage.set_watchlist_enabled(
+                                conn, str(row["symbol"]), enabled
+                            ) or 0)
+            except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，别把界面带走
+                self._toast(f"❌ 批量切换失败：{type(exc).__name__}: {exc}")
+                return
+            self._pool_signature = None
+            verb = "打开" if enabled else "关闭"
+            if not rows:
+                self._toast("「自选标的」里还没有票")
+            elif not changed:
+                self._toast(f"自选标的的提醒**已经**全是{verb}状态（没有改动）")
+            else:
+                self._toast(f"✅ 已把 {changed} 只自选标的的提醒{verb}"
+                            + ("" if enabled else "（持仓不受影响，继续盯）"))
+            self._tick()
+
+        def on_watch_follow(self, symbol: str) -> None:
+            """把一只**匹配选出来的票**收进来盯着（写自选表 + 打开监控）。
+
+            2026-10-05 主人："默认只监控持仓股票。" 于是匹配结果默认只当候选，
+            用户在「自选标的」页里点某一行的监控开关 = "这一只我要盯"。
+            状态存在 `watchlist.enabled`（只有这一处），所以这个动作同时是一次"加入自选"——
+            界面上要能看出这一行从此进了自选（来源列写它原来那条策略名，不是"自选"）。
+            """
+            self._invalidate_summary()
+            from laoa_trader.data import storage
+
+            name = self._stock_names([symbol]).get(symbol) or ""
+            source = ""
+            try:
+                with self.engine.connect() as conn:
+                    row = conn.execute(
+                        "SELECT strategy FROM stock_pool WHERE symbol = ?", (symbol,)
+                    ).fetchone()
+                    source = str(row[0]) if row and row[0] else ""
+            except Exception as exc:  # noqa: BLE001 - 取不到来源不影响"收下它"
+                logger.debug(f"取池内来源失败（不影响收下这只票）：{exc}")
+            try:
+                with self.engine.connect() as conn:
+                    storage.upsert_watchlist(conn, symbol, name=name, enabled=True,
+                                             source_strategy=source or None)
+            except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，别让点击把界面带走
+                self._toast(f"❌ 收下这只票失败：{type(exc).__name__}: {exc}")
+                return
+            self._pool_signature = None
+            self._toast(f"✅ 已收下并开始盯「{name or symbol}」（止损/止盈/跌破5日线等会提醒你）")
             self._tick()
 
         def on_watch_toggle(self, enabled: bool, symbol: str = "") -> None:

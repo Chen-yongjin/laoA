@@ -724,11 +724,12 @@ def test_not_enabled_formula_does_not_change_pool(engine, formulas_cfg: Config, 
 def test_formula_pool_row_is_also_monitored_intraday(engine, formulas_cfg: Config,
                                                      tmp_path: Path,
                                                      monkeypatch: pytest.MonkeyPatch) -> None:
-    """进池的公式标的也要进**盘中观察池**。
+    """公式标的进池之后，**用户打开监控**才进盘中观察面。
 
-    为什么专门测这一条：盘中观察池是按"启用的内置策略"过滤池子的，
-    公式标的的策略名（`公式·xxx`）不在那份名单里 —— 漏掉这一处就会表现成
-    "股票池里有它，可它跌到止损了也不提醒"，而这在界面上极难察觉。
+    2026-10-05 主人："默认只监控持仓股票。" —— 匹配选出来的票只是候选，
+    要盯哪一只由用户在「自选标的」里点开（写进 `watchlist.enabled`）。
+    这条用例把"打开之前 / 打开之后"两半都钉住：以前漏掉的是"池子里有它、
+    跌到止损却不提醒"，现在漏掉的会是"明明是候选，却自动开始响"。
     """
     folder = tmp_path / "formulas"
     _write_formula(folder, "收盘在5日线上", "C>MA(C,5)")
@@ -738,8 +739,17 @@ def test_formula_pool_row_is_also_monitored_intraday(engine, formulas_cfg: Confi
     rows = pool.build_pool(engine, formulas_cfg, size=10, hot_only=False)
     symbol = next(row["symbol"] for row in rows if row["strategy"] == "公式·收盘在5日线上")
 
+    # 候选：进池了，但默认不盯
     targets, symbols = intraday.watch_targets(formulas_cfg.db_path, cfg=formulas_cfg)
+    assert symbol not in targets and symbol not in symbols
 
+    # 用户点开那一行的监控开关（界面上的 `on_watch_follow` 做的就是这件事）
+    from laoa_trader.data import storage as storage_mod
+
+    with storage_mod.connect(formulas_cfg.db_path) as conn:
+        storage_mod.upsert_watchlist(conn, symbol, enabled=True,
+                                     source_strategy="公式·收盘在5日线上")
+    targets, symbols = intraday.watch_targets(formulas_cfg.db_path, cfg=formulas_cfg)
     assert symbol in symbols
     assert targets[symbol]["strategy"] == "公式·收盘在5日线上"      # 数据：库里存的还是公式前缀
 

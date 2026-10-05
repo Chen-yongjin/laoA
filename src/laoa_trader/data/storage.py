@@ -1009,7 +1009,7 @@ def upsert_watchlist(
     *,
     name: str | None = None,
     note: str = "",
-    enabled: bool = True,
+    enabled: bool | None = None,
     price: float | None = None,
     source_strategy: str | None = None,
 ) -> dict:
@@ -1019,6 +1019,15 @@ def upsert_watchlist(
     但**不能**因为这次传了空名字就把已缓存的名字冲掉。
 
     Args:
+        enabled: **要不要盯这只票**（三态，2026-10-05 主人："把自选标的都默认关闭"）：
+
+            * `None`（默认）—— **新加进来的一律不提醒**，而**已经在自选里的保持用户
+              自己设的那个开关**。这一条是本次改动的核心：以前"加进自选"等于"立刻开始
+              提醒"，从选股结果一键加十只，桌面上就十只票一起喊 —— 加不加、盯不盯本来
+              就是两件事，得让用户分开决定。
+            * `True` / `False` —— 显式开启/关闭（选股结果那一列的「提醒」勾选框、
+              表格里的监控开关都走它）。
+
         price: **加入时的价格**（"从加入那天算盈亏"的基准，见建表那里的说明）。
             只在**首次插入**时写入；已有记录再 upsert 时**不动它** —— 否则用户今天
             再点一次【加入自选】，盈亏基准就被重置成今天的价，那个数就没意义了
@@ -1031,6 +1040,11 @@ def upsert_watchlist(
             `tests/test_watchlist.py` 里那两条用例）。
     """
     now = _now()
+    # `enabled=None` 时：新行写 0（默认关）；冲突时**保持原值** —— 用户已经表过态，
+    # 再加一次不该把他的开关拨回去（这正是"加进自选"与"开始提醒"分家的落点）。
+    keep_state = enabled is None
+    state_clause = ("enabled = watchlist.enabled, " if keep_state
+                    else "enabled = excluded.enabled, ")
     conn.execute(
         "INSERT INTO watchlist "
         "(symbol, name, note, enabled, added_at, added_price, source_strategy) "
@@ -1038,7 +1052,7 @@ def upsert_watchlist(
         "ON CONFLICT(symbol) DO UPDATE SET "
         "  name = COALESCE(excluded.name, watchlist.name), "
         "  note = CASE WHEN excluded.note != '' THEN excluded.note ELSE watchlist.note END, "
-        "  enabled = excluded.enabled, "
+        + state_clause +
         # 已有基准价就保留（老库里是 NULL 时补上这次的价）
         "  added_price = COALESCE(watchlist.added_price, excluded.added_price), "
         # 同理：已有来源就保留（老库里是 NULL 时补上这次的来源）

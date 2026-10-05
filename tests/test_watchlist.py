@@ -120,7 +120,14 @@ def test_watchlist_table_and_crud(wl_db) -> None:
         assert storage.load_watchlist(conn) == []
         row = storage.upsert_watchlist(conn, "600100", name="冷门样本", note="龙头")
         assert row["symbol"] == "600100"
-        assert row["enabled"] == 1
+        # 2026-10-05 主人："默认只监控持仓股票" —— 加进自选**不等于**开始提醒
+        assert row["enabled"] == 0
+        # 想盯某一只：显式打开（界面上就是点那一行的「监控开关」）
+        storage.upsert_watchlist(conn, "600100", enabled=True)
+        assert storage.load_watchlist(conn)[0]["enabled"] == 1
+        # 重复添加**不许**把用户已经拨好的开关拨回去
+        storage.upsert_watchlist(conn, "600100", note="龙头二号")
+        assert storage.load_watchlist(conn)[0]["enabled"] == 1
         assert row["added_at"]
         # 幂等：重复添加只更新，不产生第二行
         storage.upsert_watchlist(conn, "600100", note="龙头二号")
@@ -342,7 +349,7 @@ def test_monitor_off_position_leaves_the_whole_observation_set(wl_db) -> None:
     右键那一行菜单是对"这只票"最具体、最新的一次表态，而"它在池子里"是几天前跑策略
     留下的结果（池子每天重建）。这条用例两边都造出来，然后逐条断言。
     """
-    _add(wl_db, "600100", name="冷门样本", note="龙头")      # 既是自选……
+    _add(wl_db, "600100", name="冷门样本", note="龙头")      # 既是自选、也打开了监控
     _hold(wl_db, "600100", monitored=True)
     targets, pool_symbols = intraday.watch_targets(wl_db.db_path, cfg=wl_db)
     assert "600100" in targets and "600100" in pool_symbols   # 开着监控：照常盯
@@ -570,8 +577,8 @@ def test_watchlist_alert_text_includes_note(wl_db) -> None:
 
 
 def test_watchlist_gets_pool_buy_rules(wl_db) -> None:
-    """自选标的适用「池内回踩买点 / 放量突破20日高」两类买点规则。"""
-    _add(wl_db, "600100", name="冷门样本")
+    """盯着的那只自选标的适用「池内回踩买点 / 放量突破20日高」两类买点规则。"""
+    _add(wl_db, "600100", name="冷门样本")      # `_add` 默认 enabled=True：用户点名要盯它
     _, pool_symbols = intraday.watch_targets(wl_db.db_path, cfg=wl_db)
     assert "600100" in pool_symbols       # 池内买点（回踩 5 日线）
     ctx = intraday.history_context(wl_db.db_path, ["600100"])["600100"]
@@ -730,7 +737,7 @@ def _watch_add(cfg, symbol: str, *, name: str = "", note: str = "",
                source_strategy: str = "") -> None:
     """加一只自选（模拟界面两条路：手工【添加自选】/ 结果页【加入自选】）。"""
     with storage.connect(cfg.db_path) as conn:
-        storage.upsert_watchlist(conn, symbol, name=name or None, note=note,
+        storage.upsert_watchlist(conn, symbol, name=name or None, note=note, enabled=True,
                                  source_strategy=source_strategy or None)
 
 
@@ -813,7 +820,8 @@ def test_upsert_keeps_the_first_source_and_price(wl_db) -> None:
     """
     _watch_add(wl_db, "600100", name="冷门样本", source_strategy="公式·A")
     with storage.connect(wl_db.db_path) as conn:
-        storage.upsert_watchlist(conn, "600100", source_strategy="公式·B", price=9.9)
+        storage.upsert_watchlist(conn, "600100", source_strategy="公式·B", price=9.9,
+                                enabled=True)
         row = storage.watchlist_map(conn)["600100"]
 
     assert row["source_strategy"] == "公式·A"

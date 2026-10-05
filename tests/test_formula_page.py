@@ -2064,7 +2064,7 @@ def test_add_all_to_watchlist_respects_the_cap_and_says_what_was_dropped(
     """自选已满：**明确说**哪几只没加进去、怎么解决（绝不静默丢）。"""
     page_cfg.watchlist_max = 1
     with storage.connect(page_cfg.db_path) as conn:
-        storage.upsert_watchlist(conn, "600009", name="已有的自选")
+        storage.upsert_watchlist(conn, "600009", name="已有的自选", enabled=True)
     page.show_pick_result({"data_date": "2026-09-11",
                            "pool": [{"symbol": "600001", "name": "甲样本", "strategy": "公式·X"},
                                     {"symbol": "600003", "name": "丙样本", "strategy": "公式·X"}]})
@@ -2708,8 +2708,10 @@ def test_add_to_watchlist_keeps_the_pick_source_in_the_pool_page(page, page_cfg)
 
     page.result_table.cellWidget(0, fp.RESULT_ADD_COLUMN).findChild(QPushButton).click()
 
+    # 加进去默认**不提醒**（2026-10-05），所以来源列带「（已停用）」——
+    # 这正是"已收下、还没盯"的显示口径
     row = _pool_row(page_cfg, "600003")
-    assert row["source_label"] == "尾盘超短策略"
+    assert row["source_label"] == "尾盘超短策略（已停用）"
     assert row["strategy"] == "公式·尾盘超短策略"
     # 表格用的就是 `source_label`（`ui/app.py` 那一列），所以这里断言的就是**屏幕上那个词**
     with storage.connect(page_cfg.db_path) as conn:
@@ -2726,8 +2728,8 @@ def test_one_click_add_keeps_the_pick_source_too(page, page_cfg) -> None:
 
     page.btn_add_all.click()
 
-    assert _pool_row(page_cfg, "600003")["source_label"] == "尾盘超短策略"
-    assert _pool_row(page_cfg, "600001")["source_label"] == "放量上攻"
+    assert _pool_row(page_cfg, "600003")["source_label"] == "尾盘超短策略（已停用）"
+    assert _pool_row(page_cfg, "600001")["source_label"] == "放量上攻（已停用）"
 
 
 def test_adding_an_existing_symbol_fills_the_missing_source_only(page, page_cfg) -> None:

@@ -550,19 +550,18 @@ def _record_pool_message(cfg: Config, day: str | None, pool_rows: list[dict]) ->
         marks = "|".join(sorted(str(r.get("symbol") or "") for r in pool_rows))
         # sha256 只当"这批内容是谁"的标记用（不是安全用途），取前 10 位足够区分
         stamp = hashlib.sha256(f"{day}|{marks}".encode("utf-8")).hexdigest()[:10]
-        names = "、".join(
-            f"{r.get('name') or ''}({r.get('symbol')})".strip() for r in pool_rows[:5]
-        )
-        more = f" 等 {len(pool_rows)} 只" if len(pool_rows) > 5 else ""
         with storage.connect(cfg.db_path) as conn:
             fresh = storage.record_alerts(conn, [{
                 "kind": intraday.KIND_POOL,
                 "symbol": f"pool-{stamp}",
-                "detail": f"共 {len(pool_rows)} 只：{names}{more}",
+                # 2026-10-05 主人："选股结果也不要播报，只提醒选股结果已出，请点击查看。"
+                # 所以这条消息**只当门铃**：不列票名、不报涨跌，看到就去点开看结果页。
+                # 票名与来源在「策略匹配 → 本次匹配结果」里本来就是一整张表。
+                "detail": f"{intraday.POOL_DONE_TEXT}（共 {len(pool_rows)} 只）",
                 "price": None,
             }], day)
         if fresh:
-            logger.info(f"匹配完成已记入「消息」列表（{day}，{len(pool_rows)} 只）")
+            logger.info(f"{intraday.POOL_DONE_TEXT}（已记入「消息」列表：{day}，{len(pool_rows)} 只）")
     except Exception as exc:  # noqa: BLE001 - 消息落库失败不影响匹配结果
         logger.warning(f"记录「匹配完成」消息失败（不影响匹配）：{exc}")
 

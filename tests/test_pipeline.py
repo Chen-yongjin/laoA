@@ -92,8 +92,10 @@ def test_run_twice_is_idempotent_for_signals_and_watchlist_rows(
     cfg = ready_db
     _enable_formulas(monkeypatch, tmp_path, cfg, {"低价": "C<5", "反转": "C>10"})
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
-    with storage.connect(cfg.db_path) as conn:      # 用户自己加的自选（会被盯、会落库）
-        storage.upsert_watchlist(conn, "600001", name="甲样本")
+    with storage.connect(cfg.db_path) as conn:
+        # 用户自己加的自选，并**打开了监控**（2026-10-05 起：加自选默认不提醒）——
+        # 只有"被盯着的"才会落进 stock_pool
+        storage.upsert_watchlist(conn, "600001", name="甲样本", enabled=True)
     first = _run(cfg, monkeypatch, notify=False, with_data=False)
     assert first["pool"], "第一次就该有候选"
     with storage.connect(cfg.db_path) as conn:
@@ -213,16 +215,15 @@ def test_enabled_formula_flows_to_pool_signals_and_watch(
     # ⚠️ 2026-09-21（主人要求）：**匹配结果不再自动进股池** —— 库里一行都不该有
     assert stored == [], "选出来的票不该自动写进 stock_pool"
 
-    # 观察池：`stock_pool` 是空的（没进池），所以它走"池子为空 → 退回近期信号"那条兜底
-    # ——兜底命中的是**信号表**（source="signal"），不是"池内标的"，两者别混：
+    # 观察面：2026-10-05 起**池子里的票默认不盯**，也不用"近期信号"兜底 ——
+    # 匹配只是候选，要盯哪只在「自选标的」里打开那一行的监控开关。
     targets, pool_symbols = intraday.watch_targets(cfg.db_path)
-    assert pool_symbols == set()                     # 池内符号：空
-    assert set(targets) == {"600003"}                # 来源是信号兜底
-    assert targets["600003"]["source"] == "signal"
+    assert set(targets) == set() and pool_symbols == set()
 
-    # 用户在结果页面点【加入自选】之后（= 写进 watchlist），它才进池、才被盯
+    # 用户在结果页点【加入自选】并打开监控之后（= 写进 watchlist 且 enabled=1），才被盯
     with storage.connect(cfg.db_path) as conn:
-        storage.upsert_watchlist(conn, "600003", name="丙样本", note="匹配来源：公式·反转")
+        storage.upsert_watchlist(conn, "600003", name="丙样本", note="匹配来源：公式·反转",
+                                 enabled=True)
     report2 = _run(cfg, monkeypatch, notify=False, with_data=False)
     assert [row["symbol"] for row in report2["pool"]] == ["600003"]
     with storage.connect(cfg.db_path) as conn:
@@ -232,12 +233,11 @@ def test_enabled_formula_flows_to_pool_signals_and_watch(
     assert pool_symbols2 == {"600003"} and set(targets2) == {"600003"}
 
 
-def test_watch_targets_watches_every_stored_pool_row(cfg, monkeypatch) -> None:
-    """库里存着上一轮的池子时，**每一行都盯**（不再有"按策略组过滤"这一层）。
+def test_watch_targets_only_watches_what_the_user_opened(cfg) -> None:
+    """库里存着上一轮的池子 → 那些票是**候选**，用户没打开监控就一只都不盯。
 
-    2026-09-18 之前这里会按"启用的策略组"把被停用组的标的剔掉；策略组机制删掉之后，
-    进池的只可能是勾选的公式标的与自选标的 —— 没有"该不该盯"的第二套判断。
-    （老库里的行还带着 `LowPriceStrategy` 这种历史类名，照旧一视同仁。）
+    2026-10-05 主人："默认只监控持仓股票。" 观察面只剩两处来源：持仓（`build_alerts`
+    补进来）与他逐只打开监控的自选标的。历史类名（`LowPriceStrategy` 这种）一视同仁。
     """
     storage.init_db(cfg.db_path)
     with storage.connect(cfg.db_path) as conn:
@@ -248,8 +248,13 @@ def test_watch_targets_watches_every_stored_pool_row(cfg, monkeypatch) -> None:
              "strategies": "ReversalStrategy", "score": 2.0},
         ], "2026-09-11")
     targets, pool_symbols = intraday.watch_targets(cfg.db_path)
-    assert pool_symbols == {"600001", "600003"}
-    assert set(targets) == {"600001", "600003"}
+    assert targets == {} and pool_symbols == set()
+
+    # 打开其中一只 → 只有它进观察面
+    with storage.connect(cfg.db_path) as conn:
+        storage.upsert_watchlist(conn, "600003", name="反转样本", enabled=True)
+    targets, pool_symbols = intraday.watch_targets(cfg.db_path)
+    assert set(targets) == {"600003"} and pool_symbols == {"600003"}
 
 
 def test_watch_targets_keeps_symbol_picked_by_many_formulas(cfg) -> None:
@@ -260,12 +265,13 @@ def test_watch_targets_keeps_symbol_picked_by_many_formulas(cfg) -> None:
             {"symbol": "600009", "name": "双策略", "strategy": "LowPriceStrategy",
              "strategies": "LowPriceStrategy,ReversalStrategy", "score": 5.0},
         ], "2026-09-11")
+        storage.upsert_watchlist(conn, "600009", name="双策略", enabled=True)
     targets, pool_symbols = intraday.watch_targets(cfg.db_path)
     assert pool_symbols == {"600009"}
 
 
-def test_watch_targets_falls_back_to_recent_signals(cfg) -> None:
-    """没有池子时退回"最近推送过的信号"（`signal` 表）—— 现在**不按策略过滤**了。"""
+def test_recent_signals_no_longer_produce_watch_targets(cfg) -> None:
+    """**不再**"没有池子就退回最近推送过的信号"：那条兜底会把选出来的票又变成提醒。"""
     storage.init_db(cfg.db_path)
     with storage.connect(cfg.db_path) as conn:
         storage.write_signals(conn, [
@@ -273,8 +279,7 @@ def test_watch_targets_falls_back_to_recent_signals(cfg) -> None:
             ("2026-09-11", "ReversalStrategy", "600003", "乙", 12.0, None, "短期反转"),
         ])
     targets, pool_symbols = intraday.watch_targets(cfg.db_path)
-    assert pool_symbols == set()             # 没有池子
-    assert set(targets) == {"600001", "600003"}   # 信号兜底：库里有的都盯
+    assert targets == {} and pool_symbols == set()
 
 
 def test_run_daily_without_any_formula_is_normal_not_an_error(

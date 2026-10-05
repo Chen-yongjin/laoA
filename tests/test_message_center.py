@@ -216,8 +216,11 @@ def test_pool_message_is_recorded_once_per_content(tmp_path: pathlib.Path) -> No
     assert len(alerts) == 1                                 # 内容没变 → 只一条
     assert alerts[0]["kind"] == intraday.KIND_POOL
     assert "共 2 只" in alerts[0]["detail"]
-    assert "贵州茅台(600519)" in alerts[0]["detail"]
-    assert intraday.KIND_LABELS[intraday.KIND_POOL] == "📈 匹配完成"
+    # 2026-10-05 主人："选股结果也不要播报，只提醒选股结果已出，请点击查看"
+    # —— 所以这条消息只当门铃：不列票名、不报涨跌
+    assert intraday.POOL_DONE_TEXT in alerts[0]["detail"]
+    assert "贵州茅台" not in alerts[0]["detail"]
+    assert intraday.KIND_LABELS[intraday.KIND_POOL] == "📈 选股结果已出"
 
     _record_pool_message(cfg, DAY, rows + [{"symbol": "300750", "name": "宁德时代"}])
     with storage.connect(cfg.db_path) as conn:
@@ -235,7 +238,8 @@ def test_pool_message_shows_as_selection_result(center) -> None:
     assert target == "匹配结果"
 
     center.set_messages([_item(symbol="pool-3f2ac91b02", kind=intraday.KIND_POOL,
-                               when=f"{DAY} 15:05:00", detail="共 12 只：贵州茅台(600519) 等",
+                               when=f"{DAY} 15:05:00",
+                               detail=f"{intraday.POOL_DONE_TEXT}（共 12 只）",
                                label=intraday.KIND_LABELS[intraday.KIND_POOL])])
-    assert "📈 匹配完成" in center.table.item(0, 2).text()
-    assert "共 12 只" in center.table.item(0, 3).text()
+    assert "📈 选股结果已出" in center.table.item(0, 2).text()
+    assert intraday.POOL_DONE_TEXT in center.table.item(0, 3).text()

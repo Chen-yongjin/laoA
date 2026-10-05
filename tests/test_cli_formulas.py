@@ -169,7 +169,8 @@ def test_pool_command_shows_the_source_column(capsys, seeded,
     """
     _enable_formulas(monkeypatch, tmp_path, seeded["cfg"], seeded["config"], {"反转": "C>10"})
     with storage.connect(seeded["cfg"].db_path) as conn:
-        storage.upsert_watchlist(conn, "600003", name="反转样本")
+        # 打开监控（2026-10-05 起：加自选默认不提醒、池子里的票默认不盯）
+        storage.upsert_watchlist(conn, "600003", name="反转样本", enabled=True)
     assert cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"])]) == 0
     capsys.readouterr()
     assert cli(["--cli", "--pool", "--config", str(seeded["config"])]) == 0
@@ -186,7 +187,8 @@ def test_once_is_idempotent_via_cli(capsys, seeded, tmp_path, monkeypatch) -> No
     """
     _enable_formulas(monkeypatch, tmp_path, seeded["cfg"], seeded["config"], {"反转": "C>10"})
     with storage.connect(seeded["cfg"].db_path) as conn:
-        storage.upsert_watchlist(conn, "600003", name="反转样本")
+        # 打开监控（2026-10-05 起：加自选默认不提醒、池子里的票默认不盯）
+        storage.upsert_watchlist(conn, "600003", name="反转样本", enabled=True)
     args = ["--cli", "--once", "--no-notify", "--config", str(seeded["config"])]
     assert cli(args) == 0
     capsys.readouterr()

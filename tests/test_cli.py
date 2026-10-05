@@ -218,7 +218,9 @@ def test_watchlist_add_unknown_symbol_warns_but_adds(capsys, watch_db, tmp_path)
     assert "本地库里没有 601999 的名称" in out
     assert "仍按你给的信息添加" in out
     with storage.connect(watch_db.db_path) as conn:
-        assert storage.watchlist_symbols(conn) == ["601999"]
+        rows = storage.load_watchlist(conn, enabled_only=False)
+    assert [r["symbol"] for r in rows] == ["601999"]
+    assert rows[0]["enabled"] == 0          # 默认不提醒（2026-10-05：默认只盯持仓）
 
 
 def test_watchlist_add_warns_when_over_limit(capsys, watch_db, tmp_path) -> None:
@@ -227,9 +229,10 @@ def test_watchlist_add_warns_when_over_limit(capsys, watch_db, tmp_path) -> None
     config.write_text(
         f'data_dir = "{p(watch_db.data_dir)}"\nwatchlist_max = 1\n' + READY_THRESHOLDS,
         encoding="utf-8")
-    cli(["--cli", "--watchlist", "add", "600519", "--config", str(config)])
+    cli(["--cli", "--watchlist", "add", "600519", "--remind", "--config", str(config)])
     capsys.readouterr()
-    assert cli(["--cli", "--watchlist", "add", "601999", "--config", str(config)]) == 0
+    assert cli(["--cli", "--watchlist", "add", "601999", "--remind",
+                "--config", str(config)]) == 0
     assert "已超过上限 1" in capsys.readouterr().out
 
 
@@ -237,7 +240,8 @@ def test_watchlist_list_shows_status_and_pool(capsys, watch_db, tmp_path) -> Non
     config = tmp_path / "config.toml"
     config.write_text(f'data_dir = "{p(watch_db.data_dir)}"\n' + READY_THRESHOLDS,
                       encoding="utf-8")
-    cli(["--cli", "--watchlist", "add", "600519", "--note", "龙头", "--config", str(config)])
+    cli(["--cli", "--watchlist", "add", "600519", "--note", "龙头", "--remind",
+         "--config", str(config)])
     capsys.readouterr()
     assert cli(["--cli", "--watchlist", "list", "--config", str(config)]) == 0
     out = capsys.readouterr().out

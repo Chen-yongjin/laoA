@@ -508,6 +508,9 @@ def test_scan_result_feeds_the_detail_dialog(cfg, nopause) -> None:
                                   "strategy": "ReversalStrategy",
                                   "strategies": "ReversalStrategy", "score": 1.0,
                                   "reason": "r"}], DAY)
+    # 「（池内）」标的是**用户正在盯**的票（2026-10-05 起：池子里的票默认不盯，
+    # 要盯得在「自选标的」里打开监控）
+    storage.upsert_watchlist(conn, "600001", name="主板甲", enabled=True)
     client = FakeClient(rows=[
         _row("300001", pct=5.0, name="创业板甲"),
         _row("600001", pct=4.0, name="主板甲"),

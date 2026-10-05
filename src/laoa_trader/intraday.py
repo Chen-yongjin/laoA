@@ -142,8 +142,13 @@ ANOMALY_REASON_LIMIT = 120
 #: 消息列表"，所以它住在同一张表（`intraday_alert`）里、只是 kind 不同。
 KIND_POOL = "pool"
 
+#: 「选股结果出来了」这条消息的正文（2026-10-05 主人："选股结果也不要播报，
+#: 只提醒选股结果已出，请点击查看"）。它是一句**门铃**：不列票名、不报涨跌 ——
+#: 要看哪几只在「策略匹配 → 本次匹配结果」里有一整张表。
+POOL_DONE_TEXT = "选股结果已出，请点击查看"
+
 KIND_LABELS = {
-    KIND_POOL: "📈 匹配完成",
+    KIND_POOL: "📈 选股结果已出",
     "stop_loss": "🛑 触及止损",
     "take_profit": "🎯 触及止盈",
     "break_ma5": "📉 跌破 5 日线",
@@ -182,8 +187,15 @@ VOICE_KIND_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("auction", "竞价强度 / 竞价走弱", ("auction_strong", "auction_weak")),
     ("t", "做 T 提示（近似）", ("t_high", "t_low")),
     ("anomaly", "当日异动", tuple(f"anomaly_{code.lower()}" for code in ANOMALY_TAGS)),
-    ("pool", "匹配完成（跑完一轮的汇总）", (KIND_POOL,)),
+    ("pool", "选股结果已出（默认不念）", (KIND_POOL,)),
 )
+
+#: **默认不念**的类型族（即使 `voice_kinds` 为空 = "全都念"）。
+#:
+#: 目前只有一条：`pool` —— 它要求的动作是"你自己点开看"，念出来只是「选股结果已出，
+#: 请点击查看」，一个字的信息量都没有（2026-10-05 主人："选股结果也不要播报"）。
+#: 用户真想让它念，在设置里勾上「选股结果已出」这一类就行（勾了就按勾的来）。
+VOICE_OFF_BY_DEFAULT: frozenset[str] = frozenset({"pool"})
 
 #: kind → 类型族（启动时展开一次）
 _KIND_TO_GROUP: dict[str, str] = {
@@ -209,9 +221,11 @@ def voice_allowed(kind: Any, cfg: Config | None = None) -> bool:
     cfg = cfg or get_config()
     chosen = {str(code).strip().lower() for code in (getattr(cfg, "voice_kinds", None) or [])
               if str(code).strip()}
+    family = voice_kind_group(kind).lower()
     if not chosen:
-        return True
-    return voice_kind_group(kind).lower() in chosen
+        # 空 = "用户没筛过" → 全都念，**除了**那几类默认不念的（见 `VOICE_OFF_BY_DEFAULT`）
+        return family not in VOICE_OFF_BY_DEFAULT
+    return family in chosen
 
 
 # ── 条件单参数（移植自 sequoia_x/trade_plan.py）──
@@ -484,16 +498,19 @@ def watch_targets(
     selection: Any = None,
     cfg: Config | None = None,
 ) -> tuple[dict[str, dict], set[str]]:
-    """盘中观察目标：**精匹配票池优先**，近期推送信号兜底。
+    """盘中观察目标 = **用户点名要盯的自选标的**（持仓由 `build_alerts` 另外补进来）。
+
+    2026-10-05 主人："默认只监控持仓股票。" 所以这里**不再自动盯池子**：
+    匹配出来的票只是候选，要不要盯由他在「自选标的」页逐只打开监控开关。
 
     Args:
         selection: **2026-09-18 起不再使用**（原来按启用的策略组窄化观察面）。
-            策略组机制已删；池子里的标的现在一律来自勾选的公式与自选标的。
-            None 时按配置解析（配置里两组都空 = 全选）。
-        cfg: 配置（解析 selection 用）。
+        days: 保留参数（老调用方传的"回看几天信号"），现在不再用它兜底。
+        cfg: 配置。
 
     Returns:
-        ({symbol: {...}}, 池内符号集合)
+        ({symbol: {...}}, 适用"池内买点"规则的符号集合) —— 第二个返回值就是观察面本身
+        （用户点名要盯的票照给买点提示）。
     """
     from laoa_trader import pool as pool_mod
 
@@ -504,19 +521,18 @@ def watch_targets(
     # 已关闭监控的持仓：**从观察面里整体剔掉**，不管它是不是池内标的/自选
     # （优先级见 `monitor_off_symbols` 的说明）
     off = monitor_off_symbols(db_path)
-    # 池子里的每一行都盯：当年这里按"启用的策略组"过滤，而策略组机制已经删掉，
-    # 现在进池的只可能是勾选的公式标的与自选标的 —— 没有"该不该盯"这一层了。
+    # 池子只用来认"这只是不是池内标的"（回踩买点要用它），**不再自动进观察面**。
     pool_rows = list(pool_mod.load_pool(db_path))
-    pool_symbols = {row["symbol"] for row in pool_rows}
-    for row in pool_rows:
-        targets[row["symbol"]] = {
-            "name": row.get("name"), "signal_date": row.get("date"), "close": None,
-            "source": "pool", "strategy": row.get("strategy"),
-        }
+    pool_by_symbol = {str(row["symbol"]): row for row in pool_rows}
+    pool_symbols: set[str] = set()
 
-    # ── 自选标的：**无论策略池是否为空都要盯** ──
-    # 为什么直接从 watchlist 表读、而不是只依赖池子：用户刚加的自选要立刻生效，
-    # 不必等到今晚重新建池；一条公式都没勾（池子只剩自选）时也一样盯。
+    # ── 观察面 = 用户明确打开监控的自选标的（+ 持仓，由 `build_alerts` 补）──
+    #
+    # 2026-10-05 主人："默认只监控持仓股票。" —— 在这之前，**池子里的每一行都盯**：
+    # 跑一次匹配选出几十只，桌面上就几十只票一起响（他原话是"语音播报有点乱"）。
+    # 现在改成分工明确：匹配结果只是"候选"，要不要盯由他在「自选标的」里逐只打开
+    # （开关写进 `watchlist.enabled`，见 `storage.upsert_watchlist` 的说明）。
+    # 默认为空 = 一只都不盯，这**不是**配置错误：新装的程序本来就该先安静地跑一轮匹配。
     if getattr(cfg, "watchlist_in_pool", True):
         with storage.connect(db_path) as conn:
             watch_entries = storage.load_watchlist(conn, enabled_only=True)
@@ -525,28 +541,30 @@ def watch_targets(
             symbol = entry["symbol"]
             note = (entry.get("note") or "").strip()
             held = positions.get(symbol)
-            info = targets.get(symbol) or {}
+            info = pool_by_symbol.get(symbol) or {}
             label = _watch_label(note, held["avg_cost"] if held else None)
             targets[symbol] = {
-                **info,
                 "name": info.get("name") or entry.get("name") or symbol,
+                "signal_date": info.get("date"),
                 "label": label,
                 "note": note,
                 "watchlist": True,
                 "source": "策略+自选" if info.get("strategy") else "自选",
+                "strategy": info.get("strategy"),
                 # 有持仓 → 用**持仓成本**做止损/止盈参考价；
                 # 没有 → 留 None，交给 evaluate_sell_rules 回退到"前一交易日收盘"
                 "close": float(held["avg_cost"]) if held and held.get("avg_cost") else None,
                 "cost": float(held["avg_cost"]) if held and held.get("avg_cost") else None,
             }
-            # 自选也要吃"池内回踩买点"这类买点规则
+            # 用户点名要盯的票，买点类规则（池内回踩买点）对它生效。
+            # 2026-10-05 之前这里是"池子里的每一行自动进"，现在进observation面的只有
+            # 用户打开监控的那些 —— 名单里既然是他自己挑的，买点提示就该照给。
             pool_symbols.add(symbol)
-    # 有股票池就**只盯池子**（池子是精选的热门行业标的，盯得过来、响应快）；
-    # 池子为空时才退回"近期信号"（例如当晚匹配还没跑）。
-    if targets and os.environ.get("INTRADAY_POOL_ONLY", "1") != "0":
-        return _drop_unmonitored(targets, pool_symbols, off)
-    for symbol, info in recent_signal_symbols(db_path, days, allowed).items():
-        targets.setdefault(symbol, {**info, "source": "signal"})
+    # 观察面 = 用户点名要盯的自选标的（+ 持仓，由 `build_alerts` 补进来）。
+    #
+    # 2026-10-05 起**不再有"池子为空就退回近期推送信号"这条兜底**：它会把刚匹配出来的
+    # 几十只票又变成提醒 —— 正是主人说的"乱"。要盯谁，就在「自选标的」里把那一行的
+    # 监控开关打开（写进 `watchlist.enabled`）。
     return _drop_unmonitored(targets, pool_symbols, off)
 
 

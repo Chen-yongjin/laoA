@@ -627,9 +627,13 @@ def test_voice_allowed_filters_by_the_chosen_kinds() -> None:
     assert intraday.voice_allowed("break_ma5", cfg) is False
     assert intraday.voice_allowed("anomaly_limit_up", cfg) is False
 
-    all_cfg = Config()                       # 默认空列表 = 全都念
+    all_cfg = Config()                       # 默认空列表 = 全都念……
     assert all_cfg.voice_kinds == []
-    assert intraday.voice_allowed("pool", all_cfg) is True
+    assert intraday.voice_allowed("stop_loss", all_cfg) is True
+    # ……**除了**那几类默认不念的：选股结果那条只当门铃（2026-10-05 主人：
+    # "选股结果也不要播报，只提醒选股结果已出，请点击查看"）。想让它念就显式勾上。
+    assert intraday.voice_allowed("pool", all_cfg) is False
+    assert intraday.voice_allowed("pool", Config(voice_kinds=["pool"])) is True
 
 
 def test_voice_content_config_is_normalized() -> None:

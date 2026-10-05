@@ -2393,7 +2393,8 @@ if QT_AVAILABLE:
                 self.result_hint.setText(
                     f"本次匹配结果：共 {len(self.result_rows)} 只（行情日 {day}）。"
                     "结果不会自动进股池：要留下哪只就点它那一行的【加入自选】"
-                    "（加进去之后才会被盯盘、并记下加入价算盈亏），也可以【导出结果到桌面】。"
+                    "（加进去之后记下加入价算盈亏；**默认不提醒**，要盯就去「自选标的」"
+                    "打开那一行的监控开关），也可以【导出结果到桌面】。"
                 )
             else:
                 self.result_hint.setText(
@@ -2582,8 +2583,9 @@ if QT_AVAILABLE:
                 self._set_result_add_cell(index, symbol, already=True)
             price_text = f"（加入价 {price:.2f}）" if price else "（没有取到价格，盈亏先不显示）"
             self._set_hint(
-                f"✅ 已把「{name}」加入「自选标的」{price_text}。\n"
-                "它会一直留在池子里被盯盘，盈亏从加入这天算起。"
+                f"✅ 已把「{name}」加入「自选标的」{price_text}，盈亏从加入这天算起。\n"
+                "默认**不提醒**（2026-10-05 起：默认只盯持仓股票）—— 要盯这一只，"
+                "去「自选标的」点它那一行的「监控开关」。"
             )
 
         def show_result_page(self) -> None:

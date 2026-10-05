@@ -1051,7 +1051,7 @@ def test_pool_table_shows_watchlist_rows_not_in_pool(window, seeded, qapp) -> No
     """
     assert window.pool_table.rowCount() == 1
     with storage.connect(seeded.db_path) as conn:
-        storage.upsert_watchlist(conn, "600001", name="低价样本", note="龙头")
+        storage.upsert_watchlist(conn, "600001", name="低价样本", note="龙头", enabled=True)
     window._invalidate_summary()
     window._pool_signature = None
     window._refresh_pool_table()
@@ -1074,7 +1074,8 @@ def test_pool_table_shows_watchlist_rows_not_in_pool(window, seeded, qapp) -> No
 def test_pool_row_hover_shows_note_and_monitor_state(window, seeded, qapp) -> None:
     """悬浮看备注 + 监控状态（表里没有「状态」列，这两件事只能靠 tooltip 说清）。"""
     with storage.connect(seeded.db_path) as conn:
-        storage.upsert_watchlist(conn, "600001", name="低价样本", note="龙头")
+        # 打开监控（2026-10-05 起加自选默认不提醒；这里要验的是"开着"那一档）
+        storage.upsert_watchlist(conn, "600001", name="低价样本", note="龙头", enabled=True)
     window._pool_signature = None
     window._refresh_pool_table()
     qapp.processEvents()
@@ -1135,11 +1136,11 @@ def test_pool_row_click_does_not_open_for_invalid_code(window, qapp, monkeypatch
 def test_pool_row_menu_actions(window, seeded, qapp, monkeypatch) -> None:
     """右键菜单：【删除】/【关闭监控】↔【打开监控】/【打开雪球】。
 
-    策略标的（不是自选）没有"停用监控"这一说 → 那一项**灰掉**并给理由，
-    而不是给一个点了没反应的菜单项。
+    2026-10-05（"默认只监控持仓股票"）：匹配选出的票默认**没有**在盯，所以那一项
+    是可用的【打开监控】（点了就收下它、开始盯），不再是"灰掉的【关闭监控】"。
     """
     with storage.connect(seeded.db_path) as conn:
-        storage.upsert_watchlist(conn, "600001", name="低价样本", note="")
+        storage.upsert_watchlist(conn, "600001", name="低价样本", note="", enabled=True)
     window._pool_signature = None
     window._refresh_pool_table()
     qapp.processEvents()
@@ -1148,9 +1149,8 @@ def test_pool_row_menu_actions(window, seeded, qapp, monkeypatch) -> None:
     # 策略标的（600002）：删除可用、关闭监控灰掉、打开雪球可用
     menu = window._row_menu(window.pool_table, rows.index("600002"), "pool")
     actions = {a.text(): a for a in menu.actions() if a.text()}
-    assert list(actions)[:2] == ["删除", "关闭监控"]
-    assert actions["关闭监控"].isEnabled() is False
-    assert "策略" in actions["关闭监控"].toolTip()
+    assert list(actions)[:2] == ["删除", "打开监控"]
+    assert actions["打开监控"].isEnabled() is True      # 点了 = 收下它并开始盯
     assert actions["打开雪球"].isEnabled() is True
 
     # 自选（600001）：可以关闭监控；点了之后它变成"打开监控"
@@ -1239,7 +1239,7 @@ def test_pool_table_has_exact_headers_and_monitor_column(window, seeded, qapp) -
     qapp.processEvents()
 
     item = window.pool_table.item(0, ui_app.WATCH_MONITOR_COLUMN)
-    assert item.text() == ui_app.MONITOR_ON_TEXT          # 策略标的默认在监控中
+    assert item.text() == ui_app.MONITOR_OFF_TEXT         # 匹配选出的票默认**不盯**
     assert "放量突破" in item.toolTip()                    # 短标签（原「提醒」列的文字）
     assert "现价 12.85 突破 20 日高点 12.60" in item.toolTip()
     assert today in item.toolTip()
@@ -2690,7 +2690,11 @@ def test_watchlist_panel_starts_empty(window) -> None:
 
 
 def test_watch_panel_add_autofills_name_and_notes(window, seeded, qapp) -> None:
-    """加自选：名称从本地库自动补，备注写进去，表格立刻出现（来源标「自选」）。"""
+    """加自选：名称从本地库自动补、备注写进去、表格立刻出现。
+
+    2026-10-05 起**加进来默认不提醒**（主人："默认只监控持仓股票"），所以这一行的
+    监控开关是 `关闭`、来源列带「（已停用）」尾巴；要盯它得点开那一格。
+    """
     window.watch_symbol.setText("600001")
     window.watch_note.setText("龙头")
     window.on_watch_add()
@@ -2700,14 +2704,16 @@ def test_watch_panel_add_autofills_name_and_notes(window, seeded, qapp) -> None:
         rows = storage.load_watchlist(conn)
     assert rows[0]["symbol"] == "600001"
     assert rows[0]["name"] == "低价样本"        # 自动补的名字
+    assert rows[0]["enabled"] == 0                 # 默认不提醒（2026-10-05）
     assert rows[0]["note"] == "龙头"
     row = _symbols_of(window.pool_table).index("600001")
     assert window.pool_table.item(row, 0).text() == "低价样本(600001)"
     assert "备注：龙头" in window.pool_table.item(row, 0).toolTip()
-    assert window.pool_table.item(row, ui_app.WATCH_HEADERS.index("来源")).text() == "自选"
-    # 加进来的自选默认在监控中 → 「监控开关」列是 `开启`
+    assert window.pool_table.item(row, ui_app.WATCH_HEADERS.index("来源")).text() \
+        == "自选（已停用）"
+    # 默认**不提醒** → 「监控开关」列是 `关闭`
     assert window.pool_table.item(row, ui_app.WATCH_MONITOR_COLUMN).text() \
-        == ui_app.MONITOR_ON_TEXT
+        == ui_app.MONITOR_OFF_TEXT
     assert "已加自选" not in window.status_label.fullText()     # 成功不弹提示
 
 
@@ -2716,7 +2722,9 @@ def test_watch_panel_add_unknown_symbol_warns_but_adds(window, seeded, qapp) -> 
     window.on_watch_add()
     qapp.processEvents()
     with storage.connect(seeded.db_path) as conn:
-        assert storage.watchlist_symbols(conn) == ["601999"]
+        rows = storage.load_watchlist(conn, enabled_only=False)
+    assert [r["symbol"] for r in rows] == ["601999"]
+    assert rows[0]["enabled"] == 0          # 默认不提醒（2026-10-05）
     assert "本地库没有它的名称" in window.status_label.fullText()
 
 
@@ -2777,7 +2785,7 @@ def test_pool_table_shows_watchlist_source_and_note(window, seeded, qapp) -> Non
 
     # 纯自选（不在策略候选里）→ 来源「自选」，而且**不用等建池**就能进这张表
     with storage.connect(seeded.db_path) as conn:
-        storage.upsert_watchlist(conn, "600100", name="冷门样本", note="消息面")
+        storage.upsert_watchlist(conn, "600100", name="冷门样本", note="消息面", enabled=True)
     window._pool_signature = None
     window._refresh_pool_table()
     qapp.processEvents()
@@ -2813,7 +2821,8 @@ def test_pool_table_signature_includes_note(window, seeded) -> None:
 def test_pool_count_label_and_details_show_watchlist_count(window, seeded, qapp) -> None:
     """自选只数：**表头那一行小字**负责（`共 N 只（策略 M · 自选 K）`），详情里也有。"""
     with storage.connect(seeded.db_path) as conn:
-        storage.upsert_watchlist(conn, "600001", name="低价样本")
+        # 打开监控：概况里的"含自选 N 只"数的是**盯着**的那些（2026-10-05 起）
+        storage.upsert_watchlist(conn, "600001", name="低价样本", enabled=True)
     window._pool_signature = None
     window._tick()
     # 数据概况在界面层有 30 秒 TTL 缓存（下载时不再每 5 秒全表 COUNT 一遍）：
@@ -4828,27 +4837,30 @@ def test_watch_table_shows_added_date_and_pnl_from_the_added_price(
 def test_monitor_column_click_toggles_watchlist_and_explains_for_strategy_rows(
     window, seeded, qapp
 ) -> None:
-    """自选行点一下就能开关监控；**策略/公式选中的票不是自选**，点了给一句指路的话
-    （不静默失败 —— 与右键菜单里那一项灰掉 + tooltip 说明是同一个判据）。"""
+    """自选行点一下就能开关监控；**匹配选出来的票默认不盯**，点了就是"收下它、开始盯"。
+
+    2026-10-05 主人："默认只监控持仓股票。" —— 所以策略行的默认文字改成 `关闭`，
+    点一下会把它写进自选表并打开监控（以前这里给的是"不能在这里单独关掉监控"，
+    因为那时候池子里的每一行都自动盯着）。"""
     from laoa_trader.data import storage as st
 
     column = ui_app.WATCH_MONITOR_COLUMN
     table = window.pool_table
     with st.connect(seeded.db_path) as conn:
-        st.upsert_watchlist(conn, "600001", name="低价样本", note="")
+        st.upsert_watchlist(conn, "600001", name="低价样本", note="", enabled=True)
     window._pool_signature = None
     window._refresh_pool_table()
     qapp.processEvents()
     rows = {_symbols_of(table)[i]: i for i in range(table.rowCount())}
     assert set(rows) == {"600002", "600001"}
 
-    # 策略标的（600002）：不能在这里关 → 文字仍是 `开启`，点一下给指路的话
-    assert table.item(rows["600002"], column).text() == ui_app.MONITOR_ON_TEXT
+    # 匹配选出的票（600002）：默认 `关闭`；点一下就收进来盯着
+    assert table.item(rows["600002"], column).text() == ui_app.MONITOR_OFF_TEXT
     window._on_table_cell_clicked(table, rows["600002"], column)
     qapp.processEvents()
+    with st.connect(seeded.db_path) as conn:
+        assert st.watchlist_map(conn)["600002"]["enabled"] == 1
     assert table.item(rows["600002"], column).text() == ui_app.MONITOR_ON_TEXT
-    assert "不能在这里单独关掉监控" in window.status_label.fullText()
-    assert "策略" in window.status_label.fullText()
 
     # 自选（600001）：点一下 → `关闭`，写回 watchlist.enabled = 0
     window._on_table_cell_clicked(table, rows["600001"], column)
