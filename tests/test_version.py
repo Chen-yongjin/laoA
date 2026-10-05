@@ -124,3 +124,26 @@ def test_executable_is_named_after_the_product() -> None:
     # 压缩包与 artifact 名**没跟着变**（改了会让下载链接失效）
     assert f"{ARTIFACT_NAME}.zip" in workflow
     assert ui_app.APP_NAME == NEW_NAME
+
+
+def test_package_names_are_renamed_everywhere() -> None:
+    """改名（2026-09-30）最容易漏的地方：**压缩包名、站点下载文件名、包内容自检路径**。
+
+    这三处分别落在 CI 工作流、站点脚本与清单、站点首页里。任何一处没跟上，用户下到的
+    就是一个名字对不上的包 —— 打包本身不会报错，只能靠人发现，所以在这里钉死。
+    """
+    workflow = (ROOT / ".github" / "workflows" / "build-windows.yml").read_text(encoding="utf-8")
+    script = (ROOT / "网站" / "script.js").read_text(encoding="utf-8")
+    index = (ROOT / "网站" / "index.html").read_text(encoding="utf-8")
+    manifest = (ROOT / "网站" / "downloads" / "latest.json").read_text(encoding="utf-8")
+
+    version = laoa_trader.__version__
+    assert f"Copy-Item '{ARTIFACT_NAME}.zip' \"{ARTIFACT_NAME}-$ver.zip\"" in workflow
+    assert f"{ARTIFACT_NAME}/财神助手\\.exe" in workflow          # 包内容自检认的是新路径
+    assert f"downloads/{ARTIFACT_NAME}.zip" in script             # 站点的兜底链接
+    assert f"downloads/{ARTIFACT_NAME}.zip" in index              # 首页两个下载按钮
+    assert f"{ARTIFACT_NAME}-{version}.zip" in manifest           # 站点指向带版本号的那个包
+    # 旧名字一个字都不许剩
+    for text, label in ((workflow, "CI"), (script, "script.js"), (index, "index.html"),
+                        (manifest, "latest.json")):
+        assert "LaoniuTrader" not in text, f"{label} 里还留着旧包名"
