@@ -551,3 +551,101 @@ def test_a_failed_enumeration_is_not_retried_every_time(monkeypatch) -> None:
         assert voice.installed_voices() == []
 
     assert calls["n"] == 1, "枚举失败没有被缓存（每次问都重新起进程）"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 语音播报内容：念哪几样 / 念哪些类型（2026-10-05 主人："语音播报有点乱，
+# 在设置里增加选项，可以自由选择要提醒的内容"）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_compose_item_defaults_skip_the_formula_sentence() -> None:
+    """默认只念"谁 + 代码 + 类型 + 现价"，**不念「说明」里那句带公式的原文**。
+
+    那句原文长这样：`现价 12.34 ≤ 参考价 20.00 × 0.95`。念出来既乱又记不住，
+    而"要不要念"是主人在设置里能选的（这是他这次要的开关）。
+    """
+    text = voice.compose_item(name="贵州茅台", code="600519", kind_label="触及止损",
+                              price="1234.56", detail="现价 1234.56 ≤ 参考价 1300.00 × 0.95",
+                              fields=None)
+    assert text == "贵州茅台，600519，触及止损，现价 1234.56"
+    assert "参考价" not in text and "×" not in text
+    # 真正念出来时：代码逐位、价格整读（规则在 `prepare` / `digits_for_speech`，见那边的注释）
+    spoken = voice.prepare(text)
+    assert "六零零五一九" in spoken and "一千二百三十四点五六" not in spoken
+
+
+def test_compose_item_honours_the_chosen_fields() -> None:
+    """勾哪几样就念哪几样：加回「说明」与「条数」、去掉「代码」都按勾选走。"""
+    detail = "现价 12.34 ≤ 参考价 20.00 × 0.95"
+    full = voice.compose_item(name="半导体甲", code="600002", kind_label="触及止损",
+                              price="12.34", detail=detail, extra=2,
+                              fields=["name", "code", "kind", "price", "detail", "extra"])
+    assert "参考价" in full and full.endswith("还有 2 条")
+    assert "600002" in full
+
+    without_code = voice.compose_item(name="半导体甲", code="600002", kind_label="触及止损",
+                                      price="12.34", detail=detail,
+                                      fields=["name", "kind", "price"])
+    assert "六零零" not in without_code and "半导体甲" in without_code
+
+
+def test_compose_item_ignores_unknown_fields_and_never_returns_empty() -> None:
+    """认不出来的项直接忽略；一个都不剩时也不能念出一片空白。"""
+    # 「kind」没勾上 → 类型那一段不念；认不出来的 "胡说" 被丢掉，也不会整句变空
+    assert voice.compose_item(name="甲", kind_label="触及止损",
+                              fields=["name", "胡说"]) == "甲"
+    # 空列表 → 回默认那几项（这里有名字，所以至少念得出名字）
+    assert voice.compose_item(name="甲", fields=[]) == "甲"
+
+
+def test_voice_kind_groups_cover_every_kind_the_program_emits() -> None:
+    """类型族必须覆盖程序真会写进库的每一种 kind（漏一个 = 那一类永远念不出来）。"""
+    from laoa_trader import intraday
+
+    families = {code for code, _label, _members in intraday.VOICE_KIND_GROUPS}
+    assert families == {"stop_loss", "take_profit", "break_ma5", "limit_up_open",
+                        "break_high", "pullback_ma5_buy", "auction", "t", "anomaly", "pool"}
+    # 竞价与做T 各两个 kind，异动按标签生成 —— 都要能归到族里
+    assert intraday.voice_kind_group("auction_strong") == "auction"
+    assert intraday.voice_kind_group("t_low") == "t"
+    assert intraday.voice_kind_group("anomaly_rapid_rally") == "anomaly"
+    assert intraday.voice_kind_group("pool") == "pool"
+    # 库里真出现过的 kind 全都有族（直接用 KIND_LABELS 当清单）
+    for kind in intraday.KIND_LABELS:
+        assert intraday.voice_kind_group(kind) in families, kind
+
+
+def test_voice_allowed_filters_by_the_chosen_kinds() -> None:
+    """只勾了止损/止盈时，别的类型不念；一个都不勾 = 全都念（老配置的默认行为）。"""
+    from laoa_trader import intraday
+    from laoa_trader.config import Config
+
+    cfg = Config(voice_kinds=["stop_loss", "take_profit"])
+    assert intraday.voice_allowed("stop_loss", cfg) is True
+    assert intraday.voice_allowed("take_profit", cfg) is True
+    assert intraday.voice_allowed("break_ma5", cfg) is False
+    assert intraday.voice_allowed("anomaly_limit_up", cfg) is False
+
+    all_cfg = Config()                       # 默认空列表 = 全都念
+    assert all_cfg.voice_kinds == []
+    assert intraday.voice_allowed("pool", all_cfg) is True
+
+
+def test_voice_content_config_is_normalized() -> None:
+    """三项都按"认不出来就丢、绝不报错"处理（配置是用户手写过的）。"""
+    from laoa_trader.config import Config
+
+    cfg = Config(voice_kinds=["STOP_LOSS", "胡说", "auction", "t"],
+                 voice_fields=["extra", "PRICE", "name", "胡说"],
+                 voice_multi="ALL")
+    # 类型族按界面顺序归一（不是按用户写的顺序）
+    assert cfg.voice_kinds == ["stop_loss", "auction", "t"]
+    # 字段按**念的顺序**归一（名称 → 代码 → 类型 → 现价 → 说明 → 条数）
+    assert cfg.voice_fields == ["name", "price", "extra"]
+    assert cfg.voice_multi == "all"
+
+    # 字符串写法（手改 toml / 环境变量）也认；全写错时回默认
+    assert Config(voice_kinds="stop_loss, t", voice_fields="name,code").voice_fields == ["name", "code"]
+    assert Config(voice_fields=["胡说"]).voice_fields == list(voice.DEFAULT_FIELDS)
+    assert Config(voice_multi="胡说").voice_multi == "newest"

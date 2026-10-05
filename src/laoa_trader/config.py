@@ -605,6 +605,26 @@ class Config:
     #: 老配置里存的是某个音色的完整名字 —— 那种值现在**认不出来，一律当自动**
     #: （界面已经不再列具体音色了；见 `_normalize_voice_name`）。
     notify_voice_name: str = ""
+    # ── 语音播报内容（2026-10-05 主人："现在的语音播报有点乱，在设置里增加选项，
+    #    可以自由选择要提醒的内容"）──
+    #
+    # 三件事分开管，互不牵连（消息列表与两张表的「提醒」列**始终是全的**，
+    # 这里只筛"念出来的那一句"和桌宠气泡上那句话）：
+    #: ① **念哪些类型**：存"类型族"代号，取值见 `intraday.VOICE_KIND_GROUPS`
+    #:    （`stop_loss` / `take_profit` / `break_ma5` / `limit_up_open` / `break_high` /
+    #:    `pullback_ma5_buy` / `auction` / `t` / `anomaly` / `pool`）。
+    #:    **空列表 = 全都念**（与老配置一致：升级后不会突然少念什么）。
+    voice_kinds: list[str] = field(default_factory=list)
+    #: ② **一句里念哪几样**：顺序固定（名称 → 代码 → 类型 → 现价 → 说明 → 剩余条数），
+    #:    取值见 `notify.voice.VOICE_FIELDS`。默认**不念「说明」** —— 那一句是
+    #:    `现价 12.34 ≤ 参考价 20.00 × 0.95` 这种带公式的原文，念出来最乱、信息量最低；
+    #:    也不念"还有 N 条"（连念几遍数字最烦人）。
+    voice_fields: list[str] = field(
+        default_factory=lambda: ["name", "code", "kind", "price"]
+    )
+    #: ③ 一次来多条时：`"newest"` = 只念最新一条（多出来的用"还有 N 条"带过，默认）；
+    #:    `"all"` = 每条都念（排队念完，声音不重叠）。
+    voice_multi: str = "newest"
     # ⚠️ `notify_voice_digits`（"播报数字逐位"开关）**已于 2026-09-21 删除**：
     # 主人说"价格逐位不需要有选项，直接按我说的做就行了" —— 读法固定成
     # 代码逐位（600519 → 六零零五一九）、价格整读、数量整读，不再给用户选。
@@ -847,7 +867,43 @@ class Config:
         self.anomaly_alert_tags = [
             str(tag).strip().upper() for tag in (tags or []) if str(tag).strip()
         ]
+        self._normalize_voice_content()
         self.market_overview_ttl = _ttl_seconds(self.market_overview_ttl)
+
+    def _normalize_voice_content(self) -> None:
+        """收紧"语音播报内容"三项（2026-10-05 新增）。
+
+        规矩与别处一致：**认不出来的值直接丢掉，绝不报错**（配置文件是用户手写过的，
+        写错一个词不该让程序起不来）。三件事各自兜底：
+
+        * `voice_kinds`：只留 `intraday.VOICE_KIND_GROUPS` 里有的族；顺手支持
+          `"a,b"` 这种字符串写法（手改 toml / 环境变量都可能这么写）。
+          **空列表 = 全念**，所以这里"全丢掉"和"没配"是一回事，不会念不出声。
+        * `voice_fields`：按 `voice.VOICE_FIELDS` 的**固定顺序**重排、去重、丢掉不认识的。
+          一个都不剩（用户全取消了）时回退到默认那四项 —— 否则语音会念出一片空白，
+          而他只会以为"语音坏了"。
+        * `voice_multi`：只认 `newest` / `all`，其余回默认。
+        """
+        from laoa_trader import intraday
+        from laoa_trader.notify import voice as voice_mod
+
+        kinds = self.voice_kinds
+        if isinstance(kinds, str):
+            kinds = [x for x in kinds.replace("，", ",").split(",")]
+        wanted = {str(k).strip().lower() for k in (kinds or []) if str(k).strip()}
+        self.voice_kinds = [
+            code for code, _label, _members in intraday.VOICE_KIND_GROUPS if code in wanted
+        ]
+
+        fields = self.voice_fields
+        if isinstance(fields, str):
+            fields = [x for x in fields.replace("，", ",").split(",")]
+        chosen = {str(f).strip().lower() for f in (fields or []) if str(f).strip()}
+        ordered = [code for code, _label in voice_mod.VOICE_FIELDS if code in chosen]
+        self.voice_fields = ordered or list(voice_mod.DEFAULT_FIELDS)
+
+        multi = str(self.voice_multi or "").strip().lower()
+        self.voice_multi = multi if multi in ("newest", "all") else "newest"
 
     # -- 派生属性 --
 

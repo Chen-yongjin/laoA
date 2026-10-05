@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 
@@ -142,7 +143,15 @@ def test_package_names_are_renamed_everywhere() -> None:
     assert f"{ARTIFACT_NAME}/财神助手\\.exe" in workflow          # 包内容自检认的是新路径
     assert f"downloads/{ARTIFACT_NAME}.zip" in script             # 站点的兜底链接
     assert f"downloads/{ARTIFACT_NAME}.zip" in index              # 首页两个下载按钮
-    assert f"{ARTIFACT_NAME}-{version}.zip" in manifest           # 站点指向带版本号的那个包
+    # 站点清单指向的必须是**downloads/ 里真实存在的那个包**（不一定是最新版本号）：
+    # 新版本要等 CI 编完、包放进来之后才改这两行 —— 抢先把版本号改成还没编出来的那个，
+    # 用户点下载只会看到「下载准备中」。所以这里钉的是「名字对得上、且文件确实在」。
+    payload = json.loads(manifest)
+    assert payload["file"].startswith(f"{ARTIFACT_NAME}-") and payload["file"].endswith(".zip")
+    assert (ROOT / "网站" / "downloads" / payload["file"]).is_file(), (
+        f"站点清单指向的包不存在：{payload['file']}（换版本时要把包一起放进去）"
+    )
+    assert payload["version"] in payload["file"]
     # 旧名字一个字都不许剩
     for text, label in ((workflow, "CI"), (script, "script.js"), (index, "index.html"),
                         (manifest, "latest.json")):

@@ -417,6 +417,7 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
         QDoubleSpinBox,
         QFrame,
         QGridLayout,
+        QGroupBox,
         QHBoxLayout,
         QHeaderView,
         QLabel,
@@ -3287,6 +3288,8 @@ if QT_AVAILABLE:
             voice_row.addWidget(self.btn_voice_try)
             body.addLayout(voice_row)
 
+            self._build_voice_content_rows(body)
+
             self.voice_hint = QLabel("")
             self.voice_hint.setObjectName("statusTag")
             self.voice_hint.setWordWrap(True)
@@ -5606,37 +5609,88 @@ if QT_AVAILABLE:
                       max(0, area.bottom() - pet.height() - 24))
 
         def _announce(self, items: list[dict]) -> None:
-            """桌宠冒气泡 + 中文朗读（消息内容取最新的那一条）。
+            """桌宠冒气泡 + 中文朗读（念什么、念哪几样、多条怎么办都由设置页那三组勾选决定）。
 
-            一次来多条时**只念最新的一条**，再把"还有几条"带上：连着念五条会把正在做事的人
-            烦到关掉语音（"大声喊"要喊得有用，不是喊得久）。气泡同理，只显示最新一条。
+            2026-10-05 主人："现在的语音播报有点乱，在设置里增加选项，可以自由选择要提醒的内容。"
+            所以这里多了两道筛子，**都只管"念出来"**（消息列表与两张表的「提醒」列不受影响）：
+
+            * `intraday.voice_allowed()`：这一**类型**要不要念（设置页「念哪些类型」）；
+            * `Config.voice_fields`：这一句里**念哪几样**（默认不念「说明」那句带公式的原文）。
+
+            多条同时到：默认只念最新一条 + "还有 N 条"；设置里可以改成每条都念
+            （`voice.speak` 是排队朗读，不会两句叠在一起）。气泡始终只显示最新那条 ——
+            气泡在屏幕上停留，念的话一遍就过去了，两件事的最优解不一样。
             """
             if not items:
                 return
-            newest = items[0]
-            text = self._announce_text(newest, extra=len(items) - 1)
+            allowed = [item for item in items
+                       if intraday.voice_allowed(str(item.get("kind") or ""), self.cfg)]
+            if not allowed:
+                return          # 这一类用户明确说了不想被念：不念、气泡也不冒
+
+            multi = str(getattr(self.cfg, "voice_multi", "newest") or "newest")
+            newest = allowed[0]
+            extra = len(allowed) - 1
             pet = self._ensure_pet()
             if pet is not None:
                 try:
-                    pet.notify(text)
+                    pet.notify(self._announce_text(newest, extra=extra))
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(f"桌宠冒泡失败：{exc}")
-            self._speak(text)
+            if multi == "all" and len(allowed) > 1:
+                # 每条都念：最新那条去掉"还有 N 条"的尾巴（马上就念到下一条了），
+                # 其余原样念 —— 顺序按消息列表的倒序（最新的先念）。
+                for item in allowed:
+                    self._speak(self._announce_text(item))
+                return
+            self._speak(self._announce_text(newest, extra=extra))
 
-        @staticmethod
-        def _announce_text(item: dict, *, extra: int = 0) -> str:
-            """要念/要显示的那句话：`名称(代码)，类型，说明 现价 x`（+ 还有 N 条）。"""
+        def _announce_text(self, item: dict, *, extra: int = 0) -> str:
+            """要念/要显示的那句话（按设置页勾的那几样拼；`extra` = 剩余条数）。
+
+            名称与代码**分开传**：代码要逐位念（六零零五一九），名称里的数字不能跟着逐位念。
+            """
             from laoa_trader.notify import voice as voice_mod
 
-            text = voice_mod.compose(
-                str(item.get("target") or ""),
-                str(item.get("kind_label") or ""),
-                str(item.get("detail") or ""),
-                item.get("price_text") or None,
+            return voice_mod.compose_item(
+                name=self._announce_name(item),
+                code=self._announce_code(item),
+                kind_label=str(item.get("kind_label") or ""),
+                price=item.get("price_text") or None,
+                detail=str(item.get("detail") or ""),
+                extra=extra,
+                fields=getattr(self.cfg, "voice_fields", None) or None,
             )
-            if extra > 0:
-                text = f"{text}，还有 {extra} 条"
-            return text
+
+        @staticmethod
+        def _announce_name(item: dict) -> str:
+            """念名字用的那一串 —— **绝不能把代码念两遍**。
+
+            消息里那一位叫「标的」：`名称(代码)`，退化时只有代码（"600002"）或者
+            `匹配结果`（匹配完成那条不是某只票）。代码由 `_announce_code()` 单独念
+            （要逐位念），所以这里只取**名称部分**：目标就是裸代码/占位词时留空。
+            """
+            name = str(item.get("name") or "").strip()
+            if name:
+                return name
+            target = str(item.get("target") or "").strip()
+            if target.endswith(")") and "(" in target:
+                head = target[: target.rindex("(")].strip()
+                if head and head != target:
+                    return head
+            if target.isdigit() or target == "匹配结果":
+                return ""
+            return target
+
+        @staticmethod
+        def _announce_code(item: dict) -> str:
+            """念代码时用的那一串：**只认 6 位数字代码**。
+
+            为什么要把关：匹配完成那条消息的 `symbol` 是 `pool-<指纹>`（它不是一只票），
+            念出来会变成一串谁也听不懂的字符；代码是 6 位数字以外的东西一律不念。
+            """
+            symbol = str(item.get("symbol") or "").strip()
+            return symbol if (len(symbol) == 6 and symbol.isdigit()) else ""
 
         def _speak(self, text: str) -> bool:
             """朗读（排队、不阻塞）；关掉或没有中文音色时返回 False，什么都不发生。"""
@@ -5861,10 +5915,13 @@ if QT_AVAILABLE:
             为什么用面板上的值而不是已保存的配置：这一行就是给"调参数"用的 ——
             调了听一下、不满意再调，不该逼用户先保存再听（那样每次试都要写一次盘）。
             念的那一步在后台线程里（起进程要几百毫秒），界面不会被按住。
+
+            样本文本**照面板上勾的"念哪几样"现场拼**（2026-10-05）：用户在"念哪些内容"
+            里取消了「说明」，试听却照旧念那一长串带公式的话，他会以为设置没生效。
             """
             from laoa_trader.notify import voice as voice_mod
 
-            text = voice_mod.test_text()
+            text = self._voice_sample_text()
             gender = str(self.voice_name_box.currentData() or "")
             # 面板上的"女声/男声"先在这里解析成具体音色名（没解析出来就交给自动挑选）
             voice_name = voice_mod.resolve_gender_voice(gender) if gender else None
@@ -5919,6 +5976,113 @@ if QT_AVAILABLE:
                         "想加：Windows 设置 → 时间和语言 → 语音 → 添加语音（中文）。",
                         Qt.ItemDataRole.ToolTipRole,
                     )
+
+        def _build_voice_content_rows(self, body: Any) -> None:
+            """「语音播报内容」：念哪些类型 + 一句里念哪几样 + 一次来多条怎么念。
+
+            2026-10-05 主人："现在的语音播报有点乱，在设置里增加选项，可以自由选择要提醒的内容。"
+            三组控件对应 `Config` 的三个键（`voice_kinds` / `voice_fields` / `voice_multi`）：
+
+            * **念哪些类型**：勾的是"类型族"（见 `intraday.VOICE_KIND_GROUPS`），
+              竞价/做T/异动各自合成一项，用户勾的是他脑子里的分类，不是程序的 kind 代号；
+            * **一句里念哪几样**：勾的是"这一样念不念"，**顺序不给调**（先说谁、再说发生了
+              什么、最后才是数字，这条顺序是听感的地基）；默认不念「说明」—— 那是
+              `现价 12.34 ≤ 参考价 20.00 × 0.95` 这种带公式的原文，念出来最乱；
+            * **一次来多条**：默认只念最新一条（多出来的用"还有 N 条"带过）。
+
+            三组都只管"念出来的那几句"（含桌宠气泡），**消息列表与两张表的「提醒」列不受影响** ——
+            少念几句不该等于少收几条提醒。
+            """
+            from laoa_trader.notify import voice as voice_mod
+
+            title = QLabel("语音播报内容（不影响消息列表，只决定「念什么」）")
+            title.setObjectName("groupTitle")
+            body.addWidget(title)
+
+            chosen_kinds = {str(k).strip().lower() for k in (self.cfg.voice_kinds or [])}
+            self.voice_kind_boxes: dict[str, Any] = {}
+            kind_box = QGroupBox("念哪些类型（一个都不勾 = 全都念）")
+            kind_grid = QGridLayout(kind_box)
+            for index, (code, label, _members) in enumerate(intraday.VOICE_KIND_GROUPS):
+                box = QCheckBox(label)
+                box.setChecked(code in chosen_kinds)
+                box.setToolTip(
+                    f"勾上：这类提醒会**念出来**（写回 config.toml 的 voice_kinds）。\n"
+                    f"不勾只是不念，提醒照样进「消息」列表、照样闪图标。\n"
+                    f"（程序内部代号：{code}）"
+                )
+                self.voice_kind_boxes[code] = box
+                kind_grid.addWidget(box, index // 3, index % 3)
+            body.addWidget(kind_box)
+
+            chosen_fields = {str(f).strip().lower() for f in (self.cfg.voice_fields or [])}
+            self.voice_field_boxes: dict[str, Any] = {}
+            field_box = QGroupBox("一句里念哪几样（顺序固定：名称 → 代码 → 类型 → 现价 → 说明 → 条数）")
+            field_grid = QGridLayout(field_box)
+            for index, (code, label) in enumerate(voice_mod.VOICE_FIELDS):
+                box = QCheckBox(label)
+                box.setChecked(code in chosen_fields)
+                box.setToolTip(
+                    "勾上：这一样会出现在念的那句话里（写回 config.toml 的 voice_fields）。\n"
+                    "一个都不勾 = 回到默认那四项，不会真的念空。"
+                )
+                self.voice_field_boxes[code] = box
+                field_grid.addWidget(box, index // 3, index % 3)
+            body.addWidget(field_box)
+
+            multi_row = QHBoxLayout()
+            multi_row.addWidget(QLabel("一次来多条时："))
+            self.voice_multi_box = QComboBox()
+            self.voice_multi_box.addItem("只念最新一条（默认，多出来的用「还有 N 条」带过）", "newest")
+            self.voice_multi_box.addItem("每条都念（排队念完，声音不重叠）", "all")
+            current = str(getattr(self.cfg, "voice_multi", "newest") or "newest")
+            self.voice_multi_box.setCurrentIndex(1 if current == "all" else 0)
+            self.voice_multi_box.setToolTip(
+                "写回 config.toml 的 voice_multi。\n"
+                "连着来五条时，「每条都念」会把正在做事的人烦到关掉语音 —— 默认只念最新那条。"
+            )
+            multi_row.addWidget(self.voice_multi_box, 1)
+            body.addLayout(multi_row)
+
+            self.voice_sample_hint = QLabel("")
+            self.voice_sample_hint.setObjectName("statusTag")
+            self.voice_sample_hint.setWordWrap(True)
+            body.addWidget(self.voice_sample_hint)
+            # 勾一下就把"会念成什么"重写一遍：比任何说明都直观（lambda 是为了吞掉
+            # `toggled` 带过来的那个 bool —— 直接连会 TypeError）
+            for box in (*self.voice_kind_boxes.values(), *self.voice_field_boxes.values()):
+                box.toggled.connect(lambda *_: self._refresh_voice_sample_hint())
+            self._refresh_voice_sample_hint()
+
+        def _voice_panel_fields(self) -> list[str]:
+            """面板上勾的"念哪几样"（顺序按 `VOICE_FIELDS`；一个都没勾 = 默认那四项）。"""
+            from laoa_trader.notify import voice as voice_mod
+
+            picked = [code for code, _label in voice_mod.VOICE_FIELDS
+                      if self.voice_field_boxes.get(code) is not None
+                      and self.voice_field_boxes[code].isChecked()]
+            return picked or list(voice_mod.DEFAULT_FIELDS)
+
+        def _voice_sample_text(self) -> str:
+            """【试听】/【试喊一条】用的样本句：按面板上勾的"念哪几样"现场拼。
+
+            单独一个方法是因为三处都要它（试听按钮、桌宠右键【试喊一条】、面板上那句
+            "按现在的勾选，一句话念成：…"），三处各拼一遍迟早会出现"念的和写的不是一个样"。
+            """
+            from laoa_trader.notify import voice as voice_mod
+
+            return voice_mod.compose_item(
+                name="贵州茅台", code="600519", kind_label="触及止损",
+                price="1234.56", detail="现价 1234.56 ≤ 参考价 1300.00 × 0.95",
+                fields=self._voice_panel_fields(),
+            )
+
+        def _refresh_voice_sample_hint(self) -> None:
+            """把"照现在这些勾，会念成什么"写在面板上（比任何说明都直观）。"""
+            sample = self._voice_sample_text()
+            kinds = sum(1 for box in self.voice_kind_boxes.values() if box.isChecked())
+            tail = "全都念" if not kinds else f"{kinds} 类会念"
+            self.voice_sample_hint.setText(f"按现在的勾选，一句话念成：{sample}（{tail}）")
 
         def _refresh_voice_hint(self) -> None:
             """把"这台机器到底能不能念"写清楚（用户不用去猜为什么没声音）。"""
@@ -6830,6 +6994,12 @@ if QT_AVAILABLE:
                 "notify_voice_volume": int(self.voice_volume_box.value()) / 100.0,
                 # 空字符串 = 自动挑中文（第一项）；"female" / "male" = 按性别挑
                 "notify_voice_name": str(self.voice_name_box.currentData() or ""),
+                # 语音播报内容（2026-10-05 主人："语音播报有点乱，可以自由选择要提醒的内容"）：
+                # 念哪些类型 / 一句里念哪几样 / 一次来多条怎么念
+                "voice_kinds": [code for code, box in self.voice_kind_boxes.items()
+                                if box.isChecked()],
+                "voice_fields": self._voice_panel_fields(),
+                "voice_multi": str(self.voice_multi_box.currentData() or "newest"),
                 "notify_flash_seconds": int(self.flash_seconds_box.value()),
                 "notify_popup_seconds": int(self.popup_seconds_box.value()),
                 "notify_popup_max_items": int(self.popup_items_box.value()),

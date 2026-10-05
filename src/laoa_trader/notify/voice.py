@@ -34,7 +34,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from laoa_trader.log import get_logger
 
@@ -402,6 +402,9 @@ def compose(target: str, kind_label: str, detail: str = "", price: Any = None) -
 
     与消息列表里那一行**同源**（都来自同一条提醒行），但顺序按"听"的习惯排：
     先说谁、再说发生了什么、最后才是数字 —— 听的人前两个字就知道要不要抬头看屏幕。
+
+    这是**老接口**（名称与代码已经拼成一个 `target`，每一项都念）。设置页能勾选
+    "念哪几样"之后，界面走的是 `compose_item()`；这条保留给"全字段"的调用方与老测试。
     """
     parts = [sanitize(target), sanitize(kind_label)]
     if price not in (None, ""):
@@ -410,6 +413,63 @@ def compose(target: str, kind_label: str, detail: str = "", price: Any = None) -
     if body:
         parts.append(body)
     return sanitize("，".join(p for p in parts if p))
+
+
+#: 一句话里可以念的几样，**顺序就是念的顺序**（设置页那一排勾选框照这个来）：
+#: 名称 → 代码 → 类型 → 现价 → 说明 → 剩余条数。
+#:
+#: 顺序**不给用户调**：听起来顺不顺全靠这一条（先说谁、再说发生了什么、最后才是数字），
+#: 让人去排顺序只会把这句话排成"机器报数"。用户能决定的是"这一样念不念"。
+VOICE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("name", "标的名称"),
+    ("code", "代码（念成「六零零五一九」）"),
+    ("kind", "提醒类型（触及止损 / 涨停打开 …）"),
+    ("price", "现价"),
+    ("detail", "说明（触发数字那一句，最长）"),
+    ("extra", "剩余条数（还有 N 条）"),
+)
+
+#: 默认念哪几样（与 `Config.voice_fields` 的默认一致）。
+#: **不含「说明」**：那一句是 `现价 12.34 ≤ 参考价 20.00 × 0.95` 这种带公式的原文，
+#: 念出来最乱、听完也记不住触发原因；要看细节可以点开「消息」列表。
+DEFAULT_FIELDS: tuple[str, ...] = ("name", "code", "kind", "price")
+
+
+def compose_item(
+    *,
+    name: str = "",
+    code: str = "",
+    kind_label: str = "",
+    price: Any = None,
+    detail: str = "",
+    extra: int = 0,
+    fields: Sequence[str] | None = None,
+) -> str:
+    """按"念哪几样"拼一句话（设置页那三组勾选框的落点）。
+
+    Args:
+        fields: 要念的项（`VOICE_FIELDS` 的代号）；None = 默认那四项。
+            认不出来的项直接忽略 —— 配置里写错一个词不该让播报整句变空白。
+
+    为什么名称与代码分开传（老接口给的是拼好的 `target`）：代码要**逐位念**，
+    名称里的数字不能跟着逐位念（"600519" 念成六零零五一九，"贵州茅台" 照常念）。
+    拼成一个字符串之后，这两件事就分不开了。
+    """
+    wanted = {str(f).strip().lower() for f in (fields or DEFAULT_FIELDS)}
+    pieces: list[str] = []
+    if "name" in wanted and str(name).strip():
+        pieces.append(sanitize(name))
+    if "code" in wanted and str(code).strip():
+        pieces.append(sanitize(code))
+    if "kind" in wanted and str(kind_label).strip():
+        pieces.append(sanitize(kind_label))
+    if "price" in wanted and price not in (None, ""):
+        pieces.append(f"现价 {price}")
+    if "detail" in wanted and str(detail).strip():
+        pieces.append(sanitize(detail))
+    if "extra" in wanted and int(extra or 0) > 0:
+        pieces.append(f"还有 {int(extra)} 条")
+    return sanitize("，".join(p for p in pieces if p))
 
 
 # ── 朗读 ─────────────────────────────────────────────────────────────

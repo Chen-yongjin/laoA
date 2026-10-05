@@ -198,9 +198,12 @@ def test_alert_makes_the_pet_bubble_and_speaks(window, qapp, _quiet_voice) -> No
     assert "六零零五一九" in _quiet_voice[0] and "止损提醒" in _quiet_voice[0]
 
 
-def test_several_alerts_speak_only_the_newest_and_say_how_many_more(
-        window, qapp, _quiet_voice) -> None:
-    """一次来多条：只念最新那条 + "还有 N 条"（连着念五条会把人烦到关掉语音）。"""
+def test_several_alerts_speak_only_the_newest(window, qapp, _quiet_voice) -> None:
+    """一次来多条：默认只念最新那条（连着念五条会把人烦到关掉语音）。
+
+    2026-10-05 起"还有 N 条"不再默认念（主人："语音播报有点乱"）—— 想听这句就在
+    设置页「一句里念哪几样」里勾上「剩余条数」，见下一个用例。
+    """
     rows = [
         {"date": "2026-09-18", "symbol": "600002", "kind": "break_ma5",
          "label": "跌破5日线", "detail": "现价 10.10", "price": 10.1},
@@ -212,7 +215,30 @@ def test_several_alerts_speak_only_the_newest_and_say_how_many_more(
     qapp.processEvents()
 
     text = window.pet.bubble.toolTip()
-    assert "还有 1 条" in text
+    assert "还有 1 条" not in text          # 默认不念条数
+    # 只念最新那条：念的是列表第一条（跌破5日线），不是两条都念
+    import time as _time
+    _time.sleep(0.01)
+    assert len(_quiet_voice) == 1 and "六零零零零二" in _quiet_voice[0]
+
+
+def test_count_tail_and_detail_are_optional_fields(window, qapp, _quiet_voice) -> None:
+    """勾上「剩余条数」/「说明」就念，取消就不念 —— 设置页那两组勾选框的落点。"""
+    window.cfg.voice_fields = ["name", "code", "kind", "price", "detail", "extra"]
+    rows = [
+        {"date": "2026-09-18", "symbol": "600002", "kind": "break_ma5",
+         "label": "跌破5日线", "detail": "现价 10.10", "price": 10.1},
+        {"date": "2026-09-18", "symbol": "600001", "kind": "stop_loss",
+         "label": "止损提醒", "detail": "现价 9.90", "price": 9.9},
+    ]
+
+    window._notify_alerts(rows)
+    qapp.processEvents()
+
+    assert "还有 1 条" in window.pet.bubble.toolTip()
+    import time as _time
+    _time.sleep(0.01)
+    assert _quiet_voice and "还有 1 条" in _quiet_voice[-1]
 
 
 def test_voice_switch_off_means_no_speaking(window, qapp, _quiet_voice) -> None:

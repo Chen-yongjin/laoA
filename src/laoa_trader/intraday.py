@@ -164,6 +164,56 @@ for _tag_code in ANOMALY_TAGS:
     KIND_LABELS[f"anomaly_{_tag_code.lower()}"] = "⚡ 异动"
 
 
+#: **语音播报的类型族**（设置页「语音播报内容」那一排勾选框就是它）。
+#:
+#: 为什么要"族"而不是一个个 kind：`anomaly_rapid_rally` 这类 kind 是按标签生成的（有 7 个），
+#: 竞价与做T 又各有两个。让用户在设置里勾十几个只有程序才认得的英文代号是折磨；
+#: 勾"当日异动""做 T 提示"才是他脑子里的分类。
+#:
+#: 2026-10-05 主人："现在的语音播报有点乱，在设置里增加选项，可以自由选择要提醒的内容。"
+#: 勾的是**念不念**，不影响消息列表与两张表的「提醒」列（那里始终是全的）。
+VOICE_KIND_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("stop_loss", "触及止损", ("stop_loss",)),
+    ("take_profit", "触及止盈", ("take_profit",)),
+    ("break_ma5", "跌破 5 日线", ("break_ma5",)),
+    ("limit_up_open", "涨停打开", ("limit_up_open",)),
+    ("break_high", "放量突破 20 日高", ("break_high",)),
+    ("pullback_ma5_buy", "池内回踩买点", ("pullback_ma5_buy",)),
+    ("auction", "竞价强度 / 竞价走弱", ("auction_strong", "auction_weak")),
+    ("t", "做 T 提示（近似）", ("t_high", "t_low")),
+    ("anomaly", "当日异动", tuple(f"anomaly_{code.lower()}" for code in ANOMALY_TAGS)),
+    ("pool", "匹配完成（跑完一轮的汇总）", (KIND_POOL,)),
+)
+
+#: kind → 类型族（启动时展开一次）
+_KIND_TO_GROUP: dict[str, str] = {
+    kind: code for code, _label, members in VOICE_KIND_GROUPS for kind in members
+}
+
+
+def voice_kind_group(kind: Any) -> str:
+    """一条提醒的 `kind` → 它属于哪个类型族（设置里勾的就是族）。
+
+    认不出来的一律返回它自己：将来新加一种提醒，默认行为是"按自己的 kind 走"，
+    既不会被误当成"没勾上"而念不出来，也不会被并进别的族里。
+    """
+    return _KIND_TO_GROUP.get(str(kind or "").strip(), str(kind or "").strip())
+
+
+def voice_allowed(kind: Any, cfg: Config | None = None) -> bool:
+    """这一条要不要**念出来**（`voice_kinds` 为空 = 全都念）。
+
+    只影响"念的那一句"（含桌宠气泡上那句话），不影响消息列表、图标闪烁、飞书/托盘推送 ——
+    "少念几句"不该等于"少收几条提醒"。
+    """
+    cfg = cfg or get_config()
+    chosen = {str(code).strip().lower() for code in (getattr(cfg, "voice_kinds", None) or [])
+              if str(code).strip()}
+    if not chosen:
+        return True
+    return voice_kind_group(kind).lower() in chosen
+
+
 # ── 条件单参数（移植自 sequoia_x/trade_plan.py）──
 #
 # 服务器版从环境变量读这些参数；桌面版改为从 config.toml 读，

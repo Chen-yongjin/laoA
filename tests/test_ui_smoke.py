@@ -2138,6 +2138,9 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
     # `notify_voice_rate` 已于 2026-09-21 删除（主人："把播报速度直接锁定 1.0 吧
     # 不要给选择了"）—— 语速固定 1.0，界面也没有控件
     "notify_pet", "notify_voice", "notify_voice_volume", "notify_voice_name",
+    # 语音播报内容（2026-10-05 主人："语音播报有点乱，可以自由选择要提醒的内容"）：
+    # 念哪些类型 / 一句里念哪几样 / 一次来多条怎么念
+    "voice_kinds", "voice_fields", "voice_multi",
     # 3) 竞价扫描
     "intraday_auction", "auction_min_pct", "auction_max_pct", "auction_min_amount",
     "auction_min_volume_ratio", "auction_min_score", "auction_alert_max_items",
@@ -2184,8 +2187,10 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     # 主人原话："价格逐位不需要有选项，直接按我说的做就行了"；
     # 38 → 37：同一天删掉语速键 `notify_voice_rate`（"把播报速度直接锁定 1.0 吧"）。
     # 2026-09-23 一度加过 `intraday_pick_live`（「匹配口径」那一组），当天又被主人划掉
-    # ——"不需要加开关，按照我说的规则来"，所以个数回到 37）
-    assert len(updates) == 37
+    # ——"不需要加开关，按照我说的规则来"，所以个数回到 37；
+    # 37 → 40：2026-10-05 加上语音播报内容那三项（`voice_kinds` / `voice_fields` /
+    # `voice_multi`）—— 主人："语音播报有点乱，可以自由选择要提醒的内容"）
+    assert len(updates) == 40
     # 2026-09-18 起**必须收**它：内置同花顺那一行有输入框，一键保存就该把它写回去
     # （出厂值是空串，程序从不预置；"填了没保存"才是要防的那件事）
     assert "hithink_api_key" in updates
@@ -3279,8 +3284,9 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     #  37 + 1 → 38 + 1：用户要求"桌宠声音可以自由改"，加上 `notify_voice_name`；
     #  39 + 1 → 38 + 1：2026-09-21 删掉"数字逐位念"开关；
     #  38 + 1 → 37 + 1：同一天删掉语速键（语速锁定 1.0）
-    #  —— 2026-09-23 加过又划掉的 `intraday_pick_live` 让个数回到 37 + 1）
-    assert window.save_settings_hint.text().startswith("✅ 已保存 38 项")
+    #  —— 2026-09-23 加过又划掉的 `intraday_pick_live` 让个数回到 37 + 1；
+    #  37 + 1 → 40 + 1：2026-10-05 加上语音播报内容那三项）
+    assert window.save_settings_hint.text().startswith("✅ 已保存 41 项")
     # 内置同花顺的 Key 也在这份键集合里（它的输入框和替身来源的走同一条规则）
     assert "hithink_api_key" in window._collect_settings_updates()
 
