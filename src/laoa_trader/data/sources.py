@@ -420,6 +420,33 @@ _SNAPSHOT_FETCHERS: dict[str, Callable[[Any, list[str] | None], dict[str, dict]]
 }
 
 
+#: 能**一次把全市场拉回来、并且带流通市值**的来源（2026-10-08 加，板块热力图要它）。
+#: 现在只有东方财富（clist 分页，`ceil(5559/200)` = 28 个请求）：
+#:   * 公开源出局 —— 腾讯/新浪没有"给我全部"的开关，全市场得由调用方给代码表；
+#:   * 同花顺出局 —— 它也能翻页给全市场，但那个端点**不回市值**（见 `SUPPLEMENT_FIELDS`
+#:     那段）。让它先命中的结果是**静默**画不出面积的一屏灰块，最难查的一类故障。
+FULL_MARKET_MKTCAP_SOURCES: tuple[str, ...] = ("eastmoney",)
+
+
+def _normalize(
+    rows: dict[str, dict], wanted: list[str] | None, source_id: str, as_of: float,
+) -> dict[str, dict]:
+    """某来源的原始行 → 统一口径（`QUOTE_FIELDS` 全键都在，缺的就是 `None`）。
+
+    `wanted is not None` 时只留用户要的那些：来源可能多给（全市场快照就是多给）。
+    """
+    out: dict[str, dict] = {}
+    for symbol, row in (rows or {}).items():
+        if wanted is not None and symbol not in wanted:
+            continue
+        item = {name: row.get(name) for name in QUOTE_FIELDS}
+        item["symbol"] = symbol
+        item["source"] = source_id
+        item["as_of"] = as_of
+        out[str(symbol)] = item
+    return out
+
+
 def _num(value: Any) -> float | None:
     """转数字；认不出返回 None（`-`、空串、None 都是"没有这个数"）。"""
     if value is None or isinstance(value, bool):
@@ -482,15 +509,7 @@ def snapshot_map(cfg: Any, symbols: list[str] | None = None) -> dict[str, dict]:
         if not rows:
             logger.info(f"来源 {info.name} 没拿到快照（换下一个来源试）")
             continue
-        out: dict[str, dict] = {}
-        for symbol, row in rows.items():
-            if wanted is not None and symbol not in wanted:
-                continue        # 防来源多给（比如全市场快照）——只要用户要的那些
-            item = {name: row.get(name) for name in QUOTE_FIELDS}
-            item["symbol"] = symbol
-            item["source"] = info.id
-            item["as_of"] = as_of
-            out[symbol] = item
+        out = _normalize(rows, wanted, info.id, as_of)
         if out:
             logger.debug(f"实时快照来源：{info.id}（{len(out)} 只）")
             return out
@@ -575,6 +594,45 @@ def supplement_map(
     return quotes
 
 
+def full_market_quotes(cfg: Any) -> dict[str, dict]:
+    """**要流通市值**的全市场快照：挑"能一次给全市场、且带市值"的来源（**绝不抛**）。
+
+    为什么不能直接用 `snapshot_map(cfg, None)`（2026-10-08，板块热力图）
+    --------------------------------------------------------------
+    `snapshot_map` 挑来源的判据只有"有没有快照能力"，所以**主源（同花顺）会先命中**，
+    而它的快照不带 `circ_mktcap`（见 `SUPPLEMENT_FIELDS` 那段）→ 按市值分面积的
+    热力图一块都算不出面积，而且**失败是静默的**：有涨跌幅、面积全是 0，
+    用户只会觉得"热力图坏了"。这个函数把"字段要求"提前到挑来源这一步。
+
+    Returns:
+        `{symbol: 统一口径快照}`；**没有来源能给就是空字典**（不是异常）——
+        调用方据此退到"本地代码表 + 逐字段补齐"（见 `ui/app.py` 的 `_heatmap_payload`），
+        那条路慢一些（按代码表分批），但同样能拿到市值。
+    """
+    for info in usable_sources(cfg):
+        if info.id not in FULL_MARKET_MKTCAP_SOURCES:
+            continue
+        if CAP_SNAPSHOT not in info.capabilities:
+            continue
+        fetch = _SNAPSHOT_FETCHERS.get(info.id)
+        if fetch is None:
+            continue
+        try:
+            rows = fetch(cfg, None)
+        except Exception as exc:  # noqa: BLE001 - 这条来源失败不该让热力图整块消失
+            logger.info(f"全市场快照：{info.name} 取数失败（继续看下一个）：{exc}")
+            continue
+        if not rows:
+            logger.info(f"全市场快照：{info.name} 没拿到数据（继续看下一个）")
+            continue
+        out = _normalize(rows, None, info.id, time.time())
+        if out:
+            logger.debug(f"全市场快照来源：{info.id}（{len(out)} 只）")
+            return out
+    logger.info("没有来源能一次给出带市值的全市场快照（调用方退到按代码表取）")
+    return {}
+
+
 def probe_source(cfg: Any, source_id: str, symbol: str = "600519") -> dict:
     """**只测这一个来源**通不通（设置页那一行的【测试】按钮用；给界面留的钩子）。
 
@@ -626,6 +684,7 @@ __all__ = [
     "CAP_DAILY_HISTORY",
     "CAP_SNAPSHOT",
     "CAP_STOCK_LIST",
+    "FULL_MARKET_MKTCAP_SOURCES",
     "QUOTE_FIELDS",
     "REGISTRY",
     "SourceInfo",
@@ -633,10 +692,12 @@ __all__ = [
     "CAPABILITY_SHORT_LABELS",
     "capabilities_brief",
     "capabilities_text",
+    "full_market_quotes",
     "has_key",
     "hithink_rows_to_map",
     "probe_source",
     "snapshot_map",
     "source_states",
+    "supplement_map",
     "usable_sources",
 ]

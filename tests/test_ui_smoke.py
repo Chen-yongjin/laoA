@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import re
 import types
 import threading
 import time
@@ -3403,11 +3404,24 @@ def test_market_page_refreshes_right_after_startup(seeded, qapp, monkeypatch) ->
         assert stats[ui_app.MARKET_STAT_AMOUNT].value_label.text() == "16291亿"
         wide = win.market_sections[ui_app.MARKET_SECTION_WIDE]
         assert wide.entries[0].name_label.text() == "上证"
-        # 「热门板块」跟着同一趟取回来了（seeded 库里有半导体涨停）
-        hot = win.market_sections[ui_app.MARKET_SECTION_HOT]
-        rows = hot.tables[ui_app.SECTOR_UP_TITLE].table
-        assert rows.rowCount() >= 1
-        assert rows.item(0, 0).text() == "半导体"        # 本地口径下涨幅最高的行业
+        # 「板块热力图」**不跟着概览那一趟**：它有自己的数据源与节拍（TTL 180 秒、
+        # 只在自己那条节拍上拉，见 `_maybe_heatmap`），而这里封了网 → 那一轮必然失败。
+        # 要钉的是"它如实说清自己什么状态"，而不是留一个空块让人猜。
+        _wait_heatmap(win, qapp)
+        hot = _heatmap_section(win)
+        assert hot.title_label.text() == ui_app.MARKET_SECTION_HOT == "板块热力图"
+        assert hot.isVisible() is True
+        assert win.market_heatmap == []                      # 离线 → 没有数据
+        assert hot.note_label.isVisible() is True
+        # 没有数据时那行小字**必须说清是"没取到"还是"还没取过"**（两种说法都验一遍）
+        assert "取数失败" in win._heatmap_note() and "口径：" not in win._heatmap_note()
+        assert win.market_heatmap_error
+        win.market_heatmap_error = ""
+        assert "还没取过热力图数据" in win._heatmap_note()
+        # 一有数据（这里直接喂构造好的 blocks）：面积最大的那一块就是半导体
+        # —— seeded 库里有半导体涨停，热力图与概览对得上
+        _feed_heatmap(win)
+        assert [b["name"] for b in hot.widget.blocks][0] == "半导体"
         assert "更新于 —" not in win.market_as_of_label.fullText()   # 页脚已是真实取数时间
     finally:
         win._timer.stop()
@@ -3469,24 +3483,71 @@ def _stat_texts(window) -> dict[str, str]:
     return {name: item.value_label.text() for name, item in stats.items()}
 
 
-def _sector_table_rows(window, title: str) -> list[list[str]]:
-    """「上涨前五 / 下跌前五」某一张表的全部单元格文字（含表头那一行不在此列）。"""
-    table = window.market_sections[ui_app.MARKET_SECTION_HOT].tables[title].table
-    return [
-        [table.item(row, column).text() if table.item(row, column) is not None else ""
-         for column in range(table.columnCount())]
-        for row in range(table.rowCount())
-    ]
+def _heatmap_section(window):
+    """「板块热力图」那一块（2026-10-08 起它取代了原来的上涨前五 / 下跌前五两张表）。"""
+    return window.market_sections[ui_app.MARKET_SECTION_HOT]
 
 
-def _sector_headers(window, title: str) -> list[str]:
-    """某一张板块表的表头文字（用户要求"标上名称"的那四列）。"""
-    table = window.market_sections[ui_app.MARKET_SECTION_HOT].tables[title].table
-    return [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+def _heatmap_blocks() -> list[dict]:
+    """一份**构造好的**热力图数据（`data/market_map.build_blocks()` 的真实产物）。
+
+    为什么不从界面取数路径拿：测试环境 socket 被封死（见 `tests/conftest.py` 的
+    `_block_network`），全市场快照必然取不到，而这里要验的是"**有数据时**热力图怎么画"。
+    所以按真实契约造数据：面积 = 行业流通市值合计（亿）、颜色 = 市值加权涨跌幅。
+
+    三个行业刻意各有代表性：半导体（涨、两块票、市值最大）、银行（跌）、白酒（平）；
+    市值降序 = 半导体 800 > 银行 400 > 白酒 200（面积顺序就是它）。
+    """
+    from laoa_trader.data import market_map
+
+    quotes = {
+        "600002": {"pct": 6.0, "circ_mktcap": 500.0},      # 半导体甲：行业内市值最大
+        "600003": {"pct": 2.0, "circ_mktcap": 300.0},      # 半导体乙
+        "600001": {"pct": -1.0, "circ_mktcap": 400.0},     # 浦发样本
+        "300001": {"pct": 0.0, "circ_mktcap": 200.0},      # 创业样本
+    }
+    industry = {"600002": "半导体", "600003": "半导体",
+                "600001": "银行", "300001": "白酒"}
+    names = {"600002": "半导体甲", "600003": "半导体乙",
+             "600001": "浦发样本", "300001": "创业样本"}
+    return market_map.build_blocks(quotes, industry, names=names)
+
+
+def _feed_heatmap(window, blocks=None, *, at=None) -> list[dict]:
+    """把构造好的 blocks 喂进「板块热力图」并重画（**走界面路径**：`market_heatmap` + 重画）。
+
+    顺手把 `market_heatmap_error` / `market_heatmap_source` 清掉 —— 那正是
+    `_on_heatmap_ready()` 取数成功时做的事：离线环境里后台那一轮必然失败，
+    不清的话那行小字会同时挂着"最近一次取数失败"，口径与快照时间的断言就被搅浑了。
+    """
+    data = _heatmap_blocks() if blocks is None else blocks
+    window.market_heatmap = list(data)
+    window.market_heatmap_at = time.time() if at is None else at
+    window.market_heatmap_error = ""
+    window.market_heatmap_source = ""
+    window._render_market_overview()
+    return data
+
+
+def _wait_heatmap(window, qapp, timeout_ms: int = 10_000) -> None:
+    """等热力图那一轮**后台**取数落地（它有自己的节拍与线程，见 `_maybe_heatmap`）。
+
+    与 `_wait_market` 一样是"等信号送进界面再断言"。测试环境封了网，所以它**必然**
+    以"取数失败"收场 —— 这里等的是"失败已经如实写进界面"，不是"取到了数据"。
+    """
+    worker = getattr(window, "_heatmap_worker", None)
+    if worker is not None:
+        worker.wait(timeout_ms)
+    qapp.processEvents()
+
+
+def _heatmap_tip(window, block: dict) -> str:
+    """某一块的 tooltip（每个数都该说清口径，见 `ui/heatmap.py` 的 `tip_for`）。"""
+    return _heatmap_section(window).widget.tip_for(block)
 
 
 def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp) -> None:
-    """7 个小条目 + 两块指数的每一项 + 逐值颜色 + 热门板块两张表 + 页脚，一次全钉住。"""
+    """7 个小条目 + 两块指数的每一项 + 逐值颜色 + 板块热力图 + 页脚，一次全钉住。"""
     from laoa_trader import market
     from laoa_trader.ui import app as ui_app
 
@@ -3538,26 +3599,57 @@ def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp
         )
         assert market_window.market_hint.isVisible() is False       # 一切正常不留提示
 
-        # 「热门板块」：**两张表**（上涨前五 / 下跌前五），表头就是用户给定的那四列
-        assert _sector_headers(market_window, ui_app.SECTOR_UP_TITLE) \
-            == list(ui_app.SECTOR_TABLE_HEADERS)
-        # 下跌前五：第 2 列是**跌停数量**（不是涨停数量）
-        assert _sector_headers(market_window, ui_app.SECTOR_DOWN_TITLE) \
-            == list(ui_app.SECTOR_TABLE_HEADERS_DOWN)
-        assert list(market_window.market_sections[
-            ui_app.MARKET_SECTION_HOT].tables) == [ui_app.SECTOR_UP_TITLE,
-                                                   ui_app.SECTOR_DOWN_TITLE]
-        # 测试环境里 `data/sectors.py` 的取数被 socket 层封死 → 退回**本地口径**：
-        # 涨幅 = 近 5 日行业等权涨幅，主力净额 `—`（不是 0），页面上写清了口径
-        hot_note = market_window.market_sections[ui_app.MARKET_SECTION_HOT].note_label
+        # 「板块热力图」：没有表头了，它把"每一列/每一档是什么意思"写进了 block 的 tooltip。
+        # 原来那四列（板块名称 / 涨停数量 / 涨幅 / 主力净额）现在各有对应的说法，
+        # 逐条钉住：涨跌幅是**市值加权**、面积是**流通市值合计**、涨跌家数仍来自本地那一套。
+        _wait_heatmap(market_window, qapp)      # 离线那一轮先落地，免得跟断言抢状态
+        hot = _heatmap_section(market_window)
+        assert hot.isVisible() is True
+        blocks = _feed_heatmap(market_window)
+        # **面积顺序 = 市值降序**（用户是靠面积读权重的：大的必须更大）
+        assert [b["name"] for b in blocks] == ["半导体", "银行", "白酒"]
+        assert [b["mktcap"] for b in blocks] == [800.0, 400.0, 200.0]
+        assert [b["name"] for b in hot.widget.blocks] == ["半导体", "银行", "白酒"]
+        areas = [w * h for _, _, w, h in hot.widget._rects]
+        assert areas == sorted(areas, reverse=True) and areas[0] > 0
+        # **颜色 = 红涨绿跌**（半导体 +4.5% 红、银行 -1% 绿、白酒 0% 近白）
+        from laoa_trader.data import market_map
+
+        semi, bank, white = blocks
+        assert semi["pct"] == 4.5 and bank["pct"] == -1.0 and white["pct"] == 0.0
+        assert market_map.block_color(semi["pct"])[0] > market_map.block_color(semi["pct"])[1]
+        assert market_map.block_color(bank["pct"])[1] > market_map.block_color(bank["pct"])[0]
+        assert market_map.block_color(white["pct"]) == (238, 238, 238)
+        # tooltip 里每个数都说清口径（原来"表头那四个字放不下解释"的问题，heatmap 里
+        # 靠这一行行文字说清；用户在块上停一下就自己核对得了）
+        semi_tip = _heatmap_tip(market_window, semi)
+        assert "涨跌幅（市值加权）：+4.50%" in semi_tip
+        assert "流通市值合计：800 亿" in semi_tip
+        assert "面积 = 流通市值合计；颜色 = 涨跌幅，红涨绿跌" in semi_tip
+        assert "最大的一只：半导体甲（+6.00%）" in semi_tip
+        # 一张图不分"涨跌两张表"了：涨跌幅的方向由**颜色**说（同一个 tooltip 里），
+        # 跌停家数只在真有跌停时才写一行 —— 这里本地没有跌停池数据，就一个字都不写
+        # （一片"跌停家数：0"会把有用的那几行淹掉，编一个 0 更是假信息）
+        assert "跌停家数" not in semi_tip
+        # 涨停家数仍然来自**本地那一套**（`pool.hot_industries`，与原来那一列同源）
+        assert "涨停家数：1" in semi_tip
+        assert "涨停家数：0" in _heatmap_tip(market_window, bank)
+        # 主力净额取不到（测试环境板块榜被封）→ tooltip 里**一个字都不写**，绝不编一个 0
+        assert "主力净额" not in semi_tip
+        # 那行小字（`note_label`）：口径 + 快照时间 + **缺什么**都写在上面。
+        # 板块榜那一趟在测试环境里必然取不到（socket 封死）→ 退回**本地口径**：
+        # 涨停家数还有（本地涨停池，与匹配同一套），缺的只有主力净额 ——
+        # 这行小字就是原来那句"本地口径 / 主力净额取不到"的接任者，必须说准是**哪一项**。
+        assert market_window.market_sectors["source"] == "local"
+        hot_note = hot.note_label
         assert hot_note.isVisible() is True
-        assert "本地口径" in hot_note.fullText()
-        assert "主力净额取不到" in hot_note.fullText()
-        up_rows_local = _sector_table_rows(market_window, ui_app.SECTOR_UP_TITLE)
-        assert [row[0] for row in up_rows_local] == ["半导体", "银行"]   # seeded 库的真实行业
-        assert up_rows_local[0][1] == "1"            # 涨停家数口径来自 pool.hot_industries
-        assert up_rows_local[1][1] == "0"
-        assert all(row[3] == market.DASH for row in up_rows_local)      # 主力净额取不到 → —
+        note_text = hot_note.fullText()
+        assert "口径：面积 = 行业流通市值合计" in note_text
+        assert "颜色 = 市值加权涨跌幅（红涨绿跌，±10% 饱和）" in note_text
+        assert re.search(r"快照 \d{2}-\d{2} \d{2}:\d{2}", note_text), note_text
+        assert "3 个行业：涨 1 · 跌 1 · 平 1" in note_text
+        assert "板块榜这一轮没取到：tooltip 里没有主力净额" in note_text
+        assert "涨停家数用的是本地口径" in note_text
 
         # 页脚：数据来源 + 取数时间 + 刷新节奏（breadth 开着要注明它慢一档）
         footer = market_window.market_as_of_label.fullText()
@@ -3687,8 +3779,8 @@ def test_market_page_hides_whole_block_when_config_is_empty(market_window, qapp)
         # 相加）—— 宽基没配时它必然是 `—`。这条断言把这个依赖关系钉住
         #（不是缺陷，是取数口径的必然结果；北交所那一格已经删掉了，不再受影响）
         assert flow.stats[ui_app.MARKET_STAT_AMOUNT].value_label.text() == market.DASH
-        hot = market_window.market_sections[ui_app.MARKET_SECTION_HOT]
-        assert hot.isVisible() is True                   # 热门板块不受指数配置影响
+        hot = _heatmap_section(market_window)
+        assert hot.isVisible() is True                   # 板块热力图不受指数配置影响
         assert "上证" not in "".join(e.name_label.text() for e in market_window.market_entries)
         assert all(e.thscode != "000001.SH" for e in market_window.market_entries)
     finally:
@@ -3754,13 +3846,27 @@ def test_market_page_shows_dash_and_reason_without_data(market_window, qapp) -> 
             assert section.placeholder_label.text() == market.DASH
             assert section.placeholder_label.isVisible() is True
         assert market_window.market_entries == []
-        # 「热门板块」的**本地兜底**（涨停家数 + 近 5 日行业等权涨幅）与有没有 Key /
-        # 服务端通不通**无关** —— 概览全灭时它照样有内容，这正是它的价值
-        hot = market_window.market_sections[ui_app.MARKET_SECTION_HOT]
+        # 「板块热力图」的取数**不走同花顺 Key**：全市场快照走公开源、行业归属读本地表
+        # （`market_map.industry_map`）—— 概览全灭时它照样画得出内容，这正是它的价值。
+        # 这里没有 Key、socket 又被封死，那就用"本地行业表 + 一份快照"喂给它，
+        # 钉住"画出来的就是 seeded 库里的真实行业"（半导体 / 银行），而不是靠联网。
+        from laoa_trader.data import market_map
+
+        hot = _heatmap_section(market_window)
         assert hot.isVisible() is True
-        up_rows = _sector_table_rows(market_window, ui_app.SECTOR_UP_TITLE)
-        assert [row[0] for row in up_rows] == ["半导体", "银行"]
-        assert hot.placeholder_label.isVisible() is False
+        industry = market_map.industry_map(market_window.cfg.db_path)
+        assert industry == {"600001": "银行", "600002": "半导体"}    # 本地表，没联网
+        quotes = {"600002": {"pct": 6.0, "circ_mktcap": 500.0},
+                  "600001": {"pct": -1.0, "circ_mktcap": 400.0}}
+        blocks = market_map.build_blocks(quotes, industry)
+        assert [b["name"] for b in blocks] == ["半导体", "银行"]     # 面积降序
+        _feed_heatmap(market_window, blocks)
+        assert [b["name"] for b in hot.widget.blocks] == ["半导体", "银行"]
+        # 有数据时那行小字说的是口径与快照时间，不再说"还没取过"（热力图没有 `—` 占位那套：
+        # 空态是画布上的一句话，见 `HeatmapWidget.paintEvent`）
+        assert "还没取过热力图数据" not in hot.note_label.fullText()
+        assert "口径：面积 = 行业流通市值合计" in hot.note_label.fullText()
+        assert not hasattr(hot, "placeholder_label")
         assert market_window.market_hint.isVisible() is True
         assert "同花顺 Key" in market_window.market_hint.text()
         assert "同花顺 Key" in market_window.market_page.toolTip()
@@ -3853,20 +3959,25 @@ def _assert_market_fonts_and_alignment(win) -> None:
     }
     assert len(tracks) == 1
     assert tracks.pop()[0] > 0
-    # 「热门板块」两张表：数值列右对齐、板块名称加粗
-    hot = win.market_sections[ui_app.MARKET_SECTION_HOT]
-    assert hot.tables, "两块表是固定的"
-    for title, block in hot.tables.items():
-        assert block.table.rowCount() >= 1, title          # 有数据才谈得上对齐
-        for column in (1, 2, 3):                           # 涨停数量 / 涨幅 / 主力净额
-            for row in range(block.table.rowCount()):
-                item = block.table.item(row, column)
-                assert item.textAlignment() & Qt.AlignmentFlag.AlignRight
-        # 名称那一列**加粗**，数值列不加粗（用户明确要求别把数值也加粗）
-        for row in range(block.table.rowCount()):
-            assert block.table.item(row, 0).font().bold() is True
-            for column in (1, 2, 3):
-                assert block.table.item(row, column).font().bold() is False
+    # 「板块热力图」取代了原来那两张表：没有"名称列 / 数值列"可对齐了，
+    # 而用户对表格提的那条要求（"所有名称显示不清楚，都加黑显示"）落在这里的等价物是
+    # **可读性 = 字色与底色的对比**：块内文字颜色必须跟着底色深浅切换
+    # （深色底白字、浅色底深字，见 `market_map.text_color`），否则字和底糊成一片。
+    from laoa_trader.data import market_map
+
+    hot = _heatmap_section(win)
+    blocks = _feed_heatmap(win)
+    assert hot.widget.blocks, "有数据才谈得上画得下"          # 原来那条"两块表非空"
+    assert len(hot.widget._rects) == len(blocks)             # 每块都排到了地方
+    for block, (_, _, width, height) in zip(hot.widget.blocks, hot.widget._rects):
+        assert width > 0 and height > 0, block["name"]
+        bg = market_map.block_color(block["pct"])
+        fg = market_map.text_color(block["pct"])
+        assert fg != bg, block["name"]                       # 字和底同色 = 看不见
+        assert (fg == (255, 255, 255)) == (abs(block["pct"]) >= 4.5), block["name"]
+    # 排版顺序也是一层"层级"：块标题 → 热力图 → 那行口径小字（说明在图下面，不挤标题里）
+    box = hot.layout()
+    assert box.indexOf(hot.widget) < box.indexOf(hot.note_label)
 
 def test_market_refresh_button_forces_refetch(market_window, qapp, monkeypatch) -> None:
     """【立即刷新】忽略 TTL 缓存，一定重打接口（与 `force=True` 同义）。"""
@@ -4441,12 +4552,16 @@ def test_sectors_module_import_is_defensive(monkeypatch) -> None:
     assert ui_app.sectors_module() is None
 
 
-def test_market_hot_block_is_two_real_tables_with_clear_headers(market_window, qapp) -> None:
-    """「热门板块」块 = **上涨前五 / 下跌前五两张表**，每张表的表头就是用户给定的四列。
+def test_market_hot_block_is_a_real_heatmap_with_a_clear_caliber(market_window, qapp) -> None:
+    """「板块热力图」块 = **一块自绘热力图**，每个数都说清口径（2026-10-08 主人要求换掉两张表）。
 
-    用户原话："把上涨前 5 和下跌前 5 都标出来。现在的数据都没写什么意思，
-    改成以下表格标上名称。" —— 所以这条重点钉**表头文字**与**两张表都在**。
-    口径：涨停数量来自"匹配用的那一套"（`pool.hot_industries`）。
+    为什么不再用"表格"：上涨前五 / 下跌前五两张表只有 10 行，**中间那一大片看不见**
+    （横盘、微涨微跌的行业根本不上榜）；热力图一眼看全所有行业：面积给权重、颜色给涨跌。
+
+    这条替代的是原来那条"两张真表 + 表头文字"的用例，重点钉三件事：
+    **它是真的热力图控件**（不是又一张表）、**面积顺序 = 市值降序**、
+    **每个数都在 tooltip 里写清了口径**（原来"表头只有四个字放不下解释"的那个问题，
+    在这里是靠 tooltip 解决的）。口径：涨停家数仍来自本地那一套（`pool.hot_industries`）。
     """
     from laoa_trader import market, pool
     from laoa_trader.ui import app as ui_app
@@ -4456,43 +4571,66 @@ def test_market_hot_block_is_two_real_tables_with_clear_headers(market_window, q
     try:
         win.refresh_market_overview(force=True, client=_market_fake())
         qapp.processEvents()
-        section = win.market_sections[ui_app.MARKET_SECTION_HOT]
+        _wait_heatmap(win, qapp)
+        section = _heatmap_section(win)
         assert section.isVisible() is True
-        assert section.title_label.text() == ui_app.MARKET_SECTION_HOT
-        assert list(section.tables) == [ui_app.SECTOR_UP_TITLE, ui_app.SECTOR_DOWN_TITLE]
-        assert (ui_app.SECTOR_UP_TITLE, ui_app.SECTOR_DOWN_TITLE) == ("上涨前五", "下跌前五")
-        # 表头就是用户给的那四个字，**但两张表只有第 2 列不同**：
-        # 上涨前五数涨停、下跌前五数跌停（2026-09-21 主人指出"下跌那张表里放涨停数说不通"）
-        assert ui_app.SECTOR_TABLE_HEADERS == ("板块名称", "涨停数量", "涨幅", "主力净额")
-        assert ui_app.SECTOR_TABLE_HEADERS_DOWN == ("板块名称", "跌停数量", "涨幅", "主力净额")
-        assert _sector_headers(win, ui_app.SECTOR_UP_TITLE) == list(ui_app.SECTOR_TABLE_HEADERS)
-        assert _sector_headers(win, ui_app.SECTOR_DOWN_TITLE) == list(ui_app.SECTOR_TABLE_HEADERS_DOWN)
-        for title, block in section.tables.items():
-            assert block.title_label.text() == title
-            # 每张表各 5 行（本次数据只有 2 个行业 → 就 2 行；上限是 5）
-            assert 0 < block.table.rowCount() <= ui_app.SECTOR_TOP == 5
-            # 四列的表头 tooltip 都写清了口径（列头只有四个字，放不下解释）
-            for column in range(4):
-                tip = block.table.horizontalHeaderItem(column).toolTip()
-                assert len(tip) >= 10, (title, column)
-        # 涨停数量用的是**本地那一套**（`pool.hot_industries`），不是另起一套
+        assert section.title_label.text() == ui_app.MARKET_SECTION_HOT == "板块热力图"
+        # 真的是自绘热力图控件（不是"又一张表"）：块列表 / tooltip 都在，
+        # 而原来那两张表的入口（`tables` / 四列表头 / 那两个标题）**整个删掉了**
+        assert not hasattr(section, "tables")
+        for gone in ("SECTOR_UP_TITLE", "SECTOR_DOWN_TITLE", "SECTOR_TABLE_HEADERS",
+                     "SECTOR_TABLE_HEADERS_DOWN", "SECTOR_HEADER_TIPS",
+                     "SECTOR_COUNT_KEY_UP", "SECTOR_COUNT_KEY_DOWN"):
+            assert not hasattr(ui_app, gone), f"两张表的残留常量没删干净：{gone}"
+        assert type(section.widget).__name__ == "HeatmapWidget"
+        assert callable(section.widget.set_blocks) and callable(section.widget.tip_for)
+        assert section.widget.blocks == []                # 离线还没取到（它不是概览那一趟的东西）
+        assert section.widget.extras                      # 但 extras 已就位（来自概览那趟的板块榜）
+        # 三个按钮都在（刷新 / 放大 / 打开大盘云图），文字就是界面上的那几档
+        assert (section.btn_refresh.text(), section.btn_zoom.text(),
+                section.btn_site.text()) == ("刷新热力图", "放大", "打开大盘云图")
+        assert ui_app.HEATMAP_TTL_SECONDS == 180          # 它自己的节拍（不跟概览那 60 秒）
+        assert ui_app.HEATMAP_MIN_HEIGHT >= 200           # 概览页里那块的落地高度
+        assert ui_app.MARKET_HEATMAP_SITE.startswith("https://")
+
+        blocks = _feed_heatmap(win)
+        # **面积顺序 = 市值降序**（每块的面积就是它的行业流通市值合计）
+        assert [b["mktcap"] for b in blocks] == sorted(
+            (b["mktcap"] for b in blocks), reverse=True)
+        assert [b["name"] for b in section.widget.blocks] == [b["name"] for b in blocks]
+        # 每个数都在 tooltip 里写清了口径 —— 逐个说法钉住（谁能自己核对，就不用信一个颜色）
+        tip = section.widget.tip_for(blocks[0])
+        assert "涨跌幅（市值加权）" in tip          # 不是等权、不是算术平均
+        assert "流通市值合计" in tip                # 面积的口径
+        assert "成分股：2 只" in tip                # 有几只票
+        assert "最大的一只" in tip                  # 行业内最大的那只（跟名字一起给）
+        assert tip.rstrip().endswith("（面积 = 流通市值合计；颜色 = 涨跌幅，红涨绿跌）")
+        # 涨停家数用的是**本地那一套**（`pool.hot_industries`），不是另起一套
         expected = pool.hot_industries(win.cfg.db_path, top=ui_app.MARKET_HOT_TOP)
-        up_rows = _sector_table_rows(win, ui_app.SECTOR_UP_TITLE)
-        for row in up_rows:
-            assert row[0] in expected
-            assert row[1] == str(expected[row[0]]["limit_up"])
-        # 本地口径下涨幅 = 近 5 日等权涨幅（比例 → 百分数），页内说明写清了这一点
-        assert up_rows[0][2] == f"{expected[up_rows[0][0]]['mom'] * 100:+.2f}%"
+        extras = win._heatmap_extras()
+        assert extras, "seeded 库里有涨停，板块榜这一趟该有内容"
+        for name, record in extras.items():
+            assert name in expected                       # 行业名对得上本地那一套
+            assert record["limit_up"] == expected[name]["limit_up"]
+        assert extras["半导体"]["limit_up"] == 1
+        assert "涨停家数：1" in section.widget.tip_for(
+            next(b for b in blocks if b["name"] == "半导体"))
+        # 取不到的那一列（主力净额，测试环境板块榜被封）**一个字都不写**，不编 0
+        assert all(record["main_net"] is None for record in extras.values())
+        assert "主力净额" not in tip
     finally:
         market.clear_cache()
 
 
-def test_market_hot_block_explains_itself_when_local_data_is_missing(
+def test_market_hot_block_explains_itself_when_the_sector_rank_is_missing(
     market_window, qapp, monkeypatch
 ) -> None:
-    """本地没有涨停池数据 + 板块榜也取不到 → 两张表空着 + **页面上写出怎么补**。
+    """本地没有涨停池数据 + 板块榜也取不到 → 热力图照画 + **页面上写出怎么补**。
 
     不能只留一个空块：用户会以为"这一块本来就不显示东西"，而实际是数据还没下。
+    热力图的面积与颜色走全市场快照（与板块榜无关），所以**它照样画得出来**；
+    缺的那一项（主力净额，以及没有本地涨停池时的涨停家数）要在那行小字里点明，
+    而不是让人以为"没涨停"。
     """
     from laoa_trader import market, pool
     from laoa_trader.ui import app as ui_app
@@ -4503,16 +4641,208 @@ def test_market_hot_block_explains_itself_when_local_data_is_missing(
         monkeypatch.setattr(ui_app, "sectors_module", lambda: None)
         market_window.refresh_market_overview(force=True, client=_market_fake())
         qapp.processEvents()
-        section = market_window.market_sections[ui_app.MARKET_SECTION_HOT]
-        assert all(block.table.rowCount() == 0 for block in section.tables.values())
-        assert section.placeholder_label.isVisible() is True
-        assert section.placeholder_label.text() == market.DASH
-        # 表头仍然在（空表也要看得出这四列是什么）
-        assert _sector_headers(market_window, ui_app.SECTOR_UP_TITLE) \
-            == list(ui_app.SECTOR_TABLE_HEADERS)
+        _wait_heatmap(market_window, qapp)
+        section = _heatmap_section(market_window)
+        # 板块榜这一轮是空的 → 供热力图 tooltip 用的 extras 也必然是空的
+        assert (market_window.market_sectors or {}).get("up") in (None, [])
+        assert market_window._heatmap_extras() == {}
+        blocks = _feed_heatmap(market_window)
+        # 热力图照样有内容（面积/颜色不依赖板块榜），只是 tooltip 里少那两项
+        assert [b["name"] for b in section.widget.blocks] == [b["name"] for b in blocks]
+        tip = section.widget.tip_for(blocks[0])
+        assert "涨停家数" not in tip and "主力净额" not in tip
+        # 而那行小字必须**说清为什么少**（"没取到" ≠ "没有涨停"），口径那几句照旧在。
+        # 措辞按分支不同：退回**本地口径**时涨停家数还在（本地涨停池），缺的只有主力净额；
+        # 两个分支的共用说法是"板块榜这一轮没取到"，缺的那一项一定点名。
+        note = section.note_label.fullText()
+        assert "板块榜这一轮没取到" in note
+        assert "主力净额" in note
+        assert "口径：面积 = 行业流通市值合计" in note
+        assert tip.rstrip().endswith("（面积 = 流通市值合计；颜色 = 涨跌幅，红涨绿跌）")
+        # 页内提示仍然指路到【刷新数据】（本地还没有涨停池数据 → 热力图 tooltip 里
+        # 就没有涨停家数；原来这句话是围绕"热门板块两张表"说的，2026-10-08 跟着改了措辞）
         assert market_window.market_hint.isVisible() is True
-        assert "热门板块" in market_window.market_hint.text()
+        assert "板块热力图" in market_window.market_hint.text()
+        assert "涨停家数" in market_window.market_hint.text()
         assert "刷新数据" in market_window.market_hint.text()
+    finally:
+        market.clear_cache()
+
+
+def test_heatmap_note_states_its_caliber_and_the_snapshot_time(market_window, qapp) -> None:
+    """那行小字（`note_label`）三种状态各说各的话 —— **口径、快照时间、缺什么**。
+
+    它是这一块唯一的文字说明（原来两张表靠四条表头 + 一行说明），所以三种状态都要说清：
+    ① 还没取过 → 指路【刷新热力图】；② 取数失败 → 写出失败原因；③ 有数据 → 口径 + 快照
+    MM-DD HH:MM；板块榜这一轮没取到时再补一句（否则用户会以为"没有涨停"）。
+    """
+    from laoa_trader import market
+
+    market.clear_cache()
+    win = market_window
+    try:
+        _wait_heatmap(win, qapp)
+        hot = _heatmap_section(win)
+        # ① 还没取过（离线建窗口时后台那一轮还没落地 / 缓存也没有）
+        win.market_heatmap, win.market_heatmap_at, win.market_heatmap_error = [], 0.0, ""
+        note = win._heatmap_note()
+        assert "还没取过热力图数据" in note and "刷新热力图" in note
+        assert "口径：" not in note
+        # ② 取数失败：原因是**原样写出来**的（不是一句"加载失败"）
+        win.market_heatmap_error = "RuntimeError: 全市场快照没取到（网络/限流/来源都不可用）"
+        assert win._heatmap_note().startswith("⚠️ 取数失败：")
+        assert "全市场快照没取到" in win._heatmap_note()
+        # ③ 有数据：口径 + 分档 + 快照时间 + 涨跌平各几块
+        at = time.time() - 60
+        blocks = _feed_heatmap(win, at=at)
+        note = win._heatmap_note()
+        assert "口径：面积 = 行业流通市值合计" in note
+        assert "颜色 = 市值加权涨跌幅（红涨绿跌，±10% 饱和）" in note
+        assert "3 个行业：涨 1 · 跌 1 · 平 1" in note
+        assert re.search(r"快照 \d{2}-\d{2} \d{2}:\d{2}", note), note
+        assert "已过期" not in note                      # 一分钟前的快照还不算旧
+        # 快照时间取的是**真实时间**（相差一分钟 → 显示的分钟数就该是那个）
+        assert time.strftime("%m-%d %H:%M", time.localtime(at)) in note
+        # 那行小字显示的就是 `_heatmap_note()` 的产物（一处生成，页面小字 / 放大窗口 /
+        # tooltip 三处共用，不许各算各的）
+        assert hot.note_label.fullText() == note
+        assert hot.note_label.toolTip() == note
+        # ④ 板块榜这一轮退回了**本地口径** → 说清缺的是哪一项（涨停家数还在，缺的是主力净额）
+        win.market_sectors = {"up": [], "down": [], "source": "local", "note": "x"}
+        win._render_market_overview()
+        note = win._heatmap_note()
+        assert "板块榜这一轮没取到" in note and "主力净额" in note
+        assert "涨停家数用的是本地口径" in note
+        # ④b 板块榜整个没取到（连本地那份都没有）→ 那一句话要升级：两项都别指望
+        win.market_sectors = {"up": [], "down": [], "source": "sectors", "note": "x"}
+        win._render_market_overview()
+        assert "板块榜这一轮没取到：鼠标停在块上看不到涨停家数与主力净额" \
+            in win._heatmap_note()
+        # ⑤ 板块榜回来了 → 那句话收掉（说错比不说更糟）
+        win.market_sectors = {"up": [{"name": "半导体", "limit_up": 1, "main_net": None}],
+                              "source": "sectors"}
+        win._render_market_overview()
+        assert "板块榜这一轮没取到" not in win._heatmap_note()
+        assert [b["name"] for b in hot.widget.blocks] == [b["name"] for b in blocks]
+        # ⑥ 快照的**出处**也要写出来（价格与市值可能来自两个来源，见 `quotes_source_text`）
+        win.market_heatmap_source = "同花顺金融数据服务（市值由 公开行情源 补）"
+        win._render_market_overview()
+        assert "来源 同花顺金融数据服务（市值由 公开行情源 补）" in win._heatmap_note()
+        assert hot.note_label.fullText() == win._heatmap_note()   # 小字跟着一起重画
+    finally:
+        market.clear_cache()
+
+
+def test_heatmap_tip_shows_sector_rank_extras_with_units(market_window, qapp) -> None:
+    """tooltip 里"板块榜那三项"的**单位与显示条件**：涨停家数 / 跌停家数 / 主力净额（亿）。
+
+    这三项只有板块榜有（面积与颜色走全市场快照），而板块榜在测试环境里必然取不到，
+    所以这里按控件自己的接口喂一份 extras（`hot.set_blocks(blocks, extras, note=…)`）——
+    要钉的是"合流之后每个数的单位对不对、没有的行不写"，不是"有没有联网取到"。
+    单位：两个家数是**只数**；`main_net` 在数据层是**元**，tooltip 显示前 ÷1e8 换成"亿"
+    （`sector_rank_tables` 的口径），差 1e8 倍是最容易犯又最看不出来的错。
+    """
+    from laoa_trader import market
+
+    market.clear_cache()
+    try:
+        hot = _heatmap_section(market_window)
+        blocks = _heatmap_blocks()
+        extras = {
+            "半导体": {"limit_up": 3, "limit_down": 2, "main_net": 12.5e8},
+            "银行": {"limit_up": 0, "limit_down": None, "main_net": None},
+        }
+        hot.set_blocks(blocks, extras, note="口径：面积 = 行业流通市值合计")
+        semi_tip = hot.widget.tip_for(hot.widget.blocks[0])
+        assert "涨停家数：3" in semi_tip
+        assert "跌停家数：2" in semi_tip
+        assert "主力净额：+12.50 亿" in semi_tip        # 12.5e8 元 = 12.5 亿（不是 1250000000 亿）
+        bank_tip = hot.widget.tip_for(hot.widget.blocks[1])
+        # 0 家涨停要写（"真的没有"是有用的信息）；跌停 0 / 主力净额取不到就不写这一行
+        assert "涨停家数：0" in bank_tip
+        assert "跌停家数" not in bank_tip and "主力净额" not in bank_tip
+        # 口径那行小字照旧由调用方给（这一条不关心它）
+        assert hot.note_label.fullText() == "口径：面积 = 行业流通市值合计"
+        # 板块榜那几项**不进面积、也不进颜色**：面积还是市值、颜色还是涨跌幅
+        assert [b["mktcap"] for b in hot.widget.blocks] == [800.0, 400.0, 200.0]
+        assert blocks[0]["pct"] == 4.5
+    finally:
+        market.clear_cache()
+
+
+def test_heatmap_zoom_opens_a_window_with_its_own_chart(market_window, qapp) -> None:
+    """【放大】→ 独立窗口里有一张热力图（同一份数据、同一套口径，只是画布大）。"""
+    from laoa_trader import market
+
+    market.clear_cache()
+    win = market_window
+    try:
+        _wait_heatmap(win, qapp)
+        blocks = _feed_heatmap(win)
+        window = win.show_heatmap_window()
+        qapp.processEvents()
+
+        assert window is not None and window.isVisible() is True
+        assert type(window._chart).__name__ == "HeatmapWidget"
+        assert window._chart.compact is False               # 大图：不截断行业名
+        assert window._chart.minimumHeight() > 0
+        assert [b["name"] for b in window._chart.blocks] == [b["name"] for b in blocks]
+        assert window._chart.extras                          # 涨停家数等 extras 一起带过来
+        assert "面积 = 行业流通市值合计" in window._note.text()
+        assert "板块热力图" in window.windowTitle()
+        # 同一个窗口不重复建（连点两次不该堆出一摞）
+        assert win.show_heatmap_window() is window
+        assert sum(1 for w in qapp.topLevelWidgets() if w is window) == 1
+        # 窗口里也有【刷新】与【打开大盘云图】两个入口（与概览页同一套方法）
+        from PySide6.QtWidgets import QPushButton
+
+        texts = [b.text() for b in window.findChildren(QPushButton)]
+        assert "刷新" in texts and "打开大盘云图" in texts
+        window.close()
+        qapp.processEvents()
+        assert window.isVisible() is False
+    finally:
+        market.clear_cache()
+
+
+def test_heatmap_zoom_and_refresh_buttons_are_wired(market_window, qapp) -> None:
+    """【放大】/【刷新热力图】真的接上了（点按钮，不是调方法）——离线时如实报失败。
+
+    【刷新热力图】那条尤其值得点一遍：它的意义是"忽略 TTL 立刻重拉一轮"，而测试环境
+    封了网 → 这一轮**必然失败**。要钉的就是"失败被如实写到那行小字上、界面照常可用"，
+    而不是静默什么都不发生（用户点了没反应，是最难查的一类问题）。
+    """
+    from laoa_trader import market
+
+    market.clear_cache()
+    win = market_window
+    try:
+        _wait_heatmap(win, qapp)
+        hot = _heatmap_section(win)
+        # 【放大】按钮 = `show_heatmap_window`
+        assert win._heatmap_window is None
+        hot.btn_zoom.click()
+        qapp.processEvents()
+        assert win._heatmap_window is not None
+        assert win._heatmap_window.isVisible() is True
+        assert win._heatmap_window._chart is not None        # 窗口里确实有图
+        win._heatmap_window.close()
+        qapp.processEvents()
+
+        # 【刷新热力图】按钮 = `on_refresh_heatmap`（忽略 TTL 真去取一轮）
+        win.market_heatmap_error = ""
+        win.market_heatmap, win.market_heatmap_at = [], 0.0
+        win._heatmap_ts = 0.0
+        hot.btn_refresh.click()
+        assert time.time() - win._heatmap_ts < 5, "点了刷新就该立刻起一轮取数"
+        _wait_heatmap(win, qapp)
+        assert win.market_heatmap_error, "离线取数必然失败，且必须如实记下来"
+        assert "取数失败" in win._heatmap_note()
+        assert hot.note_label.isVisible() is True
+        # 失败不影响界面其余部分：概览页照常能用
+        win._tick()
+        qapp.processEvents()
+        assert win.pool_table.rowCount() == 1
     finally:
         market.clear_cache()
 
@@ -4570,13 +4900,23 @@ def test_overview_columns_fit_the_screen_without_clipping(
                 ui_app.MARKET_SECTION_FLOW].stats.items():
             assert item.value_label.width() >= item.value_label.sizeHint().width(), name
             assert item.title_label.width() >= item.title_label.sizeHint().width(), name
-        # 热门板块两张表的每一格文字都不许被自己的列宽截掉
-        for title, block in win.market_sections[ui_app.MARKET_SECTION_HOT].tables.items():
-            for row in range(block.table.rowCount()):
-                for column in range(block.table.columnCount()):
-                    item = block.table.item(row, column)
-                    need = block.table.fontMetrics().horizontalAdvance(item.text())
-                    assert block.table.columnWidth(column) >= need, (title, row, column)
+        # 「板块热力图」没有"列宽"这回事了，窄屏上的等价要求是：
+        # ① 块本身不比视口宽（不横向溢出）；② 每一块的矩形都落在自己的画布内
+        # （越界就会被裁掉一半，看着像少了个行业）；③ 每块都大到写得下名字。
+        from laoa_trader.ui import heatmap as heatmap_mod
+
+        hot = _heatmap_section(win)
+        _wait_heatmap(win, qapp)
+        blocks = _feed_heatmap(win)
+        canvas_w, canvas_h = hot.widget.width(), hot.widget.height()
+        assert canvas_w <= win.market_scroll.viewport().width()
+        assert hot.widget.minimumHeight() == ui_app.HEATMAP_MIN_HEIGHT >= 240
+        assert len(hot.widget._rects) == len(blocks)
+        for _, _, width, height in hot.widget._rects:
+            assert 0 < width <= canvas_w and 0 < height <= canvas_h
+        readable = [rect for rect in hot.widget._rects
+                    if rect[2] >= heatmap_mod.MIN_TEXT_W and rect[3] >= heatmap_mod.MIN_TEXT_H]
+        assert len(readable) == len(blocks), "有数据时每一块都该写得下名字"
         # 一行页脚照样成立
         assert win.market_footer.height() \
             <= max(win.market_as_of_label.height(), win.btn_market_refresh.height()) + 8

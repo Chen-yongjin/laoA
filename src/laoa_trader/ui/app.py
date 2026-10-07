@@ -150,7 +150,7 @@ ALERT_SEEN_LIMIT = 1000
 # ── 窗口尺寸 ──
 #: 窗口**期望**尺寸（可用区域够大时就用它）与**最小**尺寸上限。
 #: 这两个值只是"上限"：真正的尺寸按屏幕可用区域算（见 `fit_window_geometry`）。
-#: 高 760 而不是 720：概览页有三块（宽基 / 情绪 / 热门板块），720 在 150% 缩放的机器上
+#: 高 760 而不是 720：概览页底下有三块（宽基 / 情绪 / 板块热力图），720 在 150% 缩放的机器上
 #: 正好压线（"KPI 卡片整排"已经折进「情绪指数」块，这一档高度是留给三块的）。
 WINDOW_PREFERRED_SIZE = (1120, 760)
 #: 最小尺寸收到 760×540 —— 比"持仓表 8 列 + 概览两块指数条目"需要的宽度小得多，
@@ -189,11 +189,19 @@ MARKET_PCT_TRACK = "-888.88%"
 #: 2026-09-17 改版（用户要求，顺序也是用户给的）：
 #:   1. 「成交与情绪」**挪到最上面**（在「宽基指数」之前），装的是原来那排 KPI 的小条目；
 #:   2. 「情绪指数」只剩指数条目（成交额/涨跌停/涨跌家数都搬去上面那一块了）；
-#:   3. 「热门板块」改成"上涨前五 + 下跌前五"两张表。
+#:   3. 第四块原先是"上涨前五 + 下跌前五"两张表 —— **2026-10-08 换成了板块热力图**
+#:      （用户要求：面积给权重、颜色给涨跌，一屏看全所有行业；常量名因此从
+#:      `MARKET_SECTION_HOT`（热门板块）留了下来，界面文字已是「板块热力图」）。
 MARKET_SECTION_FLOW = "成交与情绪"
 MARKET_SECTION_WIDE = "宽基指数"
 MARKET_SECTION_SENTIMENT = "情绪指数"
-MARKET_SECTION_HOT = "热门板块"
+#: 第四块的名字。**常量名没跟着改**（改动面太大、收益为零），改的是它的值。
+MARKET_SECTION_HOT = "板块热力图"
+#: 概览页里那块热力图的最小高度（像素）。
+#: 为什么是 320 而不是"塞得下就行的 240"：行业有 90 来个，块小到 34×18 就不写字了
+#: （见 `ui/heatmap.py` 的 `MIN_TEXT_W/MIN_TEXT_H`）—— 太矮的图等于"一片颜色、没有一个名字"，
+#: 用户只能靠猜。原来那两张表（各 5 行 + 表头）占的也是这个量级。
+HEATMAP_MIN_HEIGHT = 320
 MARKET_SECTION_TITLES: tuple[str, ...] = (
     MARKET_SECTION_FLOW, MARKET_SECTION_WIDE, MARKET_SECTION_SENTIMENT,
     MARKET_SECTION_HOT,
@@ -245,55 +253,27 @@ MARKET_STAT_GRID_SPACING = 5
 #: 小条目**框内**（名称与数值之间）的间距。与上面的网格间距同理：为了挤下 7 条而收紧，
 #: 但不许小于 4 —— 再小两段文字就贴在一起，"看得清"比"排得下"更重要。
 STAT_INNER_SPACING = 6
-#: 「热门板块」取几个行业来算（`pool.hot_industries(top=...)`）。
-#: 12 = 用户给定的口径（与 `pool.hot_industries` 的默认 top 一致）：两张表各取前 5，
-#: 从这 12 个行业里挑，样本够宽（不会因为只取 5 个而漏掉真正涨得多的板块）。
+#: 概览这一趟取几个行业的**本地口径**（`pool.hot_industries(top=...)`）。
+#: 12 = 与 `pool.hot_industries` 的默认 top 一致：这个数决定了"哪些行业拿得到
+#: 涨停家数"（板块榜自己有 31 个一级行业，但涨停家数只有本地那一套算得出来）。
+#: 2026-10-08 起它服务的是**热力图 tooltip**（原来服务的是上涨前五/下跌前五两张表）。
+#: 为什么不是"全部行业"：`hot_industries` 还要算近 5 日行业等权涨幅（一次全市场扫描），
+#: 这一趟每分钟都在跑，取前 12 个够用（热力图里 hover 到没上榜的行业时就没有这一项，
+#: 小字里说明了"来自板块榜"）。
 MARKET_HOT_TOP = 12
-
-# ── 「热门板块」：上涨前五 / 下跌前五 两张表（2026-09-17 用户要求）──
-#: 两张表的列（用户给定的表头文字，**照抄**）：
-#:     板块名称  涨停数量  涨幅  主力净额
-#: 口径：「板块名称」来自 `data.sectors.fetch_sector_rank()`（取不到时退回本地
-#: `pool.hot_industries()` 的行业名）；「涨停数量」永远来自 `pool.hot_industries()`
-#: （与匹配用的是同一套口径，不另起一套）；「涨幅」= 板块当天涨跌幅（%）；
-#: 「主力净额」= 主力净流入，单位**亿**（正负号保留）。
-SECTOR_TABLE_HEADERS: tuple[str, ...] = ("板块名称", "涨停数量", "涨幅", "主力净额")
-#: 「下跌前五」的列头（2026-09-21 主人指出：下跌那张表里放"涨停数量"说不通）。
-#: **只有第 2 列不同**：涨停 → 跌停；其余三列两张表完全一致（口径也一致）。
-SECTOR_TABLE_HEADERS_DOWN: tuple[str, ...] = ("板块名称", "跌停数量", "涨幅", "主力净额")
-#: 两张表各自的"数量列"取哪个字段：上涨表数涨停、下跌表数跌停。
-SECTOR_COUNT_KEY_UP = "limit_up"
-SECTOR_COUNT_KEY_DOWN = "limit_down"
-#: 「上涨前五」/「下跌前五」的标题与各取几名（用户给定：前 5）。
-SECTOR_UP_TITLE = "上涨前五"
-SECTOR_DOWN_TITLE = "下跌前五"
+#: 「上涨前五 / 下跌前五」这个名字在**界面**上已经没有对应控件了（两张表 2026-10-08 被
+#: 热力图原位替换），但这两组行还在：`sector_rank_tables()` 各取前 5 行，供热力图 tooltip
+#: 取"涨停家数 / 跌停家数 / 主力净额"（见 `_heatmap_extras`）。所以前 5 这个数是**取数口径**，
+#: 不是界面口径 —— 热力图上没有"前五"这回事。
 SECTOR_TOP = 5
-#: 「主力净额」的单位（元 → 亿）与显示位数：正负号保留、两位小数。
+#: 「主力净额」的单位（元 → 亿）：tooltip 显示时 ÷1e8，正负号保留、两位小数。
 SECTOR_NET_UNIT = 1e8
-#: 四个表头各自的 tooltip（"这一列什么意思"的说明书；列头只有四个字，写不下口径）。
-SECTOR_HEADER_TIPS: tuple[str, ...] = (
-    "板块名称：来自 `data/sectors.py` 的板块榜；取不到时退回本地"
-    "`pool.hot_industries()` 的行业名（这时下面那行说明会写明是哪种口径）",
-    "涨停数量：**当日该板块的涨停家数**（与匹配用的是同一套口径：`pool.hot_industries`）。"
-    "取不到本地涨停池数据时是 `—`",
-    "涨幅：板块**当天涨跌幅**（%）；退回本地口径时它是**近 5 日**行业等权涨幅"
-    "（那时表下方会写清）",
-    "主力净额：主力资金净流入，单位**亿**（正=净流入、负=净流出）。"
-    "只有 `data/sectors.py` 的板块榜提供这一项，取不到是 `—`（不是 0）",
-)
-#: 「下跌前五」的表头 tooltip：只有第 2 列换了说法（其余三列与上涨表共用上面那三条）。
-SECTOR_HEADER_TIPS_DOWN: tuple[str, ...] = (
-    SECTOR_HEADER_TIPS[0],
-    "跌停数量：**当日该板块的跌停家数**（本地日线 + 实测过的跌停价规则算出来的："
-    "主板 10%、创业板/科创板 20%、北交所 30% 且向上取整、ST 同幅度）。"
-    "库里不足两个交易日时是 `—`",
-    SECTOR_HEADER_TIPS[2],
-    SECTOR_HEADER_TIPS[3],
-)
-#: 板块表"最少要多宽"的估算参数（只影响并列还是上下排，不影响任何布局约束）：
-#: 每个单元格左右各留一点内边距，再给表框与竖向滚动条留一点。
-SECTOR_CELL_PADDING = 24
-SECTOR_TABLE_CHROME = 40
+#: 对照用的第三方站点（主人给的）：只在页面上给一个"跳过去看看"的入口，
+#: **不内嵌、不抓它的数据** —— 内嵌要给客户装 Chromium（包大几百 MB），
+#: 抓它的页面又涉及条款；我们用自己的数据自己画（见 `data/market_map.py`）。
+MARKET_HEATMAP_SITE = "https://52etf.site/"
+#: 热力图的刷新间隔（秒）：全市场快照 ≈28 个请求，绝不能跟 60 秒那套节拍走
+HEATMAP_TTL_SECONDS = 180
 
 # ── 「系统设置」的五组（顺序 = 页面上下顺序）──
 #: 每组一个带标题的块。**顺序**是用户给定的：先"数据从哪来"，
@@ -1019,274 +999,82 @@ if QT_AVAILABLE:
             self.value_label.setStyleSheet(style)
             self.pct_label.setStyleSheet(style)
 
-    class SectorTable(QFrame):
-        """「上涨前五」/「下跌前五」里的一张表：小标题 + 四列。
+    class SectorHeatmapSection(QFrame):
+        """「板块热力图」块 = 标题 + 一行口径/操作 + 自绘热力图（2026-10-08 主人要求）。
 
-        列就是用户给定的那四个字（`SECTOR_TABLE_HEADERS`）：
-        `板块名称 | 涨停数量 | 涨幅 | 主力净额` —— 用户原话是"现在的数据都没写什么意思，
-        改成以下表格标上名称"，所以**表头文字必须写清含义**，这也是这一块的设计核心。
+        为什么换掉原来的「上涨前五 / 下跌前五」两张表：两张表只有 10 行，**中间那一大片
+        看不见**（横盘、微涨微跌的行业根本不上榜）。热力图一眼看全 90 个行业：
+        面积给权重（行业流通市值合计）、颜色给涨跌（红涨绿跌）。
 
-        为什么用 `QTableWidget` 而不是继续用"一行一个 QFrame"：这两张表是**表**——
-        列要对齐、要有表头、要能一眼看出"哪一列是什么"；QTableWidget 的列头就是
-        那个"写清含义"的地方，而且它还自带列宽自适应（`Stretch`），窄窗口下自己
-        横向滚动，不会把整页顶宽。
+        这一块**不跟大盘概览那 60 秒节拍**：它要一份全市场快照（东财分页 ≈28 个请求），
+        所以自己的节奏是 TTL 180 秒 + 手动【刷新热力图】+ 页面不可见时一次都不拉
+        （见主窗口的 `_maybe_heatmap`）。口径写死在 `data/market_map.py` 里。
 
-        口径（都在 tooltip 里写清，因为列头只有四个字）：
-        - 板块名称：来自 `data.sectors.fetch_sector_rank()`；取不到时是本地
-          `pool.hot_industries()` 的行业名（页面上会写明是哪种口径）；
-        - 涨停数量：**当日该板块涨停家数**（`pool.hot_industries()`，与匹配同一套口径）；
-        - 涨幅：板块当天涨跌幅（%），按涨跌上色（`market.value_color`）；
-        - 主力净额：主力净流入，**单位亿**（原始单位是元，这里 ÷1e8），正负号保留、
-          同样按正负上色；取不到就是 `—`（**绝不显示 0**：0 是"刚好不流入不流出"）。
+        属性：`title_label`（块标题）、`widget`（`HeatmapWidget`）、`btn_refresh` /
+        `btn_zoom` / `btn_site`、`note_label`（口径 + 快照时间那行小字）。
+        另外三样是**为了不给外面的通用代码分叉**而留的：`entries` / `stats` 恒为空
+        （`_market_item_need()` / `_market_stat_need()` 与页面渲染都会遍历它们）、
+        `set_columns()` 是空实现（热力图自己按当前宽度铺块，没有「列数」这回事）。
         """
 
-        def __init__(
-            self,
-            title: str,
-            *,
-            headers: tuple[str, ...] = SECTOR_TABLE_HEADERS,
-            tips: tuple[str, ...] = SECTOR_HEADER_TIPS,
-            count_key: str = SECTOR_COUNT_KEY_UP,
-        ) -> None:
-            """Args:
-                headers / tips: 列头与各自的 tooltip。**上涨与下跌两张表只有第 2 列不同**
-                    （涨停数量 / 跌停数量），所以做成参数而不是写死 —— 见
-                    `SECTOR_TABLE_HEADERS_DOWN` 的说明。
-                count_key: 第 2 列的数从行里的哪个字段取（`limit_up` / `limit_down`）。
-            """
+        def __init__(self, label: str) -> None:
             super().__init__()
-            self.title = title
-            self.headers = tuple(headers)
-            self.tips = tuple(tips)
-            self.count_key = count_key
-            self.setObjectName("marketSectorTable")
-            box = QVBoxLayout(self)
-            box.setContentsMargins(0, 0, 0, 0)
-            box.setSpacing(4)
-            self.title_label = QLabel(title)
-            self.title_label.setObjectName("marketSectionTitle")   # 与分区标题同一档
-            self.title_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-            box.addWidget(self.title_label)
-            self.table = QTableWidget(0, len(self.headers))
-            self.table.setHorizontalHeaderLabels(list(self.headers))
-            self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-            self.table.verticalHeader().setVisible(False)
-            self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-            self.table.setSelectionBehavior(QTableWidget.SelectRows)
-            self.table.setAlternatingRowColors(True)
-            self.table.setShowGrid(True)
-            # 表头那四个字就是"这一列什么意思"的说明书 —— 口径写进表头 tooltip
-            for column, tip in enumerate(self.tips):
-                item = self.table.horizontalHeaderItem(column)
-                if item is not None:
-                    item.setToolTip(tip)
-            box.addWidget(self.table)
-            self.rows: list[dict] = []
+            from laoa_trader.ui import heatmap as heatmap_mod
 
-        def minimum_need(self) -> int:
-            """这张表"至少要多宽"（表头文字 + 单元格内边距 + 竖滚动条）。
-
-            为什么要问它：两张表并列还是上下排，取决于"半屏塞不塞得下"——
-            与其写死一个 600 像素的常量（换台机器字体更宽就不对了），
-            不如按当前字体量一遍（与概览条目列数同一套思路，见 `_market_item_need`）。
-            """
-            metrics = self.table.fontMetrics()
-            width = sum(metrics.horizontalAdvance(text) for text in self.headers)
-            return int(width + SECTOR_CELL_PADDING * len(self.headers)
-                       + SECTOR_TABLE_CHROME)
-
-        def set_rows(self, rows: list[dict]) -> None:
-            """填 5 行（`rows` 为空就画 0 行 + 表头，照样能看出这一列是什么）。"""
-            self.rows = list(rows or [])
-            self.table.setRowCount(len(self.rows))
-            for index, row in enumerate(self.rows):
-                self.table.setItem(index, 0, self._name_item(row))
-                self.table.setItem(index, 1, self._count_item(row))
-                self.table.setItem(index, 2, self._pct_item(row))
-                self.table.setItem(index, 3, self._net_item(row))
-
-        def _name_item(self, row: dict) -> Any:
-            """板块名称：**加粗**（用户要求所有名称加黑）——数值不加粗。"""
-            item = QTableWidgetItem(str(row.get("name") or market.DASH))
-            item.setFont(_bold_name_font(self.table))
-            item.setToolTip(self._name_tip(row))
-            return item
-
-        @staticmethod
-        def _name_tip(row: dict) -> str:
-            bits = []
-            if row.get("source_text"):
-                bits.append(str(row["source_text"]))
-            if row.get("mom") is not None and row.get("pct") is None:
-                # 退回本地口径时，这一列装的其实是"近 5 日行业等权涨幅"
-                bits.append("这一列现在是**近 5 日**行业等权涨幅（不是当日涨幅），"
-                            "原因见「热门板块」下面那行说明")
-            return "\n".join(bits)
-
-        def _count_item(self, row: dict) -> Any:
-            """第 2 列：上涨表数**涨停**、下跌表数**跌停**（取不到一律 `—`，不显示 0）。
-
-            0 是"这个板块今天没有涨停/跌停"，与"没取到"是两回事 —— 与本项目在
-            市值/换手那里的口径一致（见 `_snapshot_cells`）。
-            """
-            value = row.get(self.count_key)
-            item = QTableWidgetItem(market.DASH if value is None else str(int(value)))
-            item.setToolTip(self.tips[1])
-            item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
-            return item
-
-        def _pct_item(self, row: dict) -> Any:
-            value = row.get("pct")
-            item = QTableWidgetItem(percent_value_text(value))
-            color = market.value_color(value)
-            if color:
-                # 与两张主表同一套做法：改前景色，不用富文本（排序/复制都不受影响）
-                item.setForeground(QBrush(QColor(color)))
-            item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
-            item.setToolTip(self.tips[2])
-            return item
-
-        def _net_item(self, row: dict) -> Any:
-            """主力净额：元 → **亿**（`+1.23亿` / `-0.45亿`）；取不到是 `—`。
-
-            为什么单独写一个格式化而不是复用 `market._amount_text`：
-            那个是"成交额"口径（四舍五入到整亿、没有正负号），
-            而主力净额要的是**带符号的两位小数亿** —— 差一个符号，
-            用户就会把"净流出"看成"净流入"。
-            """
-            value = row.get("main_net")
-            if value is None:
-                item = QTableWidgetItem(market.DASH)
-                item.setToolTip(
-                    "这一列取不到：主力净额要 `data/sectors.py` 的板块榜才提供，"
-                    "现在这份数据里没有它（不是 0 —— 0 是「刚好不流入不流出」）"
-                )
-            else:
-                number = float(value) / SECTOR_NET_UNIT
-                item = QTableWidgetItem(f"{number:+.2f}亿")
-                color = market.value_color(number)
-                if color:
-                    item.setForeground(QBrush(QColor(color)))
-                item.setToolTip(f"{self.tips[3]}\n原始值 {float(value):,.0f} 元")
-            item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
-            return item
-
-    class HotSectorsSection(QFrame):
-        """「热门板块」块 = 标题 + **上涨前五 / 下跌前五 两张表**（2026-09-17 用户要求）。
-
-        为什么改成两张表：用户原话是"把上涨前 5 和下跌前 5 都标出来。现在的数据都没写
-        什么意思，改成以下表格标上名称" —— 也就是说这一块要回答两件事：
-        **今天资金在抢谁、又在砸谁**，而且每一列的含义要写在表头上。
-        旧版是"涨停密度前 12"的一列长串（只有上榜的、全是涨的），跌得最狠的板块
-        在那套口径里根本不会出现（它按涨停密度排序）。
-
-        窄屏排布：两张表**并列**（宽屏）或**上下排**（窄屏）—— 判据是
-        "两张表的最小需要宽度之和塞不塞得下当前宽度"（`_relayout`），
-        与概览条目列数同一套思路：宁可少排一列，也不让文字被裁。
-
-        属性：`title_label`（块标题）、`tables`（`{标题: SectorTable}`）、
-        `placeholder_label`（两张表都没数据时的 `—` 占位）、`note_label`（口径说明）。
-        兼容旧接口：`entries` / `stats` 恒为空 —— 原来"一块 = 一个条目网格"，
-        现在这一块是两张表，但外面遍历各块的代码（`_render_market_overview`）不必分叉。
-        """
-
-        def __init__(self, label: str,
-                     titles: tuple[str, ...] = (SECTOR_UP_TITLE, SECTOR_DOWN_TITLE)) -> None:
-            super().__init__()
             self.label = label
             self.keys: tuple[str, ...] = ()
             self.entries: list[Any] = []
             self.stats: dict[str, Any] = {}
-            self._narrow: bool | None = None
-            self._need = 0
             box = QVBoxLayout(self)
             box.setContentsMargins(0, 0, 0, 0)
             box.setSpacing(6)
+            head = QHBoxLayout()
+            head.setSpacing(PAGE_SPACING)
             self.title_label = QLabel(label)
             self.title_label.setObjectName("marketSectionTitle")
-            self.title_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-            box.addWidget(self.title_label)
-            #: 两张表：**上涨前五** 与 **下跌前五**（顺序就是界面上的顺序）
-            # 两张表的**第 2 列不同**（涨停数量 / 跌停数量）：列头、tooltip、取数字段
-            # 一起传进去 —— 三处分开写迟早会出现"表头写跌停、数的是涨停"这种最难查的错。
-            self.tables: dict[str, SectorTable] = {
-                SECTOR_UP_TITLE: SectorTable(
-                    SECTOR_UP_TITLE, headers=SECTOR_TABLE_HEADERS,
-                    tips=SECTOR_HEADER_TIPS, count_key=SECTOR_COUNT_KEY_UP,
-                ),
-                SECTOR_DOWN_TITLE: SectorTable(
-                    SECTOR_DOWN_TITLE, headers=SECTOR_TABLE_HEADERS_DOWN,
-                    tips=SECTOR_HEADER_TIPS_DOWN, count_key=SECTOR_COUNT_KEY_DOWN,
-                ),
-            }
-            if tuple(self.tables) != tuple(titles):
-                # 传进来的标题必须是那两张（顺序也一致）：对不上就直接暴露出来，
-                # 别用"多建一张空表"糊过去（那样界面上会少一张表还一声不响）
-                raise ValueError(f"板块表标题对不上：{titles!r}")
-            self.grid = QGridLayout()
-            self.grid.setContentsMargins(0, 0, 0, 0)
-            self.grid.setSpacing(MARKET_ITEM_GAP)
-            box.addLayout(self.grid)
-            for table in self.tables.values():
-                self.grid.addWidget(table, 0, 0)
-            self.placeholder_label = QLabel(market.DASH)
-            self.placeholder_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-            box.addWidget(self.placeholder_label)
-            self.placeholder_label.setVisible(False)
-            #: 页内那行说明（"表里的数是从哪来的"）：**只在有话说时出现**
+            # 与 `MarketSection` 的分区标题**必须长得一样**（2026-09-21 主人："四个子项目名
+            # 改成黑体大字"）：这一块原来是灰小字，一眼就看出"它跟另外三块不是一家人"。
+            # 所以同样套 `_scaled_font(..., bold=True)`、同样**不设** PlaceholderText 前景色
+            # （设了就是灰字，与"大字"的意图相反）。
+            self.title_label.setFont(
+                _scaled_font(self.title_label.font(), MARKET_SECTION_TITLE_DELTA, bold=True)
+            )
+            head.addWidget(self.title_label)
+            head.addStretch(1)
+            self.btn_refresh = QPushButton("刷新热力图")
+            self.btn_refresh.setToolTip(
+                "取一轮全市场快照重画（约 28 个请求，通常十几秒）。\n"
+                "平时不用点：交易时段每 3 分钟自己刷一次，页面在别处时不拉"
+            )
+            head.addWidget(self.btn_refresh)
+            self.btn_zoom = QPushButton("放大")
+            self.btn_zoom.setToolTip("打开独立窗口看大图（面积/颜色同一套口径）")
+            head.addWidget(self.btn_zoom)
+            self.btn_site = QPushButton("打开大盘云图")
+            self.btn_site.setToolTip(
+                f"用系统浏览器打开 {MARKET_HEATMAP_SITE}（对照用；\n"
+                "本程序不内嵌、不抓它的数据，热力图是我们自己按公开源算的）"
+            )
+            head.addWidget(self.btn_site)
+            box.addLayout(head)
+            HeatmapWidget = heatmap_mod.build_heatmap_widget()
+            self.widget = HeatmapWidget(self, compact=True)
+            self.widget.setMinimumHeight(HEATMAP_MIN_HEIGHT)
+            box.addWidget(self.widget)
             self.note_label = ElidedLabel("")
             self.note_label.setObjectName("statusTag")
             self.note_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
             box.addWidget(self.note_label)
-            self.note_label.setVisible(False)
 
-        def set_rows(self, rows: dict[str, list[dict]], note: str = "") -> None:
-            """填两张表：`{标题: 行列表}`；`note` 是"这些数从哪来"的那句话。"""
-            for title, table in self.tables.items():
-                table.set_rows(list((rows or {}).get(title) or []))
-            empty = not any(table.rows for table in self.tables.values())
-            self.placeholder_label.setVisible(empty)
-            # 界面显示用 `plain_text`（与来源说明同一套：QLabel 是纯文本，
-            # `**` 会显示成字面的星号）；tooltip 里保留原文
+        def set_blocks(self, blocks: Any, extras: Any = None, note: str = "") -> None:
+            """填热力图：`blocks` 见 `data/market_map.build_blocks`。"""
+            self.widget.set_blocks(blocks or [], extras or {})
             self.note_label.setFullText(plain_text(note or ""))
             self.note_label.setToolTip(str(note or ""))
             self.note_label.setVisible(bool(note))
-            self._need = 0
-            self._relayout()
 
         def set_columns(self, columns: int, stat_columns: int | None = None) -> None:
-            """列数变化时重排（这一块不看列数，只看自己的宽度 —— 见 `_relayout`）。"""
-            self._relayout()
-
-        def resizeEvent(self, event: Any) -> None:  # noqa: D102 - 见类说明
-            super().resizeEvent(event)
-            self._relayout()
-
-        def _relayout(self) -> None:
-            """按当前宽度决定两张表**并列**还是**上下排**（宽度不够就上下排）。"""
-            if not self._need:
-                self._need = sum(table.minimum_need() for table in self.tables.values())
-            need = self._need + MARKET_ITEM_GAP
-            width = max(self.width(), 0)
-            available = width or 10_000          # 还没被布局量过宽度时：按够宽算
-            narrow = available < need
-            if narrow == self._narrow:
-                return
-            self._narrow = narrow
-            for index, table in enumerate(self.tables.values()):
-                self.grid.removeWidget(table)
-                if narrow:
-                    self.grid.addWidget(table, index, 0)
-                else:
-                    self.grid.addWidget(table, 0, index)
-            for column in range(len(self.tables)):
-                self.grid.setColumnStretch(column, 1 if (not narrow or column == 0) else 0)
+            """列数变化时不需要重排（热力图自己按宽度铺块）。"""
 
     class MarketSection(QFrame):
         """一块 = 小标题 + 条目网格（**整块就是这一个控件**）。
@@ -1472,15 +1260,20 @@ if QT_AVAILABLE:
         rank: Any, industries: Any, *, shown: int = SECTOR_TOP,
         limit_down: Any = None,
     ) -> tuple[list[dict], list[dict]]:
-        """板块榜的行 + 本地涨停家数 → `(上涨前五, 下跌前五)`。
+        """板块榜的行 + 本地涨停家数 → `(涨幅前 5, 跌幅前 5)` 两组行。
 
-        口径（用户给定）：
-        - **排序按涨幅**：上涨前五 = 涨幅降序前 5；下跌前五 = 涨幅升序前 5
+        **界面上已经没有对应的两张表了**（2026-10-08 起那两块被板块热力图原位替换）；
+        这两组行现在的唯一用途是给热力图 tooltip 备料：`_heatmap_extras` 把两组合起来，
+        这样"涨停家数 / 跌停家数 / 主力净额"三项只对**上过榜的行业**有值（其余行业
+        在图上点开就只有面积与颜色），并且**一个请求都不多发**（板块榜大盘概览本来就在拉）。
+
+        口径：
+        - **排序按涨幅**：涨幅降序前 `shown` 个 / 升序前 `shown` 个
           （涨幅 = 板块当天涨跌幅，来自 `sectors.fetch_sector_rank()`）；
         - **涨停数量用地本那一套**：`pool.hot_industries()` 的 `limit_up`
           （用户原话"涨停数量 = 该板块当日涨停家数；用它的口径，不要另起一套"），
-          按**板块名**对齐；对不上的显示 `—`（宁可显示"没对上"，也不要编一个 0 出来）；
-        - **主力净额**单位是元，界面上 ÷1e8 显示成"亿"（见 `SectorTable._net_item`）。
+          按**板块名**对齐；对不上的保持 `None`（tooltip 里那一行就不写，不编一个 0 出来）；
+        - **主力净额**单位是元，显示时 ÷1e8 成"亿"（`ui/heatmap.py` 的 `tip_for` 照这个口径）。
         """
         counts: dict[str, Any] = {}
         for name, record in (industries or {}).items():
@@ -1499,15 +1292,12 @@ if QT_AVAILABLE:
             rows.append({
                 "name": name,
                 "limit_up": counts.get(name),
-                # 跌停家数：**只有"下跌前五"那张表用得上**，但两行都挂一份，
-                # 免得"哪张表拿哪个数"这种事散在界面代码里
+                # 跌停家数也一起挂上：热力图 tooltip 里"这个跌的板块有几个跌停"是有用的一格
                 "limit_down": (limit_down or {}).get(name),
                 "pct": pct,
                 "main_net": _sector_number(item.get("main_net")),
-                "source_text": "板块榜（`data/sectors.py` 的 fetch_sector_rank）："
-                               "涨幅=当天板块涨跌幅",
             })
-        # 同涨幅按名字定序：**每次刷新顺序都一样**（否则两张表会自己跳来跳去）
+        # 同涨幅按名字定序：**每次刷新顺序都一样**（否则同一个行业会在两组之间来回跳）
         up = sorted(rows, key=lambda row: (-float(row["pct"]), row["name"]))[:shown]
         down = sorted(rows, key=lambda row: (float(row["pct"]), row["name"]))[:shown]
         return up, down
@@ -1516,15 +1306,16 @@ if QT_AVAILABLE:
     def local_sector_tables(
         industries: Any, *, shown: int = SECTOR_TOP, limit_down: Any = None,
     ) -> tuple[list[dict], list[dict]]:
-        """取不到板块榜时的**本地兜底**：按本地口径排，主力净额一律 `—`。
+        """取不到板块榜时的**本地兜底**：按本地口径排，主力净额一律没有。
 
         本地只有 `pool.hot_industries()` 给的三样东西：涨停家数、涨停密度、
         **近 5 日行业等权涨幅**（没有"当天板块涨跌幅"，也没有主力净额）。
         所以这里：
-        - 涨幅那一列装的是**近 5 日等权涨幅**（`mom`），页面上会写明"不是当日涨幅" ——
+        - `pct` 装的是**近 5 日等权涨幅**（`mom`），而热力图的颜色**不用它**（颜色走全市场
+          快照的市值加权涨跌幅）；退回本地口径时热力图的小字会写明"主力净额看不到"——
           换个名字叫"涨幅"却不说明，等于拿一个别的口径冒充用户要的那个数；
-        - 主力净额那一列是 `—`（取不到），**不显示 0**；
-        - 涨停数量照旧用本地那一套口径（本来就是它算的）。
+        - 主力净额是 `None`（取不到），**不显示 0**；
+        - 涨停家数照旧用本地那一套口径（本来就是它算的），热力图 tooltip 照常能显示。
         """
         rows: list[dict] = []
         for name, record in (industries or {}).items():
@@ -1541,7 +1332,6 @@ if QT_AVAILABLE:
                 "pct": None if mom is None else float(mom) * 100,
                 "main_net": None,
                 "mom": mom,
-                "source_text": "本地口径：这一列是**近 5 日**行业等权涨幅（不是当日涨幅）",
             })
         ranked = [row for row in rows if row["pct"] is not None]
         up = sorted(ranked, key=lambda row: (-float(row["pct"]), row["name"]))[:shown]
@@ -1550,21 +1340,26 @@ if QT_AVAILABLE:
 
 
     def sector_payload(cfg: Any, industries: Any) -> dict:
-        """「热门板块」两张表的数据 + 那行说明（**在后台线程里调用**）。
+        """板块榜的行 + 本地涨跌停家数 + 那句口径说明（**在后台线程里调用**）。
 
         Returns:
             `{"up": [...], "down": [...], "source": "sectors"|"local", "note": "..."}`。
-            `note` 就是页面上那行小字：**说明这些数是从哪来的、缺的那一列为什么缺** ——
-            用户要的东西不许静默消失，取不到就得说清是"没取到"而不是"没有"。
 
-        2026-09-21：下跌前五那张表要显示**跌停家数**（不再是涨停），跌停家数本地
+        谁在用（2026-10-08 起）：**只有板块热力图**。它拿 `up + down` 两组行给 tooltip 备料
+        （`_heatmap_extras` → 涨停/跌停家数 + 主力净额），并据 `source` 判断"这一轮板块榜
+        到底有没有取到"（`_heatmap_note` 据此决定要不要告诉用户"看不到主力净额"）。
+        `note` 与 `pct` 现在**没有界面在显示**（原来显示它们的那两张表已被热力图替换），
+        但两者仍然是这一层的对外契约：`note` 说清"这些数从哪来、缺的那一列为什么缺"
+        （用户要的东西不许静默消失），`pct` 是排序依据。
+
+        2026-09-21：下跌那一组要显示**跌停家数**（不再是涨停），跌停家数本地
         没有现成的池子，由 `pool.limit_down_industries()` 现算（见那里的口径说明）。
-        算不出来不影响这一块：那一列显示 `—`，并在说明里点一句。
+        算不出来不影响这一块：热力图的 tooltip 里就不写这一项，并在说明里点一句。
         """
         try:
             down_counts = pool.limit_down_industries(cfg.db_path)
         except Exception as exc:      # noqa: BLE001 - 只是一列数，绝不带崩这一块
-            logger.info(f"跌停家数算不出来（下跌前五那一列显示 —）：{exc}")
+            logger.info(f"跌停家数算不出来（热力图的 tooltip 里就不会有这一项）：{exc}")
             down_counts = {}
         sectors_mod = sectors_module()
         if sectors_mod is not None:
@@ -1576,11 +1371,11 @@ if QT_AVAILABLE:
             if rank:
                 up, down = sector_rank_tables(rank, industries, limit_down=down_counts)
                 if up or down:
-                    # ⚠️ 要按**每张表实际显示的那一列**判"没对上"：上涨表看
-                    # `limit_up`、下跌表看 `limit_down`。原来两张表都查 `limit_up`，
-                    # 于是下跌那五个板块（本来就没有涨停）永远被判成"没对应行业"，
-                    # 页脚会挂一句"数量列显示 —：交通运输、钢铁…"——**而它们的分明显示了数字**。
-                    # 这行小字是给用户解释"为什么有空列"的，说错比不说更糟（2026-09-23 截图时发现）。
+                    # ⚠️ 要按**每一组实际用的那一列**判"没对上"：涨的那组看 `limit_up`、
+                    # 跌的那组看 `limit_down`。原来两边都查 `limit_up`，于是下跌那五个板块
+                    # （本来就没有涨停）永远被判成"没对应行业"，说明里会挂一句
+                    # "数量列显示 —：交通运输、钢铁…"——**而它们的分明显示了数字**。
+                    # 这行小字是给用户解释"为什么缺数"的，说错比不说更糟（2026-09-23 截图时发现）。
                     unmatched = [
                         row["name"] for row in up if row["limit_up"] is None
                     ] + [
@@ -1609,8 +1404,8 @@ if QT_AVAILABLE:
 
 
     # 原来的 `percent_text()` / `signed_percent_text()`（"比例 → 百分数"）随
-    # `IndustryEntry`（旧的热门板块条目控件）一起删掉了：2026-09-17 起热门板块是两张表，
-    # 表里的 `pct` 直接就是**百分数**（板块榜给的口径），只有一个格式化函数
+    # `IndustryEntry`（旧的热门板块条目控件）一起删掉了：2026-09-17 起那一块是带 `pct` 的表、
+    # 2026-10-08 起是热力图，两种形态里 `pct` 都是**百分数**（板块榜给的口径），只有一个格式化函数
     # （`percent_value_text`）。留着那两个没人调的转换函数，迟早有人拿它去格式化
     # "已经是百分数"的值 —— 那正好是 ×100 的那个量级错误。
 
@@ -1820,7 +1615,8 @@ if QT_AVAILABLE:
             #: 最近一次的大盘概览（拿不到就是 None）——测试与"复制/追查原因"都从它取值
             self.market_overview: dict | None = None
             #: 最近一次的**热门行业**（`pool.hot_industries()` 的原样结果，键=行业名）。
-            #: 与概览同一个节拍取回来（见 `_market_payload`）——「热门板块」那一块画的就是它
+            #: 与概览同一个节拍取回来（见 `_market_payload`）——热力图 tooltip 里
+            #: "涨停家数 / 跌停家数"就是从它（经 `sector_payload`）来的
             self.market_industries: dict[str, dict] = {}
             #: 「关于软件」对话框（测试与"重复点关于"都要能拿到它）
             self.about_dialog: Any = None
@@ -2419,7 +2215,7 @@ if QT_AVAILABLE:
         # ── 大盘概览页（第一个页签；数据口径见 market.py）──
 
         def _build_market_page(self) -> Any:
-            """「大盘概览」页：**四块**（成交与情绪 / 宽基指数 / 情绪指数 / 热门板块）+ 单行页脚。
+            """「大盘概览」页：**四块**（成交与情绪 / 宽基指数 / 情绪指数 / 板块热力图）+ 单行页脚。
 
             用户 2026-09-17 给定的布局（顺序也是用户给的）：竖直排列、窄窗口自动换列，
             整页**四块**：
@@ -2429,7 +2225,9 @@ if QT_AVAILABLE:
             2. 「宽基指数」：上证 / 深成 / 创业板 / 科创50 / 沪深300 + 上证50 / 中证1000
                —— 点位 + 涨跌幅（各自按涨跌上色）；
             3. 「情绪指数」：同花顺情绪/板块指数，**只有指数条目**（小条目都搬去第 1 块了）；
-            4. 「热门板块」：**上涨前五 + 下跌前五两张表**（板块名称/涨停数量/涨幅/主力净额）。
+            4. 「板块热力图」：**一块自绘的行业热力图**（面积 = 行业流通市值合计、
+               颜色 = 市值加权涨跌幅）+ 三个按钮（刷新 / 放大 / 打开大盘云图）。
+               2026-10-08 之前这里是"上涨前五 + 下跌前五两张表"。
 
             为什么把这一块挪到最上面：用户原话是"把'成交额等元素'模块挪到「宽基指数」上面"——
             成交额与涨跌停/涨跌家数是"今天市场整体什么状态"的第一眼信息，
@@ -2438,7 +2236,7 @@ if QT_AVAILABLE:
             结构（也是测试的断言对象）：
                 page ─┬─ 标题行（页面标题，按钮在页脚）
                       ├─ market_scroll（可伸缩：窗口变矮时它自己滚动，页面底部那行不会被挤出去）
-                      │    └─ 成交与情绪块 + 宽基指数块 + 情绪指数块 + 热门板块块
+                      │    └─ 成交与情绪块 + 宽基指数块 + 情绪指数块 + 板块热力图块
                       ├─ market_hint（**只在有话说时出现**：取数失败 / 涨跌家数关掉 / 板块没数据）
                       └─ market_footer（一行：数据来源小字 + 右对齐【立即刷新】）
 
@@ -2471,8 +2269,8 @@ if QT_AVAILABLE:
             #: 数据来源：成交与情绪块只吃 `market.kpi_values()` 的那 7 个数（没有指数条目）；
             #: 宽基块只吃 `market_indices`；情绪块吃 `market_sentiment_indices`
             #: + `market_sector_indices` 两组（同一类同花顺板块指数）；
-            #: 热门板块块的数据来自 `data/sectors.py` 的板块榜 + `pool.hot_industries()`
-            #: 的涨停家数（见 `sector_payload`）。
+            #: 热力图那一块：面积/颜色走全市场快照（`data/market_map.py`），tooltip 里的
+            #: 涨跌停家数与主力净额来自 `sector_payload()`（见 `_heatmap_extras`）。
             self.market_sections: dict[str, Any] = {
                 MARKET_SECTION_FLOW: MarketSection(
                     MARKET_SECTION_FLOW, (),
@@ -2484,8 +2282,12 @@ if QT_AVAILABLE:
                 MARKET_SECTION_SENTIMENT: MarketSection(
                     MARKET_SECTION_SENTIMENT, ("sentiment", "sector"),
                 ),
-                MARKET_SECTION_HOT: HotSectorsSection(MARKET_SECTION_HOT),
+                MARKET_SECTION_HOT: SectorHeatmapSection(MARKET_SECTION_HOT),
             }
+            hot_section = self.market_sections[MARKET_SECTION_HOT]
+            hot_section.btn_refresh.clicked.connect(self.on_refresh_heatmap)
+            hot_section.btn_zoom.clicked.connect(self.show_heatmap_window)
+            hot_section.btn_site.clicked.connect(self.on_open_heatmap_site)
             for title in MARKET_SECTION_TITLES:
                 content_layout.addWidget(self.market_sections[title])
             content_layout.addStretch(1)         # 条目少时靠上排，不散在页面中间
@@ -2526,7 +2328,17 @@ if QT_AVAILABLE:
             self.market_page = page
             #: 每个指数条目的控件（`thscode` / `name_label` / `value_label` / `pct_label`）
             self.market_entries: list[Any] = []
-            #: 「热门板块」两张表的数据（`sector_payload()` 的结果：up/down/source/note）
+            #: 板块热力图：方块列表 + 快照时间（启动时先读磁盘缓存，界面立刻有东西看）
+            self.market_heatmap: list[dict] = []
+            self.market_heatmap_at: float = 0.0
+            self.market_heatmap_error: str = ""
+            self.market_heatmap_source: str = ""
+            self._heatmap_worker: Any = None
+            self._heatmap_ts: float = 0.0
+            self._heatmap_window: Any = None
+            self._load_heatmap_cache()
+            #: 板块榜的数据（`sector_payload()` 的结果：up/down/source/note）——
+            #: 2026-10-08 起它喂的是热力图 tooltip 与那行小字，不再是两张表
             self.market_sectors: dict[str, Any] = {
                 "up": [], "down": [], "source": "", "note": "",
             }
@@ -2632,6 +2444,179 @@ if QT_AVAILABLE:
             except Exception:  # noqa: BLE001 - 界面还没搭完时问这些也算"不可见"
                 return False
 
+        # ── 板块热力图（自己一条节拍：TTL 180 秒 + 手动刷新 + 页面不可见不拉）──
+
+        def _load_heatmap_cache(self) -> None:
+            """启动时读磁盘缓存：第一屏就有图，并如实显示"这是几点的快照"。"""
+            from laoa_trader.data import market_map
+
+            blocks, at = market_map.load_cache(self.cfg)
+            if blocks:
+                self.market_heatmap = blocks
+                self.market_heatmap_at = at
+
+        def _heatmap_extras(self) -> dict:
+            """涨停家数 / 主力净额：来自**大盘概览已经在拉**的板块榜（不多发一个请求）。"""
+            from laoa_trader.data import market_map
+
+            sector_data = self.market_sectors or {}
+            return market_map.industry_extras(
+                list(sector_data.get("up") or []) + list(sector_data.get("down") or [])
+            )
+
+        def _heatmap_note(self) -> str:
+            """那行小字：口径 + 快照时间 + 缺数据的块数（**取不到就要说清**）。"""
+            from laoa_trader.data import market_map
+
+            if not self.market_heatmap:
+                if self.market_heatmap_error:
+                    return f"⚠️ 取数失败：{self.market_heatmap_error}"
+                return ("还没取过热力图数据 —— 点【刷新热力图】拉一轮全市场快照"
+                        "（约 28 个请求）")
+            stat = market_map.summarize(self.market_heatmap)
+            stamp, stale = market_map.age_text(self.market_heatmap_at)
+            bits = [f"口径：面积 = 行业流通市值合计（{stat['mktcap'] / 1e4:.2f} 万亿），"
+                    f"颜色 = 市值加权涨跌幅（红涨绿跌，±10% 饱和）",
+                    f"{stat['blocks']} 个行业：涨 {stat['up']} · 跌 {stat['down']}"
+                    + (f" · 平 {stat['flat']}" if stat["flat"] else "")
+                    + (f" · 无数据 {stat['unknown']}" if stat["unknown"] else ""),
+                    f"快照 {stamp}" + ("（已过期，点【刷新热力图】更新）" if stale else "")]
+            if self.market_heatmap_source:
+                # 出处必须写出来：热力图这条路"价格一个源、市值另一个源补"是常态
+                bits.append(f"来源 {self.market_heatmap_source}")
+            if str((self.market_sectors or {}).get("source") or "") == "local":
+                # 板块榜没取到，退回了本地口径：**涨停家数还是有的**（本地涨停池，与匹配同一套），
+                # 缺的只有主力净额。说成"两项都没有"是另一种误导。
+                bits.append("板块榜这一轮没取到：tooltip 里没有主力净额"
+                            "（涨停家数用的是本地口径）")
+            elif not (self.market_sectors or {}).get("up"):
+                # 板块榜没取到 → 涨停家数/主力净额这两项 tooltip 里就没有，要说清而不是让人以为"没涨停"
+                bits.append("板块榜这一轮没取到：鼠标停在块上看不到涨停家数与主力净额")
+            if self.market_heatmap_error:
+                bits.append(f"最近一次取数失败：{self.market_heatmap_error}")
+            return "；".join(bits)
+
+        def _maybe_heatmap(self, *, force: bool = False) -> None:
+            """到点就取一轮热力图数据（**只在页面可见时**、且同一时刻只允许一轮在飞）。"""
+            if not self._market_page_visible():
+                return
+            if self._heatmap_worker is not None and self._heatmap_worker.isRunning():
+                return
+            if not force and time.time() - self._heatmap_ts < HEATMAP_TTL_SECONDS:
+                return
+            self._heatmap_ts = time.time()
+            hot = self.market_sections.get(MARKET_SECTION_HOT)
+            if hot is not None:
+                hot.note_label.setFullText("正在取全市场快照（约 28 个请求，十几秒）…")
+                hot.note_label.setVisible(True)
+            worker = Worker(self._heatmap_payload)
+            self._heatmap_worker = worker
+            worker.finished_ok.connect(self._on_heatmap_ready)
+            worker.failed.connect(self._on_heatmap_failed)
+            worker.start()
+
+        def _heatmap_payload(self) -> dict:
+            """后台取：全市场快照 → 按行业聚合（**在后台线程里做，主线程只画**）。
+
+            行情有两条路，按"快 → 慢"试（**都必须带流通市值**，面积就是它）：
+              1. `sources.full_market_quotes()`：一次拿全市场的来源（东财分页，28 个请求）；
+              2. 退到"本地代码表 + `fetch_snapshot_prices`"：同花顺给价、公开源补市值
+                 （按代码表分批，比第 1 条慢，但正是两张表天天在走的那条路，最稳）。
+            为什么不能只写第 1 条：用户没启用东财时它恒为空 —— 那时热力图不该整块消失，
+            而该换个来源把图照样画出来（口径一样，只是取数路径不同，见 note 里的来源）。
+            """
+            from laoa_trader.data import market_map, sources
+
+            quotes = sources.full_market_quotes(self.cfg)
+            if not quotes:
+                codes = list(self.engine.get_stock_names(None))
+                if not codes:
+                    raise RuntimeError("本地还没有股票列表（先跑一次日更下载）")
+                quotes = quotes_mod.fetch_snapshot_prices(self.cfg, codes)
+            if not quotes:
+                raise RuntimeError("全市场快照没取到（网络/限流/来源都不可用）")
+            industry = market_map.industry_map(self.cfg.db_path)
+            names = self.engine.get_stock_names(list(quotes)[:8000])
+            blocks = market_map.build_blocks(
+                market_map.drawable_quotes(quotes), industry, names=names
+            )
+            if not blocks:
+                raise RuntimeError("快照取到了，但没有一行带涨跌幅或市值")
+            if market_map.summarize(blocks)["mktcap"] <= 0:
+                # 有涨跌幅、没市值 = 面积全是 0，画出来是一张**空白画布**。
+                # 这条必须当成"取数失败"报出来（不能只是画个空图）：根因几乎总是
+                # "启用的来源给不出流通市值"（同花顺的快照就没有这一项）。
+                raise RuntimeError(
+                    "这一轮快照里没有流通市值（面积画不出来）—— 请在「系统设置 → 数据来源」里"
+                    "启用「东方财富」或「公开行情源（腾讯）」，它们提供市值"
+                )
+            at = time.time()
+            market_map.save_cache(self.cfg, blocks, at=at)
+            return {"blocks": blocks, "at": at,
+                    "source": market_map.quotes_source_text(quotes)}
+
+        def _on_heatmap_ready(self, payload: Any) -> None:
+            self.market_heatmap = list((payload or {}).get("blocks") or [])
+            self.market_heatmap_at = float((payload or {}).get("at") or time.time())
+            self.market_heatmap_source = str((payload or {}).get("source") or "")
+            self.market_heatmap_error = ""
+            self._render_market_overview()
+            window = self._heatmap_window
+            if window is not None and window.isVisible():
+                # 放大窗口开着的时候正好取到新数据：顺手把它也重画（不然它停在旧图上）
+                window._chart.set_blocks(self.market_heatmap, self._heatmap_extras())  # type: ignore[attr-defined]
+                window._note.setText(self._heatmap_note())                             # type: ignore[attr-defined]
+
+        def _on_heatmap_failed(self, message: str) -> None:
+            first = str(message).splitlines()[0] if message else "未知错误"
+            self.market_heatmap_error = first
+            logger.warning(f"热力图取数失败：{first}")
+            self._render_market_overview()
+
+        def on_refresh_heatmap(self) -> None:
+            """【刷新热力图】：忽略 TTL，立刻拉一轮。"""
+            self._maybe_heatmap(force=True)
+
+        def on_open_heatmap_site(self) -> None:
+            """【打开大盘云图】：跳系统浏览器（不内嵌、不抓数据，只是给个对照入口）。"""
+            QDesktopServices.openUrl(QUrl(MARKET_HEATMAP_SITE))
+
+        def show_heatmap_window(self) -> Any:
+            """【放大】：独立窗口看大图（同一份数据、同一套口径，只是画布大）。"""
+            from laoa_trader.ui import heatmap as heatmap_mod
+
+            window = self._heatmap_window
+            if window is None:
+                HeatmapWidget = heatmap_mod.build_heatmap_widget()
+                window = QDialog(self)
+                window.setWindowTitle("板块热力图（面积 = 流通市值合计，颜色 = 涨跌幅）")
+                window.resize(1180, 760)
+                box = QVBoxLayout(window)
+                box.setSpacing(8)
+                chart = HeatmapWidget(window, compact=False)
+                box.addWidget(chart, 1)
+                note = QLabel(self._heatmap_note())
+                note.setObjectName("statusTag")
+                note.setWordWrap(True)
+                box.addWidget(note)
+                row = QHBoxLayout()
+                btn_refresh = QPushButton("刷新")
+                btn_refresh.clicked.connect(self.on_refresh_heatmap)
+                row.addWidget(btn_refresh)
+                btn_site = QPushButton("打开大盘云图")
+                btn_site.clicked.connect(self.on_open_heatmap_site)
+                row.addWidget(btn_site)
+                row.addStretch(1)
+                box.addLayout(row)
+                window._chart = chart          # type: ignore[attr-defined]
+                window._note = note            # type: ignore[attr-defined]
+                self._heatmap_window = window
+            window._chart.set_blocks(self.market_heatmap, self._heatmap_extras())  # type: ignore[attr-defined]
+            window._note.setText(self._heatmap_note())                             # type: ignore[attr-defined]
+            window.show()
+            window.raise_()
+            return window
+
         def _market_tick(self) -> None:
             """概览页自己的定时器（**每 60 秒**一次，与 5 秒的界面刷新解耦）。
 
@@ -2642,6 +2627,7 @@ if QT_AVAILABLE:
             if not self._market_page_visible():
                 return
             self.request_market_overview()
+            self._maybe_heatmap()      # 热力图自己一条节拍（TTL 180 秒），见那边的说明
 
         def _on_tab_changed(self, _index: int) -> None:
             """切到概览页时立刻刷一次（缓存没过期就只是重画缓存）。
@@ -2679,11 +2665,11 @@ if QT_AVAILABLE:
             worker.start()
 
         def _market_payload(self, force: bool = False, client: Any = None) -> dict:
-            """**一趟取齐**「大盘概览」要的三份数据：行情概览 + 热门行业 + 板块榜两张表。
+            """**一趟取齐**「大盘概览」要的三份数据：行情概览 + 热门行业 + 板块榜。
 
             为什么三件事一起取（而不是各开一个线程）：
             - 它们更新的是**同一页**、同一个刷新节拍（60 秒一次），分线程会出现
-              "表头写 10:31、热门板块还是 10:30 的"这种半新半旧；
+              "指数写 10:31、热力图 tooltip 还是 10:30 的"这种半新半旧；
             - 热门行业是一次本地库查询（当日涨停密度 + 近 5 日行业等权涨幅），
               板块榜是一次网络取数（`sectors.fetch_sector_rank()`）——
               两件都能在后台线程里跑，但**都不能放主线程**：库里几百万行行情时那几条
@@ -2697,8 +2683,8 @@ if QT_AVAILABLE:
             industries: dict[str, dict] = {}
             try:
                 industries = pool.hot_industries(self.cfg.db_path, top=MARKET_HOT_TOP)
-            except Exception as exc:  # noqa: BLE001 - 热门板块取不到只让那一块空着
-                logger.debug(f"取热门行业失败（热门板块空着）：{exc}")
+            except Exception as exc:  # noqa: BLE001 - 热门行业取不到只让热力图 tooltip 少两项
+                logger.debug(f"取热门行业失败（热力图 tooltip 里就没有涨跌停家数）：{exc}")
             # 板块榜取不到就退回本地口径（`sector_payload` 里写清了原因，页面会显示）
             sectors_data = sector_payload(self.cfg, industries)
             return {
@@ -2735,7 +2721,7 @@ if QT_AVAILABLE:
         def refresh_market_overview(
             self, force: bool = False, client: Any = None
         ) -> dict | None:
-            """**同步**取一次大盘概览（含热门板块）并刷到页面上（`force=True` 忽略 TTL 缓存）。
+            """**同步**取一次大盘概览（含板块榜）并刷到页面上（`force=True` 忽略 TTL 缓存）。
 
             与 `request_market_overview()` 的分工：
             - 界面自己发起的取数（启动 / 定时器 / 切页 / 【立即刷新】）走**后台线程**那条，
@@ -2763,10 +2749,11 @@ if QT_AVAILABLE:
               （与 `--cli --market` 同一份口径）；**始终可见**（与"配没配指数"无关）；
             - **宽基 / 情绪两块指数**：每个指数一个条目控件，点位与涨跌幅**各按自己的
               涨跌上色**（涨=红、跌=绿、平/缺=默认色，色值只在 `market.py` 里定义一次）；
-            - **热门板块**：上涨前五 / 下跌前五两张表（`self.market_sectors`，
-              `sector_payload()` 的产物：板块榜 + 本地涨停家数）；
+            - **板块热力图**：一张自绘的方块图（`self.market_heatmap`，见 `data/market_map.py`）
+              + 一行口径小字；tooltip 里的涨跌停家数与主力净额来自 `self.market_sectors`；
             - **空块**：`market_indices` 没配 → 宽基块**连标题一起隐藏**（不留空标题）；
-              配了但取不到数 → 一个 `—` 占位；板块榜没数据 → 两张表空着 + 一行说明；
+              配了但取不到数 → 一个 `—` 占位；热力图没数据 → 画布上写一句"还没有数据" +
+              小字说明为什么（取数失败时把原因原样贴出来）；
             - **页内提示**（`market_hint`）：取数失败的原因、以及"涨跌家数为什么是 `—`"
               （`market_breadth` 关着就不取全市场快照，`_market_hint_notes` 负责说清）。
 
@@ -2800,14 +2787,8 @@ if QT_AVAILABLE:
 
             hot = self.market_sections[MARKET_SECTION_HOT]
             hot.setVisible(True)
-            sector_data = self.market_sectors or {}
-            hot.set_rows(
-                {
-                    SECTOR_UP_TITLE: list(sector_data.get("up") or []),
-                    SECTOR_DOWN_TITLE: list(sector_data.get("down") or []),
-                },
-                note=str(sector_data.get("note") or ""),
-            )
+            hot.set_blocks(self.market_heatmap or [], self._heatmap_extras(),
+                           note=self._heatmap_note())
 
             entries: list[Any] = []
             for title in MARKET_SECTION_TITLES:
@@ -2884,9 +2865,9 @@ if QT_AVAILABLE:
             几件事各有各的说法，**不能只把 errors 贴出来**：
             - 取数失败/关闭：`market` 层已经给了中文原因（含"market_overview 已关闭"）；
             - `market_breadth` 关着 → 涨跌家数必然是一排 `—`，不说清用户会以为坏了；
-            - 热门板块为空 → 告诉他是"本地还没有涨停池数据"（点【刷新数据】能补），
-               而不是让他以为这个块本来就不显示东西（"板块榜为什么是空的"由
-               `sector_payload()` 的 note 写在块里，那句话说清了口径与缺失原因）。
+            - 本地涨停池为空 → 热力图 tooltip 里就没有涨跌停家数，要说清是"本地还没有
+               涨停池数据"（点【刷新数据】能补），而不是让他以为这个块本来就不显示东西
+               （"板块榜这一轮有没有取到"由 `_heatmap_note()` 写在图下面那行小字里）。
 
             后两条**只在"真的取过一轮"之后才说**（`as_of` 是那一轮的取数时间）：
             窗口刚起来、后台那一路还没回来时，任何"为什么没有数"的说法都是猜的 ——
@@ -2901,7 +2882,7 @@ if QT_AVAILABLE:
                                  f"{MARKET_STAT_FLAT} 显示 {market.DASH}：market_breadth "
                                  "关着，不取全市场快照（打开就能看到）")
                 if not (self.market_industries or {}):
-                    notes.append("热门板块暂无数据：本地还没有涨停池数据，"
+                    notes.append("板块热力图暂无涨停家数：本地还没有涨停池数据，"
                                  f"在【{TAB_SETTINGS}】里点【{BTN_REFRESH_TEXT}】补齐")
             return notes
 

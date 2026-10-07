@@ -313,3 +313,31 @@ def test_unescaped_repo_path_also_breaks_config() -> None:
     assert cfg.config_error                          # 有明确的错误说明（不是静默吞掉）
     assert cfg.data_dir == default_data_dir()        # 退回默认目录 = 后面"空库/needs_full"的根因
     assert str(cfg.data_dir) != WIN_REPO_DATA
+
+
+# ── "测试不许改宿主机"的守护 ──
+
+def test_writing_the_default_location_is_redirected_into_tmp(tmp_path, monkeypatch) -> None:
+    """写"默认位置"（`path=None`）时，落点必须是 tmp —— 不许写进**这台机器真实的**用户配置。
+
+    为什么单独一条用例看着它：界面里有几处**自动保存**（勾选策略存 `enabled_formulas`、
+    拖桌宠存 `pet_x/pet_y`、【保存设置】），而用例里的 `Config(...)` 大多没有 `source_path`，
+    于是它们都会走到"默认位置"这条路 —— 在函数内部就是 `user_config_path()`，
+    也就是 `~/.config/caishen-helper/config.toml` / `%APPDATA%\CaishenHelper\config.toml`。
+    实测踩到过：跑一遍界面用例，家目录里多出一份写着 `hithink_api_key = "test-key"` 的配置，
+    紧接着 `test_config.py::test_defaults` 因为读到它而红（用例之间就这么串起来了）。
+
+    拦它的夹具是 `tests/conftest.py` 的 `_never_touch_the_real_user_config`。
+    这里把 `user_config_path` 换成一个 tmp 路径**再写一次**：真正的家目录不在这个用例的
+    输入里（所以就算夹具哪天没了，这一步也不会真去写别人的配置），而断言能立刻发现
+    "落点没被改道"。
+    """
+    from laoa_trader import config as config_mod
+
+    fake_home = tmp_path / "假的家目录" / "config.toml"
+    monkeypatch.setattr(config_mod, "user_config_path", lambda: fake_home)
+
+    path = config_mod.update_config_file(None, {"pet_x": 12})
+
+    assert path != fake_home, "默认位置的写盘没有改道（这条用例的家目录是假的，真机上就写进真配置了）"
+    assert path.parent == tmp_path, f"落点应当在用例的 tmp 目录里，实际是 {path}"

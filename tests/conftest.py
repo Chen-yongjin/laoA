@@ -625,6 +625,56 @@ def _isolate_license_state(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _never_touch_the_real_user_config(tmp_path, monkeypatch):
+    """整场不许碰**这台机器上真实的**用户配置（`~/.config/caishen-helper/config.toml`）。
+
+    为什么必须（2026-10-08 实测踩到）：界面里有几处**自动保存** —— 勾选策略
+    （`formula_page` 存 `enabled_formulas`）、拖桌宠记坐标（`pet_x/pet_y`）、
+    《系统设置》的【保存设置】—— 它们最终都走 `config.update_config_file(cfg.source_path)`。
+    而用例里的 `Config(...)` 大多是 `source_path=None`，于是**回落到真实用户位置**：
+    跑一遍界面用例，家目录里就多出一份 `config.toml`（里面写着测试用的
+    `hithink_api_key = "test-key"`），紧接着 `test_config.py::test_defaults`
+    因为读到那份文件而红 —— 测试与开发机的状态就这么串起来了。
+    在**离线/CI** 机器上它还会顺手改掉人家真实在用的配置（那份文件是用户自己填的 Key）。
+
+    做法有两道，都在这一条夹具里：
+      ① 把 `LAOA_TRADER_CONFIG` 指到本用例 tmp 目录下一个**不存在的**路径 ——
+         "谁都没配过" 的语义没变（读不到就是默认值），但 `find_config_file()`
+         找的就是这里；**用用例级 `tmp_path` 而不是会话级**：否则前一个用例写下的
+         内容会串给后一个（那正是上面那条红）；
+      ② 包一层 `config.update_config_file`：`path=None`（或恰好等于真实用户位置）时
+         把落点改成 tmp 里那个文件。**这一道才是真正兜住的** —— `None` 在函数内部
+         还会回落到 `user_config_path()`，光设环境变量拦不住（实测：设了之后
+         `update_config_file(None, …)` 照样写进家目录）。
+    收尾再加一道**断言**：这一条用例之前真实位置不存在、跑完却存在了 → 直接判失败。
+    这类"悄悄改了宿主机状态"的 bug 只有在它大声报错时才可能被修掉。
+
+    注意：不 patch `config.user_config_path` 本身 —— `test_config_migration.py` 那几条
+    正是靠它（以及里面的老目录迁移）来验行为的，动了它就把那些用例的输入改了。
+    """
+    from laoa_trader import config as config_mod
+
+    real = config_mod.user_config_path()
+    existed_before = real.exists()
+    isolated = tmp_path / "user-config.toml"
+    original = config_mod.update_config_file
+
+    def _guarded(path=None, updates=None, *, create=True):
+        target = isolated if path is None else Path(path)
+        if target == real:
+            target = isolated
+        return original(target, updates or {}, create=create)
+
+    monkeypatch.setenv("LAOA_TRADER_CONFIG", str(isolated))
+    monkeypatch.setattr(config_mod, "update_config_file", _guarded)
+    yield
+    if not existed_before and real.exists():
+        # 不删它（删掉就把证据毁了），直接判失败并告诉人文件在哪
+        pytest.fail(f"这条用例把**真实用户配置**写出来了：{real}"
+                    "（界面里的自动保存必须落在 tmp 目录，见本夹具说明）")
+
+
+@pytest.fixture(autouse=True)
 def _never_speak_for_real(monkeypatch: pytest.MonkeyPatch):
     """整场把**朗读**这一路钉成"不发声、不起进程、不起线程"。
 

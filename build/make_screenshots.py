@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -188,6 +189,92 @@ DEMO_POSITIONS: dict[str, tuple[float, str, bool]] = {
     "300638": (0.943, "算力模组，中线", True),          # +6.0%
 }
 
+#: 演示用的板块热力图：`(行业名, 当日涨幅%, 行业流通市值合计亿)`（**全是编的**）。
+#:
+#: 四条硬要求（改数据时按这张单子对一遍）：
+#:   ① 行业名用**真实行业名**（同花顺/腾讯那套叫法），别造"AI概念"这种没有出处的名字；
+#:   ② 涨幅与市值要有**层次**：大到银行/白酒（近 10 万亿）小到几百亿的小行业，
+#:      红绿都有、深浅都有 —— 热力图的价值就在"一眼看出钱压在哪、往哪边动"，
+#:      一片均匀的浅色等于什么都没说；
+#:   ③ 下面 **`DEMO_SECTORS` 里那 10 个板块必须在这里出现、且涨幅完全一致**：
+#:      热力图的 tooltip 会显示"涨停家数 / 主力净额"（来自板块榜，见 `_patch_sector_rank`），
+#:      同一个行业在两个数字打架（榜上 +3.42%、图上 -1% ）是最不能出的错；
+#:   ④ 市值合计落在 A 股流通市值的量级（40~80 万亿，见 `_check_demo_heatmap`）。
+DEMO_HEATMAP: tuple[tuple[str, float, float], ...] = (
+    ("银行", -1.36, 98000), ("白酒", -2.74, 38000), ("半导体", 2.84, 41000),
+    ("电池", 2.35, 26000), ("通信设备", 1.96, 23000), ("软件开发", 3.12, 21000),
+    ("电力行业", -0.28, 19000), ("证券", -1.24, 17000), ("消费电子", 1.42, 16500),
+    ("汽车零部件", 0.88, 15000), ("化学制药", -0.42, 13500), ("医疗器械", -0.65, 12000),
+    ("石油行业", -0.74, 11500), ("电网设备", 1.55, 10500), ("煤炭", -1.82, 9500),
+    ("保险", 0.35, 9000), ("有色金属", 1.18, 8500), ("化学制品", 0.76, 8100),
+    ("家电行业", 0.92, 7200), ("房地产", -2.15, 7000), ("光学光电子", 0.85, 6800),
+    ("通用设备", 1.32, 6000), ("食品饮料", -0.72, 5800), ("工程建设", -0.92, 5600),
+    ("自动化设备", 2.05, 5500), ("专用设备", 1.08, 5200), ("计算机设备", 1.68, 4900),
+    ("钢铁行业", -0.68, 4600), ("通信服务", -0.36, 4500), ("军工电子", 2.62, 4200),
+    ("创新药", 1.28, 4100), ("农牧饲渔", 0.48, 3900), ("机器人", 3.42, 3600),
+    ("航运港口", -0.92, 3400), ("铁路公路", 0.24, 3200), ("贵金属", 3.86, 3000),
+    ("航空机场", -0.44, 2900), ("水泥建材", -1.12, 2800), ("物流行业", -0.58, 2600),
+    ("航天装备", 1.86, 2600), ("固态电池", 2.86, 2400), ("装修建材", -0.86, 2400),
+    ("商业百货", -0.36, 2100), ("CPO", 2.31, 1900), ("纺织服装", 0.28, 1900),
+    ("旅游酒店", 0.66, 1800), ("塑料制品", 0.36, 1600), ("燃气", -0.32, 1500),
+    ("造纸印刷", -0.55, 1400), ("橡胶制品", 0.42, 1200), ("液冷", 1.94, 1100),
+    ("教育", 0.54, 900),
+)
+
+#: 每个行业拆成几只成分股（3~6 只）—— 热力图 tooltip 里"成分股：N 只"要有个像样的数。
+#: 拆的时候**涨跌幅与行业一致**（同一行业里所有成分股同涨同跌）：这样"市值加权涨跌幅"
+#: 一定等于表里那个数，不会出现"图上写 +2.84%、tooltip 里加权出来 +2.61%"这种自相矛盾。
+DEMO_HEATMAP_SPLIT: tuple[float, ...] = (0.40, 0.25, 0.15, 0.10, 0.06, 0.04)
+
+
+def _demo_heatmap_rows() -> tuple[list[tuple[str, str, str]], dict[str, dict]]:
+    """演示热力图的成分股：`([(代码, 名称, 行业)], {代码: 快照})`。
+
+    代码用 `9xxxxx` 段（不是真实 A 股号段）—— 万一这些行漏进某个界面，一眼能看出是演示数据；
+    它们只写进临时库的 `stock_basic`（热力图靠它做行业归属），不参与涨跌停家数那套统计
+    （没有日线，也就永远不会被数成涨停）。
+    """
+    rows: list[tuple[str, str, str]] = []
+    quotes: dict[str, dict] = {}
+    serial = 0
+    for industry, pct, cap in DEMO_HEATMAP:
+        count = 3 + (serial % 4)               # 3~6 只，反复跑结果一样（不用随机）
+        parts = DEMO_HEATMAP_SPLIT[:count]
+        scale = sum(parts)
+        for index, part in enumerate(parts):
+            serial += 1
+            symbol = f"9{serial:05d}"
+            name = f"{industry}成分{'甲乙丙丁戊己'[index]}"
+            rows.append((symbol, name, industry))
+            quotes[symbol] = {
+                "symbol": symbol, "name": name, "last_price": 10.0 + index,
+                "pct": pct, "circ_mktcap": round(cap * part / scale, 2),
+                "turnover_rate": 2.0 + index, "volume_ratio": 1.0 + index * 0.1,
+            }
+    return rows, quotes
+
+
+def _check_demo_heatmap() -> None:
+    """演示热力图数据的自检（**数字编得不对就让截图脚本直接失败**，别把错图存下来）。
+
+    查三件事：市值合计在 A 股量级、涨跌两边都有、`DEMO_SECTORS` 里那 10 个板块都在
+    且涨幅一致（见 `DEMO_HEATMAP` 上头第 ③ 条）。
+    """
+    table = {name: pct for name, pct, _cap in DEMO_HEATMAP}
+    total = sum(cap for _n, _p, cap in DEMO_HEATMAP)
+    if not 40e4 <= total <= 80e4:
+        raise SystemExit(f"演示热力图的流通市值合计 {total / 1e4:.1f} 万亿，"
+                         f"不在 40~80 万亿这个量级（改 DEMO_HEATMAP）")
+    if not any(p > 0 for p in table.values()) or not any(p < 0 for p in table.values()):
+        raise SystemExit("演示热力图必须红绿都有（见 DEMO_HEATMAP 上头第 ② 条）")
+    for name, pct, _net in DEMO_SECTORS:
+        if name not in table:
+            raise SystemExit(f"板块榜里的「{name}」没出现在 DEMO_HEATMAP 里"
+                             f"（tooltip 的涨停家数会落空，见第 ③ 条）")
+        if abs(table[name] - pct) > 1e-9:
+            raise SystemExit(f"「{name}」两处涨幅不一致：热力图 {table[name]} / 板块榜 {pct}")
+
+
 #: 演示用的板块榜（**注入**，不联网）：`(板块名, 当日涨幅%, 主力净额元)`
 #:
 #: 三条硬要求：
@@ -301,6 +388,9 @@ def _seed_demo_db(cfg: Config) -> list[str]:
         # 两条路都要有数据，两列才不会全是 `—`
         storage.write_stock_basic(conn, [(sym, name, industry)
                                          for sym, name, industry, _d in DEMO_SECTOR_STOCKS])
+        # 热力图的成分股也要进 `stock_basic`：行业归属（热力图的方块名）读的就是这张表，
+        # 不入库的话整张图会缩成一个「未分类」的方块
+        storage.write_stock_basic(conn, _demo_heatmap_rows()[0])
         moves = []
         for index, (symbol, _name, _industry, direction) in enumerate(DEMO_SECTOR_STOCKS):
             last = 11.00 if direction == "up" else 9.00
@@ -435,6 +525,16 @@ def _block_network_fetches() -> None:
 
     sources.snapshot_map = _no_snapshot                  # type: ignore[assignment]
     quotes_mod.fetch_snapshot_prices = _fake_snapshot    # type: ignore[assignment]
+
+    # 热力图取的是**全市场带市值**的那条路（`sources.full_market_quotes`，生产上走东财分页）：
+    # 这里换成演示的"全市场快照"。**必须拦**：不拦的话它真去发 28 个请求，
+    # 而且图上会出现当天的真实涨跌（图就不可重复了）。
+    stamp = time.time()
+    demo_quotes = _demo_heatmap_rows()[1]
+    sources.full_market_quotes = lambda _cfg: {          # type: ignore[assignment]
+        symbol: {**quote, "source": "eastmoney", "as_of": stamp}
+        for symbol, quote in demo_quotes.items()
+    }
 
 
 def _demo_quote_fields(symbol: str) -> dict:
@@ -735,6 +835,7 @@ def _grab_desktop(win, pet, name: str) -> Path:
 def main() -> int:
     app = QApplication.instance() or QApplication([])
 
+    _check_demo_heatmap()
     tmp = Path(tempfile.mkdtemp(prefix="laoa-shots-"))
     cfg = Config(data_dir=tmp / "data")
     cfg.ensure_dirs()
