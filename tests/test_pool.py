@@ -487,12 +487,12 @@ def test_pool_rows_carry_no_group(engine, cfg, tmp_path, monkeypatch) -> None:
         assert row["source_label"] == "半导体甲"
 
 
-# ── 删自选：**必须同时把"纯自选"的池子行删掉**（2026-10-08 主人实报的 bug）──
+# ── 删自选：**自选表与今日池子行一起删，删了就当场消失**（2026-10-08 主人实报的 bug）──
 #
 # 现场：自选标的建池时会被并进 `stock_pool`（盘中监控按池子盯），而「自选标的」页
 # 读的正是池子行 —— 只删自选表的话，那一行会原地不动，用户看到的是"点了删除没生效"。
-# 下面四条把 `remove_watch_symbol()` 的四种组合钉死（判据只有两件事：
-# 在不在自选表里、池子行有没有策略来源）。
+# 口径（主人当天拍板）：**手动删的一律删干净，不替用户做决定** —— 所以下面这几条
+# 把"自选来源的行""今天真被策略选中的行""从匹配结果加入自选的行"都钉在"必须消失"上。
 
 
 def _seed_row(cfg, *, symbol: str, strategy: str = "", reason: str = "自选",
@@ -518,7 +518,7 @@ def test_removing_a_watch_symbol_that_is_only_in_the_pool_deletes_both(cfg) -> N
 
     outcome = pool.remove_watch_symbol(cfg.db_path, "600001")
 
-    assert outcome == {"watchlist": True, "pool": True, "kept_strategy": ""}
+    assert outcome == {"watchlist": True, "pool": True}
     assert pool.pool_page_rows(cfg.db_path) == []          # 表里当场没了
     with storage.connect(cfg.db_path) as conn:
         assert storage.watchlist_map(conn) == {}
@@ -540,12 +540,17 @@ def test_a_symbol_added_from_the_result_page_still_deletes(cfg) -> None:
 
     outcome = pool.remove_watch_symbol(cfg.db_path, "600002")
 
-    assert outcome == {"watchlist": True, "pool": True, "kept_strategy": ""}
+    assert outcome == {"watchlist": True, "pool": True}
     assert pool.pool_page_rows(cfg.db_path) == []
 
 
-def test_removing_a_watch_symbol_keeps_a_row_that_a_strategy_also_picked(cfg) -> None:
-    """它**今天真的被策略选中**（池子行的 reason 是策略评语）→ 池子行留着并说明原因。"""
+def test_removing_a_watch_symbol_that_a_strategy_also_picked_deletes_both(cfg) -> None:
+    """它**今天真的被策略选中**（池子行的 reason 是策略评语）→ **照样两个都删**。
+
+    2026-10-08 主人："只要是手动删除的，都即时删除，不需要留，我们不替用户做决定。"
+    所以这里不再有"它还挂着某条策略、就替你留着"的分支 —— 删了就是删了。
+    （下次【开始匹配】策略又选中它，那是"重新选出来"，与"没删掉"是两回事。）
+    """
     storage.init_db(cfg.db_path)
     with storage.connect(cfg.db_path) as conn:
         storage.upsert_watchlist(conn, "600002", name="乙", enabled=True)
@@ -554,12 +559,10 @@ def test_removing_a_watch_symbol_keeps_a_row_that_a_strategy_also_picked(cfg) ->
 
     outcome = pool.remove_watch_symbol(cfg.db_path, "600002")
 
-    assert outcome["watchlist"] is True
-    assert outcome["pool"] is False                        # 池子行没动
-    assert outcome["kept_strategy"] == "尾盘匹配策略"        # 界面据此说一句人话
-    rows = pool.pool_page_rows(cfg.db_path)
-    assert [r["symbol"] for r in rows] == ["600002"]       # 那一行还在（来源是策略）
-    assert rows[0]["source_label"] == "尾盘匹配策略"
+    assert outcome == {"watchlist": True, "pool": True}
+    assert pool.pool_page_rows(cfg.db_path) == []          # 界面当场少一行
+    with storage.connect(cfg.db_path) as conn:
+        assert storage.watchlist_map(conn) == {}
 
 
 def test_removing_a_pure_strategy_row_deletes_the_pool_row(cfg) -> None:
@@ -570,9 +573,8 @@ def test_removing_a_pure_strategy_row_deletes_the_pool_row(cfg) -> None:
 
     outcome = pool.remove_watch_symbol(cfg.db_path, "600002")
 
-    # 它不是自选（`watchlist` 没删到东西）→ 删的是池子那一行；
-    # `kept_strategy` 只在"自选删了但行被策略留着"时才有值，这里是空串
-    assert outcome == {"watchlist": False, "pool": True, "kept_strategy": ""}
+    # 它不是自选（`watchlist` 没删到东西）→ 删的是池子那一行
+    assert outcome == {"watchlist": False, "pool": True}
     assert pool.pool_symbols(cfg.db_path) == []
 
 
@@ -582,4 +584,4 @@ def test_removing_a_symbol_that_is_nowhere_is_a_no_op(cfg) -> None:
 
     outcome = pool.remove_watch_symbol(cfg.db_path, "600001")
 
-    assert outcome == {"watchlist": False, "pool": False, "kept_strategy": ""}
+    assert outcome == {"watchlist": False, "pool": False}

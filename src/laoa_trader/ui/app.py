@@ -5004,32 +5004,28 @@ if QT_AVAILABLE:
             return bool(int((row or {}).get("monitor", 1) or 0))
 
         def on_pool_row_delete(self, symbol: str) -> None:
-            """右键【删除】一行池内标的。
+            """右键【删除】一行池内标的：**删了就当场消失**。
 
-            两种情形分开办（**不能只删自选**）：
-            - 它在自选表里 → 删自选。若它同时是策略选中的票，这一行会以"策略标的"的样子
-              继续留着 —— 那正是用户想要的（"不想要的自选去掉，策略选的还在"）；
-            - 它不在自选表里（纯策略/公式选中）→ 从**今日池子**里删掉这一行，
-              下次【开始匹配】会重新评估（提示里明说这句，否则用户以为删不干净）。
+            2026-10-08 主人定的口径："只要是手动删除的，都即时删除，不需要留，
+            我们不替用户做决定。" 所以：
+
+            - 它在自选表里 → 删自选，**并且把今日池子里那一行也删掉**
+              （自选是并进池子的，而这一页读的正是池子行；只删自选表的话那一行会
+              原地不动，用户看到的是"点了删除没反应"）；
+            - 它不在自选表里（纯策略/公式选中）→ 同样删掉今日池子里那一行。
+              下次【开始匹配】会重新评估，策略又选中它就还会回来（那是"重新选出来"，
+              不是"没删掉"）。
             """
             from laoa_trader import pool as pool_mod
 
             self._invalidate_summary()
             try:
-                # 一次调用把"自选表 + 今日池子里那条纯自选行"一起处理掉：
-                # 自选标的是**并进池子**的，而这一页读的是池子行 —— 只删自选表的话
-                # 那一行会原地不动（2026-10-08 主人实报"点删除不能即时删除"）。
+                # 两条入口（右键【删除】与按代码删）共用这一份实现
                 outcome = pool_mod.remove_watch_symbol(self.cfg.db_path, symbol)
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"删除失败：{type(exc).__name__}: {exc}")
                 return
-            if outcome["kept_strategy"]:
-                # 还有策略来源 → 池子行按用户要求留着（"自选去掉、策略选的还在"），
-                # 但要说清它为什么还在，否则又是一次"点了删除没反应"
-                self._toast(f"{symbol} 已从自选标的移除；它同时被"
-                            f"「{outcome['kept_strategy']}」选中，那一行仍在"
-                            "（下次【开始匹配】会重新评估）")
-            elif not outcome["watchlist"]:
+            if not (outcome["watchlist"] or outcome["pool"]):
                 # 删除成功**不弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）；
                 # "没找到"留着 —— 那是"你要删的东西不在这儿"，不说用户会以为删掉了
                 self._toast(f"没找到 {symbol} 的池子行")
@@ -5243,12 +5239,12 @@ if QT_AVAILABLE:
                     return
 
         def on_watch_remove(self, symbol: str = "") -> None:
-            """删自选：只删 `watchlist` 表里那一行，别的什么都不动。
+            """删自选：自选表与**今日池子**里那一行一起删（删了就当场消失）。
 
-            与右键菜单的关系：菜单里的【删除】由 `on_pool_row_delete` 分发 ——
-            **在自选表里的行**走这条路径（删自选），**纯策略/公式选中的行**走
-            "从今日池子移除"那条（它本来就不是自选，删自选删不掉它）。
-            这个方法负责"没给代码时自己去哪儿找"（当前选中的行 → 输入框）。
+            与右键菜单的关系：菜单里的【删除】由 `on_pool_row_delete` 分发，
+            两条入口都调 `pool.remove_watch_symbol()` —— 一份实现，不会出现
+            "右键删得掉、这里删不掉"。这个方法负责"没给代码时自己去哪儿找"
+            （当前选中的行 → 输入框）。
             """
             self._invalidate_summary()
             from laoa_trader import pool as pool_mod
@@ -5264,11 +5260,7 @@ if QT_AVAILABLE:
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"删除失败：{type(exc).__name__}: {exc}")
                 return
-            if outcome["kept_strategy"]:
-                self._toast(f"{symbol} 已从自选标的移除；它同时被"
-                            f"「{outcome['kept_strategy']}」选中，那一行仍在"
-                            "（下次【开始匹配】会重新评估）")
-            elif not outcome["watchlist"]:
+            if not (outcome["watchlist"] or outcome["pool"]):
                 self._toast(f"未找到自选 {symbol}")
             self._pool_signature = None
             self._tick()
