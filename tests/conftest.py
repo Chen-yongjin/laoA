@@ -667,6 +667,17 @@ def _never_touch_the_real_user_config(tmp_path, monkeypatch):
 
     monkeypatch.setenv("LAOA_TRADER_CONFIG", str(isolated))
     monkeypatch.setattr(config_mod, "update_config_file", _guarded)
+    # 默认**数据目录**也一起收到 tmp 里（`%LOCALAPPDATA%\CaishenHelper\data` /
+    # `$XDG_DATA_HOME/CaishenHelper/data`）：跑 `--doctor` 的用例最后会把
+    # `自检报告.txt` 落到那个目录（见 `__main__` 的 `_Tee`），
+    # 在 CI 上那份报告还会被归档步骤抓去当"编译产物自检报告"——
+    # 2026-10-08 实测：ci-log 里那份写着「运行形态：源码运行」，看日志的人
+    # 会以为编译版退回了源码形态（真正那份在 `ci-smoke-data/logs/` 下）。
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    # APPDATA 同理（`user_config_path()` 的 Windows 分支 + 老目录迁移的落点）：
+    # 用例要验迁移路径时自己 `monkeypatch.setenv`，会覆盖这一条（见 test_config_migration.py）。
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
     yield
     if not existed_before and real.exists():
         # 不删它（删掉就把证据毁了），直接判失败并告诉人文件在哪

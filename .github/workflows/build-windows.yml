@@ -613,10 +613,22 @@ jobs:
           # 构建日志只留尾部 200 行（nuitka.log 可能很大，全推会把 ci-log 分支吹起来）
           if (Test-Path nuitka.log) { Get-Content nuitka.log -Tail 200 | Set-Content ci-log/build-tail.log }
           if (Test-Path zip-meta.txt) { Get-Content zip-meta.txt | Add-Content ci-log/meta.txt }
-          # 报告文件本身也留一份（exe 的输出在 GUI 子系统下拿不到，这份是它自己写的）
-          foreach ($f in @("ci-smoke-data/logs/*.txt", (Join-Path $env:LOCALAPPDATA "CaishenHelper/data/logs/*.txt"))) {
-            Get-ChildItem $f -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending |
-              Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName ci-log/smoke-report.txt -Force }
+          # 报告文件本身也留一份（exe 的输出在 GUI 子系统下拿不到，这份是它自己写的）。
+          # ⚠️ **先取冒烟那一步自己的数据目录**，只有它没有时才去默认数据目录找：
+          # 默认目录里可能混进**跑测试时**写的那一份（`--doctor` 用例在配置解析失败时
+          # 会退回默认数据目录，并把 `自检报告.txt` 落在那儿）。2026-10-08 实测踩到：
+          # 归档下来的"编译产物自检报告"写着「运行形态：源码运行」——那是测试跑出来的，
+          # 看日志的人（我）差点以为编译版退回了源码形态。真正那份在 `ci-smoke-data/logs/`。
+          $report = Get-ChildItem "ci-smoke-data/logs/*.txt" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $report) {
+            $report = Get-ChildItem (Join-Path $env:LOCALAPPDATA "CaishenHelper/data/logs/*.txt") `
+              -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          }
+          if ($report) {
+            Copy-Item $report.FullName ci-log/smoke-report.txt -Force
+            Write-Host "归档自检报告：$($report.FullName)"
           }
           Get-Content ci-log/meta.txt
           git add -f ci-log
