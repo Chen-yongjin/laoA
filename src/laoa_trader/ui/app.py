@@ -5012,21 +5012,26 @@ if QT_AVAILABLE:
             - 它不在自选表里（纯策略/公式选中）→ 从**今日池子**里删掉这一行，
               下次【开始匹配】会重新评估（提示里明说这句，否则用户以为删不干净）。
             """
-            from laoa_trader.data import storage
+            from laoa_trader import pool as pool_mod
 
             self._invalidate_summary()
             try:
-                with storage.connect(self.cfg.db_path) as conn:
-                    removed_watch = storage.remove_watchlist(conn, symbol)
-                    removed_pool = 0 if removed_watch else storage.delete_pool_symbol(
-                        conn, symbol
-                    )
+                # 一次调用把"自选表 + 今日池子里那条纯自选行"一起处理掉：
+                # 自选标的是**并进池子**的，而这一页读的是池子行 —— 只删自选表的话
+                # 那一行会原地不动（2026-10-08 主人实报"点删除不能即时删除"）。
+                outcome = pool_mod.remove_watch_symbol(self.cfg.db_path, symbol)
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"删除失败：{type(exc).__name__}: {exc}")
                 return
-            # 删除成功**不弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）；
-            # "没找到"留着 —— 那是"你要删的东西不在这儿"，不说用户会以为删掉了
-            if not (removed_watch or removed_pool):
+            if outcome["kept_strategy"]:
+                # 还有策略来源 → 池子行按用户要求留着（"自选去掉、策略选的还在"），
+                # 但要说清它为什么还在，否则又是一次"点了删除没反应"
+                self._toast(f"{symbol} 已从自选标的移除；它同时被"
+                            f"「{outcome['kept_strategy']}」选中，那一行仍在"
+                            "（下次【开始匹配】会重新评估）")
+            elif not outcome["watchlist"]:
+                # 删除成功**不弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）；
+                # "没找到"留着 —— 那是"你要删的东西不在这儿"，不说用户会以为删掉了
                 self._toast(f"没找到 {symbol} 的池子行")
             self._pool_signature = None
             self._tick()
@@ -5246,15 +5251,24 @@ if QT_AVAILABLE:
             这个方法负责"没给代码时自己去哪儿找"（当前选中的行 → 输入框）。
             """
             self._invalidate_summary()
-            from laoa_trader.data import storage
+            from laoa_trader import pool as pool_mod
 
             symbol = symbol or self._selected_watch_symbol()
             if not (symbol.isdigit() and len(symbol) == 6):
                 self._toast("先点一行自选，或填 6 位代码再删除")
                 return
-            with self.engine.connect() as conn:
-                removed = storage.remove_watchlist(conn, symbol)
-            if not removed:
+            # 与右键【删除】走**同一份实现**（`pool.remove_watch_symbol`）：
+            # 自选是并进池子的，而这一页读池子行 —— 只删自选表会出现"点了没反应"
+            try:
+                outcome = pool_mod.remove_watch_symbol(self.cfg.db_path, symbol)
+            except Exception as exc:  # noqa: BLE001
+                self._toast(f"删除失败：{type(exc).__name__}: {exc}")
+                return
+            if outcome["kept_strategy"]:
+                self._toast(f"{symbol} 已从自选标的移除；它同时被"
+                            f"「{outcome['kept_strategy']}」选中，那一行仍在"
+                            "（下次【开始匹配】会重新评估）")
+            elif not outcome["watchlist"]:
                 self._toast(f"未找到自选 {symbol}")
             self._pool_signature = None
             self._tick()

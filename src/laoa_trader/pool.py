@@ -526,6 +526,79 @@ def limit_down_industries(db_path: str, day: str | None = None) -> dict[str, int
     return counts
 
 
+
+def remove_watch_symbol(
+    db_path: str, symbol: str, *, day: str | None = None,
+) -> dict:
+    """删一只自选标的：**自选表与今日池子里那一条"纯自选"的行一起删**。
+
+    为什么不是只删 `watchlist`（2026-10-08 主人实报"自选标的里点删除不能即时删除"）
+    --------------------------------------------------------------------------
+    自选标的在建池时会被**并进 `stock_pool`**（盘中监控就是按池子盯的），而
+    「自选标的」页读的正是**池子行**（`pool_page_rows`）—— 于是"删自选"之后那一行
+    还在表里、长得和原来一模一样，用户看到的就是"点了删除没生效"。
+    实测：只要那只票在今日池子里（跑过一次建池之后就是常态），这个 bug 必然出现。
+
+    判据只有两件事：**在不在自选表里**、以及池子里那一行**是不是"自选来源"的行**。
+    后者的判据是 `reason` 以「自选」开头或 `strategy` 为空 —— 这两个标记是
+    `merge_watchlist()` 给自选行打上的（策略/公式选出来的行带的是那条策略的 `reason`）。
+
+    | 在自选表 | 池子行是"自选来源" | 处理 |
+    |---|---|---|
+    | 是 | 是 | **自选表与池子行都删** —— 这条就是修那个"点了删除没反应"的 bug |
+    | 是 | 否（今天真的被策略选中） | 只删自选表；池子行留着（"不想要的自选去掉、策略选的还在"），返回值说明是哪条策略留下的 |
+    | 否 | 任意 | 删池子行（用户要的是"这张表里别再出现它"） |
+    | 否 | 池子里没有它 | 什么都不做（本来就没这行） |
+
+    ⚠️ 注意"池子行带策略名"**不等于**"今天被策略选中"：从匹配结果页点【加入自选】的票
+    会把当初那条策略记进 `watchlist.source_strategy`（来源列要显示它），而它的池子行
+    仍然是自选来源（`reason` 以「自选」开头）。这种票删了就该消失 —— 按 `strategy`
+    有没有值来判会把这一类全判错，于是"删除"又变成没反应。
+
+    Returns:
+        `{"watchlist": bool, "pool": bool, "kept_strategy": str}`：
+        两个布尔表示各自删掉了没有，`kept_strategy` 非空表示"那一行因为还有策略来源
+        被保留"（界面据此可以说一句人话，说清"为什么要等下次匹配才会消失"）。
+    """
+    from laoa_trader.data import storage
+
+    with storage.connect(db_path) as conn:
+        removed_watch = bool(storage.remove_watchlist(conn, symbol))
+        if not symbol:
+            return {"watchlist": False, "pool": False, "kept_strategy": ""}
+        target_day = day
+        if target_day is None:
+            row = conn.execute("SELECT MAX(date) FROM stock_pool").fetchone()
+            target_day = row[0] if row and row[0] else None
+        strategy = ""
+        watch_origin = False
+        in_pool = False
+        if target_day:
+            found = conn.execute(
+                "SELECT COALESCE(strategy, ''), COALESCE(reason, '') FROM stock_pool "
+                "WHERE date = ? AND symbol = ?",
+                (target_day, symbol),
+            ).fetchone()
+            in_pool = found is not None
+            if found is not None:
+                strategy = str(found[0]).strip()
+                reason = str(found[1]).strip()
+                # 「自选来源」的两个标记：`merge_watchlist()` 给自选行写的 reason 以
+                # 「自选」开头；没有策略来源的也一定是自选行。
+                # 反过来，策略/公式选出来的行带的是它自己的 reason（形如"量比 2.6…"）。
+                watch_origin = (not strategy) or reason.startswith("自选")
+        removed_pool = 0
+        if in_pool and (not removed_watch or watch_origin):
+            # 两种要删池子行的情况：
+            #   * 它本来就不是自选（纯策略/公式行）→ 用户要的是"这张表里别再出现它"；
+            #   * 它是自选行（含"从匹配结果加入自选"那种带来源名的）→ 必须一起删，
+            #     否则界面上那一行纹丝不动（这就是主人实报的 bug）。
+            removed_pool = storage.delete_pool_symbol(conn, symbol, day=target_day)
+        # 只有"自选删了、但那一行今天确实被策略选中所以留着"才把策略名报上去：
+        # 界面据此说一句"它同时被 X 选中，那一行仍在"，而不是让人以为又没删掉。
+        kept = strategy if (removed_watch and in_pool and not watch_origin) else ""
+    return {"watchlist": removed_watch, "pool": bool(removed_pool), "kept_strategy": kept}
+
 def save_pool(db_path: str, pool: list[dict], day: str | None = None) -> int:
     """把股票池写入 `stock_pool`（幂等 upsert，同一天重复跑只会覆盖同代码的行）。"""
     # 用**北京日期**：池子是按"行情日"存的，机器在 UTC（NAS/Docker/CI）时

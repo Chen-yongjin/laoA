@@ -5433,3 +5433,76 @@ def test_pipeline_status_explains_why_nothing_was_pushed(window, qapp) -> None:
     # `filtered` 这个 kind 已经不会产生（策略引擎删了），界面把它当"未重复推送"显示 ——
     # 关键是**不许崩、不许静默**，真正的原因那句还在 push_skipped 里
     assert "未重复推送" in window.status_label.fullText()
+
+
+def test_deleting_a_watchlist_row_that_is_also_in_todays_pool_removes_it_now(
+    window, seeded, qapp,
+) -> None:
+    """**自选行同时也躺在今日池子里**时，删了要立刻从表里消失（2026-10-08 主人实报的 bug）。
+
+    为什么会这样：自选标的会被并进 `stock_pool`（盘中监控按它盯），所以"删自选"之后
+    池子里那一行还在 —— 界面读的正是池子行，于是**点了删除、那一行纹丝不动**，
+    用户看到的就是"删除不生效"。原来那条用例造的场景是"自选不在池子里"
+    （`seeded` 库的池子只有 600002），刚好绕开了这个组合。
+
+    判据：① 自选表里没了；② **今日池子里也没了**；③ 表里那一行当场消失。
+    """
+    from laoa_trader import pool as pool_mod
+
+    with storage.connect(seeded.db_path) as conn:
+        storage.upsert_watchlist(conn, "600001", name="低价样本", enabled=True)
+    # 造出"自选已经被并进今日池子"的真实状态（与建池后的库一模一样：
+    # 自选行的 `strategy` 是空的，来源因此显示「自选」）
+    with storage.connect(seeded.db_path) as conn:
+        row = conn.execute("SELECT MAX(date) FROM stock_pool").fetchone()
+    day = row[0] if row and row[0] else "2026-09-11"
+    pool_mod.save_pool(seeded.db_path, [{
+        "symbol": "600001", "name": "低价样本", "strategy": "", "strategies": "",
+        "score": None, "reason": "自选标的",
+    }], day=day)
+    window._pool_signature = None
+    window._refresh_pool_table()
+    qapp.processEvents()
+    assert "600001" in _symbols_of(window.pool_table)
+
+    window.on_pool_row_delete("600001")
+    qapp.processEvents()
+
+    with storage.connect(seeded.db_path) as conn:
+        assert storage.watchlist_map(conn) == {}                       # ① 自选删掉了
+    assert "600001" not in pool_mod.pool_symbols(seeded.db_path)       # ② 今日池子也删掉了
+    assert "600001" not in _symbols_of(window.pool_table)              # ③ 表里当场就没了
+
+
+def test_deleting_a_symbol_added_from_the_result_page_removes_it_now(
+    window, seeded, qapp,
+) -> None:
+    """从匹配结果页点【加入自选】的票：删了也要**当场消失**（2026-10-08 实报的那个 bug 的另一半）。
+
+    这一类带着"当初是哪条策略选出来的"（`watchlist.source_strategy`），所以池子行里
+    **也有策略名**。按"有没有策略名"判"今天被没被选中"会把它当成策略标的留下来，
+    于是删除又变成没反应 —— 判据只能是"这一行是不是自选来源的行"。
+    """
+    from laoa_trader import pool as pool_mod
+
+    with storage.connect(seeded.db_path) as conn:
+        storage.upsert_watchlist(conn, "600001", name="低价样本", enabled=True,
+                                 source_strategy="公式·尾盘匹配策略")
+    row = None
+    with storage.connect(seeded.db_path) as conn:
+        row = conn.execute("SELECT MAX(date) FROM stock_pool").fetchone()
+    day = row[0] if row and row[0] else "2026-09-11"
+    pool_mod.save_pool(seeded.db_path, [{
+        "symbol": "600001", "name": "低价样本", "strategy": "公式·尾盘匹配策略",
+        "strategies": "公式·尾盘匹配策略", "score": 0.5, "reason": "自选",
+    }], day=day)
+    window._pool_signature = None
+    window._refresh_pool_table()
+    qapp.processEvents()
+    assert "600001" in _symbols_of(window.pool_table)
+
+    window.on_pool_row_delete("600001")
+    qapp.processEvents()
+
+    assert "600001" not in _symbols_of(window.pool_table)
+    assert "600001" not in pool_mod.pool_symbols(seeded.db_path)

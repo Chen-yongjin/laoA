@@ -485,3 +485,101 @@ def test_pool_rows_carry_no_group(engine, cfg, tmp_path, monkeypatch) -> None:
         assert row["horizon"] == 0
         # 「来源」列照旧回答问题："是哪条策略选出来的"（显示成策略前缀）
         assert row["source_label"] == "半导体甲"
+
+
+# ── 删自选：**必须同时把"纯自选"的池子行删掉**（2026-10-08 主人实报的 bug）──
+#
+# 现场：自选标的建池时会被并进 `stock_pool`（盘中监控按池子盯），而「自选标的」页
+# 读的正是池子行 —— 只删自选表的话，那一行会原地不动，用户看到的是"点了删除没生效"。
+# 下面四条把 `remove_watch_symbol()` 的四种组合钉死（判据只有两件事：
+# 在不在自选表里、池子行有没有策略来源）。
+
+
+def _seed_row(cfg, *, symbol: str, strategy: str = "", reason: str = "自选",
+              day: str = "2026-09-11") -> None:
+    """往今日池子里塞一行。
+
+    - `strategy=""` + `reason="自选"` = **自选并进池子**的那一行（`merge_watchlist` 的产物）；
+    - `strategy` 有值 + `reason` 是策略的评语 = **策略/公式今天选出来的**那一行。
+    """
+    pool.save_pool(cfg.db_path, [{
+        "symbol": symbol, "name": "样本", "strategy": strategy,
+        "strategies": strategy, "score": None if not strategy else 0.5, "reason": reason,
+    }], day=day)
+
+
+def test_removing_a_watch_symbol_that_is_only_in_the_pool_deletes_both(cfg) -> None:
+    """**核心回归**：自选 + 今日池子里那条纯自选行 → 两个都删，「自选标的」页当场空掉。"""
+    storage.init_db(cfg.db_path)
+    with storage.connect(cfg.db_path) as conn:
+        storage.upsert_watchlist(conn, "600001", name="甲", enabled=True)
+    _seed_row(cfg, symbol="600001")
+    assert [r["symbol"] for r in pool.pool_page_rows(cfg.db_path)] == ["600001"]
+
+    outcome = pool.remove_watch_symbol(cfg.db_path, "600001")
+
+    assert outcome == {"watchlist": True, "pool": True, "kept_strategy": ""}
+    assert pool.pool_page_rows(cfg.db_path) == []          # 表里当场没了
+    with storage.connect(cfg.db_path) as conn:
+        assert storage.watchlist_map(conn) == {}
+
+
+def test_a_symbol_added_from_the_result_page_still_deletes(cfg) -> None:
+    """**从匹配结果页点【加入自选】的票**：删了也必须消失（它只是"带着当初那条策略的名字"）。
+
+    这一类最容易判错：`watchlist.source_strategy` 记着"当初是哪条策略选出来的"，
+    而来源列要显示它，于是**池子行里也有 `strategy`** —— 按"有没有 strategy"判
+    "今天被没被选中"就会把它当成策略标的留着，于是"删除"又变成没反应。
+    判据只能是"这一行是不是自选来源的行"（`reason` 以「自选」开头）。
+    """
+    storage.init_db(cfg.db_path)
+    with storage.connect(cfg.db_path) as conn:
+        storage.upsert_watchlist(conn, "600002", name="乙", enabled=True,
+                                 source_strategy="公式·尾盘匹配策略")
+    _seed_row(cfg, symbol="600002", strategy="公式·尾盘匹配策略", reason="自选")
+
+    outcome = pool.remove_watch_symbol(cfg.db_path, "600002")
+
+    assert outcome == {"watchlist": True, "pool": True, "kept_strategy": ""}
+    assert pool.pool_page_rows(cfg.db_path) == []
+
+
+def test_removing_a_watch_symbol_keeps_a_row_that_a_strategy_also_picked(cfg) -> None:
+    """它**今天真的被策略选中**（池子行的 reason 是策略评语）→ 池子行留着并说明原因。"""
+    storage.init_db(cfg.db_path)
+    with storage.connect(cfg.db_path) as conn:
+        storage.upsert_watchlist(conn, "600002", name="乙", enabled=True)
+    _seed_row(cfg, symbol="600002", strategy="尾盘匹配策略",
+              reason="流通市值 120 亿；换手 5.2%；放量突破 20 日高点")
+
+    outcome = pool.remove_watch_symbol(cfg.db_path, "600002")
+
+    assert outcome["watchlist"] is True
+    assert outcome["pool"] is False                        # 池子行没动
+    assert outcome["kept_strategy"] == "尾盘匹配策略"        # 界面据此说一句人话
+    rows = pool.pool_page_rows(cfg.db_path)
+    assert [r["symbol"] for r in rows] == ["600002"]       # 那一行还在（来源是策略）
+    assert rows[0]["source_label"] == "尾盘匹配策略"
+
+
+def test_removing_a_pure_strategy_row_deletes_the_pool_row(cfg) -> None:
+    """它**不是**自选（纯策略/公式行）→ 删今日池子那一行（老行为不许被这次改动带坏）。"""
+    storage.init_db(cfg.db_path)
+    _seed_row(cfg, symbol="600002", strategy="公式·放量上攻",
+              reason="收盘站上 5 日线，量能放大到 5 日均量 1.5 倍")
+
+    outcome = pool.remove_watch_symbol(cfg.db_path, "600002")
+
+    # 它不是自选（`watchlist` 没删到东西）→ 删的是池子那一行；
+    # `kept_strategy` 只在"自选删了但行被策略留着"时才有值，这里是空串
+    assert outcome == {"watchlist": False, "pool": True, "kept_strategy": ""}
+    assert pool.pool_symbols(cfg.db_path) == []
+
+
+def test_removing_a_symbol_that_is_nowhere_is_a_no_op(cfg) -> None:
+    """哪都没有它 → 两个布尔都是假、不报错（界面按这个显示"没找到"）。"""
+    storage.init_db(cfg.db_path)
+
+    outcome = pool.remove_watch_symbol(cfg.db_path, "600001")
+
+    assert outcome == {"watchlist": False, "pool": False, "kept_strategy": ""}
