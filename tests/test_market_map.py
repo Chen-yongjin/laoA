@@ -444,3 +444,54 @@ def test_layout_blocks_survives_extreme_weight_ratios() -> None:
     only = layout_blocks([7.0], 400, 300)[0]
     assert _area(only) >= 0.95 * _canvas_area(400, 300)
     assert only[2] == 400 - GAP and only[3] == 300 - GAP
+
+
+# ── 深色皮肤下的热力图配色（2026-10-08 加了「科技蓝」深色主题）──
+#
+# 浅色主题的横盘块是**近白**；铺在深蓝底上，最平静的块反而变成全屏最亮的东西。
+# 深色主题因此换一套**同构**配色（横盘=深灰蓝、涨跌两端=亮红亮绿），
+# 判据完全一样、只是锚点不同 —— 下面把两件事钉住：两端色是真的换了、语义没变。
+
+
+def test_dark_palette_keeps_the_semantics_but_moves_the_anchors() -> None:
+    assert market_map.block_color(10.0, dark=True) == market_map.DARK_UP
+    assert market_map.block_color(-10.0, dark=True) == market_map.DARK_DOWN
+    assert market_map.block_color(0.0, dark=True) == market_map.DARK_BASE
+    assert market_map.block_color(None, dark=True) == market_map.DARK_UNKNOWN
+    # 涨的那一端仍然"更红"（R > G）、跌的那一端仍然"更绿"（G > R）
+    up, down = market_map.block_color(6.0, dark=True), market_map.block_color(-6.0, dark=True)
+    assert up[0] > up[1] and down[1] > down[0]
+    # 底色是深的（这就是"深色主题"的意思），而两端比底色亮得多（否则看不见）
+    assert sum(market_map.DARK_BASE) < 200
+    assert sum(market_map.DARK_UP) > sum(market_map.DARK_BASE) + 200
+    # 浅色那套一个字没动（默认参数必须与以前逐位一致）
+    assert market_map.block_color(0.0) == (238, 238, 238)
+    assert market_map.block_color(None) == (158, 158, 158)
+    assert market_map.block_color(10.0) == (214, 48, 40)
+    assert market_map.block_color(-10.0) == (26, 145, 74)
+
+
+def test_dark_palette_separates_flat_from_missing_and_keeps_text_readable() -> None:
+    """0%（真的没动）与 None（不知道）在深色底上**也必须**分得开，而且字要看得清。"""
+    assert market_map.block_color(0.0, dark=True) != market_map.block_color(None, dark=True)
+
+    def _lum(rgb):
+        def _ch(value):
+            c = value / 255
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+        r, g, b = (_ch(v) for v in rgb)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    def _contrast(fg, bg):
+        hi, lo = sorted((_lum(fg), _lum(bg)), reverse=True)
+        return (hi + 0.05) / (lo + 0.05)
+
+    for pct in (None, 0.0, 3.0, 5.0, 8.0, 10.0, -3.0, -5.0, -8.0, -10.0):
+        bg = market_map.block_color(pct, dark=True)
+        fg = market_map.text_color(pct, dark=True)
+        assert fg != bg, pct
+        assert _contrast(fg, bg) >= 4.3, (pct, fg, bg, round(_contrast(fg, bg), 2))
+
+    # 深色底用**亮字**、亮底（接近饱和）用**深字** —— 这一条是"字和底糊在一起"的解药
+    assert market_map.text_color(0.0, dark=True) == (232, 238, 248)
+    assert market_map.text_color(10.0, dark=True) == (10, 18, 32)

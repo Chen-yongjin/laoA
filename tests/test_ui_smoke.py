@@ -572,22 +572,29 @@ def test_status_line_is_fully_visible_at_960_logical_width(screen_window, qapp) 
 # ── 界面主题（皮肤）：银色 / 系统默认，一键切回 ──
 
 
-def test_silver_theme_is_applied_when_the_window_opens(window, qapp) -> None:
-    """默认皮肤是银色（金属感）：窗口一建起来，应用级样式表就已经是它了。"""
+def test_default_skin_is_applied_when_the_window_opens(window, qapp) -> None:
+    """默认皮肤 = **科技蓝（深色）**（2026-10-08 起）：窗口一建起来，样式表就已经是它了。
+
+    银色那套仍然可用（下拉框里选），所以这里同时钉住"默认是深色"这件事 ——
+    皮肤换了默认值，界面、下拉框、配置三处必须一致，否则用户看到的是"设置里写着银色、
+    界面却是深色"。
+    """
     from laoa_trader.ui import theme as theme_mod
 
     qss = qapp.styleSheet()
-    assert theme_mod.current_theme() == "silver"
-    assert window.cfg.ui_theme == "silver"
-    assert "qlineargradient" in qss                       # 按钮/表头是渐变（金属感）
+    assert theme_mod.current_theme() == "tech"
+    assert window.cfg.ui_theme == "tech"
+    assert theme_mod.is_dark() is True                    # 深色底（热力图/自绘控件按它换色）
+    assert "qlineargradient" in qss                       # 按钮/表头是渐变
     assert "QPushButton#primaryAction" in qss             # 主操作按钮按 objectName 命中
     assert window.btn_run.objectName() == "primaryAction"
-    assert "#f4f5f7" in qss                               # 窗口底：浅银灰
-    # 拉丝纹理只铺在"背景条"上（状态区 / 页脚 / 表头），且是绝对路径
+    assert theme_mod.TECH_COLORS["window"] in qss         # 窗口底：深海军蓝
+    assert theme_mod.TECH_COLORS["tab_accent"] in qss     # 青色强调
+    # 深色底**不贴**那张浅色拉丝纹理（贴上去就是一块脏斑），背景条改用深色渐变
     assert window.status_area.objectName() == "statusArea"
     assert window.market_footer.objectName() == "marketFooter"
-    assert "assets/ui/brushed-metal" in qss
-    assert "background-repeat: repeat-x" in qss
+    assert "brushed-metal" not in qss
+    assert "background-repeat: repeat-x" not in qss
 
 
 def test_settings_theme_combo_switches_and_writes_back(window, qapp, seeded) -> None:
@@ -595,10 +602,11 @@ def test_settings_theme_combo_switches_and_writes_back(window, qapp, seeded) -> 
     from laoa_trader.ui import theme as theme_mod
 
     box = window.theme_box
-    assert [box.itemText(i) for i in range(box.count())] == ["银色（金属感）", "系统默认"]
-    assert box.currentData() == "silver"
-    silver_qss = qapp.styleSheet()
-    assert silver_qss                                     # 银色：有样式表
+    assert [box.itemText(i) for i in range(box.count())] == [
+        "科技蓝（深色）", "银色（金属感）", "系统默认"]
+    assert box.currentData() == "tech"                    # 默认是科技蓝
+    tech_qss = qapp.styleSheet()
+    assert tech_qss                                       # 科技蓝：有样式表
 
     # 切到"系统默认" → 样式表被清空（安全绳：一键回到原生外观）
     box.setCurrentIndex(box.findData("system"))
@@ -611,12 +619,12 @@ def test_settings_theme_combo_switches_and_writes_back(window, qapp, seeded) -> 
     assert "# 用户自己的注释（保存设置后必须还在）" in text        # 只改这一个键
     assert 'my_own_key = "别动我"' in text
 
-    # 切回银色 → 样式表回来，界面照常刷新（换皮肤不许把界面换坏）
-    box.setCurrentIndex(box.findData("silver"))
+    # 切回科技蓝 → 样式表回来，界面照常刷新（换皮肤不许把界面换坏）
+    box.setCurrentIndex(box.findData("tech"))
     qapp.processEvents()
-    assert qapp.styleSheet() == silver_qss
-    assert window.cfg.ui_theme == "silver"
-    assert 'ui_theme = "silver"' in (seeded.data_dir / "config.toml").read_text(
+    assert qapp.styleSheet() == tech_qss
+    assert window.cfg.ui_theme == "tech"
+    assert 'ui_theme = "tech"' in (seeded.data_dir / "config.toml").read_text(
         encoding="utf-8"
     )
     window._tick()
@@ -624,7 +632,7 @@ def test_settings_theme_combo_switches_and_writes_back(window, qapp, seeded) -> 
     assert window.pool_table.rowCount() == 1              # 池子还在、刷新没出异常
     # 2026-09-18 起**不再**往标题区弹"已切换"（用户："软件操作的一些提醒都不需要"）：
     # 这句回显现在写在设置页那行小字里
-    assert "界面主题已切换为「银色（金属感）」" in window.save_settings_hint.text()
+    assert "界面主题已切换为「科技蓝（深色）」" in window.save_settings_hint.text()
     assert "界面主题已切换" not in window.status_label.fullText()
 
 
@@ -659,7 +667,7 @@ def test_window_builds_and_refreshes_in_every_theme(seeded, qapp) -> None:
 
 
 def test_illegal_theme_in_config_still_opens_window(seeded, qapp) -> None:
-    """配置里写错主题（例如中文/少个字母）：按默认银色走，界面照常能用。"""
+    """配置里写错主题（例如中文/少个字母）：按默认皮肤走，界面照常能用。"""
     from laoa_trader.ui import app as ui_app
     from laoa_trader.ui import theme as theme_mod
 
@@ -668,9 +676,9 @@ def test_illegal_theme_in_config_still_opens_window(seeded, qapp) -> None:
     win.show()
     qapp.processEvents()
     try:
-        assert theme_mod.current_theme() == "silver"
-        assert qapp.styleSheet()                               # 仍然是银色皮肤
-        assert win.theme_box.currentData() == "silver"         # 下拉框显示默认
+        assert theme_mod.current_theme() == "tech"
+        assert qapp.styleSheet()                               # 仍然是默认皮肤
+        assert win.theme_box.currentData() == "tech"           # 下拉框显示默认
         win._tick()
         qapp.processEvents()
         assert win.position_table.rowCount() == 1
@@ -843,7 +851,8 @@ def test_doctor_command_prints_report(cfg, capsys, tmp_path) -> None:
     config_file.write_text(f'data_dir = "{p(cfg.data_dir)}"', encoding="utf-8")
     assert cli(["--cli", "--doctor", "--config", str(config_file)]) == 0
     out = capsys.readouterr().out
-    assert "财神助手 —— 自检" in out
+    # 自检报告的开头用**短自称**（手机上/剪贴板里那几行要短），界面标题才用全名
+    assert f"{ui_app.ASSISTANT_NAME} —— 自检" in out
     assert "数据目录" in out and "数据库" in out
     assert "同花顺 Key" in out
     assert "行情行数" in out
@@ -1738,7 +1747,7 @@ def test_position_table_pnl_colors_and_dash(window, seeded, qapp) -> None:
     """「盈亏比例」：两位数百分比、涨红跌绿、没价的显示 `—`（且不上色）。"""
     from PySide6.QtCore import Qt
 
-    from laoa_trader import market
+    from laoa_trader.ui import theme as theme_mod
 
     table = window.position_table
     assert table.columnCount() == 10
@@ -1750,7 +1759,9 @@ def test_position_table_pnl_colors_and_dash(window, seeded, qapp) -> None:
     qapp.processEvents()
     cell = table.item(0, pnl)
     assert cell.text() == "+5.80%"
-    assert cell.foreground().color().name() == market.COLOR_UP      # 赚 → 红
+    # 赚 → 红。色值**按当前主题取**（深色皮肤上是亮红，浅色皮肤上是 #d32f2f）——
+    # 判据仍然只有一处（`market.value_color`），见 `theme.semantic()`。
+    assert cell.foreground().color().name() == theme_mod.semantic("up")
 
     # 再加两只：一只亏（成本 20 > 最新 12.696）、一只没有行情（不该显示 0.00%）
     with storage.connect(seeded.db_path) as conn:
@@ -1765,10 +1776,10 @@ def test_position_table_pnl_colors_and_dash(window, seeded, qapp) -> None:
     by_symbol = {_symbols_of(table)[i]: i for i in range(table.rowCount())}
     losing = table.item(by_symbol["600002"], pnl)
     assert losing.text() == "-36.52%"
-    assert losing.foreground().color().name() == market.COLOR_DOWN  # 亏 → 绿
+    assert losing.foreground().color().name() == theme_mod.semantic("down")   # 亏 → 绿
 
     missing = table.item(by_symbol["600009"], pnl)
-    assert missing.text() == market.DASH                            # 不是 0.00%
+    assert missing.text() == ui_app.market.DASH                     # 不是 0.00%
     assert missing.data(Qt.ItemDataRole.ForegroundRole) is None     # 不上色（默认前景）
     # 止损位/止盈位按**成本**算
     cost = float(table.item(by_symbol["600001"], 1).text())
@@ -1890,7 +1901,8 @@ def test_window_title_is_just_the_app_name(window, qapp) -> None:
     import laoa_trader
     from PySide6.QtWidgets import QLabel
 
-    assert window.windowTitle() == ui_app.APP_NAME == "财神助手"   # 软件名（2026-09-20 改名）
+    # 软件名只有一个真源（`ui/app.py` 的 APP_NAME，2026-10-08 起是「luweik决策系统」）
+    assert window.windowTitle() == ui_app.APP_NAME == "luweik决策系统"
     assert "v" not in window.windowTitle()                 # 不再挂版本号
     assert window.app_title_label.text() == ui_app.APP_NAME
     assert window.btn_about.text() == ui_app.BTN_ABOUT_TEXT == "关于软件"
@@ -1918,7 +1930,7 @@ def test_about_dialog_shows_version_and_copyright(window, qapp) -> None:
     assert dialog.isVisible() is True
     texts = [label.text() for label in dialog.findChildren(QLabel)]
     blob = "\n".join(texts)
-    assert "财神助手" in blob          # 软件名（用户 2026-09-20 改名）
+    assert ui_app.APP_NAME in blob      # 软件名（只有 APP_NAME 一处定义）
     assert f"版本：{laoa_trader.__version__}" in blob
     assert "作者 / 版权所有人：async-chen" in blob
     assert "版权所有 © 2026 async-chen，保留所有权利。" in blob
@@ -1951,7 +1963,7 @@ def test_about_copy_version_info_to_clipboard(window, qapp) -> None:
     # 2026-09-21 起多了「公式引擎」那一行：用户报障贴这份文本时，
     # 一行就能看出他跑的是哪个版本、引擎认识多少函数（旧包是短清单）。
     assert lines == [
-        "财神助手",
+        ui_app.APP_NAME,
         f"版本：{laoa_trader.__version__}",
         window.about_lines()[2],
         "版权所有 © 2026 async-chen，保留所有权利。",
@@ -3550,6 +3562,7 @@ def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp
     """7 个小条目 + 两块指数的每一项 + 逐值颜色 + 板块热力图 + 页脚，一次全钉住。"""
     from laoa_trader import market
     from laoa_trader.ui import app as ui_app
+    from laoa_trader.ui import theme as theme_mod
 
     market.clear_cache()
     try:
@@ -3589,7 +3602,8 @@ def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp
 
         # 逐值上色：宽基里 5 只跌（绿）+ 上证50 涨（红）+ 中证1000 跌（绿），
         # 情绪块里 4 情绪 + 2 板块各自按自己的涨跌
-        up, down = f"color:{market.COLOR_UP}", f"color:{market.COLOR_DOWN}"
+        up = f"color:{theme_mod.semantic('up')}"
+        down = f"color:{theme_mod.semantic('down')}"
         wide = market_window.market_sections[ui_app.MARKET_SECTION_WIDE].entries
         assert [_entry_colors(e) for e in wide] == [
             (down, down)] * 5 + [(up, up), (down, down)]
@@ -3683,6 +3697,7 @@ def test_market_colors_each_value_on_its_own_move(market_window, qapp) -> None:
     按块取色只能"要么全染红、要么全不染"，两种都在骗人。
     """
     from laoa_trader import market
+    from laoa_trader.ui import theme as theme_mod
     from laoa_trader.ui import app as ui_app
 
     market.clear_cache()
@@ -3702,17 +3717,23 @@ def test_market_colors_each_value_on_its_own_move(market_window, qapp) -> None:
         flat = by_code["883994.TI"]
 
         assert (up.value_label.text(), up.pct_label.text()) == ("900.00", "+1.20%")
-        assert _entry_colors(up) == (f"color:{market.COLOR_UP}",) * 2
-        assert _entry_colors(down) == (f"color:{market.COLOR_DOWN}",) * 2
+        assert _entry_colors(up) == (f"color:{theme_mod.semantic('up')}",) * 2
+        assert _entry_colors(down) == (f"color:{theme_mod.semantic('down')}",) * 2
         # 平盘：两个 label 都没有 color 样式（用界面默认色，不硬塞一个颜色）
         assert _entry_colors(flat) == ("", "")
         assert flat.pct_label.text() == "+0.00%"
         # 同一块里既有红又有绿 —— 逐值上色才做得到
         assert {_entry_colors(up)[0], _entry_colors(down)[0]} == {
-            f"color:{market.COLOR_UP}", f"color:{market.COLOR_DOWN}",
+            f"color:{theme_mod.semantic('up')}", f"color:{theme_mod.semantic('down')}",
         }
-        # 颜色只在 `market` 里定义一次，界面与测试都从那里取
+        # 语义色的**判据**只在 `market` 里定义一次；色值按主题给（见 theme.semantic）——
+        # 浅色皮肤仍然是全项目核过的那两档，深色皮肤换成亮一档
         assert (market.COLOR_UP, market.COLOR_DOWN) == ("#d32f2f", "#2e7d32")
+        theme_mod.apply_theme(None, "silver")
+        assert theme_mod.semantic("up") == market.COLOR_UP
+        assert theme_mod.semantic("down") == market.COLOR_DOWN
+        theme_mod.apply_theme(None, "tech")
+        assert theme_mod.semantic("up") == theme_mod.TECH_SEMANTIC["up"]
     finally:
         market.clear_cache()
 
@@ -5139,6 +5160,7 @@ def test_watch_table_shows_added_date_and_pnl_from_the_added_price(
     日期那一格是加入那天（`added_at` 的日期部分）；**老数据（没有加入价）显示 `—`**。
     """
     from laoa_trader.data import storage as st
+    from laoa_trader.ui import theme as theme_mod
 
     table = window.pool_table
     with st.connect(seeded.db_path) as conn:
@@ -5167,7 +5189,7 @@ def test_watch_table_shows_added_date_and_pnl_from_the_added_price(
     assert "加入价 5.00" in table.item(rows["600001"], pnl_col).toolTip()
     # 颜色沿用红涨绿跌：这只票是亏的 → 绿
     assert table.item(rows["600001"], pnl_col).foreground().color().name() \
-        == ui_app.QColor(ui_app.market.COLOR_DOWN).name()
+        == ui_app.QColor(theme_mod.semantic("down")).name()
 
     # 老数据：两格都是 `—`（不拿今天顶替、也不假装 0%）
     assert table.item(rows["600003"], pnl_col).text() == ui_app.market.DASH

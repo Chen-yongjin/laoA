@@ -1,4 +1,4 @@
-"""财神助手（Windows 单机版）。
+"""luweik决策系统（Windows 单机版）。
 
 入口：`python -m laoa_trader`（无参数启动 GUI），或 `--cli` 走命令行：
 
@@ -85,7 +85,7 @@ def _doctor(cfg, startup_problem: str = "") -> None:
 
     import laoa_trader
 
-    print("财神助手 —— 自检")
+    print("luweik —— 自检")
     print("=" * 56)
     print(f"程序版本    : {laoa_trader.__version__}")
     # 运行形态与两条关键路径：换成 Nuitka 之后，"图标/随包公式找没找到"是最容易出问题的地方
@@ -483,7 +483,7 @@ def _market_command(cfg) -> int:
 def cli(argv: list[str] | None = None) -> int:
     """命令行模式。"""
     parser = argparse.ArgumentParser(
-        prog="laoa_trader", description="财神助手（命令行）"
+        prog="luweik", description="luweik（命令行）"
     )
     parser.add_argument("--cli", action="store_true", help="强制命令行模式")
     parser.add_argument("--config", help="config.toml 路径")
@@ -570,7 +570,7 @@ def cli(argv: list[str] | None = None) -> int:
 
         from laoa_trader.strategy import formula as fm
 
-        print(f"财神助手 {laoa_trader.__version__}")
+        print(f"luweik {laoa_trader.__version__}")
         print(f"构建形态：{runtime.describe()}")
         print(f"程序位置：{runtime.exe_dir()}")
         print(f"策略引擎：支持 {len(fm.SUPPORTED_FUNCTIONS)} 个函数")

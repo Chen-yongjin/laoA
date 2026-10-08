@@ -38,12 +38,14 @@ from laoa_trader.log import get_logger
 logger = get_logger(__name__)
 
 #: 默认数据目录（Windows 用 LOCALAPPDATA，其它平台退回 ~/.local/share）
-#: 数据/配置目录名（`%LOCALAPPDATA%\CaishenHelper`）。产品显示名是「财神助手」
-#: （见 `ui/app.py` 的 `APP_NAME`）。
+#: 数据/配置目录名（`%LOCALAPPDATA%\CaishenHelper`）。
 #:
-#: 2026-09-30 改名时**没有**只改这一行就完事：老用户的数据库（几年日线，几百 MB）
-#: 与授权状态都躺在旧目录里，直接换名等于让他重下一遍、试用天数还可能重置。
-#: 所以 `_migrate_legacy_dirs()` 会在第一次用到新目录时，把旧目录**整份搬过来**。
+#: ⚠️ **目录名与产品显示名是解耦的**：显示名前后改过三次（老牛选股 → 财神助手 →
+#: luweik决策系统，见 `ui/app.py` 的 `APP_NAME`），这个目录名**一次都没跟着动**。
+#: 为什么不跟着动：老用户的数据库（几年日线，几百 MB）与授权状态都躺在旧目录里，
+#: 直接换名等于让他重下一遍、试用天数还可能重置。所以下面这三个值只服务于「搬家」
+#: 这一个动作 —— `_migrate_legacy_dirs()` 会在第一次用到某个目录时把旧的那份
+#: **整份搬过来**，与产品叫什么名字无关。以后再改显示名，**也不要**动它们。
 DEFAULT_APP_NAME = "CaishenHelper"
 
 #: 改名前用过的目录名（Windows `%LOCALAPPDATA%`/`%APPDATA%` 下，以及 Linux 的
@@ -70,8 +72,11 @@ POOL_VIEWS: tuple[str, ...] = ("cards", "table")
 #: 为什么常量放在 config 里而不是 `ui/theme.py`：配置层要在**没有任何 Qt** 的环境下
 #: 也能 import（CLI、服务器版共存、打包前的静态检查），而 theme.py 会用到 Qt。
 #: 取值只有这一处，`theme.normalize_theme` 也读它，不会出现两份定义。
-UI_THEMES: tuple[str, ...] = ("silver", "system")
-DEFAULT_UI_THEME = "silver"
+#: 界面皮肤。`tech`（科技蓝深色，2026-10-08 起是默认）走深底亮字 + 青色强调；
+#: `silver` 是原来的金属浅灰；`system` 清空样式表回到 Qt 原生外观（安全绳）。
+#: 顺序 = 设置页下拉框的顺序。
+UI_THEMES: tuple[str, ...] = ("tech", "silver", "system")
+DEFAULT_UI_THEME = "tech"
 
 #: 大盘概览默认盯的宽基指数（同花顺代码）。实测这五个都能取到；
 #: `899050.BJ`（北证50）**不存在**，混进去会让整批快照失败，别往这里加。

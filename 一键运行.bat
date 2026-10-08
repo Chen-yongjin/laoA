@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================================
-rem  财神助手 · 一键运行（Windows）
+rem  luweik决策系统 · 一键运行（Windows）
 rem
 rem  为什么有这个脚本：正常路径是"从 GitHub Actions 下打包好的 exe"，但那要等
 rem  云端构建（而且 Actions 有额度/排队的时候会卡住）。这个脚本让你在本机直接跑起来：
@@ -14,7 +14,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 echo.
-echo === 财神助手 · 一键运行 ===
+echo === luweik决策系统 · 一键运行 ===
 echo.
 
 rem ── 1) 找 Python（优先 py -3.11，其次 py -3，最后 PATH 里的 python）──

@@ -78,7 +78,7 @@ def test_ci_packages_never_contain_the_keygen() -> None:
 
     钉四件事：① 主 job 里有"产物里不许出现 keygen"的**检查**（不是只写文档）；
     ② 写包那一步不许再把注册机复制进去（`keygen_in_pkg` 那一步已删）；
-    ③ 注册机仍是独立 job + 独立 artifact 名（`keygen`），主 artifact 名仍 `CaishenTrader`；
+    ③ 注册机仍是独立 job + 独立 artifact 名（`keygen`），主 artifact 名仍 `LuweikDecision`；
     ④ 主程序的 Release 附件里不许出现 keygen。
     """
     text = WORKFLOW.read_text(encoding="utf-8")
@@ -92,7 +92,7 @@ def test_ci_packages_never_contain_the_keygen() -> None:
     # ③ 注册机自己的 job / artifact 仍在，主 artifact 名不变
     assert re.search(r"^\s{2}keygen:", text, re.M), "workflow 里没有独立的 keygen job"
     assert re.search(r"name:\s*keygen\b", text), "注册机 artifact 名必须是 keygen"
-    assert re.search(r"name:\s*CaishenTrader\b", text), "主 artifact 名仍是 CaishenTrader"
+    assert re.search(r"name:\s*LuweikDecision\b", text), "主 artifact 名仍是 LuweikDecision"
     assert "github.event_name == 'workflow_dispatch'" in text
     assert "contains(github.event.head_commit.modified, 'build/keygen.spec')" in text, \
         "改动 keygen.spec 时应当自动重发注册机"

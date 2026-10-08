@@ -29,14 +29,16 @@ from tests._toml import p
 # ── 1) 主题名归一（配置 / 环境变量）──
 
 
-def test_theme_defaults_to_silver(cfg) -> None:
-    """默认是银色主题（用户点名要的那套）；取值表只有 config 一份。"""
-    assert config_mod.DEFAULT_UI_THEME == "silver"
-    assert config_mod.UI_THEMES == ("silver", "system")
-    assert config_mod.Config().ui_theme == "silver"
-    assert cfg.ui_theme == "silver"
+def test_theme_defaults_to_the_tech_skin(cfg) -> None:
+    """默认是**科技蓝（深色）**（2026-10-08 主人："改成吸引眼球的颜色组合，要科技感又专业"）；
+    取值表只有 config 一份。银色与系统默认仍然可选（一键切回的安全绳）。"""
+    assert config_mod.DEFAULT_UI_THEME == "tech"
+    assert config_mod.UI_THEMES == ("tech", "silver", "system")
+    assert config_mod.Config().ui_theme == "tech"
+    assert cfg.ui_theme == "tech"
     # 界面层的取值表引用同一份定义，不会两处各写各的
-    assert theme.THEME_SILVER in config_mod.UI_THEMES
+    for name in (theme.THEME_TECH, theme.THEME_SILVER, theme.THEME_SYSTEM):
+        assert name in config_mod.UI_THEMES
     assert set(theme.THEMES) == set(config_mod.UI_THEMES)
 
 
@@ -46,12 +48,12 @@ def test_theme_accepts_valid_values(raw) -> None:
     assert theme.normalize_theme(raw) == raw.strip().lower()
 
 
-@pytest.mark.parametrize("raw", ["", None, "银色", "silver ", "neon", "SILVE", 0, "1"])
+@pytest.mark.parametrize("raw", ["", None, "银色", "neon", "SILVE", 0, "1", "techy"])
 def test_theme_falls_back_to_default_on_bad_value(raw) -> None:
     """非法值一律回默认 —— 写错一个字母不该让界面起不来。"""
-    assert config_mod.Config(ui_theme=raw).ui_theme == "silver"
-    assert theme.normalize_theme(raw) == "silver"
-    assert theme.theme_label(raw) == theme.THEME_LABELS["silver"]
+    assert config_mod.Config(ui_theme=raw).ui_theme == "tech"
+    assert theme.normalize_theme(raw) == "tech"
+    assert theme.theme_label(raw) == theme.THEME_LABELS["tech"]
 
 
 def test_theme_from_config_file_and_env(tmp_path, monkeypatch) -> None:
@@ -69,24 +71,25 @@ def test_theme_from_config_file_and_env(tmp_path, monkeypatch) -> None:
     assert config_mod.load_config(path).ui_theme == "silver"     # 环境变量盖过文件
 
     monkeypatch.setenv("UI_THEME", "乱写的")
-    assert config_mod.load_config(path).ui_theme == "silver"     # 非法 → 回默认
+    assert config_mod.load_config(path).ui_theme == "tech"       # 非法 → 回默认
 
     monkeypatch.setenv("UI_THEME", "System")
     assert config_mod.load_config(path).ui_theme == "system"     # 大小写不敏感
 
 
 def test_theme_labels_are_chinese_and_distinct() -> None:
+    assert theme.theme_label("tech") == "科技蓝（深色）"
     assert theme.theme_label("silver") == "银色（金属感）"
     assert theme.theme_label("system") == "系统默认"
 
 
 def test_current_theme_tracks_applied(monkeypatch) -> None:
     """`current_theme()` 反映**实际应用**的主题（不是"配置里写了什么"）。"""
-    assert theme.current_theme() == "silver"
+    assert theme.current_theme() == "tech"
     theme.apply_theme(_FakeApp(), "system")
     assert theme.current_theme() == "system"
     theme.apply_theme(_FakeApp(), "乱写的")
-    assert theme.current_theme() == "silver"          # 非法值回默认，不留在"乱写的"
+    assert theme.current_theme() == "tech"            # 非法值回默认，不留在"乱写的"
 
 
 class _FakeApp:
@@ -223,3 +226,81 @@ def test_missing_texture_falls_back_to_plain_color(monkeypatch) -> None:
 def test_ui_asset_returns_none_for_unknown_name() -> None:
     assert assets.ui_asset("没有这张图.png") is None
     assert assets.ui_asset("") is None
+
+
+# ── 3) 科技蓝（深色）主题：颜色与语义色 ──
+#
+# 深色皮肤最容易翻车的两件事：① 深绿字配深蓝底看不清；② 主按钮换成了亮青底却还在用白字。
+# 这两条都用对比度/取色值钉住（改配色时不能只看"好不好看"）。
+
+
+def _contrast(fg: str, bg: str) -> float:
+    """WCAG 对比度（1~21）。`fg`/`bg` 都是 `#rrggbb`。"""
+
+    def _lum(color: str) -> float:
+        raw = color.lstrip("#")
+        parts = [int(raw[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in parts]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+    hi, lo = sorted((_lum(fg), _lum(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_tech_skin_text_is_readable_on_its_backgrounds() -> None:
+    """正文/次要文字/涨跌色在这块深底上都要够对比（AA 正文 4.5:1）。"""
+    colors = theme.TECH_COLORS
+    for key in ("text", "text_dim", "text_disabled"):
+        for bg_key in ("window", "panel", "section", "alt_row"):
+            ratio = _contrast(colors[key], colors[bg_key])
+            # text_disabled 是"故意压低"的文字，放它到 AA 的边缘（4:1）就够
+            floor = 4.0 if key == "text_disabled" else 4.5
+            assert ratio >= floor, (key, bg_key, round(ratio, 2))
+    for key in ("up", "down"):
+        for bg_key in ("window", "panel"):
+            ratio = _contrast(theme.TECH_SEMANTIC[key], colors[bg_key])
+            assert ratio >= 4.5, (key, bg_key, round(ratio, 2))
+    # 主按钮上的字只在**它自己的底色**上被读：亮青底 + 深字（白字在青底上只有 1.8:1）
+    for bg_key in ("primary_top", "primary_bottom", "primary_hover_top", "primary_press_top"):
+        ratio = _contrast(colors["primary_text"], colors[bg_key])
+        assert ratio >= 4.5, ("primary_text", bg_key, round(ratio, 2))
+    assert _contrast("#ffffff", colors["primary_top"]) < 2.0      # 记住为什么不能写白字
+
+
+def test_tech_skin_uses_cyan_and_not_the_metal_texture() -> None:
+    """强调色是青色；深色底**不贴**那张浅色拉丝纹理（贴上去就是一块脏斑）。"""
+    qss = theme.theme_qss("tech")
+    assert theme.TECH_COLORS["tab_accent"] in qss          # 青色进样式表
+    assert theme.TEXTURE_NAME not in qss                   # 不引用拉丝纹理
+    assert "qlineargradient" in qss                        # 背景条用渐变
+    # 银色那套仍然照旧带纹理（两条路互不影响）
+    silver = theme.theme_qss("silver", '"/tmp/brushed.png"')
+    assert "/tmp/brushed.png" in silver
+
+
+def test_semantic_colors_follow_the_theme() -> None:
+    """涨跌色按主题走：浅色皮肤沿用全项目那两档，深色皮肤用亮一档的。
+
+    判据仍然只有一处（`market.value_color`）—— 这里钉的是"换主题换一档色"，
+    以及**平盘/取不到时仍然是空串**（那是"不上色"，不是某种颜色）。
+    """
+    from laoa_trader import market
+
+    app = _FakeApp()
+    theme.apply_theme(app, "silver")
+    assert theme.semantic("up") == market.COLOR_UP == "#d32f2f"
+    assert theme.semantic("down") == market.COLOR_DOWN == "#2e7d32"
+    assert theme.value_color(1.0) == market.COLOR_UP
+    assert theme.value_color(-1.0) == market.COLOR_DOWN
+
+    theme.apply_theme(app, "tech")
+    assert theme.semantic("up") == theme.TECH_SEMANTIC["up"]
+    assert theme.semantic("down") == theme.TECH_SEMANTIC["down"]
+    assert theme.value_color(1.0) == theme.TECH_SEMANTIC["up"]
+    assert theme.value_color(-1.0) == theme.TECH_SEMANTIC["down"]
+
+    # 平盘 / 取不到：**不上色**（空串），两种主题一致
+    for name in ("silver", "tech"):
+        theme.apply_theme(app, name)
+        assert theme.value_color(0) == ""
+        assert theme.value_color(None) == ""

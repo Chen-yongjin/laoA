@@ -67,7 +67,7 @@ def blocked_config(tmp_path):
 def test_doctor_reports_paths_deps_and_data(capsys, config_file) -> None:
     assert cli(["--cli", "--doctor", "--config", config_file]) == 0
     out = capsys.readouterr().out
-    assert "财神助手 —— 自检" in out
+    assert "luweik —— 自检" in out
     for key in ("程序版本", "Python", "配置来源", "数据目录", "数据库", "同花顺 Key",
                 "飞书凭证", "通知开关", "交易参数", "定时", "行情行数", "最新数据日期"):
         assert key in out, f"自检报告缺少「{key}」"
@@ -175,7 +175,7 @@ def test_writes_are_refused_when_data_dir_unwritable(capsys, blocked_config) -> 
 def test_help_and_no_args(capsys) -> None:
     """不带动作（或 --help）时打印帮助并正常退出，不能因为数据目录不可写就报错。"""
     assert cli(["--cli"]) == 0
-    assert "财神助手" in capsys.readouterr().out
+    assert "luweik" in capsys.readouterr().out
 
     # --help 由 argparse 直接 SystemExit(0)，这是标准行为（退出码 0）
     with pytest.raises(SystemExit) as excinfo:

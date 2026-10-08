@@ -6,10 +6,10 @@ Nuitka 需要 C 编译器，本机（NAS）没有、也不该为了跑测试去�
 Windows CI 上（构建 + 跑 exe 自检）。但"构建参数写错了"这类问题**不该等到 CI 才发现**
 （一轮 CI 二十多分钟），所以这里把能静态核对的部分钉死：
 
-1. 产物名与目录名 = 我们对客户承诺的那两个（`CaishenTrader` / `财神助手.exe`）；
+1. 产物名与目录名 = 我们对客户承诺的那两个（`LuweikDecision` / `luweik决策系统.exe`）；
 2. 随包数据与 `build/laoa_trader.spec` 的 `DATAS` **逐项对应**（两条构建路径不许漂移）；
 3. `--nofollow-import-to` 覆盖 spec 的 `EXCLUDES`（省体积的取舍两边一致）；
-4. 搬运逻辑（Nuitka 的 `.dist` → `dist/CaishenTrader/`，并把 exe 改成中文名）真的能跑，
+4. 搬运逻辑（Nuitka 的 `.dist` → `dist/LuweikDecision/`，并把 exe 改成交付时约定的名字）真的能跑，
    用一个假产物目录验。
 """
 
@@ -40,9 +40,9 @@ def builder():
 
 
 def test_exe_and_dist_names_are_what_we_promise_users(builder) -> None:
-    """产物名是硬承诺：`dist/CaishenTrader/财神助手.exe`（下载说明/CI 检查/文档都按它写）。"""
-    assert builder.DIST_NAME == "CaishenTrader"       # 目录名保持 ASCII（命令行/工具兼容）
-    assert builder.EXE_NAME == "财神助手"            # exe 名中文（用户在资源管理器里双击的就是它）
+    """产物名是硬承诺：`dist/LuweikDecision/luweik决策系统.exe`（下载说明/CI 检查/文档都按它写）。"""
+    assert builder.DIST_NAME == "LuweikDecision"      # 目录名保持 ASCII（命令行/工具兼容）
+    assert builder.EXE_NAME == "luweik决策系统"     # 用户双击的就是它（前四个字母 + 中文，见 app.APP_NAME）
 
 
 def test_product_version_has_one_source_of_truth(builder) -> None:
@@ -109,7 +109,7 @@ def test_excludes_and_nofollow_stay_in_sync(builder) -> None:
 
 
 def test_stage_into_dist_moves_the_payload_and_renames_the_exe(builder, tmp_path: Path) -> None:
-    """搬运逻辑：Nuitka 的 `launcher.dist/` → `dist/CaishenTrader/财神助手.exe`。
+    """搬运逻辑：Nuitka 的 `launcher.dist/` → `dist/LuweikDecision/luweik决策系统.exe`。
 
     这一步是"客户拿到的路径"与"Nuitka 自己的命名"之间的唯一转换点，
     搬错了的表现是"包能下、双击不到 exe"（用户第一时间就会报）。
@@ -121,7 +121,7 @@ def test_stage_into_dist_moves_the_payload_and_renames_the_exe(builder, tmp_path
 
     exe = builder.stage_into_dist(staged, exe_suffix=".exe", dist_root=tmp_path / "dist")
 
-    assert exe == tmp_path / "dist" / "CaishenTrader" / "财神助手.exe"
+    assert exe == tmp_path / "dist" / "LuweikDecision" / "luweik决策系统.exe"
     assert exe.is_file()
     assert not staged.exists(), "中间目录应该被搬走（不是复制），否则 CI 上白占空间"
     # 随包数据跟着一起过去
@@ -129,8 +129,8 @@ def test_stage_into_dist_moves_the_payload_and_renames_the_exe(builder, tmp_path
 
 
 def test_stage_into_dist_replaces_an_old_build(builder, tmp_path: Path) -> None:
-    """重复构建：旧的 dist/CaishenTrader 要被整体替掉（否则新旧文件混在一起，最难查）。"""
-    old = tmp_path / "dist" / "CaishenTrader"
+    """重复构建：旧的 dist/LuweikDecision 要被整体替掉（否则新旧文件混在一起，最难查）。"""
+    old = tmp_path / "dist" / "LuweikDecision"
     old.mkdir(parents=True)
     (old / "旧文件.txt").write_text("old", encoding="utf-8")
 
@@ -140,7 +140,7 @@ def test_stage_into_dist_replaces_an_old_build(builder, tmp_path: Path) -> None:
 
     exe = builder.stage_into_dist(staged, exe_suffix="", dist_root=tmp_path / "dist")
 
-    assert exe == tmp_path / "dist" / "CaishenTrader" / "财神助手"
+    assert exe == tmp_path / "dist" / "LuweikDecision" / "luweik决策系统"
     assert not (exe.parent / "旧文件.txt").exists(), "旧产物里那些文件不该留下来"
 
 

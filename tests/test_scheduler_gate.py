@@ -502,7 +502,7 @@ def _patch_formulas(monkeypatch) -> None:
 
 
 def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_path) -> None:
-    """建池成功 → 往 `<export_dir>/财神助手-匹配结果-<今天>.txt` 写一份结果。
+    """建池成功 → 往 `<export_dir>/luweik-匹配结果-<今天>.txt` 写一份结果。
 
     文件里的数量/每一行都与**这一轮**的池子对得上，标题里带行情日；
     状态栏（`stage_cb`）还要收到那句"结果已导出到 <路径>"（用户明确要求写了就说）。
@@ -520,16 +520,16 @@ def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_pa
     assert report["export_path"], report
     path = Path(report["export_path"])
     assert path.parent == desk and desk.is_dir()
-    assert path.name.startswith("财神助手-匹配结果-")
+    assert path.name.startswith("luweik-匹配结果-")
     assert path.name.endswith(".txt")
-    # 文件名带日期（用户给定：`财神助手-匹配结果-2026-09-18.txt`）
-    assert path.name == f"财神助手-匹配结果-{_today()}.txt"
+    # 文件名带日期（用户给定：`luweik-匹配结果-2026-09-18.txt`）
+    assert path.name == f"luweik-匹配结果-{_today()}.txt"
     # 状态栏也说了这一句（界面上的 `_set_status` 就是接在这个回调上的）
     assert f"结果已导出到 {path}" in stages, stages
 
     text = path.read_text(encoding="utf-8-sig")
     lines = text.splitlines()
-    assert lines[0] == f"财神助手 · 匹配结果 · {_today()}（行情日 {report['data_date']}）"
+    assert lines[0] == f"luweik · 匹配结果 · {_today()}（行情日 {report['data_date']}）"
     assert lines[1] == f"共 {len(report['pool'])} 只（策略 1 · 自选 0）"
     assert "1. 反转样本(600001)" in lines[2]
     assert "现价" in lines[2]                        # 库里有收盘价 → 写上现价

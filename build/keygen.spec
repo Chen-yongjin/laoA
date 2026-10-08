@@ -14,7 +14,7 @@ r"""注册机的打包配置（**作者的签发工具，绝不随主程序分�
 
 * **主程序 spec（`laoa_trader.spec`）里不许出现它**：`build/` 目录不在主包的 `DATAS` 里，
   主包的入口是 `laoa_trader/__main__.py`，与这里没有任何交集；
-* **CI 里是单独的 job + 单独的 artifact 名（`keygen`）**：主 artifact 叫 `CaishenTrader`
+* **CI 里是单独的 job + 单独的 artifact 名（`keygen`）**：主 artifact 叫 `LuweikDecision`
   （给用户），注册机 artifact 只有作者自己下载（见 `.github/workflows/build-windows.yml`）；
 * `tests/test_packaging.py` 里有用例钉住"主 spec 不许提到 keygen" —— 将来谁顺手加进去会立刻红。
 

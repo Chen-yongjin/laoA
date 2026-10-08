@@ -413,7 +413,7 @@ def copy_text(*, conv_key: str, audit: dict | None,
     重排就是第二个版式，迟早与界面上的说法对不上。
     """
     lines = [
-        "📊 策略成绩单（财神助手）",
+        "📊 策略成绩单（luweik决策系统）",
         f"成交口径：{_convention_text(conv_key)}",
         "数据来源：本地库（只读、不联网）；下面是绝对收益，不算 α"
         "（α 要全市场同期基准，这个入口不算）。",

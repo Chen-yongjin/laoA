@@ -467,7 +467,7 @@ def test_speak_always_uses_the_locked_rate(monkeypatch, cfg) -> None:
     spoken: list[list[str]] = []
     monkeypatch.setattr(voice, "run_command", spoken.append)
 
-    ok = voice.speak_now("财神助手，语音提醒测试", cfg=cfg, force=True,
+    ok = voice.speak_now("luweik决策系统，语音提醒测试", cfg=cfg, force=True,
                          voice="Chinese Huihui", volume=0.5, rate=1.5)
 
     assert ok is True

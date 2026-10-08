@@ -61,10 +61,10 @@ def test_file_name_carries_the_date_and_content_is_the_agreed_layout(tmp_path) -
         quotes={"600519": (1266.98, 0.71)},     # 注入行情：用例不碰库、不联网
     )
 
-    assert path == tmp_path / "财神助手-匹配结果-2026-09-18.txt"
+    assert path == tmp_path / "luweik-匹配结果-2026-09-18.txt"
     assert path is not None and path.exists()
     assert path.read_text(encoding="utf-8-sig").splitlines() == [
-        "财神助手 · 匹配结果 · 2026-09-18（行情日 2026-09-17）",
+        "luweik · 匹配结果 · 2026-09-18（行情日 2026-09-17）",
         # M = 有来源策略的行（内置 + 公式），K = 自选 —— 与「自选标的」表头同一口径
         "共 3 只（策略 2 · 自选 1）",
         "1. 贵州茅台(600519)  现价 1266.98 +0.71%  来源：短期反转",
@@ -96,7 +96,7 @@ def test_file_name_defaults_to_today_in_beijing_time(tmp_path, monkeypatch) -> N
 
     path = pool.export_pick_file(_pool_rows(), dest_dir=tmp_path)
 
-    assert path is not None and path.name == "财神助手-匹配结果-2026-09-18.txt"
+    assert path is not None and path.name == "luweik-匹配结果-2026-09-18.txt"
 
 
 def test_no_tooltip_or_reason_noise_but_source_label_is_kept(tmp_path) -> None:
@@ -172,10 +172,10 @@ def test_desktop_directory_is_used_when_it_exists(tmp_path) -> None:
 
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  fallback_dir=fallback, day="2026-09-18")
-    # 2026-09-21（主人要求）：桌面根目录不再散着文件，收进 `桌面/财神助手/` 里
-    assert pool.EXPORT_FOLDER_NAME == "财神助手"
+    # 2026-09-21（主人要求）：桌面根目录不再散着文件，收进 `桌面/luweik/` 里
+    assert pool.EXPORT_FOLDER_NAME == "luweik"
     assert path == (home / "Desktop" / pool.EXPORT_FOLDER_NAME
-                    / "财神助手-匹配结果-2026-09-18.txt")
+                    / "luweik-匹配结果-2026-09-18.txt")
     assert not list(fallback.iterdir())                      # 没有重复写进数据目录
 
 
@@ -188,7 +188,7 @@ def test_chinese_desktop_name_is_found(tmp_path) -> None:
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  day="2026-09-18")
     assert path == (home / "桌面" / pool.EXPORT_FOLDER_NAME
-                    / "财神助手-匹配结果-2026-09-18.txt")
+                    / "luweik-匹配结果-2026-09-18.txt")
 
 
 def test_onedrive_desktop_is_found(tmp_path) -> None:
@@ -208,9 +208,9 @@ def test_falls_back_to_the_data_dir_when_no_desktop_exists(tmp_path) -> None:
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  fallback_dir=fallback, day="2026-09-18")
 
-    # 回退目录里也套一层「财神助手」（口径与桌面那条一致：文件永远收在一个文件夹里）
+    # 回退目录里也套一层「luweik」（口径与桌面那条一致：文件永远收在一个文件夹里）
     assert path == (fallback / pool.EXPORT_FOLDER_NAME
-                    / "财神助手-匹配结果-2026-09-18.txt")
+                    / "luweik-匹配结果-2026-09-18.txt")
     assert path.exists()
 
 
@@ -378,3 +378,38 @@ def test_export_carries_no_private_information(tmp_path) -> None:
     assert "/" not in text and "\\" not in text
     for secret in ("api_key", "apikey", "token", "secret", "webhook", "password"):
         assert secret not in lowered
+
+
+def test_legacy_export_folder_is_moved_to_the_new_name(tmp_path) -> None:
+    """改名后的第一次导出：老的 `桌面\\财神助手\\` 整个搬到 `桌面\\luweik\\`（历史文件不丢）。
+
+    为什么要有这一步：目录名跟着产品名走，改名之后老用户那几个月攒下来的
+    `*-匹配结果-*.txt` 会留在一个再也不会被写入的旧文件夹里 —— 文件没丢，但用户
+    再也看不到、程序也不会再往里写，等于凭空少了一段历史。（2026-10-08 又一次改名时加。）
+    """
+    home = tmp_path / "home"
+    desktop = home / "Desktop"
+    legacy = desktop / "财神助手"
+    legacy.mkdir(parents=True)
+    (legacy / "旧名-匹配结果-2026-09-01.txt").write_text("历史", encoding="utf-8")
+
+    path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
+                                 day="2026-09-18")
+
+    assert path.parent == desktop / pool.EXPORT_FOLDER_NAME
+    assert (path.parent / "旧名-匹配结果-2026-09-01.txt").read_text(encoding="utf-8") == "历史"
+    assert not legacy.exists()                              # 旧目录搬走了（在同一块盘上是改名，不复制）
+
+
+def test_legacy_export_folder_is_kept_when_the_new_one_already_exists(tmp_path) -> None:
+    """新目录已经存在（用户两边都在用）→ **什么都不动**：合并两份历史不归程序替用户决定。"""
+    home = tmp_path / "home"
+    desktop = home / "Desktop"
+    (desktop / pool.EXPORT_FOLDER_NAME).mkdir(parents=True)
+    legacy = desktop / "财神助手"
+    legacy.mkdir()
+    (legacy / "旧文件.txt").write_text("历史", encoding="utf-8")
+
+    pool.export_pick_file(_pool_rows(), dest_dir=None, home=home, day="2026-09-18")
+
+    assert (legacy / "旧文件.txt").exists()                  # 旧目录原样留着

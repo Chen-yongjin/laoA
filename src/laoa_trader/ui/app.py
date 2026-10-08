@@ -2,7 +2,7 @@
 
 布局（改版后）：**一个标题区 + 五个页签**。
 
-    标题区：财神助手 · 运行状态：<现在在干什么>            [显示详情] [关于软件]
+    标题区：luweik决策系统 · 运行状态：<现在在干什么>      [显示详情] [关于软件]
             （下面是"没有数据"这一类**一句话提示**，以及只在任务运行时出现的细进度条）
     页签：大盘概览 / 自选标的 / 持仓监控 / 策略匹配 / 系统设置
 
@@ -65,11 +65,15 @@ logger = get_logger(__name__)
 #: 程序名 / 版权行 / 数据来源：「窗口标题」「关于软件」对话框、复制到剪贴板的版本信息
 #: **共用这一份** —— 分发出去之后用户看到的版本信息必须处处一致，不能各写各的
 #: 软件名（标题栏 / 托盘 tooltip / 任务栏 / exe 与打包目录都取它）。
-#: 用户 2026-09-20 定：**软件名 = 财神助手**；而"助手"语气的地方
-#: （导出文件名、推送标题、消息里自称）用 `ASSISTANT_NAME`。
-APP_NAME = "财神助手"
-#: 带"助手"语气的自称（通知与导出的标题用）
-ASSISTANT_NAME = "财神助手"
+#: 2026-10-08 主人拍的第三个名字：**软件名 = luweik决策系统**。
+#: 为什么又改：前一个名字在闲鱼/小红书上被限流（名字里带"选股/荐股"那类字就容易被拦），
+#: 所以这次的名字里**一个这类字都没有**，语气也中性（"决策系统"而不是"助手/荐股"）。
+#: ⚠️ 界面显示名与"自称"是两件事：`APP_NAME` 给窗口标题/关于页/托盘 tooltip 用；
+#: 推送标题、导出文件名、消息气泡里那种短自称用 `ASSISTANT_NAME`（手机上标题要短）。
+APP_NAME = "luweik决策系统"
+#: 短自称（推送标题 `luweik-标的池`、导出文件名 `luweik-匹配结果-<日期>.txt`、
+#: 桌面子目录 `luweik/` 都用它）
+ASSISTANT_NAME = "luweik"
 COPYRIGHT_TEXT = "版权所有 © 2026 async-chen，保留所有权利。"
 #: 数据来源声明（「关于软件」里那一行）。
 #:
@@ -992,7 +996,7 @@ if QT_AVAILABLE:
             self.name_label.setText(name)
             self.value_label.setText(value)
             self.pct_label.setText(pct)
-            color = market.value_color(item.get("change_pct"))
+            color = theme_mod.value_color(item.get("change_pct"))
             # 用 setStyleSheet 上色而不是富文本 HTML：`text()` 里带标签会让断言变脆，
             # 而且颜色只有一个用途（前景色），样式表是最直接的一层
             style = f"color:{color}" if color else ""
@@ -3707,7 +3711,7 @@ if QT_AVAILABLE:
                     self.style().StandardPixmap.SP_ComputerIcon
                 )
             self.tray = QSystemTrayIcon(icon, self)
-            self.tray.setToolTip("财神助手")
+            self.tray.setToolTip(APP_NAME)
             # 闪烁要交替两张图，得先记住"正常的那张"（见 `_start_alert_flash`）
             self._normal_tray_icon = icon
             menu = QMenu()
@@ -4513,7 +4517,7 @@ if QT_AVAILABLE:
                     pct_item = QTableWidgetItem(market.DASH)
                     pct_item.setToolTip(price_item.toolTip())
             if pct is not None:
-                color = market.value_color(pct)
+                color = theme_mod.value_color(pct)
                 if color:
                     # 用前景色而不是富文本：与表格其余部分同一套画法，排序/复制都不受影响
                     pct_item.setForeground(QBrush(QColor(color)))
@@ -4811,7 +4815,7 @@ if QT_AVAILABLE:
             else:
                 pnl = (float(price) - base) / base * 100
                 pnl_item = QTableWidgetItem(f"{pnl:+.2f}%")
-                color = market.value_color(pnl)
+                color = theme_mod.value_color(pnl)
                 if color:
                     pnl_item.setForeground(QBrush(QColor(color)))
                 pnl_item.setToolTip(
@@ -5094,7 +5098,7 @@ if QT_AVAILABLE:
                 else:
                     profit = (price - cost) / cost * 100
                     profit_item = QTableWidgetItem(f"{profit:+.2f}%")
-                    color = market.value_color(profit)
+                    color = theme_mod.value_color(profit)
                     if color:
                         profit_item.setForeground(QBrush(QColor(color)))
                     profit_item.setToolTip(
@@ -6235,7 +6239,7 @@ if QT_AVAILABLE:
             if action is not None:
                 action.setText(f"消息（{count}）" if count else "消息")
             if self.tray is not None:
-                title = "财神助手"
+                title = APP_NAME
                 if count:
                     title += f" —— {count} 条新消息"
                 try:
@@ -6475,7 +6479,8 @@ if QT_AVAILABLE:
                     return None
                 painter = QPainter(pixmap)
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                painter.setBrush(QBrush(QColor(market.COLOR_UP)))   # 涨红 = 提醒色
+                # 涨红 = 提醒色，**按当前主题取**（深色皮肤上是亮红，浅色皮肤上是原来的 #d32f2f）
+                painter.setBrush(QBrush(QColor(theme_mod.semantic("up"))))
                 painter.setPen(Qt.PenStyle.NoPen)
                 size = max(8, pixmap.width() // 3)
                 # 画在右上角，并稍微内缩：托盘图标边缘常被系统裁掉几像素
@@ -6501,7 +6506,7 @@ if QT_AVAILABLE:
             """轻提示：状态栏 + 托盘气泡（不用模态弹窗打断操作）。"""
             self._set_status(text)
             try:
-                self.tray.showMessage("财神助手", text)
+                self.tray.showMessage(APP_NAME, text)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -7558,7 +7563,7 @@ if QT_AVAILABLE:
                 "频道与参数取自「设置」页当前勾选（无需先保存）。",
             ]
             self._run_worker(
-                lambda: notify_all("🧪 财神助手 · 测试提醒", lines, cfg=test_cfg),
+                lambda: notify_all(f"🧪 {APP_NAME} · 测试提醒", lines, cfg=test_cfg),
                 "测试通知",
             )
 

@@ -106,7 +106,7 @@ def test_formula_dir_frozen_uses_exe_sibling(
     Nuitka 那种布局见下一条用例（随包目录与用户目录**本来就是同一个**，不需要播种）。
     """
     monkeypatch.delenv(lib.FORMULA_DIR_ENV, raising=False)
-    exe = tmp_path / "dist" / "CaishenTrader" / "财神助手.exe"
+    exe = tmp_path / "dist" / "LuweikDecision" / "luweik决策系统.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"fake")
     # 造一个"_MEIPASS"：里面放着随包公式（内容取自仓库里那份，保证与真实分发一致）
@@ -140,7 +140,7 @@ def test_formula_dir_nuitka_layout_is_its_own_user_dir(
     ② 它不会因为"随包=用户目录"而把用户自己的公式覆盖掉或反复复制。
     """
     monkeypatch.delenv(lib.FORMULA_DIR_ENV, raising=False)
-    exe = tmp_path / "dist" / "CaishenTrader" / "财神助手.exe"
+    exe = tmp_path / "dist" / "LuweikDecision" / "luweik决策系统.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"fake")
     # Nuitka 产物里随包公式就在 exe 同级（构建脚本的 include-data-dir 落点）

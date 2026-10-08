@@ -126,7 +126,7 @@ if QT_AVAILABLE:
                 | Qt.WindowType.Tool
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-            self.setWindowTitle("财神助手的桌宠")
+            self.setWindowTitle("luweik决策系统的桌宠")
             self.size_ = int(size)
             self.setFixedSize(self.size_, self.size_ + BUBBLE_HEIGHT)
             #: 素材（没有素材时是 None → 手画降级，见 `_load_pet`）
@@ -146,7 +146,7 @@ if QT_AVAILABLE:
             self._bubble_timer.setSingleShot(True)
             self._bubble_timer.timeout.connect(self.hide_bubble)
             self._build_bubble()
-            self.setToolTip("财神助手的桌宠：双击看消息，右键有菜单")
+            self.setToolTip("luweik决策系统的桌宠：双击看消息，右键有菜单")
 
         # ── 素材 ─────────────────────────────────────────────────────
 
@@ -203,8 +203,13 @@ if QT_AVAILABLE:
             self.bubble.setWordWrap(True)
             self.bubble.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.bubble.setGeometry(0, 0, self.size_, BUBBLE_HEIGHT)
+            # ⚠️ 这里的 `color` **必须自己写**：气泡是暖白底（与红包/金元宝那只小牛一套），
+            # 而应用级样式表给所有 QLabel 设的是**主题文字色** —— 深色主题下那是亮色，
+            # 亮字配暖白底就等于看不清（2026-10-08 换深色皮肤时实拍发现："浅蓝字配浅蓝底"）。
+            # 气泡是浮在用户桌面上的独立小窗，风格不跟主题走，但**对比度必须自己保证**。
             self.bubble.setStyleSheet(
                 "QLabel#petBubble { background: rgba(255, 250, 240, 235);"
+                " color: #4a3410;"
                 " border: 2px solid #c8a24a; border-radius: 10px; padding: 4px 6px; }"
             )
             font = QFont(self.bubble.font())
@@ -252,7 +257,7 @@ if QT_AVAILABLE:
         def set_unread(self, count: int) -> None:
             """未读数（tooltip 与右键菜单里那个 (N) 用）。"""
             self._unread = max(0, int(count))
-            base = "财神助手的桌宠：双击看消息，右键有菜单"
+            base = "luweik决策系统的桌宠：双击看消息，右键有菜单"
             self.setToolTip(base if not self._unread else f"{base}（未读 {self._unread} 条）")
 
         def unread_count(self) -> int:

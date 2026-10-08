@@ -1,4 +1,4 @@
-# 财神助手 · 产品网站（纯静态）
+# luweik决策系统 · 产品网站（纯静态）
 
 给客户看的落地页，**不需要后端、不需要构建**，把整个 `网站/` 目录放到 NAS 上任意一个能被浏览器访问的地方就能用。
 
@@ -11,8 +11,8 @@
 ├── script.js           只做一件事：检查 downloads/ 里有没有 zip，决定下载按钮是否可用
 ├── 截图/               10 张界面截图（从 ../docs/截图/ 拷贝过来的，别在这儿单独改）
 └── downloads/          放安装包的地方
-    ├── CaishenTrader-<版本>.zip    ← 带版本号的包（用户看到的就是这个名字）
-    ├── CaishenTrader.zip           ← 固定名的副本（老链接/兜底用）
+    ├── LuweikDecision-<版本>.zip   ← 带版本号的包（用户看到的就是这个名字）
+    ├── LuweikDecision.zip          ← 固定名的副本（老链接/兜底用）
     └── latest.json                ← 告诉页面当前指向哪个包（换版本只改这里）
 ```
 
@@ -45,7 +45,7 @@
 
 ## 要做的一件事：放安装包
 
-把打包好的 `CaishenTrader.zip` 放进 `网站/downloads/`（文件名必须一致）。
+把打包好的 `LuweikDecision.zip` 放进 `网站/downloads/`（文件名必须一致）。
 
 - 有它：页面上的【下载 Windows 版】按钮自动可用，并显示文件大小（`script.js` 用 HEAD 探测）。
 - 没有它：按钮显示「下载准备中，请联系作者微信 q352162」，**不会**出现点了 404 的死按钮。
@@ -74,7 +74,7 @@ local = [p for p in refs if not p.startswith(("http", "mailto:", "#"))]
 missing = [p for p in local if not pathlib.Path(p).exists() and not p.startswith("downloads/")]
 print("缺失的本地资源：", missing or "无")
 print("外部资源引用：", sorted({p for p in refs if p.startswith("http")}))
-print("安装包已就位：", pathlib.Path("downloads/CaishenTrader.zip").exists())
+print("安装包已就位：", pathlib.Path("downloads/LuweikDecision.zip").exists())
 PY
 ```
 

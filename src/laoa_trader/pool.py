@@ -658,16 +658,16 @@ def format_pool_lines(pool: list[dict]) -> list[str]:
 #      导出挂在这个位置三条路就都有桌面文件；挂在界面上则只有点按钮那条路有。
 #   3. 这一层不依赖 Qt、不联网、不读配置，可以单独测（`tests/test_desk_export.py`）。
 
-#: 导出文件名（用户给定：`财神助手-匹配结果-2026-09-18.txt`）。
+#: 导出文件名（用户给定：`luweik-匹配结果-2026-09-18.txt`）。
 #: 同一天再跑一次会**覆盖同一个文件**：桌面不是归档目录，堆一串同名文件只会让人分不清。
-EXPORT_NAME_PREFIX = "财神助手-匹配结果-"
+EXPORT_NAME_PREFIX = "luweik-匹配结果-"
 EXPORT_NAME_SUFFIX = ".txt"
 
 #: 文件名与正文里的日期写法（用户给定：`2026-09-18`）
 EXPORT_DAY_FORMAT = "%Y-%m-%d"
 
-#: 正文第一行（`财神助手 · 匹配结果 · 2026-09-18（行情日 2026-09-17）`）
-EXPORT_TITLE = "财神助手 · 匹配结果"
+#: 正文第一行（`luweik · 匹配结果 · 2026-09-18（行情日 2026-09-17）`）
+EXPORT_TITLE = "luweik · 匹配结果"
 
 #: 正文最后一行。**必须留着**：这份文件常被用户转发到群里，而里面的价格只是
 #: 公开来源的快照 —— 不写清楚，看到的人会当它是交易所行情。
@@ -679,11 +679,40 @@ EXPORT_FOOTER = (
 #: 桌面目录的候选写法：Windows 英文系统叫 `Desktop`、中文系统叫 `桌面`；
 #: 后两条覆盖"桌面被 OneDrive 接管"那类机器。自己拼路径一定会猜错几台机器，
 #: 所以 `_standard_desktop()` 还会**先**问 Qt/系统要一次答案（见那里的说明）。
-#: 桌面上的**子目录**：导出文件落在 `桌面/财神助手/` 里（2026-09-21 主人要求）。
+#: 桌面上的**子目录**：导出文件落在 `桌面/luweik/` 里（2026-09-21 主人要求）。
 #: 为什么要有这一层：以前直接扔在桌面根目录，用久了桌面上会散着一堆
-#: `财神助手-匹配结果-*.txt`（每天一个），桌面本身就是用户摆东西的地方 ——
+#: `luweik-匹配结果-*.txt`（每天一个），桌面本身就是用户摆东西的地方 ——
 #: 收进一个以软件命名的文件夹里，找起来反而更快。
-EXPORT_FOLDER_NAME = "财神助手"
+EXPORT_FOLDER_NAME = "luweik"
+
+#: 改名前的桌面子目录名。**只用来搬一次家**（见 `_migrate_export_dir`）：
+#: 名字改过之后老用户的 `桌面\财神助手\` 会变成孤儿目录，那里面是他几个月攒下来的
+#: 匹配结果，不能就这么留在旧文件夹里"看不见"。
+EXPORT_FOLDER_LEGACY_NAMES: tuple[str, ...] = ("财神助手",)
+
+
+def _migrate_export_dir(target: Path) -> None:
+    """把**旧名字**的导出目录整个搬到新名字下（只在"新的还没建"时搬一次）。
+
+    三条规矩：
+    * 新的已经存在 → 什么都不做（用户可能两边都在用，合并两份历史不是程序该替他决定的事）；
+    * 旧的也不存在 → 什么都不做（绝大多数用户）；
+    * 只有旧的、没有新的 → `rename`（同一个盘上的目录改名，原子的、不复制文件）。
+    搬不动（占用/权限）只记一条日志：**导出失败绝不能把匹配流程带走**（与 `_write_export`
+    同一个口径）。
+    """
+    if target.exists():
+        return
+    for legacy in EXPORT_FOLDER_LEGACY_NAMES:
+        old = target.parent / legacy
+        try:
+            if old.is_dir():
+                old.rename(target)
+                logger.info(f"桌面导出目录已从「{legacy}」搬到「{EXPORT_FOLDER_NAME}」")
+                return
+        except OSError as exc:
+            logger.warning(f"搬桌面导出目录失败（旧文件仍在「{legacy}」里）：{exc}")
+            return
 
 DESKTOP_SUBDIRS: tuple[tuple[str, ...], ...] = (
     ("Desktop",),
@@ -845,7 +874,7 @@ def pick_export_text(
 
     版式（用户给定）：
 
-        财神助手 · 匹配结果 · 2026-09-18（行情日 2026-09-17）
+        luweik · 匹配结果 · 2026-09-18（行情日 2026-09-17）
         共 N 只（策略 M · 自选 K）
         1. 贵州茅台(600519)  现价 1266.98 +0.71%  来源：策略·短期反转
         2. …
@@ -898,7 +927,7 @@ def pick_export_text(
 
 
 def export_file_name(day: str) -> str:
-    """文件名（`财神助手-匹配结果-2026-09-18.txt`，用户给定）。"""
+    """文件名（`luweik-匹配结果-2026-09-18.txt`，用户给定）。"""
     return f"{EXPORT_NAME_PREFIX}{day}{EXPORT_NAME_SUFFIX}"
 
 
@@ -930,9 +959,9 @@ def export_pick_file(
     所以这是**附赠**产物：它绝不能影响匹配/建池/推送（调用方 `run_daily` 另有兜底
     try，这里自己也不再往外抛）。
 
-    落点（2026-09-21 主人要求）：`桌面/财神助手/财神助手-匹配结果-<日期>.txt` ——
+    落点（2026-09-21 主人要求）：`桌面/luweik/luweik-匹配结果-<日期>.txt` ——
     桌面根目录不再散着文件，都收进以软件命名的那个文件夹里；找不到桌面时退回数据目录，
-    同样套一层 `财神助手`。
+    同样套一层 `luweik`。
 
     Args:
         pool_rows: 池子行（`build_pool()` 的返回值）。
@@ -974,6 +1003,8 @@ def export_pick_file(
                 "（不影响匹配与推送）"
             )
             return None
+        # 改名后的第一次导出：先把旧名字那个目录搬过来，再建新目录
+        _migrate_export_dir(target)
         target.mkdir(parents=True, exist_ok=True)      # 目录不在就建（回退目录常常还没建）
         if quotes is None and db_path is not None:
             try:

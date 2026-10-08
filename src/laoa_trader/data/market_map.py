@@ -160,28 +160,72 @@ def build_blocks(
     return blocks
 
 
-def block_color(pct: float | None) -> tuple[int, int, int]:
+#: 深色主题下热力图的两端色（浅色主题那套见 `block_color` 里的字面量）。
+#: 为什么必须分两档：浅色主题的横盘块是**近白**（#eeeeee），铺在深蓝底上就是一片发白的
+#: 方块，"平静"反而变成全屏最亮的东西 —— 深色主题里横盘应当是**低调的深灰蓝**，
+#: 涨跌两端才亮起来（与同花顺那种深色热力图一个观感）。
+DARK_BASE = (32, 40, 56)          # 0%：低调的深灰蓝
+DARK_UP = (232, 74, 84)           # +10% 及以上：亮红
+DARK_DOWN = (46, 190, 120)        # -10% 及以下：亮绿
+DARK_UNKNOWN = (90, 100, 118)     # 没数据：中性灰（比横盘块亮一点点，仍然分得开）
+
+
+def block_color(pct: float | None, *, dark: bool = False) -> tuple[int, int, int]:
     """涨跌幅 → RGB（**红涨绿跌**，±`SATURATE_PCT` 饱和）。
 
     `None`（没数据）返回中性灰 —— 与"0%（横盘）"必须能分开：
-    灰 = 不知道，近白 = 真的没动。纯函数，用例直接打表核对。
+    灰 = 不知道，0% = 真的没动。纯函数，用例直接打表核对。
+
+    Args:
+        pct: 涨跌幅（%），`None` = 没数据。
+        dark: 深色主题（见 `theme.is_dark()`）。深色底换一套两端色与底色的**同构**配色：
+            横盘是深灰蓝、涨跌两端是亮红亮绿 —— 判据完全一样，只是锚点不同，
+            所以"0% 与 None 必须分得开"这条在任何主题下都成立。
     """
     if pct is None:
-        return (158, 158, 158)
+        return DARK_UNKNOWN if dark else (158, 158, 158)
     ratio = max(-1.0, min(1.0, float(pct) / SATURATE_PCT))
-    base = (238, 238, 238)              # 0% 的近白
-    if ratio >= 0:
-        target, ratio = (214, 48, 40), ratio       # 红：涨
+    if dark:
+        base = DARK_BASE
+        target, ratio = (DARK_UP, ratio) if ratio >= 0 else (DARK_DOWN, -ratio)
     else:
-        target, ratio = (26, 145, 74), -ratio      # 绿：跌
+        base = (238, 238, 238)              # 0% 的近白
+        if ratio >= 0:
+            target, ratio = (214, 48, 40), ratio       # 红：涨
+        else:
+            target, ratio = (26, 145, 74), -ratio      # 绿：跌
     return tuple(int(round(base[i] + (target[i] - base[i]) * ratio)) for i in range(3))  # type: ignore[return-value]
 
 
-def text_color(pct: float | None) -> tuple[int, int, int]:
-    """块内文字颜色：底色越深越用白字（否则字和底色糊在一起）。"""
+
+def _luminance(rgb: tuple[int, int, int]) -> float:
+    """相对亮度（WCAG 口径，0~1）。给"深色底上该用深字还是亮字"做判据用。"""
+
+    def channel(value: int) -> float:
+        c = value / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (channel(v) for v in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def text_color(pct: float | None, *, dark: bool = False) -> tuple[int, int, int]:
+    """块内文字颜色：**跟着底色走**（字与底糊在一起是最糟的观感）。
+
+    浅色主题：块越红/越绿，底越深 → 字越白；横盘块近白 → 深字。
+    深色主题正好反过来：底色本身是深的 → 横盘块用亮字，涨跌两端亮起来 → 用**深字**。
+    """
     if pct is None:
-        return (60, 60, 60)
-    return (255, 255, 255) if min(1.0, abs(float(pct)) / SATURATE_PCT) >= 0.45 else (32, 32, 32)
+        # 灰块（不知道）：浅色底用深灰字，深色底用亮字
+        return (232, 238, 248) if dark else (60, 60, 60)
+    if dark:
+        # 深色主题**按底色明暗**决定字色，而不是按涨跌幅档位：
+        # 5% 那一档的红/绿其实还是暗的（(132,57,70)），那时用深字就糊了；
+        # 只有接近饱和（±8% 往上）的块才亮到该配深字。
+        rgb = block_color(pct, dark=True)
+        return (10, 18, 32) if _luminance(rgb) >= 0.20 else (232, 238, 248)
+    strong = min(1.0, abs(float(pct)) / SATURATE_PCT) >= 0.45
+    return (255, 255, 255) if strong else (32, 32, 32)
 
 
 def summarize(blocks: Sequence[dict]) -> dict:

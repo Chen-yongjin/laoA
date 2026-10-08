@@ -137,6 +137,8 @@ def build_heatmap_widget() -> Any:
     from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
     from PySide6.QtWidgets import QWidget
 
+    from laoa_trader.ui import theme as theme_mod
+
     class HeatmapWidget(QWidget):  # noqa: D101 - 见模块说明
         #: 双击某一块（放大窗口用它做"下钻"，概览页里没用）
         blockActivated = Signal(str)
@@ -183,6 +185,9 @@ def build_heatmap_widget() -> Any:
             font.setPointSize(max(7, font.pointSize() - (2 if self.compact else 0)))
             painter.setFont(font)
             metrics = QFontMetrics(font)
+            # 深色主题下热力图换一套同构配色（横盘=深灰蓝、涨跌两端=亮红亮绿）：
+            # 浅色那套的"横盘近白"铺在深蓝底上，会让最平静的块变成全屏最亮的东西。
+            dark = theme_mod.is_dark()
             for index, block in enumerate(self.blocks):
                 if index >= len(self._rects):
                     break
@@ -191,13 +196,13 @@ def build_heatmap_widget() -> Any:
                     continue
                 rect = QRect(x, y, w, h)
                 pct = block.get("pct")
-                rgb = market_map.block_color(pct)
+                rgb = market_map.block_color(pct, dark=dark)
                 painter.fillRect(rect, QColor(*rgb))
                 painter.setPen(QPen(QColor(255, 255, 255, 90)))
                 painter.drawRect(rect)
                 if w < MIN_TEXT_W or h < MIN_TEXT_H:
                     continue
-                text_rgb = market_map.text_color(pct)
+                text_rgb = market_map.text_color(pct, dark=dark)
                 painter.setPen(QPen(QColor(*text_rgb)))
                 # 名字按**这块自己的宽度**截断（`elidedText`），而不是按固定字数 ——
                 # 行业名 3~6 个字都有（"银行" / "汽车零部件"），固定字数要么浪费宽度、

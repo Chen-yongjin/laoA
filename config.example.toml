@@ -1,4 +1,4 @@
-# 财神助手（Windows 单机版）配置文件示例
+# luweik决策系统（Windows 单机版）配置文件示例
 #
 # 用法：把本文件复制成 config.toml 放在程序（或 exe）同级目录，然后按需修改。
 #   copy config.example.toml config.toml

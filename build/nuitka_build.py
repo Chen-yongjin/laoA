@@ -2,7 +2,7 @@
 
 用法（在 Windows 上；Linux 上也会构建出 Linux 版，用来验证参数是对的）：
 
-    python build/nuitka_build.py                # 构建并把产物摆成 dist/CaishenTrader/财神助手.exe
+    python build/nuitka_build.py                # 构建并把产物摆成 dist/LuweikDecision/luweik决策系统.exe
     python build/nuitka_build.py --keep-going   # 出错时保留中间目录（排查用）
 
 为什么从 PyInstaller 换成 Nuitka
@@ -15,8 +15,8 @@ workflow 里的 PyInstaller 步骤**都保留**，作为备用路径（Nuitka �
 
 产物形态与 PyInstaller 版**逐项对齐**（这是硬要求，否则客户下载说明、CI 检查、
 Release 附件全要跟着改）：
-* 目录：`dist/CaishenTrader/`
-* 可执行文件：`财神助手.exe`（Windows）/ `财神助手`（其它平台）
+* 目录：`dist/LuweikDecision/`
+* 可执行文件：`luweik决策系统.exe`（Windows）/ `luweik决策系统`（其它平台）
 * 随包数据（`config.example.toml`、`laoa_trader/assets/`、`formulas/`）放在**产物目录里**，
   位置与 `build/laoa_trader.spec` 的 `DATAS` 一一对应 ——
   路径解析统一走 `laoa_trader.runtime`，别在这里另发明一套。
@@ -24,7 +24,7 @@ Release 附件全要跟着改）：
 为什么先构建到临时目录、再搬到 `dist/`
 --------------------------------------
 Nuitka 的产物目录名由主模块名决定（`launcher.dist` 这种），而我们要求目录名是
-`CaishenTrader`、exe 名是中文 `财神助手`。与其跟 Nuitka 的命名规则较劲，
+`LuweikDecision`、exe 名是 `luweik决策系统`。与其跟 Nuitka 的命名规则较劲，
 不如构建完做一次确定性搬运：搬运逻辑集中在本脚本，CI 与本地行为一致。
 """
 
@@ -62,9 +62,9 @@ def product_version() -> str:
 #: 构建中间目录（每次重建；`--keep-going` 时保留下来看日志）
 STAGING = PROJECT_ROOT / "build" / "nuitka-out"
 #: 最终产物目录名（**ASCII**：解压/命令行/别的工具里中文名容易乱码）
-DIST_NAME = "CaishenTrader"
+DIST_NAME = "LuweikDecision"
 #: 可执行文件名（中文：用户在资源管理器里双击的那一个）
-EXE_NAME = "财神助手"
+EXE_NAME = "luweik决策系统"
 
 #: 随包数据：与 `build/laoa_trader.spec` 的 DATAS 一一对应（源 → 产物内的相对路径）
 DATA_FILES: tuple[tuple[Path, str], ...] = (
@@ -119,9 +119,9 @@ def build_command(python: str) -> list[str]:
         "--include-package=laoa_trader",   # 本项目全部模块（含懒导入那几个）
         f"--output-dir={STAGING}",
         # 版本信息：属性里看得出来这是哪个产品哪个版本（也方便用户报障）
-        "--product-name=财神助手",
+        "--product-name=luweik决策系统",
         f"--product-version={product_version()}",
-        "--file-description=财神助手（行情软件辅助工具）",
+        "--file-description=luweik决策系统（行情软件辅助工具）",
         # 编译期优化：去掉断言与 docstring 相关的开销；`__doc__` 我们**要**保留
         # （策略编辑器的帮助文案、函数的"是什么"提示都读它），所以不加 --python-flag=-OO
         "--python-flag=-O",
@@ -153,10 +153,10 @@ def _staged_dist_dir() -> Path | None:
 
 def stage_into_dist(dist_dir: Path, *, exe_suffix: str,
                     dist_root: Path | None = None) -> Path:
-    """把 Nuitka 的产物目录搬到 `dist/CaishenTrader/`，并把 exe 改成中文名。
+    """把 Nuitka 的产物目录搬到 `dist/LuweikDecision/`，并把 exe 改成中文名。
 
     为什么这一步不能省：Nuitka 用主模块名（`launcher.exe`）命名产物，
-    而我们对客户承诺的是 `CaishenTrader/财神助手.exe`（下载说明、快捷方式、
+    而我们对客户承诺的是 `LuweikDecision/luweik决策系统.exe`（下载说明、快捷方式、
     文档里的路径都按它写）。搬运比跟 Nuitka 的命名规则较劲可靠。
     """
     target = (dist_root or (PROJECT_ROOT / "dist")) / DIST_NAME
@@ -212,7 +212,7 @@ def nuitka_available(python: str) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="用 Nuitka 构建「财神助手」")
+    parser = argparse.ArgumentParser(description="用 Nuitka 构建「luweik决策系统」")
     parser.add_argument("--keep-going", action="store_true",
                         help="构建失败时保留中间目录（排查用）")
     parser.add_argument("--print-command", action="store_true",

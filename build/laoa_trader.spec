@@ -5,7 +5,7 @@
     build\\build.bat                       # 一键：建 venv → 装依赖 → 打包
     pyinstaller --noconfirm --clean build\\laoa_trader.spec
 
-产出：`dist\CaishenTrader\财神助手.exe`（**onedir** 目录版；目录名 ASCII、exe 名中文）。
+产出：`dist\LuweikDecision\luweik决策系统.exe`（**onedir** 目录版；目录名 ASCII、exe 名中文）。
 
 为什么是 onedir 而不是 onefile
 ------------------------------
@@ -197,11 +197,12 @@ exe = EXE(  # noqa: F821
     a.scripts,
     [],
     exclude_binaries=True,
-    # exe 名：**中文「财神助手」**（主人 2026-09-21 要求：包里那个可执行文件叫财神助手.exe）。
-    # 目录名（COLLECT）与压缩包名仍是 ASCII 的 CaishenTrader —— 那两个是"下载/解压/命令行"
+    # exe 名：**「luweik决策系统」**（2026-09-21 主人要求包里那个可执行文件用中文名；
+    # 2026-10-08 第三次改名后就是它）。
+    # 目录名（COLLECT）与压缩包名仍是 ASCII 的 LuweikDecision —— 那两个是"下载/解压/命令行"
     # 上会用到的东西，中文名在别的机器或工具里可能变成乱码；exe 名是用户在资源管理器里
     # 双击的那一个，中文更合适。
-    name="财神助手",
+    name="luweik决策系统",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -222,7 +223,7 @@ coll = COLLECT(  # noqa: F821
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="CaishenTrader",   # 产出 dist/CaishenTrader/财神助手.exe（目录名保持 ASCII，见上）
+    name="LuweikDecision",   # 产出 dist/LuweikDecision/luweik决策系统.exe（目录名保持 ASCII，见上）
 )
 
 if sys.platform != "win32":

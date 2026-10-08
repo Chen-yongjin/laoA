@@ -1,7 +1,7 @@
 [project]
 name = "caishen-helper"
-version = "1.5.0"
-description = "财神助手（Windows 单机版）：A 股匹配 + 盯盘 + 提醒"
+version = "1.6.0"
+description = "luweik决策系统（Windows 单机版）：A 股匹配 + 盯盘 + 提醒"
 authors = [{ name = "async-chen" }]           # 与「关于」对话框、README 的版权信息一致
 requires-python = ">=3.11"
 dependencies = [

@@ -29,12 +29,12 @@ from laoa_trader import assets, config, formulas, runtime
 @pytest.fixture()
 def dist_layout(tmp_path: Path) -> Path:
     """造一个"Nuitka 产物目录"：exe + 随包数据（结构与 --include-data-* 一致）。"""
-    dist = tmp_path / "CaishenTrader"
+    dist = tmp_path / "LuweikDecision"
     (dist / "laoa_trader" / "assets").mkdir(parents=True)
     (dist / "laoa_trader" / "assets" / "icon.png").write_bytes(b"png")
     (dist / "formulas").mkdir()
     (dist / "formulas" / "短期反转.txt").write_text("# 名称: 短期反转\n", encoding="utf-8")
-    (dist / "财神助手.exe").write_bytes(b"exe")
+    (dist / "luweik决策系统.exe").write_bytes(b"exe")
     (dist / "config.example.toml").write_text("# 示例\n", encoding="utf-8")
     return dist
 
@@ -44,7 +44,7 @@ def _pretend_nuitka(monkeypatch: pytest.MonkeyPatch, dist: Path) -> None:
     monkeypatch.setitem(runtime.__dict__, "__compiled__", object())
     monkeypatch.delattr(sys, "frozen", raising=False)
     monkeypatch.delattr(sys, "_MEIPASS", raising=False)
-    monkeypatch.setattr(sys, "executable", str(dist / "财神助手.exe"))
+    monkeypatch.setattr(sys, "executable", str(dist / "luweik决策系统.exe"))
     # Nuitka 里模块的 __file__ 指向产物目录内的路径（那一份不一定是真文件，
     # 但同级的 assets 目录是真的）—— 这行让 assets_dir() 的"旁边那个"分支也指向产物
     monkeypatch.setattr(assets, "__file__", str(dist / "laoa_trader" / "assets.py"))
@@ -55,7 +55,7 @@ def _pretend_pyinstaller(monkeypatch: pytest.MonkeyPatch, dist: Path, meipass: P
     monkeypatch.delitem(runtime.__dict__, "__compiled__", raising=False)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(meipass), raising=False)
-    monkeypatch.setattr(sys, "executable", str(dist / "财神助手.exe"))
+    monkeypatch.setattr(sys, "executable", str(dist / "luweik决策系统.exe"))
     monkeypatch.setattr(assets, "__file__", str(meipass / "laoa_trader" / "assets.py"))
 
 
