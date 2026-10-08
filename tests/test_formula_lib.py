@@ -873,7 +873,13 @@ def test_multiline_description_breaks_the_header_so_ui_must_flatten(tmp_path: Pa
 
 
 def test_scorecard_library_capability_survives_the_ui_removal(tmp_path: Path) -> None:
-    """界面拿掉了成绩单入口，但**库能力还在**（CLI `--scorecard` 与长样本回测要用）。"""
+    """库能力是入口的地基：不管界面怎么变，`run_scorecard()` 与默认口径都必须还在。
+
+    历史（别再被措辞带偏）：2026-09 界面上**移除了**成绩单按钮（数据只有 6 个月，
+    常驻面板永远只会显示"样本不足"）；2026-10-08 主人要回了一个**按需**入口
+    （`ui/scorecard_dialog.py`，先预检、后台算）。这条用例只钉**库这一层**，
+    与入口在不在界面上无关。
+    """
     assert callable(lib.run_scorecard)
     assert lib.DEFAULT_CONVENTION_KEY == "B"
 

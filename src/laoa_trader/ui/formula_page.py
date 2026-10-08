@@ -39,13 +39,15 @@
 3. **【开始匹配】**（右上角）：本页**只 emit `start_pick_requested()`** ——
    增量数据 → 跑策略与公式 → 建池 → 推送这一整套在主窗口（`ui/app.py`）里，
    这一页不碰它（也不联网）。
+4. **【成绩单】**（顶部那一排的最后）：按需打开 `ui/scorecard_dialog.py` 的对话框，
+   把**勾选**的这几条策略在本地库上跑一遍历史成绩（预检 + 后台线程都在那个模块里）。
 
 匹配结果去哪了（用户 2026-09-17 的明确要求）
 --------------------------------------------
 用户原话：「策略匹配只要显示策略，不显示匹配结果，匹配结果直接进自选标的，
 可以在股池再添加删除。（也可以同时 output 一个文件到桌面）」
 
-所以这一页**只有策略列表**（`名称 | 备注 | 状态` + 【策略编辑】【开始匹配】）：
+所以这一页**只有策略列表**（`名称 | 备注 | 状态` + 【策略编辑】【开始匹配】【成绩单】）：
 旧版那块「本次匹配结果」表 + 一句话结论 + 【全部加为自选】按钮**已经删掉**。
 结果有**两个**去处在界面上看得见，一个都不会丢：
 
@@ -59,13 +61,24 @@
 只写日志、不画任何东西 —— 删掉它会让 `ui/app.py` 那边 `AttributeError`
 （`app.py` 属于另一个改动方，这一页不替它做决定）。
 
-为什么这里**没有**「成绩单」
-----------------------------
-旧版右下角有两个按钮（【看成绩单】【复制成绩单】）。改版把它们**从界面移除**：
-数据只有 6 个月（`history_years = 0.5`），而成绩单自己有 250 个交易日的样本门槛
-（`research/scorecard.py`）—— 放在界面上永远只会显示"样本不足，无法评估"，
-点一次要扫全库几十秒。**能力没有删除**：`formulas.run_scorecard()` 保留，
-CLI `--scorecard` 照旧（数据下到 ≥1 年时它才有意义）。
+为什么这里**也有**「成绩单」，但只给一个**按需**入口
+----------------------------------------------
+旧版右下角常驻两个按钮（【看成绩单】【复制成绩单】）。2026-09 改版把它们**从界面上移除**：
+数据只有 6 个月（`history_years = 0.5`），而成绩单自己有 250 个交易日 / 100 只票的
+**库级门槛**（`research/scorecard.py`）—— 常驻在页面上永远只会显示"样本不足，无法评估"，
+点一次还要扫全库几十秒。
+
+2026-10-08 主人的决定是**要一个入口**。于是做法不是把面板搬回来，而是"按需 + 预检 + 后台"：
+顶部一个【成绩单】按钮 → 打开 `ui/scorecard_dialog.py` 那个对话框。不点它就不读库，
+也就不存在"随手点一下、等二十秒"的意外；对话框一打开先用本地库做一次预检
+（判据**全部**来自 `research.scorecard.db_sufficiency()`，界面里不另写一套门槛），
+库不够时最上面直接写清"现在有多少 / 需要多少 / 怎么补"，但**照旧允许继续点**
+（有人就是想先看看自己那条策略长什么样），只在结果上如实标注"样本不足，不能当结论"；
+计算与预检都在后台线程里跑，主线程不阻塞。
+
+为什么按钮在这一页（而不是「系统设置」或菜单里）：成绩单评的就是**这一页列表里的策略**，
+用户想到"这条策略到底行不行"时人就在这儿。它那个 tooltip 写明了"要扫全库、几十秒；
+数据不足 1 年时结论不可用"。
 
 为什么单独一个模块而不是塞进 `ui/app.py`
 --------------------------------------
@@ -121,6 +134,9 @@ try:  # Qt 缺失时不应该 import 就炸（与 ui/app.py 同一个约定）
         QVBoxLayout,
         QWidget,
     )
+    # 「策略成绩单」对话框（按需打开，见模块 docstring 那一节）：放在这个 try 里面，
+    # 与这一页同一个降级约定 —— 没有 Qt 就没有界面，那个模块也只需要在界面里存在。
+    from laoa_trader.ui.scorecard_dialog import ScorecardDialog, ScorecardTarget
 
     QT_AVAILABLE = True
 except Exception as _exc:  # noqa: BLE001 - 与 ui/app.py 同一个降级策略
@@ -699,8 +715,9 @@ if QT_AVAILABLE:
         工作线程不该替界面决定措辞 —— 主线程拿到类型才分得清
         （见 `FormulaPage._on_preview_failed`）。
 
-        （旧版这里还兼跑"成绩单"，改版把成绩单的界面入口去掉了，
-        这个线程只服务【运行】；`formulas.run_scorecard()` 仍在，CLI 照用。）
+        （旧版这里还兼跑"成绩单"。成绩单现在的入口是**按需打开的对话框**
+        `ui/scorecard_dialog.py`，它有自己的线程 —— 那边要逐条回报进度，
+        与本线程"一次返回一个 dict"不是一件事，所以两边各留一个，不硬合并。）
         """
 
         progress = Signal(str, int, int)
@@ -785,6 +802,9 @@ if QT_AVAILABLE:
             #: 【运行】（原【试算】，下同）的后台线程；跑完置回 None
             #: （测试就等这一条来判断"落地了"）
             self.preview_worker: FormulaWorker | None = None
+            #: 最近一次打开的【成绩单】对话框（它自己管自己的后台线程与预检；
+            #: 这里留个引用只是为了别让 Qt 在 `exec()` 返回时把它立刻回收掉）
+            self.scorecard_dialog: Any = None
             #: 【运行】按下按钮那一刻的公式快照（结果属于它，不属于编辑框里现在的内容）
             self.preview_formula: Any = None
             #: **上一次【运行】的结果**（【导出匹配结果】导的就是它）：
@@ -853,6 +873,18 @@ if QT_AVAILABLE:
             )
             self.btn_start_pick.clicked.connect(self.on_start_pick)
             top.addWidget(self.btn_start_pick)
+
+            # 【成绩单】：**按需**入口（不常驻面板 —— 理由见模块 docstring）。
+            # tooltip 必须把代价说在前面：它要扫全库（几十秒量级），而且出厂那 6 个月
+            # 的数据**必然**得出"样本不足"—— 不说清楚，用户会以为程序算错了。
+            self.btn_scorecard = QPushButton("成绩单")
+            self.btn_scorecard.setToolTip(
+                "按需算一遍历史成绩单：把上面勾选的策略在当前库里逐条回测，"
+                "要扫全库，几十秒量级；数据不足 1 年（250 个交易日）时结论不可用 "
+                "—— 打开后会先告诉你库里的数据够不够、不够怎么补"
+            )
+            self.btn_scorecard.clicked.connect(lambda _checked=False: self.on_scorecard())
+            top.addWidget(self.btn_scorecard)
 
             self.page_hint = QLabel(PAGE_HINT)
             self.page_hint.setObjectName("statusTag")      # 小号灰字（与状态区同一档）
@@ -2738,6 +2770,38 @@ if QT_AVAILABLE:
                     self.status_cb(text)
                 except Exception:  # noqa: BLE001 - 回调出错不该影响这一页
                     logger.debug("策略页状态回调出错", exc_info=True)
+
+        def scorecard_targets(self) -> list[Any]:
+            """当前**勾选**的策略 → 成绩单要评估的清单（名字 + 正文）。
+
+            为什么只取勾选的（而不是"列表里全部"）：与【开始匹配】跑的是同一批，
+            用户看到的"参与匹配的这几条"就是他以为会被评估的那几条。
+            偷偷把没勾的也算一遍，除了多扫十几遍全库，还会让结果里冒出一堆
+            他早就不用的策略。
+
+            正文取 `spec.source`（= 文件里的策略体，不带 `# 名称:` 注释头）：
+            带注释头喂给引擎会直接报"未知字段"，那是我们自己的格式问题，
+            不该让用户看到。
+            """
+            targets: list[Any] = []
+            for spec in self.specs:
+                box = self._row_box(ROW_FORMULA, spec.name)
+                if box is None or not box.isChecked():
+                    continue
+                targets.append(ScorecardTarget(name=spec.name, text=spec.source))
+            return targets
+
+        def on_scorecard(self) -> None:
+            """【成绩单】：**按需**打开对话框（预检、计算、复制都在那个模块里）。
+
+            这一页只做一件事：把勾选的策略名单交出去。不在这里算、也不在这里预检 ——
+            同一份口径被两处实现，迟早会出现"界面说够、成绩单说不够"。
+            模态（`exec()`）打开：成绩单是用户主动要看的临时窗口，跑完就关，
+            不需要与主窗口并排操作。
+            """
+            dialog = ScorecardDialog(self, cfg=self.cfg, targets=self.scorecard_targets())
+            self.scorecard_dialog = dialog
+            dialog.exec()
 
         def on_start_pick(self) -> None:
             """【开始匹配】：**只举手**（emit `start_pick_requested`）。

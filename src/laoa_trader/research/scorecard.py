@@ -86,6 +86,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+import math
 from statistics import mean, stdev
 
 import pandas as pd
@@ -752,6 +753,26 @@ def market_map(
     return result
 
 
+
+def _finite_price(value: Any) -> bool:
+    """这个价能不能拿来做收益计算（**有限的正数**）。
+
+    为什么单独一个判断：库里 `close`/`open` 允许是 NULL（源缺那一列、或 dump 里的 NaN），
+    取出来就是 `None` 或 `nan`。`nan` 在 Python 里是真值，`if not value` 挡不住它 ——
+    于是 NaN 一路混进收益序列，`statistics.stdev` 直接抛
+    `AttributeError: 'float' object has no attribute 'numerator'`（整条成绩单崩），
+    或者只留一个信号日时印出 `+nan%`。这两个判断点（这里与 `formulas._forward_return`）
+    用同一个函数，免得只有一边修。
+    """
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and number > 0
+
+
 def compute_outcomes(
     panel: pd.DataFrame,
     picks: pd.DataFrame,
@@ -831,7 +852,10 @@ def compute_outcomes(
             move = gap_open if conv.entry_price == "open" else gap_close
             if move is not None and move >= LIMIT_UP_GAP:
                 continue      # 这个口径下买不进 → 该口径不计这一笔
-            if not entry_px or not exit_px:
+            # 判据必须用"有限"而不是"非零"：NaN 在 Python 里是**真值**，
+            # 只写 `not entry_px` 挡不住它（NULL 价会一路传成 nan，最后让 stdev 抛异常
+            # 或让报告印出 `+nan%`）。2026-10-08 实测：库里有 NULL 收盘价时整条成绩单崩。
+            if not _finite_price(entry_px) or not _finite_price(exit_px):
                 continue
             ret = exit_px / entry_px - 1.0
             benchmark = market.get((date, conv.key))
@@ -862,7 +886,17 @@ def daily_t(values_by_date: dict[str, list[float]]) -> tuple[float | None, float
 
     残留偏差：持有 N 天的收益在相邻信号日之间仍重叠（自相关），t 值依然偏乐观。
     """
-    daily = [mean(values) for values in values_by_date.values() if values]
+    # ⚠️ 先剔掉**非有限值**（NaN/inf）：库里某一行行情价是 NULL 时，那一笔收益会算成 NaN，
+    # 而 `statistics.stdev` 遇到 NaN 会直接抛
+    # `AttributeError: 'float' object has no attribute 'numerator'` —— 一个坏样本
+    # 就能让整条成绩单崩掉（2026-10-08 实测复现）。上游那两个函数（`compute_outcomes` /
+    # `formulas._forward_return`）已经把这笔剔掉了，这里再兜一道：
+    # 成绩单是给用户看结论的东西，**宁可样本少一笔，也不能整条崩或印出 `+nan%`**。
+    daily: list[float] = []
+    for values in values_by_date.values():
+        finite = [float(v) for v in values if isinstance(v, (int, float)) and math.isfinite(float(v))]
+        if finite:
+            daily.append(mean(finite))
     n = len(daily)
     if n < 2:
         return None, (daily[0] if daily else None), n

@@ -476,6 +476,10 @@ def limit_down_industries(db_path: str, day: str | None = None) -> dict[str, int
     判跌停（那个函数里的板块规则是本项目实测过的唯一一份：主板/创业板/科创板 10%/20%、
     北交所 30% 且**向上取整**、ST 同幅度），再按 `stock_basic.industry` 归组计数。
 
+    `day` 给了就按那一天算（它在库里就是"最新"，前一天是它之前最近的有行情的日子；
+    给了非交易日照样取它之前最近的两个交易日）—— 2026-10-08 修：原来这个参数**收下但没用**，
+    永远按库里最近两天算，谁按签名传一个日子就会**静默拿到另一天**的家数。
+
     Returns:
         `{行业名: 跌停家数}`；库里不足两个交易日（或读不出来）时返回 `{}` ——
         宁可让界面显示 `—`，也不要拿"全市场跌停数"冒充某个板块的数。
@@ -484,15 +488,25 @@ def limit_down_industries(db_path: str, day: str | None = None) -> dict[str, int
 
     try:
         with storage.connect(db_path) as conn:
-            days = [
-                row[0]
-                for row in conn.execute(
-                    "SELECT DISTINCT date FROM stock_daily_raw ORDER BY date DESC LIMIT 2"
-                )
-            ]
-            if len(days) < 2:
+            if day:
+                recent = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT DISTINCT date FROM stock_daily_raw WHERE date <= ? "
+                        "ORDER BY date DESC LIMIT 2",
+                        (str(day),),
+                    )
+                ]
+            else:
+                recent = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT DISTINCT date FROM stock_daily_raw ORDER BY date DESC LIMIT 2"
+                    )
+                ]
+            if len(recent) < 2:
                 return {}
-            latest, previous = days[0], days[1]
+            latest, previous = recent[0], recent[1]
             rows = conn.execute(
                 "SELECT d.symbol, d.close, p.close, b.industry, b.name "
                 "FROM stock_daily_raw d "

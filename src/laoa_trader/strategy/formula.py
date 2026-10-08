@@ -994,6 +994,51 @@ def _as_cond_array(value: Any, n: int) -> np.ndarray:
         return np.where(np.isnan(floats), False, floats != 0)
 
 
+def confirmed(mask: Any, days: int = 0) -> bool:
+    """条件数组是不是**连续命中**（`days=0` 就只看最后一根）。
+
+    这是"反手抖"的那一层（2026-10-08 主人要的口径）
+    ------------------------------------------------
+    阈值型条件（`C>MA(C,20)`、`CROSS(MA(C,5),MA(C,10))`）在边界上会今天命中、明天不命中，
+    候选名单跟着抖 —— 用户看到的是"同一套策略，昨天选出 8 只、今天 2 只、明天又 7 只"。
+    要求**连续 N 个交易日都命中**（`days=N`）能把这类抖动挡掉大半。
+
+    三条必须守住的细节：
+    * 缺值**算不命中**：`Formula.eval` 已经把 NaN 折成 `False`（见 `_as_cond_array`），
+      所以"停牌/窗口不足"不会因为"确认"被白送一个真信号；
+    * 历史不够长（不足 `days+1` 根）**也算不命中** —— 宁可不出票，也不要拿残缺窗口
+      当成"确认过"；
+    * 它只吃数组、不认识公式，所以**试算与匹配两条路能用同一个函数**
+      （口径不一致是这个项目最容易出的那类 bug）。
+    """
+    arr = _hit_flags(mask)
+    if arr.size == 0:
+        return False
+    if days <= 0:
+        return bool(arr[-1])
+    window = arr[-(days + 1):]
+    return bool(window.size == days + 1 and window.all())
+
+
+def _hit_flags(mask: Any) -> np.ndarray:
+    """条件数组 → **干净的 bool 数组**（缺值一律 False）。
+
+    为什么 `confirmed()` 不直接信调用方给的是 bool 数组：`Formula.eval` 现在确实已经
+    折过一遍（`_as_cond_array`），但这一层是"最后一道关口"性质的判断 ——
+    浮点数组里的 `NaN` 在 Python 里是**真值**，一旦有人把 `0/1/NaN` 的中间结果直接递进来，
+    "数据不足"就会被当成"一直在命中"，白送一个真信号。折一次的成本可以忽略。
+    """
+    arr = np.asarray(mask)
+    if arr.dtype == bool:
+        return arr
+    if arr.dtype.kind in ("U", "S", "O"):
+        # 字符串/对象数组：认不出真假，一律不命中（与 `_as_cond_array` 的口径一致）
+        return np.zeros(arr.shape, dtype=bool)
+    floats = np.asarray(arr, dtype="float64")
+    with np.errstate(all="ignore"):
+        return np.where(np.isnan(floats), False, floats != 0)
+
+
 def _as_cond_float(value: Any, n: int) -> np.ndarray:
     """条件值 → 长度 n 的 float64 序列，取值只有 0.0 / 1.0 / NaN（未知）。
 
@@ -3558,6 +3603,7 @@ __all__ = [
     "FormulaSpec",
     "Series",
     "compile_formula",
+    "confirmed",
     "load_formula_files",
     "load_series",
 ]

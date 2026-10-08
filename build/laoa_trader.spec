@@ -119,6 +119,10 @@ HIDDEN = [
     # exe 里点【授权…】什么都不出来"
     "laoa_trader.ui.license_dialog",
     "laoa_trader.research.scorecard",
+    # 成绩单对话框（2026-10-08 新增）与弱市门槛模块：前者是策略页按需打开的窗口，
+    # 后者被 formulas / formula_group 静态导入 —— 按这个文件的约定都补一条。
+    "laoa_trader.ui.scorecard_dialog",
+    "laoa_trader.market_regime",
     "laoa_trader.ui.alert_popup",
     "laoa_trader.ui.quotes",
     "laoa_trader.ui.theme",

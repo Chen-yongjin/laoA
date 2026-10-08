@@ -44,7 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from laoa_trader import runtime
+from laoa_trader import market_regime, runtime
 from laoa_trader.data.engine import HFQ_TABLE
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import formula as fm
@@ -974,6 +974,12 @@ def preview_hits(
     才取**一趟**实时快照（这两个数日线里没有，见 `snapshot_extra`）；
     收盘后不用这些字段的公式**一个请求都不发**。
 
+    **弱市抬门槛**（`market_regime`，2026-10-08）：大盘弱势时只留"近 N 日跑赢全市场"
+    的票（门槛 `market_regime_rs_min_pct`，窗口 `market_regime_window`），
+    挡掉多少只、为什么挡，写在 `notes` 里（界面原样显示）。
+    这条判断与建池那条路**共用同一个 `market_regime.apply_gate()`**；
+    强市/中性/未知时它一只票都不挡（`notes` 里也不会多出一句）。
+
     Returns:
         {"date": 行情日（实时口径下就是今天）, "count": 命中数,
          "hits": [{"symbol","name"}...], "shown": 展示数,
@@ -999,6 +1005,19 @@ def preview_hits(
     # 【运行】与【开始匹配】不可能出现两套口径。
     prepared = prepare_inputs(cfg, db_path, [formula], symbols, now=now)
     day = prepared.kline_day
+    # 「连续 N 日确认」与建池那条路**同一份口径**（`formula_group.confirm_days_of`）：
+    # 试算按 0 算、匹配按 2 算的话，用户会看到"【运行】选出 5 只、【开始匹配】只有 2 只"，
+    # 而且没有任何办法解释。确认生效时这里也要说一句，免得用户以为公式坏了。
+    # 延迟导入：`formula_group` 在模块级 import 本模块（它是公式库的外壳），
+    # 这里再顶层 import 会成环。
+    from laoa_trader.strategy import formula_group as fg
+
+    confirm_days = fg.confirm_days_of(cfg)
+    if confirm_days > 0:
+        notes.append(
+            f"已开启「连续确认」：只有在最近 {confirm_days + 1} 个交易日都命中的票才算选中"
+            "（配置键 signal_confirm_days；设 0 可关掉）"
+        )
     # 试算这里两类提示都并进 `notes`（界面对它们一视同仁：都渲染成单独一行）——
     # 「建池」那条路才需要分开（那边 errors 是"成功/失败"的判据，见 `Prepared`）
     notes.extend(prepared.notes)
@@ -1025,9 +1044,26 @@ def preview_hits(
             # 标的写法统一成**半角** `名称(代码)`（见 docs/开发文档.md）
             errors.append(f"{series.name}({series.symbol})：{exc}")
             continue
-        if bool(mask[-1]):
+        if fm.confirmed(mask, confirm_days):
             hits.append({"symbol": series.symbol, "name": series.name})
     hits.sort(key=lambda hit: hit["symbol"])
+    # ── 弱市抬门槛（`market_regime`）──
+    # 大盘弱势时只留"近 N 日跑赢全市场"的票。**与建池那条路调的是同一个函数**
+    # （`formula_group.run_enabled_formulas`），所以【运行】与【开始匹配】
+    # 在任何大盘状态下都会给出同一批票 —— 两处各写一套筛选，就会出现
+    # "试算说 5 只、匹配只有 2 只"这种用户无法解释的差异。
+    # 强市/中性/未知、或用户关掉 `market_regime_gate` 时：`kept` 就是原样的全部
+    # （一条票都不许被挡掉），`note` 是空串（界面上一个字都不多）。
+    gate = market_regime.apply_gate(hits, db_path=db_path, day=day, cfg=cfg)
+    if gate.applied and gate.dropped:
+        logger.info(f"弱市门槛：{len(hits)} 只 → {len(gate.kept)} 只")
+    if gate.note:
+        # **追加在最后**：`notes[0]` 历来是"本次口径"那句话（界面/测试按位置读它），
+        # 弱市门槛的说明插到前面会把那句口径挤到第二行。
+        # 另外它进的是 `notes`（告知），**不是 `errors`** —— `errors` 的意思是
+        # "某只票算不出来"，把一句筛选说明混进去，用户看到的票数与原因都会被张冠李戴。
+        notes.append(gate.note)
+    hits = gate.kept
     return {
         # 实时口径下"行情日"就是**今天**：这一轮选的正是此刻的盘面，
         # 报成"最近交易日 2026-09-22"会让用户以为程序在拿昨天的收盘数据匹配
@@ -1200,7 +1236,11 @@ def _forward_return(series: fm.Series, index: int, conv: Any) -> tuple[float, st
     closes = series.close
     entry_px = float(opens[entry_idx] if conv.entry_price == "open" else closes[entry_idx])
     exit_px = float(opens[exit_idx] if conv.exit_price == "open" else closes[exit_idx])
-    if not entry_px or not exit_px:
+    # ⚠️ 用"有限的正数"判，不要用 `not entry_px`：NaN 是真值，`not nan` 是 False，
+    # 挡不住它 —— 库里某一行行情价是 NULL 时（源里缺那一列），这一笔就会算成 NaN，
+    # 一路传到最后让成绩单抛异常或印出 `+nan%`（2026-10-08 实测）。
+    # 与 `research/scorecard.py` 用**同一个**判断（`_finite_price`），免得只有一边修。
+    if not sc._finite_price(entry_px) or not sc._finite_price(exit_px):
         return None
     move = (
         (entry_px / signal_close - 1.0)

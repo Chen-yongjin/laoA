@@ -737,3 +737,48 @@ def test_old_horizons_api_is_still_supported(six_day_db):
     assert rows["T+1"]["entry"] == "D+1开盘" and rows["T+1"]["exit"] == "D+2收盘"
     assert rows["T+3"]["exit"] == "D+4收盘"
     assert rows["T+1"]["horizon"] == 1 and rows["T+3"]["horizon"] == 3
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 坏样本（NULL 价 → NaN）不许拖垮整条成绩单
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_daily_t_survives_a_nan_sample() -> None:
+    """一个 NaN 样本不许让 t 检验崩，也不许印出 `+nan%`。
+
+    实测过的现场（2026-10-08）：库里某一行 `close` 是 NULL（源里缺那一列，
+    `stock_daily_hfq` 视图里就是 NULL），那一笔收益算成 NaN；
+    `statistics.stdev([nan, ...])` 直接抛
+    `AttributeError: 'float' object has no attribute 'numerator'` —— 整条成绩单失败。
+    只有一个信号日时更隐蔽：返回 `avg = nan`，报告里就印出 `+nan%`。
+    """
+    nan = float("nan")
+
+    # 混着 NaN：坏样本被剔掉，剩下那条照常出结论
+    t_stat, avg, days = sc.daily_t({"2026-01-01": [nan], "2026-01-02": [0.01]})
+    assert days == 1 and avg == pytest.approx(0.01) and t_stat is None
+
+    # 全是 NaN：当作"没有样本"，**不是 0、也不是 nan**
+    t_stat, avg, days = sc.daily_t({"2026-01-01": [nan], "2026-01-02": [nan]})
+    assert (t_stat, avg, days) == (None, None, 0)
+
+    # 两天的好样本照旧算得出 t 值（改动没有把正常路径一起关掉）
+    t_stat, avg, days = sc.daily_t({"2026-01-02": [0.01], "2026-01-03": [0.03]})
+    assert days == 2 and avg == pytest.approx(0.02) and t_stat is not None
+
+
+def test_finite_price_rejects_nan_none_and_zero() -> None:
+    """`_finite_price()`：只有"有限的正数"才算价（0 与 NaN 都不行）。
+
+    为什么不能用 `if not value`：NaN 在 Python 里是**真值**，`not nan` 是 False ——
+    这正是那个 bug 的根因。
+    """
+    assert sc._finite_price(10.0) is True
+    assert sc._finite_price("10.5") is True          # 从 sqlite 读出来可能是字符串
+    assert sc._finite_price(None) is False
+    assert sc._finite_price(float("nan")) is False
+    assert sc._finite_price(float("inf")) is False
+    assert sc._finite_price(0) is False
+    assert sc._finite_price(-1) is False
+    assert sc._finite_price(True) is False           # 布尔不是价

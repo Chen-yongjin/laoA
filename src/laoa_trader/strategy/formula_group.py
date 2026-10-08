@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from laoa_trader import formulas as lib
+from laoa_trader import market_regime
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import formula as fm
 
@@ -139,7 +140,11 @@ def run_enabled_formulas(
       （口径与内置策略、与界面【试算】完全一致）；
     * **K 线口径按时间自动切**：开盘时间里的那一轮用实时快照拼出"今天"这一根
       （见 `formulas.prepare_inputs`），所以【试算】与【开始匹配】的口径永远一致；
-    * 数据长度不足 `min_history` 的票直接跳过（滚动窗口全是缺值 ⇒ 不可能出信号）。
+    * 数据长度不足 `min_history` 的票直接跳过（滚动窗口全是缺值 ⇒ 不可能出信号）；
+    * **弱市抬门槛**（`market_regime`，2026-10-08）：大盘弱势时只留"近 N 日跑赢
+      全市场"的票，挡掉多少只写在 `warnings` 里（界面原样显示）。这条判断与
+      【运行】试算**共用同一个 `market_regime.apply_gate()`**；强市/中性/未知时
+      它一只票都不挡（行为与改动前完全一样）。
 
     联网：只有"公式用到快照字段"或"此刻正走盘中实时口径"时才取**一趟**快照
     （见 `formulas.prepare_inputs`）；其余情况一个请求都不发。
@@ -166,6 +171,11 @@ def run_enabled_formulas(
     failures: dict[str, int] = {}
     first_error: dict[str, str] = {}
     hits: dict[str, list[dict]] = {formula.label: [] for formula in active}
+    #: 「连续 N 个交易日都命中才算选中」（`signal_confirm_days`，默认 0 = 不确认）。
+    #: 为什么要这一层：阈值型条件在边界上会今天命中、明天不命中，候选名单跟着抖
+    #: （见 `fm.confirmed` 的说明）。**试算那条路用的是同一个判断**，
+    #: 否则会出现"【运行】说选出 5 只、【开始匹配】只有 2 只"这种无法解释的差异。
+    confirm_days = confirm_days_of(cfg)
 
     # 输入（K 线口径 + 扩展字段）全部由 `lib.prepare_inputs` 一份逻辑给：
     # "开盘时间里跑的匹配都是实时的"这条规矩在**试算与建池两条路上必须是同一份实现** ——
@@ -225,11 +235,14 @@ def run_enabled_formulas(
                             f"策略 {label} 在 {series.name}({series.symbol}) 上算不出来：{exc}"
                         )
                     continue
-                if bool(mask[-1]):
+                if fm.confirmed(mask, confirm_days):
                     hits[label].append({
                         "symbol": series.symbol,
                         "name": series.name,
-                        "reason": f"策略：{label}",
+                        # 「连续 N 日确认」写在来源里：用户看到名单变短时，
+                        # 一眼就知道是自己的确认设置（而不是"公式坏了/数据没了"）
+                        "reason": (f"策略：{label}" if confirm_days <= 0
+                                   else f"策略：{label}（连续 {confirm_days + 1} 日确认）"),
                     })
     except fm.FormulaDataError as exc:
         # 库不存在 / 读不出来这类**环境**问题：说清楚原因就返回，绝不让整轮建池失败
@@ -241,6 +254,32 @@ def run_enabled_formulas(
         _remember(result.status)
         return result
 
+    # ── 弱市抬门槛（`market_regime`）──
+    # 大盘弱势时只留"近 N 日跑赢全市场"的票。**与试算那条路调的是同一个函数**
+    # （`formulas.preview_hits`），所以【运行】与【开始匹配】在任何大盘状态下
+    # 都给出同一批票 —— 两处各写一套筛选就会出现"试算说 5 只、匹配只有 2 只"
+    # 这种用户无法解释的差异（本文件里 K 线口径、连续确认也都是这么处理的）。
+    #
+    # 为什么**一次判完所有公式的票**（而不是逐条公式各判一次）：
+    #   ① 筛掉多少只、为什么筛，是**这一轮**的一句话 —— 逐条公式各说一遍会让
+    #      界面上重复同一条消息，而"挡掉 N 只"还会变成"某一条公式的 N 只"；
+    #   ② 判据只看代码（同一只票的相对强弱与它来自哪条公式无关），
+    #      所以按代码筛回各条公式的名单与逐条筛的结果**完全一致**。
+    #
+    # 为什么必须在写进 `result.picks`（那里还有一次 `MAX_PER_FORMULA * 3` 截断）
+    # **之前**筛：先截断再筛，被挡掉的票会把后面本该留下的票挤出名单，
+    # 于是一轮匹配选出几只与【运行】试算的只数对不上。
+    flat = [pick for picks in hits.values() for pick in picks]
+    gate = market_regime.apply_gate(flat, db_path=db_path, day=day, cfg=cfg)
+    blocked = {str(pick.get("symbol") or "") for pick in gate.dropped}
+    if gate.note:
+        # ⚠️ 进 `warnings`（告知），**绝不进 `errors`**：建池的"成功/失败"判据是
+        # "errors 是否为空"（`scheduler.Scheduler._report_succeeded`）——
+        # 把一句"弱市挡掉了 7 只"塞进 errors，会让一次**正常完成**的匹配被判成失败
+        # （票选出来了、推送也发了，状态却写"未成功"再补跑一遍）。
+        result.warnings.append(gate.note)
+        logger.warning(gate.note)
+
     for formula in active:
         label = formula.label
         picks = hits.get(label) or []
@@ -251,6 +290,9 @@ def run_enabled_formulas(
             result.status[label] = reason
             result.errors.append(f"策略 {label}：{reason}")
             logger.warning(f"策略 {label}：{reason}")
+        if blocked:
+            picks = [pick for pick in picks
+                     if str(pick.get("symbol") or "") not in blocked]
         if not picks:
             continue
         # 公式内按代码排序（`load_series` 本身就是代码升序，这里显式排一次，
@@ -269,17 +311,31 @@ def run_enabled_formulas(
     return result
 
 
+def confirm_days_of(cfg: Any) -> int:
+    """读「连续确认天数」配置（负数/写错一律当 0 = 不确认）。
+
+    单独一个函数是为了**两条路读同一份口径**（`run_enabled_formulas` 与
+    `formulas.preview_hits`）：写错配置时"试算按 0 算、匹配按 2 算"是最难查的那种不一致。
+    """
+    try:
+        value = int(getattr(cfg, "signal_confirm_days", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    # 上限 5：再长就不是"反手抖"而是另一套策略了，而且会把候选压到几乎没有
+    return max(0, min(value, 5))
+
+
 def _remember(status: dict[str, str]) -> None:
     with _lock:
         _last_status.clear()
         _last_status.update(status)
-
 
 __all__ = [
     "FORMULA_PREFIX",
     "FORMULA_WEIGHT",
     "MAX_PER_FORMULA",
     "FormulaRun",
+    "confirm_days_of",
     "formula_name_of",
     "formula_strategy_name",
     "is_formula_strategy",

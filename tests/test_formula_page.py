@@ -1065,24 +1065,31 @@ def test_export_source_says_unnamed_when_the_formula_has_no_name(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 7) 【看成绩单】【复制成绩单】**已从界面移除**（理由见 `docs/开发文档.md`）
+# 7) 成绩单：**按需**入口（旧版那两个常驻按钮不再回流）
 # ══════════════════════════════════════════════════════════════════════════
 #
-# 原本这里有 3 个用例（后台线程跑成绩单 / 失败说中文 / 复制成绩单）。
-# 删掉的理由（`docs/开发文档.md`）：数据只有 6 个月，
-# 而成绩单自己有 250 个交易日的样本门槛 —— 放在界面上永远只会显示"样本不足"。
-# **能力没有消失**：`formulas.run_scorecard()` 保留（`tests/test_formula_lib.py`
-# 里那几条成绩单用例一条没少），CLI `--scorecard` 照旧。
+# 2026-09 移除了旧版右下角那两个常驻按钮（【看成绩单】【复制成绩单】）：
+# 数据只有 6 个月，而成绩单自己有 250 个交易日 / 100 只票的库级门槛
+# （`research/scorecard.py`）—— 常驻在页面上永远只会显示"样本不足"，
+# 点一次还要扫全库几十秒。
+#
+# 2026-10-08 主人要一个入口，做法是"按需 + 预检 + 后台"那个对话框
+# （`ui/scorecard_dialog.py`）—— 所以这里钉的是**边界**：入口有一个按钮，
+# 但这一页**自己不跑成绩单**（没有页内线程、没有页内结果字段、
+# 也没有旧版那个【复制成绩单】）。对话框本身的行为在
+# `tests/test_scorecard_dialog.py` 里逐条测。
 
 
-def test_scorecard_entry_points_are_gone_from_the_page(page) -> None:
-    """界面里不能再有成绩单的入口（按钮/线程/结果字段），否则就是"改版没改干净"。"""
-    assert not hasattr(page, "btn_scorecard")
+def test_scorecard_entry_is_on_demand_and_the_old_panel_stays_gone(page) -> None:
+    """【成绩单】是页面上的一个入口按钮；线程与结果都在对话框那边，不在这一页。"""
+    assert isinstance(page.btn_scorecard, QPushButton)
+    assert page.btn_scorecard.text() == "成绩单"
+    # 旧版那两个常驻按钮（以及它们的结果字段）不许回流
     assert not hasattr(page, "btn_copy_scorecard")
-    assert not hasattr(page, "scorecard_worker")
     assert not hasattr(page, "scorecard_text")
-    assert not hasattr(page, "on_scorecard")
-    # 库函数留着（CLI 与将来长样本回测还要用）
+    # 这一页不自己跑成绩单：没有页内线程、没有页内结果
+    assert not hasattr(page, "scorecard_worker")
+    # 库函数留着（对话框、CLI 与长样本回测都用它）
     assert callable(lib.run_scorecard)
 
 
