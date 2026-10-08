@@ -148,11 +148,33 @@ def test_package_names_are_renamed_everywhere() -> None:
     # 用户点下载只会看到「下载准备中」。所以这里钉的是「名字对得上、且文件确实在」。
     payload = json.loads(manifest)
     assert payload["file"].startswith(f"{ARTIFACT_NAME}-") and payload["file"].endswith(".zip")
-    assert (ROOT / "网站" / "downloads" / payload["file"]).is_file(), (
-        f"站点清单指向的包不存在：{payload['file']}（换版本时要把包一起放进去）"
-    )
     assert payload["version"] in payload["file"]
+    _assert_manifest_points_at_a_real_package(payload)
     # 旧名字一个字都不许剩
     for text, label in ((workflow, "CI"), (script, "script.js"), (index, "index.html"),
                         (manifest, "latest.json")):
         assert "LaoniuTrader" not in text, f"{label} 里还留着旧包名"
+
+
+def _assert_manifest_points_at_a_real_package(payload: dict) -> None:
+    """站点清单里那个包**在本地得真的存在** —— 但 CI 上**必须放过**。
+
+    为什么要分两种情况（2026-10-08 修：CI 连着两轮红在这一条）：
+      * `网站/downloads/*.zip` 是 **gitignore 掉的**（80MB 构建产物不进 git，见 `.gitignore`
+        里那条注释）。所以 CI 检出代码后那个目录里**一个 zip 都没有** ——
+        在那里断言"文件存在"，等于要求把 80MB 的包提交进仓库，与设计相反。
+      * 而在作者本机（发布时）那个目录里是**有包**的：这时清单指的必须是其中真实存在的那个，
+        "改了版本号却没把包放进来"正是这条要拦的错 —— 用户点下载只会看到「下载准备中」。
+
+    判据：`downloads/` 里**有没有 zip**。
+      * 一个都没有 → 这是"没有包的检出"（CI / 刚 clone），只核对命名约定，不做存在性断言；
+      * 有 ≥1 个 → 清单指的那个必须在里面（原来的强断言）。
+    """
+    downloads = ROOT / "网站" / "downloads"
+    present = {path.name for path in downloads.glob("*.zip")}
+    if not present:
+        return
+    assert payload["file"] in present, (
+        f"站点清单指向的包不在 downloads/ 里：{payload['file']}（那里的包是："
+        f"{'、'.join(sorted(present))}）—— 换版本时要把包一起放进去"
+    )
