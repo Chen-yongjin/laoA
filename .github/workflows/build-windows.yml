@@ -541,7 +541,10 @@ jobs:
           $ver = "${{ steps.zip.outputs.ver }}"
           gh release upload $tag CaishenTrader.zip "CaishenTrader-$ver.zip" --clobber
           if ($LASTEXITCODE -ne 0) { throw "上传 Release 附件失败" }
-          gh release edit $tag --notes $notes
+          gh release edit $tag --title "财神助手 · 最新构建" --notes $notes
+          # ↑ 标题也要一起改：`gh release edit --notes` **只改说明、不动标题**，所以改名
+          # （换产品名）之前建的那个 Release 标题一直挂着旧名字
+          # （2026-10-08 发现：附件与说明都已是新的，标题还是旧产品名）。
           Write-Host "::notice::已挂到 Release：https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/CaishenTrader.zip"
 
       - name: 打 tag 时创建 Release
