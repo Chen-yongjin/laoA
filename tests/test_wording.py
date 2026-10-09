@@ -258,6 +258,29 @@ def test_editor_page_texts_have_no_formula_word(page) -> None:
     _assert_no_formula_word(pairs)
 
 
+#: 旧说法「匹配」已经统一改成「筛选」（主人 2026-10-08），下面这几处是**允许的例外**：
+#: 只有"策略自己的名字"（`尾盘匹配策略.txt` 这个文件名，用户在列表里看到的就是它）——
+#: 它是**名字**不是功能名，改名要走"退役旧公式"那套簿记，属于另一件事。
+_MATCH_ALLOWED: tuple[str, ...] = ("尾盘匹配策略",)
+
+
+def test_no_match_word_in_user_visible_text(window, qapp) -> None:
+    """主窗口里不许再出现旧说法「匹配」（2026-10-08 改成「筛选」）。
+
+    为什么值得一条用例：这类"改名"最容易漏的就是 tooltip、占位符、右键菜单、托盘提示
+    这些不常被点开的地方 —— 用户看到"开始匹配"和"开始筛选"两种说法会以为功能不一样。
+    判据与「公式」那条一样：扫全部控件的 text/toolTip/placeholderText/whatsThis 与 QAction。
+    """
+    pairs = _widget_texts(window)
+    blob = "\n".join(text for _, text in pairs)
+    assert "策略筛选" in blob, "没扫到「策略筛选」页，判据不成立"
+    bad = [(where, text) for where, text in pairs
+           if "匹配" in text and not any(ok in text for ok in _MATCH_ALLOWED)]
+    assert not bad, "界面上还在说「匹配」（应当说「筛选」）：\n" + "\n".join(
+        f"  {where}: {text[:90]}" for where, text in bad[:20]
+    )
+
+
 def test_editor_hints_and_module_level_texts_have_no_formula_word() -> None:
     """模块级的常量文案（提示语、按钮字、表头 tooltip）也一起扫。
 
