@@ -15,8 +15,25 @@
 3. **能点**：双击 = 打开「消息」列表；右键 = 【消息（N）】【试喊一条】
    【静音一小时/取消静音】【藏起来】。
 
-形象
-----
+形象（**支持动态**，2026-10-10 主人问"宠物形象可以换成动态吗"）
+------------------------------------------------------------
+素材来源的优先级只有一处判据（`_load_assets`）：
+
+1. **序列帧** `assets/pet/pet-1.png`、`pet-2.png`…（**推荐**）：待机时按
+   `FRAME_MS` 循环播放；另有 `assets/pet/act-1.png`… 时，"来消息了"播一遍那个动作
+   （没有 `act-*` 就退回"蹦两下"）；
+2. **GIF** `assets/pet.gif`：交给 `QMovie` 播（GIF 的透明只有 1 bit，
+   角色边缘可能有一圈白边，所以只在没有序列帧时用它）；
+3. **单张图** `assets/pet.png`：就是原来那套（静态），照旧不变。
+
+三种都遵循同一条口径：**先把 `self._pixmap` 设成第一帧**，于是"尺寸、透明底判据、
+拖动、气泡"这些逻辑一行都不用改（静态素材走的还是老路）。
+
+规格与命名规范写在 `docs/桌宠素材.md`（给主人出素材用）；
+`build/make_pet_preview.py` 能把素材渲染成一张 GIF 预览，装软件之前就能看效果。
+
+单张图（原样保留）
+------------------
 用户给的图（`assets/pet.png`，由 `build/make_pet_asset.py` 缩到 512×512 随包）。
 **画法看素材有没有透明通道**，一个判据管两头：
 
@@ -66,12 +83,17 @@ BUBBLE_SECONDS = 8
 HOP_HEIGHT = 12
 HOP_TIMES = 2
 
+#: 序列帧的播放间隔（毫秒）。8 帧两秒左右一圈是"呼吸感"最舒服的一档：
+#: 再快像在抽搐，再慢看不出在动（真机上定不下来时改这一个数就够）
+FRAME_MS = 120
+
 try:  # Qt 缺失时不该 import 就炸（与 ui/app.py 同一个约定）
-    from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, QTimer, Signal
+    from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QTimer, Signal
     from PySide6.QtGui import (
         QAction,
         QColor,
         QFont,
+        QMovie,
         QPainter,
         QPainterPath,
         QPixmap,
@@ -129,8 +151,17 @@ if QT_AVAILABLE:
             self.setWindowTitle("luweik决策系统的桌宠")
             self.size_ = int(size)
             self.setFixedSize(self.size_, self.size_ + BUBBLE_HEIGHT)
-            #: 素材（没有素材时是 None → 手画降级，见 `_load_pet`）
-            self._pixmap = self._load_pet()
+            #: 素材（没有素材时是 None → 手画降级，见 `_load_assets`）
+            self._pixmap = None
+            #: 待机序列帧（只有一张时长度为 1；GIF 时为空、走 `_movie`）
+            self._frames: list[Any] = []
+            #: "来消息了"的动作帧（没有就退回蹦两下）
+            self._action_frames: list[Any] = []
+            #: GIF（`assets/pet.gif`）用的播放器；没有就是 None
+            self._movie: Any = None
+            self._frame_index = 0
+            self._action_left = 0
+            self._load_assets()
             #: 素材**有没有透明通道** —— 决定它是「自由站立的角色」还是「圆角卡片」，
             #: 见 `paintEvent`。加载时判一次就够（素材不会中途变）。
             self._transparent = (
@@ -142,6 +173,11 @@ if QT_AVAILABLE:
             self._hop_dir = -1
             self._hop_timer = QTimer(self)
             self._hop_timer.timeout.connect(self._hop_step)
+            #: 序列帧/ GIF 的推进定时器（只有多帧时才启动，见 `_sync_anim_timer`）
+            self._anim_timer = QTimer(self)
+            self._anim_timer.setInterval(FRAME_MS)
+            self._anim_timer.timeout.connect(self._anim_step)
+            self._sync_anim_timer()
             self._bubble_timer = QTimer(self)
             self._bubble_timer.setSingleShot(True)
             self._bubble_timer.timeout.connect(self.hide_bubble)
@@ -174,6 +210,9 @@ if QT_AVAILABLE:
             try:
                 self._hop_timer.stop()
                 self._bubble_timer.stop()
+                self._anim_timer.stop()
+                if self._movie is not None:
+                    self._movie.stop()
             except RuntimeError:      # 底层对象已经被 Qt 销毁
                 pass
 
@@ -181,9 +220,51 @@ if QT_AVAILABLE:
             self.shutdown()
             super().closeEvent(event)
 
+        def _load_assets(self) -> None:
+            """按"序列帧 > GIF > 单张图"加载素材（三者的取舍见模块说明）。
+
+            无论走哪条路，`self._pixmap` 都是**第一帧** —— 尺寸、透明底判据、拖动与
+            气泡逻辑因此一行都不用改（静态素材走的还是老路，用例也照旧）。
+            """
+            self._frames = self._pixmaps(assets.pet_frames())
+            self._action_frames = self._pixmaps(assets.pet_action_frames())
+            if self._frames:
+                self._pixmap = self._frames[0]
+                logger.info(f"桌宠形象：序列帧 {len(self._frames)} 帧"
+                            f"（动作帧 {len(self._action_frames)} 帧）")
+                return
+            gif = assets.pet_gif()
+            if gif is not None:
+                movie = QMovie(str(gif))
+                if movie.isValid():
+                    # 缩到桌宠的显示边长：GIF 素材多大都不用改这里（QMovie 负责逐帧缩放）
+                    movie.setScaledSize(QSize(self.size_, self.size_))
+                    movie.jumpToFrame(0)
+                    self._movie = movie
+                    self._pixmap = movie.currentPixmap()
+                    movie.start()
+                    logger.info(f"桌宠形象：GIF（{gif.name}）")
+                    return
+                logger.warning(f"桌宠 GIF 读不出来：{gif}")
+            self._pixmap = self._load_pet()
+            if self._pixmap is not None:
+                self._frames = [self._pixmap]
+
+        @staticmethod
+        def _pixmaps(paths: list[Any]) -> list[Any]:
+            """把帧文件读成 QPixmap 列表（坏文件跳过，不因为一张坏图就整体降级）。"""
+            out: list[Any] = []
+            for path in paths:
+                pixmap = QPixmap(str(path))
+                if pixmap.isNull():
+                    logger.warning(f"桌宠帧读不出来（已跳过）：{path}")
+                    continue
+                out.append(pixmap)
+            return out
+
         @staticmethod
         def _load_pet() -> Any:
-            """读桌宠素材（读不出来返回 None → 自己画一个）。"""
+            """读单张桌宠素材（读不出来返回 None → 自己画一个）。"""
             path = assets.pet_png()
             if path is None:
                 logger.info("桌宠素材缺失（assets/pet.png），改用手画的小家伙")
@@ -263,10 +344,87 @@ if QT_AVAILABLE:
         def unread_count(self) -> int:
             return self._unread
 
+        # ── 动态形象（序列帧 / GIF）─────────────────────────────────
+
+        def is_animated(self) -> bool:
+            """形象是不是"会自己动"的（多帧序列或 GIF）。"""
+            return len(self._frames) > 1 or self._movie is not None
+
+        def frame_count(self) -> int:
+            """待机序列帧的帧数（GIF 返回 `QMovie.frameCount()`）。"""
+            if self._movie is not None:
+                return int(self._movie.frameCount())
+            return len(self._frames)
+
+        def current_frame_index(self) -> int:
+            """当前显示的是第几帧（测试与排查用）。"""
+            return self._frame_index
+
+        def _sync_anim_timer(self) -> None:
+            """按"有没有多帧 + 窗口可不可见"开关动画定时器。
+
+            不可见时必须停：桌宠是**常驻**的，藏起来之后还每 120ms 回调一次、
+            每帧重画一张 512×512 的图，纯属白烧 CPU（笔记本上看得见）。
+            """
+            if self.is_animated() and self.isVisible():
+                if not self._anim_timer.isActive():
+                    self._anim_timer.start()
+            elif self._anim_timer.isActive():
+                self._anim_timer.stop()
+
+        def _anim_step(self) -> None:
+            """推进一帧（序列帧自己走；GIF 由 QMovie 自己走，这里只触发重画）。"""
+            if not self._alive():        # 见 `_alive`：无父窗口的桌宠可能已被销毁
+                return
+            if self._movie is not None:
+                self.update()
+                return
+            if not self._frames:
+                return
+            if self._action_left > 0:
+                self._action_left -= 1
+                self._frame_index = (self._frame_index + 1) % max(1, len(self._action_frames))
+                if self._action_left == 0:
+                    self._frame_index = 0        # 动作播完回到待机第一帧
+                self.update()
+                return
+            self._frame_index = (self._frame_index + 1) % len(self._frames)
+            self.update()
+
+        def current_pixmap(self) -> Any:
+            """当前该画的那一张（动作帧 > GIF 当前帧 > 待机第 N 帧 > 单张图）。"""
+            if self._action_left > 0 and self._action_frames:
+                return self._action_frames[self._frame_index % len(self._action_frames)]
+            if self._movie is not None:
+                return self._movie.currentPixmap()
+            if self._frames:
+                return self._frames[self._frame_index % len(self._frames)]
+            return self._pixmap
+
+        def showEvent(self, event: Any) -> None:      # noqa: N802 - Qt 命名
+            super().showEvent(event)
+            self._sync_anim_timer()
+
+        def hideEvent(self, event: Any) -> None:      # noqa: N802 - Qt 命名
+            super().hideEvent(event)
+            self._sync_anim_timer()                   # 藏起来就停（别白烧 CPU）
+
         # ── 蹦两下 ───────────────────────────────────────────────────
 
         def hop(self, *, times: int = HOP_TIMES) -> None:
-            """上下蹦两下（就是改 y 偏移，不做复杂动画）。"""
+            """来消息时的"动一下"。
+
+            **有动作帧就播一遍它**（`assets/pet/act-*.png`）—— 那是用户给的素材说了算；
+            没有动作帧才退回"上下蹦两下"（改 y 偏移，从 2026-09-18 起就是这么做的）。
+            两者不同时上：动作帧里通常已经画了位移，再叠一次蹦跳会显得乱。
+            """
+            if self._action_frames:
+                self._action_left = max(1, len(self._action_frames))
+                self._frame_index = 0
+                self._sync_anim_timer()
+                self._anim_timer.start(FRAME_MS)
+                self.update()
+                return
             self._hop_left = max(1, int(times)) * 2
             self._hop_dir = -1
             self._hop_timer.start(90)
@@ -379,18 +537,19 @@ if QT_AVAILABLE:
             top = BUBBLE_HEIGHT if self.bubble.isVisible() else 0
             rect = QRectF(0, top, self.size_, self.size_)
 
-            if self._pixmap is not None and self._transparent:
+            pixmap = self.current_pixmap()      # 动态形象：拿"当前这一帧"
+            if pixmap is not None and self._transparent:
                 # 透明底素材：什么都不垫，直接贴。卡片底与描边会把角色的透明区域
                 # 涂成一块方块 —— 那正是用户 2026-09-20 换透明底素材要摆脱的效果。
-                painter.drawPixmap(rect.toRect(), self._pixmap)
+                painter.drawPixmap(rect.toRect(), pixmap)
                 painter.end()
                 return
 
             path = QPainterPath()
             path.addRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
             painter.setClipPath(path)
-            if self._pixmap is not None:
-                painter.drawPixmap(rect.toRect(), self._pixmap)
+            if pixmap is not None:
+                painter.drawPixmap(rect.toRect(), pixmap)
             else:
                 self._paint_fallback(painter, rect)
             painter.setClipping(False)

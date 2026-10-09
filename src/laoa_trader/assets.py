@@ -31,6 +31,13 @@ from laoa_trader import runtime
 #: 资源目录名（与本文件同级）
 _ASSETS_NAME = "assets"
 
+#: 桌宠序列帧所在的子目录（`assets/pet/`）与文件前缀。
+#: 约定：`pet-1.png`、`pet-2.png`… 是**待机循环**；`act-1.png`、`act-2.png`… 是
+#: **有消息时播一次**的动作（没有就退回"蹦两下"）。见 `docs/桌宠素材.md`。
+PET_DIR_NAME = "pet"
+PET_FRAME_PREFIX = "pet"
+PET_ACTION_PREFIX = "act"
+
 
 def assets_dir() -> Path:
     """资源目录（可能不存在 —— 调用方要自己判断）。
@@ -89,6 +96,43 @@ def pet_png() -> Path | None:
     所以桌宠按**圆角卡片**呈现；将来换透明底素材时只换这个文件、不用改画法。
     """
     return _first(("pet.png",))
+
+
+def pet_frames(prefix: str = PET_FRAME_PREFIX) -> list[Path]:
+    """桌宠的**序列帧**（`assets/pet/pet-1.png`、`pet-2.png`…）；没有就返回空列表。
+
+    排序按**文件名里的数字**（`pet-2` 在 `pet-10` 前面）—— 按字符串排会得到
+    `pet-1, pet-10, pet-2`，那种顺序播出来的动画是乱的（而且很难看出是排序问题）。
+
+    为什么支持多帧而不是只支持 GIF：GIF 的透明只有 **1 bit**（要么全透明要么不透明），
+    角色边缘会出现一圈白边；PNG 序列帧是 8 bit alpha，深色桌面上干净得多。
+    两种都认，用户手里有什么就能用什么。
+    """
+    directory = assets_dir() / PET_DIR_NAME
+    if not directory.is_dir():
+        return []
+    picked: list[tuple[int, str, Path]] = []
+    for path in directory.glob(f"{prefix}-*.png"):
+        digits = path.stem[len(prefix) + 1:]
+        if not digits.isdigit():
+            continue            # `pet-旧.png` 这种不参与（名字里没数字就不是一张帧）
+        picked.append((int(digits), path.name, path))
+    picked.sort()
+    return [item[2] for item in picked]
+
+
+def pet_action_frames() -> list[Path]:
+    """桌宠"来消息了"的动作帧（`assets/pet/act-*.png`）；没有就返回空列表。"""
+    return pet_frames(PET_ACTION_PREFIX)
+
+
+def pet_gif() -> Path | None:
+    """整段动画的 GIF（`assets/pet.gif`）；没有返回 None。
+
+    优先级（见 `ui/desktop_pet.py` 的 `_load_assets`）：**序列帧 > GIF > 单张图**。
+    序列帧优先是因为它的透明通道更好（GIF 只有 1 bit）。
+    """
+    return _first(("pet.gif",))
 
 
 def ui_asset(name: str) -> Path | None:
