@@ -342,12 +342,60 @@ def test_candidate_palettes_are_not_user_selectable() -> None:
     这是"临时挑配色"与"用户能选的皮肤"之间的那道墙：候选可以渲染（出对比图），
     但界面上选不到 —— 挑中的那套会并进 `TECH_COLORS`，不需要多一个用户选项。
     """
-    assert set(theme.PREVIEW_THEMES) - set(config_mod.UI_THEMES) == {"obsidian", "graphite"}
-    for name in theme.PREVIEW_THEMES:
-        assert name in theme.PALETTES
+    assert set(theme.PREVIEW_THEMES) <= set(theme.PALETTES)
+    candidates = set(theme.PALETTES) - set(config_mod.UI_THEMES)
+    assert candidates, "至少要留一套候选配色（主人挑配色时用）"
+    assert set(theme.PREVIEW_THEMES) <= candidates
     # 用户把 config.toml 手写成候选名 → 回默认（不是"悄悄变成候选色"）
-    assert config_mod.Config(ui_theme="obsidian").ui_theme == config_mod.DEFAULT_UI_THEME
-    assert theme.theme_label("obsidian") == theme.THEME_LABELS[config_mod.DEFAULT_UI_THEME]
+    for name in candidates:
+        assert config_mod.Config(ui_theme=name).ui_theme == config_mod.DEFAULT_UI_THEME
+        assert theme.theme_label(name) == theme.THEME_LABELS[config_mod.DEFAULT_UI_THEME]
+
+
+def test_every_palette_text_is_readable() -> None:
+    """**每套配色**的正文/次要文字都要看得清（WCAG AA 4.5:1），主按钮上的字也一样。
+
+    候选配色是"由三块底色 + 一个强调色"生成的（见 `theme._dark_palette`），
+    生成的最大风险就是"某个底色上字糊了"。这条用例把判据钉死在**对比度**上：
+    以后再加几套候选、或把某套并成正式皮肤，糊字的组合直接红。
+    """
+    for name, colors in theme.PALETTES.items():
+        for bg_key in ("window", "panel", "section"):
+            ratio = _contrast(colors["text"], colors[bg_key])
+            assert ratio >= 4.5, (name, "text", bg_key, round(ratio, 2))
+        for bg_key in ("window", "panel"):
+            ratio = _contrast(colors["text_dim"], colors[bg_key])
+            assert ratio >= 4.0, (name, "text_dim", bg_key, round(ratio, 2))
+        ratio = _contrast(colors["titlebar_text"], colors["titlebar_top"])
+        assert ratio >= 4.5, (name, "titlebar_text", round(ratio, 2))
+
+
+def test_candidate_primary_buttons_are_readable_in_all_states() -> None:
+    """候选配色的主按钮：**常态**两种底色都要 ≥4.5，悬停/按压 ≥3.4（粗体大字那档）。
+
+    主按钮上的字色是算出来的（`_primary_gradient` 会在"亮底深字"与"深底亮字"
+    两条路里挑更清楚的那条，并顺着字色做悬停/按压）。这条用例验的就是那个算法：
+    强调色改一个值就可能滑到糊字的区间，得有人盯着。
+    """
+    for name in theme.PREVIEW_THEMES:
+        colors = theme.PALETTES[name]
+        text = colors["primary_text"]
+        for key in ("primary_top", "primary_bottom"):
+            ratio = _contrast(text, colors[key])
+            assert ratio >= 4.5, (name, key, round(ratio, 2))
+        for key in ("primary_hover_top", "primary_hover_bottom",
+                    "primary_press_top", "primary_press_bottom"):
+            ratio = _contrast(text, colors[key])
+            assert ratio >= 3.4, (name, key, round(ratio, 2))
+
+
+def test_dark_and_light_palette_lists_agree_with_the_colors() -> None:
+    """`DARK_THEMES` 必须**恰好**是那几套深色皮肤：漏一套 → 热力图与自绘标题栏按
+    浅色画（深底上贴浅色块），多一套 → 浅色皮肤被当深色处理，两种都是"看着就是坏的"。"""
+    dark_names = {name for name, colors in theme.PALETTES.items()
+                  if theme._luminance(colors["window"]) < 0.2}
+    assert set(theme.DARK_THEMES) == dark_names
+    assert "system" not in theme.PALETTES          # 系统默认那档没有色板（空样式表）
 
 
 def test_dark_palettes_all_report_dark() -> None:

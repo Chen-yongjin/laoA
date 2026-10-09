@@ -54,6 +54,13 @@ THEME_SYSTEM = "system"
 #: 主人定了之后这两个名字就可以删掉。
 THEME_OBSIDIAN = "obsidian"      # 曜黑 + 电光蓝
 THEME_GRAPHITE = "graphite"      # 石墨灰 + 紫罗兰
+# 第二批（2026-10-10 主人"颜色我都不满意，再给几个组合选一下"）：
+THEME_SAPPHIRE = "sapphire"      # 深海宝蓝
+THEME_INDIGO = "indigo"          # 午夜靛紫
+THEME_AMBER = "amber"            # 石墨琥珀金
+THEME_ROSE = "rose"              # 暗夜玫红
+THEME_MIST = "mist"              # 哑光雾蓝（低饱和）
+THEME_PAPER = "paper"            # 浅色高级灰（**唯一一套浅色**）
 
 #: 下拉框里的中文名（用户看到的是这个，不是 tech/silver/system）
 THEME_LABELS: dict[str, str] = {
@@ -219,6 +226,201 @@ SEMANTIC_BY_THEME: dict[str, dict[str, str]] = {
     THEME_TECH: TECH_SEMANTIC,
 }
 
+# ── 色板生成器：候选配色由"三块底色 + 一个强调色"推出来 ──────────────────
+#
+# 为什么用生成而不是一套套手抄：手抄一套就是 50 行容易漏键的数字，而"层次"本来就是
+# **相对关系**（卡片比底色亮一档、边框比卡片再亮一档、悬停又比常态亮一档）——
+# 写成公式既不容易错，也保证"换一批候选"不用重算几十个色值。
+# 安全性由用例兜着：`test_every_palette_defines_every_key` 查键名齐全、
+# `test_every_palette_text_is_readable` 查对比度（AA 4.5:1）。
+
+def _mix(first: str, second: str, ratio: float) -> str:
+    """两个 `#rrggbb` 线性混合（0 = 全取 first，1 = 全取 second）。"""
+    a = [int(first[index:index + 2], 16) for index in (1, 3, 5)]
+    b = [int(second[index:index + 2], 16) for index in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(
+        round(x + (y - x) * ratio) for x, y in zip(a, b))
+
+
+def _lighten(color: str, amount: float) -> str:
+    return _mix(color, "#ffffff", amount)
+
+
+def _darken(color: str, amount: float) -> str:
+    return _mix(color, "#000000", amount)
+
+
+def _luminance(color: str) -> float:
+    """相对亮度（WCAG 的定义），只用来算对比度。"""
+    parts = []
+    for index in (1, 3, 5):
+        value = int(color[index:index + 2], 16) / 255.0
+        parts.append(value / 12.92 if value <= 0.03928
+                     else ((value + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]
+
+
+def contrast_ratio(first: str, second: str) -> float:
+    """两个颜色的对比度（1 ~ 21）。界面里"字看不看得清"就按它判（正文要 ≥ 4.5）。"""
+    high, low = sorted((_luminance(first), _luminance(second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+#: 下面这个函数的两个候选（亮底上用深字 / 深底上用亮字）
+_TEXT_ON_DARK = "#0a1522"
+_TEXT_ON_LIGHT = "#f7fbff"
+
+
+def _primary_gradient(accent: str, accent_deep: str) -> dict[str, str]:
+    """主按钮的"字色 + 四态"：两种方向各算一遍，取**最差状态对比度更高**的那种。
+
+    两个方向是成对的，不能只挑字色：
+      * 亮底 + 深字 → 悬停**提亮**、按下压暗（越亮越清楚）；
+      * 深底 + 亮字 → 悬停/按下都**加深**（越深越清楚）。
+    反着做就会出现"悬停之后字反而看不清了"，实测踩过。
+    判据就是对比度，让色板自己算 —— 主人挑配色可能还要几轮，不能每套都手调。
+    """
+    plans = (
+        # (字色, 悬停上, 悬停下, 按下上, 按下下)
+        (_TEXT_ON_DARK, _lighten(accent, 0.16), _lighten(accent_deep, 0.12),
+         _darken(accent, 0.14), _darken(accent_deep, 0.16)),
+        (_TEXT_ON_LIGHT, _darken(accent, 0.08), _darken(accent_deep, 0.06),
+         _darken(accent, 0.20), _darken(accent_deep, 0.18)),
+    )
+
+    def worst(plan: tuple[str, ...]) -> float:
+        text = plan[0]
+        return min(contrast_ratio(text, background)
+                   for background in (accent, accent_deep, *plan[1:]))
+
+    text, hover_top, hover_bottom, press_top, press_bottom = max(plans, key=worst)
+    return {
+        "primary_text": text,
+        "primary_hover_top": hover_top,
+        "primary_hover_bottom": hover_bottom,
+        "primary_press_top": press_top,
+        "primary_press_bottom": press_bottom,
+    }
+
+
+def _dark_palette(*, window: str, panel: str, section: str,
+                  accent: str, accent_deep: str,
+                  text: str = "#e9eff7", text_dim: str = "#94a4bb",
+                  text_disabled: str = "#7d8ea6") -> dict[str, str]:
+    """深色皮肤：由"窗口底 / 卡片底 / 背景条底 / 强调色（常态·按下）"推出全套色值。"""
+    primary = _primary_gradient(accent, accent_deep)
+    return {
+        "window": window,
+        "panel": panel,
+        "section": section,
+        "border": _lighten(panel, 0.14),
+        "border_dark": _lighten(panel, 0.26),
+        "text": text,
+        "text_dim": text_dim,
+        "text_disabled": text_disabled,
+        "btn_top": _lighten(panel, 0.11),
+        "btn_bottom": _lighten(panel, 0.04),
+        "btn_border": _lighten(panel, 0.20),
+        "btn_hover_top": _lighten(panel, 0.17),
+        "btn_hover_bottom": _lighten(panel, 0.09),
+        "btn_press_top": _darken(panel, 0.10),
+        "btn_press_bottom": _darken(panel, 0.18),
+        "btn_disabled_bg": _mix(panel, window, 0.5),
+        "primary_top": accent,
+        "primary_bottom": accent_deep,
+        "primary_border": _darken(accent_deep, 0.10),
+        **primary,
+        "tab_unselected": _darken(panel, 0.06),
+        "tab_selected": panel,
+        "tab_accent": accent,
+        "tab_hover": _lighten(panel, 0.08),
+        "alt_row": _mix(panel, window, 0.45),
+        "grid": _lighten(panel, 0.09),
+        "selection": _mix(panel, accent, 0.28),
+        "selection_strong": _mix(panel, accent, 0.44),
+        "focus": accent,
+        "progress_top": accent,
+        "progress_bottom": accent_deep,
+        "progress_track": section,
+        "scrollbar": _lighten(panel, 0.22),
+        "scrollbar_hover": _lighten(panel, 0.34),
+        "tooltip_bg": section,
+        "window_top": _lighten(window, 0.05),
+        "window_bottom": _darken(window, 0.04),
+        "card_top": _lighten(panel, 0.06),
+        "card_bottom": _darken(panel, 0.03),
+        "section_top": _lighten(section, 0.09),
+        "titlebar_top": _lighten(section, 0.05),
+        "titlebar_bottom": _darken(section, 0.05),
+        "titlebar_border": _lighten(panel, 0.14),
+        "titlebar_text": text,
+        "titlebar_dim": text_dim,
+        "accent": accent,
+        "accent_dim": _mix(panel, accent, 0.42),
+        "hover_soft": _lighten(panel, 0.08),
+        "close_hover": "#e5484d",
+    }
+
+
+def _light_palette(*, window: str, panel: str, section: str,
+                   accent: str, accent_deep: str,
+                   text: str = "#1f2328", text_dim: str = "#5f6b7a",
+                   text_disabled: str = "#9aa1ab") -> dict[str, str]:
+    """浅色皮肤：同一批键名，层次的方向反过来（越靠前越亮，边框往下压）。"""
+    primary = _primary_gradient(accent, accent_deep)
+    return {
+        "window": window,
+        "panel": panel,
+        "section": section,
+        "border": _darken(section, 0.10),
+        "border_dark": _darken(section, 0.20),
+        "text": text,
+        "text_dim": text_dim,
+        "text_disabled": text_disabled,
+        "btn_top": panel,
+        "btn_bottom": _darken(panel, 0.10),
+        "btn_border": _darken(panel, 0.24),
+        "btn_hover_top": _lighten(panel, 0.02),
+        "btn_hover_bottom": _darken(panel, 0.06),
+        "btn_press_top": _darken(panel, 0.12),
+        "btn_press_bottom": _darken(panel, 0.18),
+        "btn_disabled_bg": _darken(panel, 0.05),
+        "primary_top": accent,
+        "primary_bottom": accent_deep,
+        "primary_border": _darken(accent_deep, 0.10),
+        **primary,
+        "tab_unselected": section,
+        "tab_selected": panel,
+        "tab_accent": accent,
+        "tab_hover": _darken(panel, 0.04),
+        "alt_row": _darken(panel, 0.02),
+        "grid": _darken(panel, 0.08),
+        "selection": _mix(panel, accent, 0.14),
+        "selection_strong": _mix(panel, accent, 0.26),
+        "focus": accent,
+        "progress_top": _lighten(accent, 0.10),
+        "progress_bottom": accent_deep,
+        "progress_track": _darken(panel, 0.06),
+        "scrollbar": _darken(panel, 0.18),
+        "scrollbar_hover": _darken(panel, 0.28),
+        "tooltip_bg": panel,
+        "window_top": _lighten(window, 0.30),
+        "window_bottom": _darken(window, 0.04),
+        "card_top": panel,
+        "card_bottom": _darken(panel, 0.03),
+        "section_top": _lighten(section, 0.30),
+        "titlebar_top": _lighten(section, 0.35),
+        "titlebar_bottom": section,
+        "titlebar_border": _darken(section, 0.10),
+        "titlebar_text": text,
+        "titlebar_dim": text_dim,
+        "accent": accent,
+        "accent_dim": _lighten(accent, 0.55),
+        "hover_soft": _darken(panel, 0.05),
+        "close_hover": "#c62828",
+    }
+
+
 # ── 候选配色（2026-10-10）：只用来给主人挑，挑完并入 TECH_COLORS ──────────
 #
 # 取色时的两条硬约束（不是我瞎讲究，A 股界面踩了就难看）：
@@ -340,6 +542,50 @@ GRAPHITE_COLORS: dict[str, str] = {
     "close_hover": "#e5484d",
 }
 
+# ── 第二批候选（主人 2026-10-10 下午："颜色我都不满意，再给几个组合选一下"）──
+#
+# 这一批刻意拉开距离，覆盖"他可能想要的另一种方向"：四个有色调的（宝蓝/靛紫/琥珀金/玫红）、
+# 一个**低饱和**的哑光灰蓝（"不想要花哨"的那条路）、一个**浅色**（"其实我不想要深色"那条路）。
+# 全部由 `_dark_palette` / `_light_palette` 生成：键名与层次关系与正式皮肤完全同构。
+
+#: 深海宝蓝：最保守的一条深色路（金融软件的老配色），蓝得稳、不刺眼。
+SAPPHIRE_COLORS: dict[str, str] = _dark_palette(
+    window="#08101f", panel="#101a2e", section="#16233c",
+    accent="#2a63d6", accent_deep="#1f4fc4",
+)
+
+#: 午夜靛紫：比上一版那套紫罗兰更冷更沉，偏"设计工具"的气质。
+INDIGO_COLORS: dict[str, str] = _dark_palette(
+    window="#0b0a18", panel="#14132a", section="#1b1936",
+    accent="#6a55e6", accent_deep="#4f39c9",
+)
+
+#: 石墨琥珀金：暖金强调，深棕灰底 —— 唯一一套"暖"的，像老式终端与铜质仪表。
+AMBER_COLORS: dict[str, str] = _dark_palette(
+    window="#100e0a", panel="#1a1712", section="#221d16",
+    accent="#e0a63c", accent_deep="#c2871d",
+    text="#f2ece1", text_dim="#a99c86", text_disabled="#8d8069",
+)
+
+#: 暗夜玫红：强调色是玫红（不是正红，不会跟"涨"混），有性格但底子很暗。
+ROSE_COLORS: dict[str, str] = _dark_palette(
+    window="#130c12", panel="#1d131b", section="#261822",
+    accent="#f586bd", accent_deep="#e0629f",
+)
+
+#: 哑光雾蓝：**低饱和**那条路 —— 强调色故意发灰（#7ba7c9），像哑光金属而不是霓虹灯。
+MIST_COLORS: dict[str, str] = _dark_palette(
+    window="#0d1216", panel="#151c21", section="#1b242b",
+    accent="#7ba7c9", accent_deep="#5b8aa8",
+    text="#e6ecef", text_dim="#93a3ac", text_disabled="#7d8b93",
+)
+
+#: 浅色高级灰：**唯一一套浅色**（深色看不惯就走这条），底子偏冷、强调色靛蓝。
+PAPER_COLORS: dict[str, str] = _light_palette(
+    window="#f2f4f8", panel="#ffffff", section="#e8ecf3",
+    accent="#4f46e5", accent_deep="#4338ca",
+)
+
 #: 主题名 → 色板（**所有能渲染的配色都在这里**：两套正式皮肤 + 两套候选）。
 #: `theme_qss()` 只认这张表 —— 出预览图时可以直接渲染候选配色。
 PALETTES: dict[str, dict[str, str]] = {
@@ -347,14 +593,27 @@ PALETTES: dict[str, dict[str, str]] = {
     THEME_SILVER: SILVER_COLORS,
     THEME_OBSIDIAN: OBSIDIAN_COLORS,
     THEME_GRAPHITE: GRAPHITE_COLORS,
+    THEME_SAPPHIRE: SAPPHIRE_COLORS,
+    THEME_INDIGO: INDIGO_COLORS,
+    THEME_AMBER: AMBER_COLORS,
+    THEME_ROSE: ROSE_COLORS,
+    THEME_MIST: MIST_COLORS,
+    THEME_PAPER: PAPER_COLORS,
 }
 
-#: 出对比图用的顺序（第一张是现在的默认皮肤 = 现状）
-PREVIEW_THEMES: tuple[str, ...] = (THEME_TECH, THEME_OBSIDIAN, THEME_GRAPHITE)
+#: 出对比图用的顺序（第一批两套已被主人否掉，出图默认只出第二批）
+PREVIEW_THEMES: tuple[str, ...] = (
+    THEME_SAPPHIRE, THEME_INDIGO, THEME_AMBER,
+    THEME_ROSE, THEME_MIST, THEME_PAPER,
+)
 
 #: 深色底的主题（要自己画颜色的控件、热力图、自绘标题栏都按这个判断）。
-#: **不能只写 THEME_TECH**：候选配色换上去之后 `system` 之外的全是深色。
-DARK_THEMES: tuple[str, ...] = (THEME_TECH, THEME_OBSIDIAN, THEME_GRAPHITE)
+#: **不能只写 THEME_TECH**：候选配色换上去之后 `system` 之外的全是深色
+#: —— 所以这里是"除浅色那几套之外的全集"，`PAPER` 与 `SILVER` 不在里面。
+DARK_THEMES: tuple[str, ...] = (
+    THEME_TECH, THEME_OBSIDIAN, THEME_GRAPHITE, THEME_SAPPHIRE,
+    THEME_INDIGO, THEME_AMBER, THEME_ROSE, THEME_MIST,
+)
 
 for _name in DARK_THEMES:
     SEMANTIC_BY_THEME.setdefault(_name, TECH_SEMANTIC)
