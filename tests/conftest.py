@@ -601,9 +601,9 @@ def sqlite_conn(db: str):
 
 @pytest.fixture(autouse=True)
 def _isolate_license_state(tmp_path_factory, monkeypatch):
-    """每个用例都用一份**干净的授权状态**（默认：刚装上、试用第 1 天）。
+    r"""每个用例都用一份**干净的授权状态**（默认：刚装上、试用第 1 天）。
 
-    为什么必须隔离：授权状态文件在 `%APPDATA%\CaishenHelper\license.json`（开发机上
+    为什么必须隔离：授权状态文件在 `%APPDATA%\LuweikDecision\license.json`（开发机上
     也可能真的存在）。不隔离的话，**测试行为会跟着开发机/CI 机器上那份文件变**：
     那里写着"试用到期"时，每个建 `MainWindow` 的用例都会多弹一个授权窗口，
     定时器与窗口数跟着变（这类差异最难的是一开始就看不出来 —— 本机全绿、CI 上偶发崩）。
@@ -626,7 +626,7 @@ def _isolate_license_state(tmp_path_factory, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _never_touch_the_real_user_config(tmp_path, monkeypatch):
-    """整场不许碰**这台机器上真实的**用户配置（`~/.config/caishen-helper/config.toml`）。
+    """整场不许碰**这台机器上真实的**用户配置（`~/.config/luweik-decision/config.toml`）。
 
     为什么必须（2026-10-08 实测踩到）：界面里有几处**自动保存** —— 勾选策略
     （`formula_page` 存 `enabled_formulas`）、拖桌宠记坐标（`pet_x/pet_y`）、
@@ -638,7 +638,7 @@ def _never_touch_the_real_user_config(tmp_path, monkeypatch):
     在**离线/CI** 机器上它还会顺手改掉人家真实在用的配置（那份文件是用户自己填的 Key）。
 
     做法有两道，都在这一条夹具里：
-      ① 把 `LAOA_TRADER_CONFIG` 指到本用例 tmp 目录下一个**不存在的**路径 ——
+      ① 把 `LUWEIK_CONFIG` 指到本用例 tmp 目录下一个**不存在的**路径 ——
          "谁都没配过" 的语义没变（读不到就是默认值），但 `find_config_file()`
          找的就是这里；**用用例级 `tmp_path` 而不是会话级**：否则前一个用例写下的
          内容会串给后一个（那正是上面那条红）；
@@ -665,10 +665,10 @@ def _never_touch_the_real_user_config(tmp_path, monkeypatch):
             target = isolated
         return original(target, updates or {}, create=create)
 
-    monkeypatch.setenv("LAOA_TRADER_CONFIG", str(isolated))
+    monkeypatch.setenv("LUWEIK_CONFIG", str(isolated))
     monkeypatch.setattr(config_mod, "update_config_file", _guarded)
-    # 默认**数据目录**也一起收到 tmp 里（`%LOCALAPPDATA%\CaishenHelper\data` /
-    # `$XDG_DATA_HOME/CaishenHelper/data`）：跑 `--doctor` 的用例最后会把
+    # 默认**数据目录**也一起收到 tmp 里（`%LOCALAPPDATA%\LuweikDecision\data` /
+    # `$XDG_DATA_HOME/LuweikDecision/data`）：跑 `--doctor` 的用例最后会把
     # `自检报告.txt` 落到那个目录（见 `__main__` 的 `_Tee`），
     # 在 CI 上那份报告还会被归档步骤抓去当"编译产物自检报告"——
     # 2026-10-08 实测：ci-log 里那份写着「运行形态：源码运行」，看日志的人

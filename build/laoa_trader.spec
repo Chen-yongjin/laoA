@@ -15,7 +15,7 @@ onefile 每次启动都要把几百 MB 依赖解压到临时目录：启动要 5
 为什么 --noconsole（windowed）
 ------------------------------
 这是桌面程序，双击运行时不该弹黑框。副作用是**看不到 stdout** ——
-所以 `log.py` 会同时把日志写进 `<data_dir>/logs/caishen-helper.log`，
+所以 `log.py` 会同时把日志写进 `<data_dir>/logs/luweik.log`，
 出问题时让用户把那个文件发过来即可。
 
 打包要点

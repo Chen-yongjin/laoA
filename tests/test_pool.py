@@ -32,7 +32,7 @@ def _enable_formulas(monkeypatch, tmp_path, cfg, formulas: dict[str, str]) -> No
         (folder / f"{name}.txt").write_text(
             f"# 名称: {name}\n# 说明: 测试用（{name}）\n{body}\n", encoding="utf-8"
         )
-    monkeypatch.setenv("LAOA_TRADER_FORMULAS", str(folder))
+    monkeypatch.setenv("LUWEIK_FORMULAS", str(folder))
     cfg.enabled_formulas = list(formulas)
 
 

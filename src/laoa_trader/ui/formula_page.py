@@ -2247,7 +2247,7 @@ if QT_AVAILABLE:
             except OSError as exc:
                 # 这里**必须弹 toast**：提示区在编辑器底部，窗口小就看不见，
                 # 用户会以为"存上了"（2026-09-18 实报"保存了却不显示"最可能就是这样）。
-                # 目录写的是**这一页实际用的**那个（可能是 `LAOA_TRADER_FORMULAS`
+                # 目录写的是**这一页实际用的**那个（可能是 `LUWEIK_FORMULAS`
                 # 或调用方传进来的），不是默认值 —— 打默认值会让人找错地方。
                 folder = self.directory or formulas_lib.formula_dir()
                 self._set_hint(f"❌ 没存上：{exc}（策略目录：{folder}）")

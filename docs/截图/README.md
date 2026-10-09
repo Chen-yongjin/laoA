@@ -10,7 +10,7 @@
 ```bash
 cd <仓库根>
 QT_QPA_PLATFORM=offscreen python build/make_screenshots.py     # 出图到 docs/截图/
-LAOA_SHOTS_DEBUG=1 QT_QPA_PLATFORM=offscreen python build/make_screenshots.py   # 额外打印三张表的每个单元格
+LUWEIK_SHOTS_DEBUG=1 QT_QPA_PLATFORM=offscreen python build/make_screenshots.py   # 额外打印三张表的每个单元格
 cp -f docs/截图/*.png 网站/截图/                                 # 同步到网站
 ```
 

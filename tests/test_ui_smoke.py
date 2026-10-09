@@ -494,7 +494,9 @@ def test_status_details_dialog_opens_and_copies(window, qapp) -> None:
     # 定时运行整组移除之后，详情里不该再留下"主跑/补跑/下次自动运行"这些字段
     assert "主跑时间：" not in text
     assert "下次自动运行：" not in text
-    assert "caishen-helper.log" in text                      # 日志路径要能照着找到
+    from laoa_trader.log import LOG_NAME
+
+    assert LOG_NAME in text                              # 日志路径要能照着找到
     assert "10,283,203" not in text                       # 长串数字压成"万"
     assert win.status_details_text.isReadOnly() is True
 
@@ -2634,7 +2636,7 @@ def test_run_pipeline_button_runs_in_background_and_is_idempotent(window, qapp,
     (formula_dir / "界面测试公式.txt").write_text(
         "# 名称: 界面测试公式\n# 说明: 界面用例专用\nC>0\n", encoding="utf-8"
     )
-    monkeypatch.setenv("LAOA_TRADER_FORMULAS", str(formula_dir))
+    monkeypatch.setenv("LUWEIK_FORMULAS", str(formula_dir))
     seeded.enabled_formulas = ["界面测试公式"]
 
     window.on_run_pipeline()

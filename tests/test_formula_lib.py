@@ -200,7 +200,7 @@ def test_formula_dir_never_resurrects_a_deleted_bundled_formula(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """用户删掉的随包公式**不会**在下次启动时长回来（那是"他不要"，不是"他还没有"）。
 
-    判据就是那条记录（`.caishen-seeded.json`）：播过种的名字记在里面，
+    判据就是那条记录（`.luweik-seeded.json`）：播过种的名字记在里面，
     之后目录里没了也只当"用户删了"。否则每次开机都长回来，用户会以为程序坏了。
     """
     target = tmp_path / "formulas"

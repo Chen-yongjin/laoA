@@ -28,7 +28,7 @@ r"""授权与试用（单机终身授权，用户 2026-09-20 拍板）。
 
 试用期与"删文件续命"
 --------------------
-* 首次运行日期写**两处**：`%APPDATA%\CaishenHelper\license.json` 与数据库 `app_state` 表；
+* 首次运行日期写**两处**：`%APPDATA%\LuweikDecision\license.json` 与数据库 `app_state` 表；
 * 读的时候取**较早**的那个 —— 删掉其中一个不会让试用期重置（删两个也没用：
   数据库里有更早的记录就会赢）；
 * **时钟回拨防护**：记录"见过的最大日期"，一旦系统时间比它早（用户改系统时间续命），
@@ -254,7 +254,7 @@ def machine_code() -> str:
         digest = hashlib.sha256("\x1f".join(_fingerprint_parts()).encode("utf-8")).digest()
     except Exception as exc:  # noqa: BLE001 - 极端环境：兜底也失败时给一个稳定占位
         logger.warning(f"算机器码失败，用占位值：{exc}")
-        digest = hashlib.sha256(b"caishen-helper-unknown-machine").digest()
+        digest = hashlib.sha256(b"luweik-decision-unknown-machine").digest()
     _MACHINE_CACHE = _encode(digest, MACHINE_CHARS)
     return _MACHINE_CACHE
 
@@ -314,7 +314,7 @@ def verify(machine: Any, code: Any) -> tuple[bool, str]:
 
 
 def state_path() -> Path:
-    """授权状态文件：与 `config.toml` 同目录（`%APPDATA%\\CaishenHelper\\license.json`）。
+    """授权状态文件：与 `config.toml` 同目录（`%APPDATA%\\LuweikDecision\\license.json`）。
 
     为什么不放 exe 同级：用户更新软件是整包覆盖那个目录，授权文件会被一起盖掉
     （2026-09-20 飞书配置就是这么丢的）。

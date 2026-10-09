@@ -15,10 +15,10 @@
 优先级：**环境变量 > config.toml > 内置默认值**。
 
 配置文件查找顺序（第一个存在的生效）：
-    1. 显式传入的路径 / 环境变量 `LAOA_TRADER_CONFIG`
+    1. 显式传入的路径 / 环境变量 `LUWEIK_CONFIG`
     2. 当前工作目录 `./config.toml`
     3. exe / 包所在目录的 `config.toml`（打包后就是 exe 旁边那个）
-    4. 用户目录 `%APPDATA%\\CaishenHelper\\config.toml`（Windows）或 `~/.config/caishen-helper/config.toml`
+    4. 用户目录 `%APPDATA%\\LuweikDecision\\config.toml`（Windows）或 `~/.config/luweik-decision/config.toml`
 """
 
 from __future__ import annotations
@@ -37,22 +37,18 @@ from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
 
-#: 默认数据目录（Windows 用 LOCALAPPDATA，其它平台退回 ~/.local/share）
-#: 数据/配置目录名（`%LOCALAPPDATA%\CaishenHelper`）。
+#: 数据/配置目录名与产品名**一致**（2026-10-08 主人："数据与配置目录也该掉，
+#: 不保留以前名称的痕迹，目前没有老用户，只有我一个人在用。"）：
+#:   * Windows：`%LOCALAPPDATA%\LuweikDecision\data`、`%APPDATA%\LuweikDecision\config.toml`
+#:   * 其它平台：`~/.local/share/LuweikDecision/data`、`~/.config/luweik-decision/config.toml`
 #:
-#: ⚠️ **目录名与产品显示名是解耦的**：显示名前后改过三次（老牛选股 → 财神助手 →
-#: luweik决策系统，见 `ui/app.py` 的 `APP_NAME`），这个目录名**一次都没跟着动**。
-#: 为什么不跟着动：老用户的数据库（几年日线，几百 MB）与授权状态都躺在旧目录里，
-#: 直接换名等于让他重下一遍、试用天数还可能重置。所以下面这三个值只服务于「搬家」
-#: 这一个动作 —— `_migrate_legacy_dirs()` 会在第一次用到某个目录时把旧的那份
-#: **整份搬过来**，与产品叫什么名字无关。以后再改显示名，**也不要**动它们。
-DEFAULT_APP_NAME = "CaishenHelper"
-
-#: 改名前用过的目录名（Windows `%LOCALAPPDATA%`/`%APPDATA%` 下，以及 Linux 的
-#: `~/.local/share`、`~/.config`）。**只用来搬一次家**，不参与日常逻辑。
-LEGACY_APP_NAMES: tuple[str, ...] = ("LaoATrader",)
-#: Linux/macOS 上老位置用的目录名（小写连字符那种写法）
-LEGACY_SLUG_NAMES: tuple[str, ...] = ("laoa-trader",)
+#: ⚠️ 以后**再改显示名**时，这个目录名要不要跟着改得先想清楚：目录里有几年日线
+#: （几百 MB，重下要几十分钟）与授权/试用状态。改名的正确做法是"先搬一次家再换名"
+#: （`shutil.move`，只在新位置还不存在时做），而不是直接换常量 —— 老版本留下的
+#: 数据目录会变成没人再读的孤儿目录。这一版之所以能直接换，是因为当时只有作者一个人在用。
+DEFAULT_APP_NAME = "LuweikDecision"
+#: 小写连字符写法（Linux/macOS 的 `~/.config/<slug>`，以及日志文件名那种场合）
+DEFAULT_APP_SLUG = "luweik-decision"
 
 #: 支持的通知频道（顺序 = 界面与 --doctor 的展示顺序）
 #: 支持的通知频道。**2026-09-18 起 `windows` 整路删除**（用户原话："windows系统通知删除，
@@ -161,69 +157,20 @@ _LEGACY_FIELD_ALIASES: dict[str, str] = {
 }
 
 
-def _migrate_legacy_dirs() -> None:
-    """把旧目录（改名前那套名字）整份搬到新位置。**幂等、绝不抛异常**。
-
-    为什么要搬而不是"读旧目录"：数据目录里同时住着 ① 几年日线（几百 MB，重下要几十分钟）
-    与 ② 授权/试用状态。让程序继续读旧目录，等于把老名字永远留在用户机器上；只改名字不搬，
-    等于让老用户重下一次并可能重置试用天数 —— 两条都不能接受，所以第一次用到新位置时搬。
-
-    三条规矩：
-    1. **只在新位置还不存在时搬**（第二次启动就是空操作，不会覆盖新数据）；
-    2. 用 `shutil.move`：先尝试改名（同盘瞬间完成），失败（跨盘）时自动退化成"复制 + 删源"，
-       复制没成功就不会删旧目录 —— 宁可留着旧目录，也不能把用户的数据弄丢；
-    3. 失败只记日志：这是"锦上添花"的步骤，不能拦住启动（`load_config` 的承诺是永不抛）。
-    """
-    dirs: list[tuple[Path, Path]] = []
-    local = os.environ.get("LOCALAPPDATA")
-    appdata = os.environ.get("APPDATA")
-    if local:
-        dirs.append((Path(local) / DEFAULT_APP_NAME, Path(local)))
-    if appdata:
-        dirs.append((Path(appdata) / DEFAULT_APP_NAME, Path(appdata)))
-    if not local and not appdata:
-        xdg_data = os.environ.get("XDG_DATA_HOME")
-        share = Path(xdg_data) if xdg_data else Path.home() / ".local" / "share"
-        dirs.append((share / DEFAULT_APP_NAME, share))
-        config_root = Path.home() / ".config"
-        dirs.append((config_root / "caishen-helper", config_root))
-
-    for target, parent in dirs:
-        try:
-            if target.exists():
-                continue
-            # 同一个 parent 下的候选：老目录名（Windows 风格）+ 老 slug（Linux 风格）
-            for names in (LEGACY_APP_NAMES, LEGACY_SLUG_NAMES):
-                for name in names:
-                    source = parent / name
-                    if not source.is_dir():
-                        continue
-                    shutil.move(str(source), str(target))
-                    logger.info(f"已把改名前的数据目录搬到新位置：{source} → {target}")
-                    break
-                else:
-                    continue
-                break
-        except Exception as exc:  # noqa: BLE001 - 见上面第 3 条
-            logger.warning(f"搬迁旧数据目录失败（不影响启动，可手动搬家）：{exc}")
-
-
 def default_data_dir() -> Path:
-    """默认数据目录：Windows `%LOCALAPPDATA%\\CaishenHelper\\data`，其它平台同构。"""
+    """默认数据目录：Windows `%LOCALAPPDATA%\\LuweikDecision\\data`，其它平台同构。"""
     local = os.environ.get("LOCALAPPDATA")
     if local:
-        _migrate_legacy_dirs()
         return Path(local) / DEFAULT_APP_NAME / "data"
     # 非 Windows（开发和测试用）：保持同样的目录语义
     base = os.environ.get("XDG_DATA_HOME")
     root = Path(base) if base else Path.home() / ".local" / "share"
-    _migrate_legacy_dirs()
     return root / DEFAULT_APP_NAME / "data"
 
 
 def user_config_path() -> Path:
-    r"""**用户配置文件（持久位置）**：Windows `%APPDATA%\CaishenHelper\config.toml`，
-    其它平台 `~/.config/caishen-helper/config.toml`。
+    r"""**用户配置文件（持久位置）**：Windows `%APPDATA%\LuweikDecision\config.toml`，
+    其它平台 `~/.config/luweik-decision/config.toml`。
 
     为什么必须有一个"exe 之外"的位置（用户 2026-09-20 实报"更新软件后飞书设置消失"）：
     老版本把 config.toml 写在 **exe 同级**目录，而更新软件就是"整包覆盖那个目录"——
@@ -232,10 +179,8 @@ def user_config_path() -> Path:
     """
     appdata = os.environ.get("APPDATA")
     if appdata:
-        _migrate_legacy_dirs()
         return Path(appdata) / DEFAULT_APP_NAME / "config.toml"
-    _migrate_legacy_dirs()
-    return Path.home() / ".config" / "caishen-helper" / "config.toml"
+    return Path.home() / ".config" / DEFAULT_APP_SLUG / "config.toml"
 
 
 def _legacy_config_candidates() -> list[Path]:
@@ -282,7 +227,7 @@ def config_search_paths() -> list[Path]:
     是为了让"保存设置"永远写在一个更新软件不会覆盖的地方。
     """
     paths: list[Path] = []
-    explicit = os.environ.get("LAOA_TRADER_CONFIG")
+    explicit = os.environ.get("LUWEIK_CONFIG")
     if explicit:
         paths.append(Path(explicit))
     paths.append(user_config_path())
@@ -1054,7 +999,7 @@ class Config:
             return (
                 f"无法创建数据目录 {self.data_dir}：{exc}\n"
                 "请在 config.toml 里把 data_dir 改成一个有写权限的目录"
-                "（例如 D:\\CaishenHelper\\data）。"
+                "（例如 D:\\LuweikDecision\\data）。"
             )
 
 
@@ -1199,7 +1144,7 @@ def _apply_env(cfg: Config) -> Config:
         ("NOTIFY_POPUP_MAX_ITEMS", "notify_popup_max_items"),  # 浮窗最多列几条
         ("NOTIFY_FLASH_SECONDS", "notify_flash_seconds"),   # 图标闪烁秒数
         ("RUN_AT", "run_at"),
-        ("LAOA_RUN_AT", "run_at"),          # 旧名，兼容早期配置
+        ("LUWEIK_RUN_AT", "run_at"),          # 旧名，兼容早期配置
         ("RUN_AT_FALLBACK", "run_at_fallback"),
         ("DATA_DIR", "data_dir"),
     )
@@ -1220,7 +1165,7 @@ def _apply_env(cfg: Config) -> Config:
             setattr(cfg, attr, raw)
 
     env_list = (
-        ("LAOA_ENABLED_FORMULAS", "enabled_formulas"),
+        ("LUWEIK_ENABLED_FORMULAS", "enabled_formulas"),
         ("NOTIFY_CHANNELS", "notify_channels"),
         ("DATA_SOURCES", "data_sources"),       # 数据来源（默认主源=同花顺，需 Key；公开源为兜底）
         ("AUCTION_SCAN_AT", "auction_scan_at"),
@@ -1445,7 +1390,7 @@ def update_config_file(
 
     Args:
         path: 配置文件路径；None 时用 `find_config_file()`，都没有则落到
-            `~/.config/caishen-helper/config.toml`（保证"保存"总有地方可写）。
+            `~/.config/luweik-decision/config.toml`（保证"保存"总有地方可写）。
         updates: {键: 新值}。
         create: 文件不存在时是否创建。
 

@@ -52,7 +52,7 @@ from laoa_trader.hints import (
     BTN_REFRESH_TEXT,
     BTN_RUN_TEXT,
 )
-from laoa_trader.log import get_logger, log_file_path
+from laoa_trader.log import LOG_NAME, get_logger, log_file_path
 from laoa_trader.notify import KINDS, sound, summarize
 # 语音模块在设置页构建控件/说明行时要用（音色、能不能念、锁定语速），模块级导入一次，别在构造函数里再 import
 from laoa_trader.notify import voice as voice_mod
@@ -4261,7 +4261,7 @@ if QT_AVAILABLE:
             latest = summary.get("latest_date") or "无"
             # 数据目录可能是 str（直接构造 Config 时很常见），统一成 Path 再拼
             log_path = log_file_path() or (
-                Path(self.cfg.data_dir) / "logs" / "caishen-helper.log"
+                Path(self.cfg.data_dir) / "logs" / LOG_NAME
             )
             self_check = self.preflight_result or {}
             intraday_state = self._intraday_text(st) or "不在交易时段"

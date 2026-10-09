@@ -213,13 +213,13 @@ laoA/
 
 | 用途 | 位置 |
 |---|---|
-| 配置文件 | `%APPDATA%\CaishenHelper\config.toml`（非 Windows：`~/.config/caishen-helper/config.toml`） |
-| 数据目录 | `%LOCALAPPDATA%\CaishenHelper\data`（数据库 `trader.db`、dump 缓存 `dumps/`、日志 `logs/`） |
+| 配置文件 | `%APPDATA%\LuweikDecision\config.toml`（非 Windows：`~/.config/luweik-decision/config.toml`） |
+| 数据目录 | `%LOCALAPPDATA%\LuweikDecision\data`（数据库 `trader.db`、dump 缓存 `dumps/`、日志 `logs/`） |
 | 策略目录 | 打包后是 exe 同级的 `formulas/`；源码运行是仓库根的 `formulas/` |
 
 配置文件查找顺序（第一个存在的生效）：
 
-1. 环境变量 `LAOA_TRADER_CONFIG` 指定的路径；
+1. 环境变量 `LUWEIK_CONFIG` 指定的路径；
 2. **用户目录**（上表第一行）—— 保存设置永远写这里；
 3. 当前工作目录的 `./config.toml`；
 4. exe 同级 / 仓库根（老位置）。
@@ -238,7 +238,7 @@ laoA/
 |---|---|---|
 | `hithink_api_key` | `""` | 同花顺 Key（在 fuyao.aicubes.cn 申请）；没配时匹配会被数据自检拒绝 |
 | `data_sources` | `["hithink", "public"]` | 列表即启停、**顺序即优先级**；`public` 免 Key 只当兜底 |
-| `data_dir` | `%LOCALAPPDATA%\CaishenHelper\data` | 数据库 / dump / 日志放这儿 |
+| `data_dir` | `%LOCALAPPDATA%\LuweikDecision\data` | 数据库 / dump / 日志放这儿 |
 | `history_years` | `0.5` | 首次导入多少年历史（dump 固定 10 年，导入时按这个值过滤） |
 | `min_history_years` | `0.4` | 跨度下限，**必须小于** `history_years`，否则永远判"数据不足" |
 | `auto_download_on_start` | `true` | 只对增量自动下载；全量下载始终要用户明确同意 |
@@ -301,18 +301,18 @@ laoA/
 
 | 变量 | 覆盖的键 |
 |---|---|
-| `LAOA_TRADER_CONFIG` | 配置文件路径 |
+| `LUWEIK_CONFIG` | 配置文件路径 |
 | `HITHINK_FINANCE_API_KEY` | `hithink_api_key` |
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID` | 飞书凭证 |
 | `DATA_SOURCES` | `data_sources`（逗号分隔） |
-| `LAOA_ENABLED_FORMULAS` | `enabled_formulas`（逗号分隔） |
+| `LUWEIK_ENABLED_FORMULAS` | `enabled_formulas`（逗号分隔） |
 | `WATCHLIST_MAX` / `HISTORY_YEARS` | 自选上限 / 导入年限 |
 | `INTRADAY_AUCTION` / `INTRADAY_ANOMALY` / `INTRADAY_T` | 三个盘中开关 |
 | `AUCTION_MIN_PCT` / `AUCTION_MIN_SCORE` / `AUCTION_ALERT_MAX_ITEMS` | 竞价阈值 |
 | `NOTIFY_CHANNELS` / `NOTIFY_POPUP` / `NOTIFY_PET` / `NOTIFY_VOICE` | 通知相关 |
 | `RUN_AT` / `RUN_AT_FALLBACK` / `AUTO_RUN` | 定时 |
 | `UI_THEME` / `DATA_DIR` | 主题 / 数据目录 |
-| `LAOA_TRADER_FORMULAS` | 策略目录（换机器、放在共享盘、测试用） |
+| `LUWEIK_FORMULAS` | 策略目录（换机器、放在共享盘、测试用） |
 
 ### 写回行为
 
@@ -404,7 +404,7 @@ laoA/
 
 - **缺哪条补哪条** —— 新版本多带的策略会补进你的目录，不用去别处找文本；
 - **同名不覆盖** —— 你已有的、改过的文件永远是你的；
-- **删掉的不再补** —— 播过种的记录在 `.caishen-seeded.json` 里，你删除过的策略不会每次启动都长回来；
+- **删掉的不再补** —— 播过种的记录在 `.luweik-seeded.json` 里，你删除过的策略不会每次启动都长回来；
 - **退役的不复制** —— 已下架的随包策略只在"与你没改过的老版本逐字节一致"时清理；改过的留着。
 
 > 补齐与退役只在"随包目录 ≠ 用户目录"时才有意义（PyInstaller 版是这种形态）。
@@ -430,7 +430,7 @@ laoA/
 - 免费试用 **7 天**，到期后**策略编辑锁住**，点它会弹授权窗口（程序其余部分照常可用）。
 - 机器码 `XXXX-XXXX-XXXX-XXXX`，注册码同形；注册码由机器码算出来，填进授权窗口点【注册】即可。
 - **机器码只在打开授权窗口 / 点注册时才读**：读机器码在 Windows 上要起一个 PowerShell 问硬件，启动路径不读它。
-- 试用期起点同时写 `%APPDATA%\CaishenHelper\license.json` 与数据库 `app_state` 表，取**较早**的那个；
+- 试用期起点同时写 `%APPDATA%\LuweikDecision\license.json` 与数据库 `app_state` 表，取**较早**的那个；
   系统时间被回拨按**已到期**处理。
 
 ---

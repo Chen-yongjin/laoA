@@ -330,7 +330,7 @@ jobs:
           $report = $null
           for ($i = 0; $i -lt 20 -and -not $report; $i++) {
             Start-Sleep -Milliseconds 500
-            $dirs = @("$dataDir/logs", (Join-Path $env:LOCALAPPDATA "CaishenHelper/data/logs"))
+            $dirs = @("$dataDir/logs", (Join-Path $env:LOCALAPPDATA "LuweikDecision/data/logs"))
             foreach ($d in $dirs) {
               $found = Get-ChildItem $d -Filter *.txt -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -342,7 +342,7 @@ jobs:
           Get-ChildItem -Recurse -Force $dataDir -ErrorAction SilentlyContinue |
             Select-Object -First 40 | ForEach-Object { Add-Content $log ("  " + $_.FullName) }
           Add-Content $log "----- 默认数据目录（%LOCALAPPDATA%）-----"
-          Get-ChildItem -Recurse -Force (Join-Path $env:LOCALAPPDATA "CaishenHelper/data") -ErrorAction SilentlyContinue |
+          Get-ChildItem -Recurse -Force (Join-Path $env:LOCALAPPDATA "LuweikDecision/data") -ErrorAction SilentlyContinue |
             Select-Object -First 40 | ForEach-Object { Add-Content $log ("  " + $_.FullName) }
 
           if (-not $report) {
@@ -622,7 +622,7 @@ jobs:
           $report = Get-ChildItem "ci-smoke-data/logs/*.txt" -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $report) {
-            $report = Get-ChildItem (Join-Path $env:LOCALAPPDATA "CaishenHelper/data/logs/*.txt") `
+            $report = Get-ChildItem (Join-Path $env:LOCALAPPDATA "LuweikDecision/data/logs/*.txt") `
               -ErrorAction SilentlyContinue |
               Sort-Object LastWriteTime -Descending | Select-Object -First 1
           }

@@ -1,7 +1,7 @@
 """配置位置迁移的看门人：**老位置有配置、新位置空** 时，`load_config()` 必须读得到。
 
 为什么单独一个文件（2026-09-20 用户实报"新版本同花顺 KEY 配置了仍提示没配"）：
-上一版把配置从"exe 同级"搬到 `%APPDATA%\\CaishenHelper\\config.toml`（为了覆盖安装不丢飞书
+上一版把配置从"exe 同级"搬到 `%APPDATA%\\LuweikDecision\\config.toml`（为了覆盖安装不丢飞书
 配置），并加了一条"老位置 → 新位置"的迁移。但**迁移函数里用了 `logger`，而 `config.py`
 里从来没有定义过它** —— 于是只要走这条迁移路径就抛 `NameError`，而那次调用没有兜底，
 异常一路冒到 `load_config()`（它的承诺是"绝不抛异常"）。**表现就是**：启动时读不到任何
@@ -43,7 +43,7 @@ def _setup_dirs(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
     appdata = tmp_path / "AppData"
     appdata.mkdir()
     monkeypatch.setenv("APPDATA", str(appdata))              # 用户位置（Windows 口径）
-    monkeypatch.delenv("LAOA_TRADER_CONFIG", raising=False)  # 不显式指定路径
+    monkeypatch.delenv("LUWEIK_CONFIG", raising=False)  # 不显式指定路径
     monkeypatch.delenv("HITHINK_FINANCE_API_KEY", raising=False)
     monkeypatch.chdir(legacy_dir)                            # 老位置之一就是"当前目录"
     return legacy_dir, legacy, config_mod.user_config_path()

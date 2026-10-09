@@ -207,10 +207,10 @@ def test_writeback_escapes_windows_data_dir(tmp_path: Path) -> None:
     r"""界面里把数据目录设成 Windows 路径：写回的文件必须还能被解析出来。
 
     这是一条**产品流程**（不是测试自己拼字符串）：`_toml_value()` 会转义反斜杠，
-    所以 `C:\Users\me\CaishenHelper\data` 写进 config.toml 后重新加载必须一字不差。
+    所以 `C:\Users\me\LuweikDecision\data` 写进 config.toml 后重新加载必须一字不差。
     如果哪天有人给 `_toml_value` "优化"掉转义，这里立刻红。
     """
-    win = r"C:\Users\me\AppData\Local\CaishenHelper\data"
+    win = r"C:\Users\me\AppData\Local\LuweikDecision\data"
     target = tmp_path / "config.toml"
     target.write_text(f'data_dir = "{p(tmp_path / "old")}"\n', encoding="utf-8")
     cfg = Config(data_dir=tmp_path, source_path=target)
@@ -318,12 +318,12 @@ def test_unescaped_repo_path_also_breaks_config() -> None:
 # ── "测试不许改宿主机"的守护 ──
 
 def test_writing_the_default_location_is_redirected_into_tmp(tmp_path, monkeypatch) -> None:
-    """写"默认位置"（`path=None`）时，落点必须是 tmp —— 不许写进**这台机器真实的**用户配置。
+    r"""写"默认位置"（`path=None`）时，落点必须是 tmp —— 不许写进**这台机器真实的**用户配置。
 
     为什么单独一条用例看着它：界面里有几处**自动保存**（勾选策略存 `enabled_formulas`、
     拖桌宠存 `pet_x/pet_y`、【保存设置】），而用例里的 `Config(...)` 大多没有 `source_path`，
     于是它们都会走到"默认位置"这条路 —— 在函数内部就是 `user_config_path()`，
-    也就是 `~/.config/caishen-helper/config.toml` / `%APPDATA%\CaishenHelper\config.toml`。
+    也就是 `~/.config/luweik-decision/config.toml` / `%APPDATA%\LuweikDecision\config.toml`。
     实测踩到过：跑一遍界面用例，家目录里多出一份写着 `hithink_api_key = "test-key"` 的配置，
     紧接着 `test_config.py::test_defaults` 因为读到它而红（用例之间就这么串起来了）。
 

@@ -82,7 +82,7 @@ def test_env_overrides_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("HITHINK_FINANCE_API_KEY", "env-key")
     monkeypatch.setenv("TRADE_CAPITAL", "88888")
     monkeypatch.setenv("NOTIFY_TRAY", "false")
-    monkeypatch.setenv("LAOA_RUN_AT", "21:00")
+    monkeypatch.setenv("LUWEIK_RUN_AT", "21:00")
     cfg = load_config(path)
     assert cfg.hithink_api_key == "env-key"
     assert cfg.trade_capital == 88888.0
@@ -151,22 +151,22 @@ def test_explicit_path_that_does_not_exist(tmp_path: Path) -> None:
 
 
 def test_default_data_dir_uses_localappdata(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Windows 默认数据目录 `%LOCALAPPDATA%\\CaishenHelper\\data`。"""
+    """Windows 默认数据目录 `%LOCALAPPDATA%\\LuweikDecision\\data`。"""
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\me\AppData\Local")
     assert config_mod.default_data_dir() == Path(
-        r"C:\Users\me\AppData\Local") / "CaishenHelper" / "data"
+        r"C:\Users\me\AppData\Local") / "LuweikDecision" / "data"
 
 
 def test_default_data_dir_without_localappdata(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.setenv("XDG_DATA_HOME", "/tmp/xdg")
-    assert config_mod.default_data_dir() == Path("/tmp/xdg/CaishenHelper/data")
+    assert config_mod.default_data_dir() == Path("/tmp/xdg/LuweikDecision/data")
 
 
 def test_search_paths_include_env_pointer(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "custom.toml"
     target.write_text('run_at = "07:00"', encoding="utf-8")
-    monkeypatch.setenv("LAOA_TRADER_CONFIG", str(target))
+    monkeypatch.setenv("LUWEIK_CONFIG", str(target))
     cfg = load_config(use_env=False)
     assert cfg.source_path == target
     assert cfg.run_at == "07:00"

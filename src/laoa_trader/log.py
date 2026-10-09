@@ -3,7 +3,7 @@
 为什么不用 logging.basicConfig 了事
 ----------------------------------
 桌面版是双击运行的：出问题时用户看不到控制台，必须有一份**能翻的日志文件**。
-所以这里在 `data_dir/logs/caishen-helper.log` 里留一份（按大小轮转），
+所以这里在 `data_dir/logs/luweik.log` 里留一份（按大小轮转），
 同时打到控制台（开发/CLI 模式用）。
 """
 
@@ -16,6 +16,11 @@ from pathlib import Path
 
 _FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _configured = False
+
+#: 日志文件名（**唯一一处**）：落在 `<数据目录>/logs/` 下。
+#: 为什么单独一个常量：`--doctor` 的自检报告、界面「显示详情」、打包脚本三处都要说
+#: "日志在哪"，各写一份字面量时改一次名就会漏一处（用户拿着旧路径找不到文件）。
+LOG_NAME = "luweik.log"
 
 
 class _SafeStreamHandler(logging.StreamHandler):
@@ -44,7 +49,7 @@ def setup_logging(data_dir: Path | str | None = None, level: int = logging.INFO)
     """配置根 logger（幂等），返回日志文件路径（未写入文件时返回 None）。
 
     Args:
-        data_dir: 数据目录；给了就写 `<data_dir>/logs/caishen-helper.log`。
+        data_dir: 数据目录；给了就写 `<data_dir>/logs/<LOG_NAME>`。
         level: 控制台级别。
 
     Returns:
@@ -68,7 +73,7 @@ def setup_logging(data_dir: Path | str | None = None, level: int = logging.INFO)
         try:
             folder = Path(data_dir) / "logs"
             folder.mkdir(parents=True, exist_ok=True)
-            log_path = folder / "caishen-helper.log"
+            log_path = folder / LOG_NAME
             # 轮转：单文件 2MB × 3 份，桌面场景足够回溯最近几天
             file_handler = logging.handlers.RotatingFileHandler(
                 log_path, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"

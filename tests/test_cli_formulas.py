@@ -88,7 +88,7 @@ def _enable_formulas(monkeypatch, tmp_path, cfg, config_path, formulas: dict[str
     """写公式文件 + 在 **config.toml** 里勾上它们（CLI 读的是文件，不是内存对象）。
 
     2026-09-18（用户要求）起候选只来自勾选的公式，所以走 CLI 的用例必须把
-    `enabled_formulas` 写进配置文件、并把公式目录指过去（`LAOA_TRADER_FORMULAS`）。
+    `enabled_formulas` 写进配置文件、并把公式目录指过去（`LUWEIK_FORMULAS`）。
     小库价格是确定的：600001 = 3.0 元、600003 ≈ 12.4 元 → `C<5` / `C>10` 各选一只。
     """
     from tests._toml import p as toml_path
@@ -99,7 +99,7 @@ def _enable_formulas(monkeypatch, tmp_path, cfg, config_path, formulas: dict[str
         (folder / f"{name}.txt").write_text(
             f"# 名称: {name}\n# 说明: 测试用（{name}）\n{body}\n", encoding="utf-8"
         )
-    monkeypatch.setenv("LAOA_TRADER_FORMULAS", str(folder))
+    monkeypatch.setenv("LUWEIK_FORMULAS", str(folder))
     text = config_path.read_text(encoding="utf-8")
     names = ", ".join(f'"{n}"' for n in formulas)
     config_path.write_text(

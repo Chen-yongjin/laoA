@@ -37,7 +37,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO))                           # 借用 tests/ 里的假数据与假客户端
 
 # 演示用的"家目录"：授权状态、配置文件都落在临时目录里 —— 截图脚本绝不该
-# 往真实用户目录（`~/.config/caishen-helper`、`%APPDATA%\CaishenHelper`）写东西，
+# 往真实用户目录（`~/.config/luweik-decision`、`%APPDATA%\LuweikDecision`）写东西，
 # 否则跑一次脚本就改了本机的授权/试用记账，那是实打实的副作用。
 _DEMO_HOME = Path(tempfile.mkdtemp(prefix="laoa-shots-home-"))
 os.environ["HOME"] = str(_DEMO_HOME)
@@ -732,7 +732,7 @@ def _wait_market(win, app) -> None:
 
 
 def _dump_table(table, title: str) -> None:
-    """把表格的真实单元格值打到 stdout（`LAOA_SHOTS_DEBUG=1` 时启用）。
+    """把表格的真实单元格值打到 stdout（`LUWEIK_SHOTS_DEBUG=1` 时启用）。
 
     为什么要这一层：截图上"数字看着对不对"没法自动化断言，而**肉眼看图**又容易看错
     （离屏渲染的表格缩在小窗里，字很小）。这个开关让"数据对不对"变成可核对的文本输出，
@@ -897,7 +897,7 @@ def main() -> int:
     )):
         win.tabs.setCurrentIndex(index)
         app.processEvents()
-        if os.environ.get("LAOA_SHOTS_DEBUG"):
+        if os.environ.get("LUWEIK_SHOTS_DEBUG"):
             if index == 1:
                 _dump_table(win.pool_table, "自选标的")
             elif index == 2:
@@ -936,7 +936,7 @@ def main() -> int:
         ],
     })
     app.processEvents()
-    if os.environ.get("LAOA_SHOTS_DEBUG"):
+    if os.environ.get("LUWEIK_SHOTS_DEBUG"):
         _dump_table(page.result_table, "匹配结果")
     saved.append(_grab_desktop(win, pet, "07-策略匹配-匹配结果"))
 

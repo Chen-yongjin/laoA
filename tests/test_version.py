@@ -3,7 +3,7 @@
 为什么值得单独测
 ----------------
 分发出去的是一个 exe（用户看不到源码），他报障时说的是"【关于】里写着 v0.1.0"，
-而安装包叫 `CaishenHelper-0.2.0` / 打包脚本读的是 `pyproject.toml` 的 `version`。
+而安装包叫 `LuweikDecision-0.2.0` / 打包脚本读的是 `pyproject.toml` 的 `version`。
 两处一旦漂移，就会出现"界面说这个版本、包是那个版本"的错位 ——
 排查起来极其费劲（而且这种错位没人会主动发现），所以用一条用例钉死。
 """
@@ -191,3 +191,48 @@ def _assert_manifest_points_at_a_real_package(payload: dict) -> None:
         f"站点清单指向的包不在 downloads/ 里：{payload['file']}（那里的包是："
         f"{'、'.join(sorted(present))}）—— 换版本时要把包一起放进去"
     )
+
+
+#: 改名前的**目录名 / slug / 环境变量名**（2026-10-08 第三次改名时按主人要求清干净了）：
+#: "数据与配置目录也该掉，不保留以前名称的痕迹"。它们与产品显示名是两回事 —— 显示名在
+#: `LEGACY_NAMES` 里，这一组是"机器上的落点"，用户看不见却最容易在复制粘贴里活下来。
+STALE_PATH_TOKENS: tuple[str, ...] = (
+    "CaishenHelper", "caishen-helper", "caishen_helper",
+    "LaoATrader", "laoa-trader",
+    "LAOA_TRADER_CONFIG", "LAOA_TRADER_FORMULAS", "LAOA_ENABLED_FORMULAS",
+    "LAOA_RUN_AT", "LAOA_SHOTS_DEBUG",
+)
+
+
+def test_no_traces_of_old_directory_or_env_names() -> None:
+    r"""**旧目录名 / 旧 slug / 旧环境变量名一个都不许剩**（2026-10-08 主人要求）。
+
+    为什么要单独一条：产品显示名有 `test_repo_text_files_do_not_mention_the_legacy_name`
+    看着，但"机器上的落点"（`%LOCALAPPDATA%\...`、`~/.config/...`、`LAOA_*` 环境变量）
+    当时是**故意保持不变**的，于是它们带着更早的名字活了下来。主人确认"没有老用户、
+    只有我一个人在用"之后，这些落点也一并改成了新名字 —— 这条用例防止它们被复制粘贴回来
+    （路径都在注释与文档里，改代码时最容易顺手粘一段旧的）。
+
+    扫的是 `src/`、`docs/`、`tests/`、`build/`、`config.example.toml`、`README.md`、
+    `网站/`。**跳过** `.git`、`__pycache__`、二进制与截图目录，以及**本文件自己**
+    （`STALE_PATH_TOKENS` 就在这个文件里写着，不排除的话它每次都先举报自己）。
+    """
+    roots = [ROOT / "src", ROOT / "docs", ROOT / "tests", ROOT / "build", ROOT / "网站"]
+    offenders: list[str] = []
+    for root in roots:
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix in (".png", ".jpg", ".zip", ".ico", ".pyc"):
+                continue
+            if "__pycache__" in path.parts or path == Path(__file__):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue          # 二进制/读不动的一律跳过（不是我们管的东西）
+            for token in STALE_PATH_TOKENS:
+                if token in text:
+                    offenders.append(f"{path.relative_to(ROOT)}: {token}")
+    for name in ("config.example.toml", "README.md", "pyproject.toml"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        offenders += [f"{name}: {token}" for token in STALE_PATH_TOKENS if token in text]
+    assert not offenders, f"这些地方还留着改名前目录名/环境变量名：{offenders}"

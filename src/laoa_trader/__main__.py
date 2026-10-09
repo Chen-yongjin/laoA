@@ -25,7 +25,7 @@ from laoa_trader import runtime
 from laoa_trader.config import get_config, load_config
 from laoa_trader.data import sync
 from laoa_trader.data.engine import DataEngine
-from laoa_trader.log import get_logger, setup_logging
+from laoa_trader.log import LOG_NAME, get_logger, setup_logging
 from laoa_trader.scheduler import next_run_info, validate_run_times
 
 
@@ -110,7 +110,7 @@ def _doctor(cfg, startup_problem: str = "") -> None:
           f"（{'已存在' if cfg.db_path.exists() else '尚未创建'}）")
     print(f"dump 目录   : {cfg.dump_dir}（{'已存在' if cfg.dump_dir.exists() else '尚未创建'}）")
     # Path(...) 包一层：`data_dir` 可能还是界面传进来的字符串（save_settings 之前）
-    print(f"日志文件    : {Path(cfg.data_dir) / 'logs' / 'caishen-helper.log'}")
+    print(f"日志文件    : {Path(cfg.data_dir) / 'logs' / LOG_NAME}")
     print("-" * 56)
     print(f"同花顺 Key  : {_mask(cfg.hithink_api_key)}")
     # 数据来源现在是一张**可添加的列表**（`data_sources`，顺序即取数优先级）：

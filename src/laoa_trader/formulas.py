@@ -55,7 +55,7 @@ logger = get_logger(__name__)
 FORMULA_DIR_NAME = "formulas"
 
 #: 用户显式指定公式目录的环境变量（换机器、放共享盘、测试都靠它）
-FORMULA_DIR_ENV = "LAOA_TRADER_FORMULAS"
+FORMULA_DIR_ENV = "LUWEIK_FORMULAS"
 
 #: Windows 文件名里**非法**的字符（换成下划线）。顺带把控制字符也挡掉：
 #: 从别处复制来的公式名里偶尔夹着不可见字符，那种文件名在资源管理器里看着是空的。
@@ -153,7 +153,7 @@ def bundled_formula_dir() -> Path | None:
 #: 用户的目录里已经有自己存的公式了 —— 旧规则（"只在空目录复制"）会让那条新公式**永远不出现**；
 #: 而直接"缺哪条补哪条"又会让**用户删掉的那条**每次启动都长回来。
 #: 只有记下"播过哪些"，才分得清"还没给他"与"他不要"。
-SEED_STATE_NAME = ".caishen-seeded.json"
+SEED_STATE_NAME = ".luweik-seeded.json"
 
 #: 改名前的播种记录文件名（2026-09-30 产品改名时留的一行兼容）。
 #: 为什么要认它：这份记录记的是"哪些随包公式已经给过、用户删掉的不许再补"。
@@ -296,7 +296,7 @@ def _seed_samples(target: Path, seeded: set[str]) -> None:
 def _sync_bundled_formulas(target: Path) -> None:
     """随包公式的**一站式同步**：先退役旧的、再逐条补齐缺的，最后把名单落盘。
 
-    为什么合成一个入口：这两件事共用同一份状态文件（`.caishen-seeded.json`），
+    为什么合成一个入口：这两件事共用同一份状态文件（`.luweik-seeded.json`），
     各自读一遍写一遍的话，后写的那次会把前一次刚记下的名字冲掉 ——
     退役名单就会"每轮重新判断"，补齐逻辑也会把退役文件当"还没给过他"补回来。
 
@@ -324,7 +324,7 @@ def formula_dir() -> Path:
 
     查找顺序（与 `config.config_search_paths()` 同一个思路：打包后优先"看得见的位置"）：
 
-    1. 环境变量 `LAOA_TRADER_FORMULAS`（换机器/放共享盘/测试用）；
+    1. 环境变量 `LUWEIK_FORMULAS`（换机器/放共享盘/测试用）；
     2. **打包后**：exe 同级目录下的 `formulas/` —— 用户双击 exe 就放在旁边，
        备份、发给别人、用记事本改都最直观；
     3. **源码运行**：仓库根 `laoA/formulas/`（就是仓库里那份，随包分发的也是它）。
