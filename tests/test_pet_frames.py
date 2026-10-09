@@ -57,15 +57,27 @@ def frames(tmp_path):
 
 @pytest.fixture()
 def use_frames(monkeypatch, frames):
-    """把待机帧挂上去（`action` 传了才有动作帧）。
+    """把某一批帧挂成桌宠的"素材"（`action` = 动作帧，`walk` = 走路帧）。
 
-    ⚠️ 两个都要显式替换：`pet_action_frames()` 内部就是 `pet_frames("act")`，
-    只替换前者的话动作帧会**跟着变成同一批待机图**（第一次跑就踩了：
-    "没有动作帧时应该蹦两下"那条用例因此拿到了动作帧，蹦跳没发生）。
+    ⚠️ 替换的是 **`pet_state_frames(state)`** 这一个入口：桌宠现在是按状态取帧的
+    （`idle`/`walk`/`act`/`think`/`sad`），只替换 `pet_frames` 的话，
+    `pet_state_frames` 会拿着同一个补丁去回答**所有**状态 ——
+    "没有动作帧时应该蹦两下"那条用例因此拿到了动作帧，蹦跳压根没发生（实测踩过）。
     """
-    def _apply(action=None):
-        monkeypatch.setattr(assets_mod, "pet_frames", lambda prefix="pet": frames)
+    def _apply(action=None, walk=None, think=None, sad=None):
+        mapping = {
+            "idle": list(frames),
+            "walk": list(walk or []),
+            "act": list(action or []),
+            "think": list(think or []),
+            "sad": list(sad or []),
+        }
+        monkeypatch.setattr(assets_mod, "pet_state_frames",
+                            lambda state: mapping.get(str(state), []))
+        monkeypatch.setattr(assets_mod, "pet_frames", lambda prefix="pet": [])
         monkeypatch.setattr(assets_mod, "pet_action_frames", lambda: list(action or []))
+        monkeypatch.setattr(assets_mod, "pet_gif", lambda: None)
+        monkeypatch.setattr(assets_mod, "pet_png", lambda: None)
         return frames
 
     return _apply
@@ -153,8 +165,7 @@ def test_animation_pauses_when_the_pet_is_hidden(qapp, use_frames) -> None:
 
 def test_action_frames_play_once_and_then_return_to_idle(qapp, use_frames) -> None:
     """有 `act-*.png` 就播动作帧：播完自动回待机，**不再叠"蹦两下"**（会显乱）。"""
-    action = use_frames(action=None)
-    use_frames(action=action[:2])
+    use_frames(action=use_frames()[:2])
     pet = pet_mod.DesktopPet(None)
     try:
         pet.show()
@@ -291,3 +302,138 @@ def test_pet_window_flags_are_unchanged_by_the_animation(qapp, use_frames) -> No
     finally:
         pet.shutdown()
         pet.close()
+
+
+# ── 4) "平时在桌面右下角活动"与"帧数不要过快"（2026-10-10 主人的两条要求）──
+
+
+def test_frame_interval_is_deliberately_slow() -> None:
+    """**帧数不要过快**（主人原话）：帧间隔不许低于 150ms（约 6.7 帧/秒）。
+
+    这条是"防回归"用的：走路的观感基本由这一个数决定，谁把它调回 100ms 以下，
+    机器人就从"慢慢溜达"变成"抽搐"（实测过）。
+    """
+    assert pet_mod.FRAME_MS >= 150, f"帧间隔 {pet_mod.FRAME_MS}ms 太快了"
+    assert pet_mod.WALK_STEP / (pet_mod.FRAME_MS / 1000.0) <= 30, "走路速度超过 30 像素/秒，太快"
+
+
+def test_walking_moves_along_a_short_range_around_the_anchor(qapp, use_frames) -> None:
+    """走动＝在**锚点附近左右晃**：水平挪、垂直不动、范围有上限。"""
+    idle = use_frames(walk=use_frames())
+    pet = pet_mod.DesktopPet(None)
+    try:
+        pet.show()
+        qapp.processEvents()
+        anchor = (500, 400)
+        pet.set_anchor(*anchor)
+        assert pet.roam_offset() == 0
+
+        pet._roam_dir = 1
+        pet._roam_walk_left = 10
+        for _ in range(10):
+            pet._roam_step()
+        assert pet.roam_offset() == 10 * pet_mod.WALK_STEP
+        assert pet.x() == anchor[0] + 10 * pet_mod.WALK_STEP
+        assert pet.y() == anchor[1], "走动只该在水平方向（右下角那一条上溜达）"
+        assert idle is not None
+
+        # 一直走也不会走出范围：到边界自动掉头
+        pet._roam_walk_left = 500
+        for _ in range(500):
+            pet._roam_step()
+        assert abs(pet.roam_offset()) <= pet_mod.ROAM_RANGE
+        assert anchor[0] - pet_mod.ROAM_RANGE <= pet.x() <= anchor[0] + pet_mod.ROAM_RANGE
+    finally:
+        pet.shutdown()
+        pet.close()
+
+
+def test_walking_uses_the_walk_frames(qapp, use_frames) -> None:
+    """走动时画的是**走路帧**，站着时画待机帧（两套素材各自管一段）。"""
+    use_frames(walk=use_frames())
+    pet = pet_mod.DesktopPet(None)
+    try:
+        pet.show()
+        qapp.processEvents()
+        pet.set_anchor(100, 100)
+        pet._roam_walk_left = 5
+        pet._frame_index = 0
+        assert pet.current_pixmap() is pet._walk_frames[1][0]
+        pet._roam_walk_left = 0
+        assert pet.current_pixmap() is pet._frames[0]
+    finally:
+        pet.shutdown()
+        pet.close()
+
+
+def test_mood_pauses_walking_and_uses_its_own_frames(qapp, use_frames) -> None:
+    """情绪（think / sad）期间不走动，且画自己那一套帧。"""
+    use_frames(think=[], sad=[])
+    # think/sad 用另外两张图，便于断言"现在画的是哪一套"
+    from PySide6.QtGui import QColor as _QColor
+
+    def make(color):
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(_QColor(color))
+        return pixmap
+
+    pet = pet_mod.DesktopPet(None)
+    try:
+        pet.show()
+        qapp.processEvents()
+        pet._states["think"] = [make("#ff00ff")]
+        pet._states["sad"] = [make("#00ffff")]
+        pet.set_anchor(200, 200)
+        pet._roam_walk_left = 5
+        before = pet.x()
+
+        pet.set_mood("think")
+        assert pet.mood() == "think"
+        assert pet.current_pixmap() is pet._states["think"][0]
+        assert pet._roam_walk_left == 0, "思考的时候不该还在踱步"
+        for _ in range(5):
+            pet._anim_step()
+        assert pet.x() == before, "情绪期间窗口不该移动"
+
+        pet.set_mood("止损")          # 认不出来的名字 → 回 idle（不许崩）
+        assert pet.mood() == "idle"
+        assert pet.current_pixmap() is pet._frames[0]     # 待机帧（不是路径列表）
+    finally:
+        pet.shutdown()
+        pet.close()
+
+
+def test_notify_carries_the_kind_into_the_mood(qapp, use_frames) -> None:
+    """提醒类型决定表情：止损/跌破 → 难过；其它 → 平常心。"""
+    use_frames()
+    pet = pet_mod.DesktopPet(None)
+    try:
+        pet.show()
+        qapp.processEvents()
+        pet.notify("测试 600000 止损提醒", kind="止损提醒")
+        assert pet.mood() == "sad"
+        pet.notify("测试 600000 涨停打开", kind="涨停打开")
+        assert pet.mood() == "idle"
+        assert pet._is_bad_news("跌破成本价") is True
+        assert pet._is_bad_news("") is False
+        assert pet._is_bad_news("涨停打开") is False
+    finally:
+        pet.shutdown()
+        pet.close()
+
+
+def test_real_asset_pack_has_every_state() -> None:
+    """真机上（随包素材）五种状态都要读得出来 —— 少一套 = "情绪"那部分静默失效。
+
+    这条用的是**仓库里真实的** `assets/pet/`：主人给的 8 张立绘经
+    `build/make_pet_frames.py` 生成之后就在那儿。
+    """
+    from laoa_trader import assets as real_assets
+
+    counts = {state: len(real_assets.pet_state_frames(state))
+              for state in ("idle", "walk", "act", "think", "sad")}
+    assert counts["idle"] >= 1, counts
+    assert counts["walk"] >= 2, counts          # 走路至少要两帧才叫循环
+    assert counts["act"] >= 1, counts
+    assert counts["think"] >= 1, counts
+    assert counts["sad"] >= 1, counts

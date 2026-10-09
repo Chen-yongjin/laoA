@@ -600,7 +600,9 @@ class Config:
     #: 默认开；这台机器**没有中文音色**时自动不念（英文音色念中文是怪腔怪调）。
     notify_voice: bool = True
     #: 朗读音量（0~1）
-    notify_voice_volume: float = 0.9
+    #: 朗读音量（0~1）。**默认拉满** —— 主人 2026-10-10："有提醒的时候高音量喊出来"。
+    #: 提醒是要在别的窗口里也听得见的，默认小声等于没有这个功能；嫌吵可以调小或整体静音。
+    notify_voice_volume: float = 1.0
     # ⚠️ `notify_voice_rate`（朗读语速）**已于 2026-09-21 删除**：主人说
     # "把播报速度直接锁定1.0吧 不要给选择了 选错了感觉太怪了" ——
     # 语速固定 1.0（= 正常），界面不给控件，老配置里存过的别的值**也不再生效**。
@@ -884,7 +886,7 @@ class Config:
         try:
             self.notify_voice_volume = min(max(float(self.notify_voice_volume), 0.0), 1.0)
         except (TypeError, ValueError):
-            self.notify_voice_volume = 0.9
+            self.notify_voice_volume = 1.0
         self.notify_voice_name = _normalize_voice_name(self.notify_voice_name)
         # 桌宠坐标：负数会让它跑到屏幕外（用户就只能靠改配置文件找回来了），一律当没记过。
         # 0 是"还没拖过"的哨兵值（真实桌面上 x=0 也几乎不可能是用户想要的位置）。

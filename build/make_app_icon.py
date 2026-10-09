@@ -9,8 +9,16 @@
     （ICONDIR + N 个 ICONDIRENTRY + 每张 PNG 的原始字节；≥256 的尺寸在目录项里写 0）。
 
 用法：
-    python build/make_app_icon.py                 # 默认读 ../桌宠2.png
     python build/make_app_icon.py <源图路径>
+    python build/make_app_icon.py <图标源图> --ico-source <exe 用的源图>
+    python build/make_app_icon.py <源图路径> --ico-source <exe 用源图> [--ico-source ...]
+
+**两个源图是有原因的**（2026-10-10 主人给了两份素材）：
+* `icon.png` + `icon-16…256.png` 给**窗口 / 托盘 / 关于页** —— 要**透明底**，
+  深色任务栏与托盘上才不会是一块白方块；
+* `icon.ico` 给 **exe / 桌面快捷方式 / 资源管理器** —— 那里是"完整的一张应用图标"
+  （主人那份 `robot_app_icon.png` 就是满幅方形图标），方形底反而更像正规软件。
+只给一个源图时两者都用它（老行为不变）。
 
 产出（都写进 `src/laoa_trader/assets/`，随包分发）：
     icon.png / icon-16.png … icon-256.png / icon.ico
@@ -133,10 +141,26 @@ def _write_ico(path: Path, entries: list[bytes], sizes: list[int]) -> None:
     path.write_bytes(header + dir_entries + payloads)
 
 
+def _parse_args(argv: list[str]) -> tuple[Path, Path]:
+    """解析"源图 + 可选的 exe 专用源图"。"""
+    rest = list(argv[1:])
+    ico_source: Path | None = None
+    if "--ico-source" in rest:
+        index = rest.index("--ico-source")
+        if index + 1 >= len(rest):
+            raise SystemExit("--ico-source 后面要跟一个路径")
+        ico_source = Path(rest[index + 1]).expanduser()
+        del rest[index:index + 2]
+    source = Path(rest[0]).expanduser() if rest else DEFAULT_SOURCE
+    return source, (ico_source or source)
+
+
 def main(argv: list[str]) -> int:
-    source = Path(argv[1]).expanduser() if len(argv) > 1 else DEFAULT_SOURCE
+    source, ico_source = _parse_args(argv)
     if not source.is_file():
         raise SystemExit(f"找不到源图：{source}")
+    if not ico_source.is_file():
+        raise SystemExit(f"找不到 exe 图标源图：{ico_source}")
     # QPainter（画布合成）需要一个应用实例；这里用 QApplication 而不是 QGuiApplication ——
     # 离屏平台下 QGuiApplication 会直接段错误（实测），与测试里那套一致
     QApplication.instance() or QApplication([])
@@ -153,12 +177,18 @@ def main(argv: list[str]) -> int:
             (ASSETS / f"icon-{size}-full.png").write_bytes(_png_bytes(_render(source, size)))
         if size == 256:
             (ASSETS / "icon.png").write_bytes(blob)
-    picked = [blob for size, blob in zip(SIZES, blobs, strict=True) if size in ICO_SIZES]
+    # .ico 可以从**另一个**源图来（见模块说明：托盘要透明、exe 要完整方形图标）
+    if ico_source != source:
+        picked = [_png_bytes(_render(ico_source, size, cropped=size <= SMALL_CROP_MAX))
+                  for size in ICO_SIZES]
+    else:
+        picked = [blob for size, blob in zip(SIZES, blobs, strict=True) if size in ICO_SIZES]
     _write_ico(ASSETS / "icon.ico", picked, list(ICO_SIZES))
     for size, blob in zip(SIZES, blobs, strict=True):
         print(f"  {size:>3}px  {len(blob):>6} B"
               + ("（裁剪版，另存 icon-%d-full.png 供对比）" % size if size <= SMALL_CROP_MAX else ""))
-    print(f"{source.name} → {ASSETS}/icon.png + icon-*.png + icon.ico"
+    print(f"{source.name} → {ASSETS}/icon.png + icon-*.png"
+          + (f"；{ico_source.name} → icon.ico" if ico_source != source else " + icon.ico") + " "
           f"（PNG {len(SIZES)} 档：{', '.join(str(s) for s in SIZES)}；"
           f"ICO {len(ICO_SIZES)} 档：{', '.join(str(s) for s in ICO_SIZES)}）")
     return 0

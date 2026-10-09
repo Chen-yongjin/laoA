@@ -31,12 +31,27 @@ from laoa_trader import runtime
 #: 资源目录名（与本文件同级）
 _ASSETS_NAME = "assets"
 
-#: 桌宠序列帧所在的子目录（`assets/pet/`）与文件前缀。
-#: 约定：`pet-1.png`、`pet-2.png`… 是**待机循环**；`act-1.png`、`act-2.png`… 是
-#: **有消息时播一次**的动作（没有就退回"蹦两下"）。见 `docs/桌宠素材.md`。
+#: 桌宠序列帧所在的子目录（`assets/pet/`）与各状态的前缀。
+#: 一套素材长这样（见 `docs/桌宠素材.md`、生成脚本 `build/make_pet_frames.py`）：
+#:   `idle-*` 待机、`walk-*` 走路循环（"平时在桌面右下角活动"靠它）、
+#:   `act-*` 有提醒时播一遍的动作、`think-*` 干活中、`sad-*` 亏了/止损。
+#: `pet-*` 是**旧前缀**（最初的单套待机帧），继续认，等价于 `idle-*`。
 PET_DIR_NAME = "pet"
 PET_FRAME_PREFIX = "pet"
 PET_ACTION_PREFIX = "act"
+PET_WALK_PREFIX = "walk"
+PET_IDLE_PREFIX = "idle"
+PET_THINK_PREFIX = "think"
+PET_SAD_PREFIX = "sad"
+
+#: 状态名 → 候选前缀（按顺序取第一个有帧的）
+PET_STATES: dict[str, tuple[str, ...]] = {
+    "idle": (PET_IDLE_PREFIX, PET_FRAME_PREFIX),
+    "walk": (PET_WALK_PREFIX,),
+    "act": (PET_ACTION_PREFIX,),
+    "think": (PET_THINK_PREFIX,),
+    "sad": (PET_SAD_PREFIX,),
+}
 
 
 def assets_dir() -> Path:
@@ -123,7 +138,20 @@ def pet_frames(prefix: str = PET_FRAME_PREFIX) -> list[Path]:
 
 def pet_action_frames() -> list[Path]:
     """桌宠"来消息了"的动作帧（`assets/pet/act-*.png`）；没有就返回空列表。"""
-    return pet_frames(PET_ACTION_PREFIX)
+    return pet_state_frames("act")
+
+
+def pet_state_frames(state: str) -> list[Path]:
+    """按**状态名**取帧：`idle` / `walk` / `act` / `think` / `sad`（认不出来返回空列表）。
+
+    为什么要状态名而不是让界面自己拼前缀：状态与文件名的对应关系只有这一处，
+    以后加一个状态（比如"睡"）只改 `PET_STATES`，界面那边一行都不用动。
+    """
+    for prefix in PET_STATES.get(str(state).strip().lower(), ()):
+        frames = pet_frames(prefix)
+        if frames:
+            return frames
+    return []
 
 
 def pet_gif() -> Path | None:

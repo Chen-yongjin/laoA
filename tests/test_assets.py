@@ -191,22 +191,31 @@ def test_large_icon_has_real_content() -> None:
     assert height >= px.height * 0.6, f"内容太矮（{height}/{px.height}）"
 
 
-def test_opaque_pixels_keep_the_brand_red() -> None:
-    """**颜色不能被稀释**：可见像素的平均色必须是"红橙"，不能变成暗红或灰白。
+#: 图标主色的"参考值"（每档都要跟它在一个色系里）。
+#: 2026-10-10 起图标是主人给的机器人立绘（蓝灰系）；改素材时**只改这一个常量**，
+#: 判断逻辑不用动 —— 原来那版是写死"红橙"的，换素材就会红。
+BRAND_RGB = (81, 104, 131)
+#: 每一档的平均色与参考色允许差多少（0~255 的曼哈顿距离）
+BRAND_TOLERANCE = 90
 
-    注意分工：这条管**颜色**（有没有被白底/透明稀释成浅粉或压成发黑），
+
+def test_opaque_pixels_keep_the_artwork_color() -> None:
+    """**颜色不能被稀释**：可见像素的平均色要与素材的主色同系（不能变浅粉或压成黑）。
+
+    注意分工：这条管**颜色**（有没有被白底/透明稀释、有没有被缩暗），
     "内容有没有被贴淡"由上面的覆盖率用例管（`alpha_composite` 与 `paste(mask=…)`
     的区别正是"不透明像素少了 8 倍"，那条会红）。
+    参考色来自素材本身（`BRAND_RGB`），不是写死某个颜色 —— 素材换代时改那一个常量。
     """
     for name in ("icon-256.png", "icon-32.png", "icon-16.png"):
         px = Pixels(assets.assets_dir() / name)
         opaque = [px.rgba(x, y)[:3] for x, y in _opaque_pixels(px)]
         assert opaque, f"{name} 没有不透明像素"
-        r = sum(c[0] for c in opaque) / len(opaque)
-        g = sum(c[1] for c in opaque) / len(opaque)
-        b = sum(c[2] for c in opaque) / len(opaque)
-        assert r > 150, f"{name} 的红色被缩暗了（平均 R={r:.0f}）"
-        assert r > g > b, f"{name} 的主色不是红橙（{r:.0f},{g:.0f},{b:.0f}）"
+        avg = tuple(sum(c[i] for c in opaque) / len(opaque) for i in range(3))
+        distance = sum(abs(avg[i] - BRAND_RGB[i]) for i in range(3))
+        assert distance <= BRAND_TOLERANCE, (
+            f"{name} 的平均色 {tuple(round(v) for v in avg)} 离素材主色 {BRAND_RGB} 太远"
+            f"（距离 {distance:.0f} > {BRAND_TOLERANCE}）：像被白底或透明稀释过")
 
 
 def test_large_icon_has_transparent_rounded_corners() -> None:

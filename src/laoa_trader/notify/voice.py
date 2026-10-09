@@ -633,7 +633,7 @@ def speak(text: str, *, cfg: Any = None) -> bool:
     item = {
         "text": body,
         "voice": chosen_voice(cfg),
-        "volume": float(getattr(cfg, "notify_voice_volume", 0.9) or 0.9),
+        "volume": float(getattr(cfg, "notify_voice_volume", 1.0) or 1.0),
         # 语速锁定 1.0（配置里已经没有这个键了；以前会读 `notify_voice_rate`）
         "rate": RATE_LOCKED,
     }
@@ -725,7 +725,7 @@ def _loop() -> None:
                 text, voice = item["text"], item["voice"]
                 volume, rate = item["volume"], item["rate"]
             else:                      # 老格式（纯文本）：走默认参数
-                text, voice, volume, rate = str(item), None, 0.9, 1.0
+                text, voice, volume, rate = str(item), None, 1.0, 1.0
             if muted() or voice is None:
                 continue
             run_command(_speak_command(text, voice=voice, volume=volume,
@@ -745,7 +745,7 @@ def _no_window_flag() -> int:
 
 
 def _speak_command(text: str, *, voice: str | None = None,
-                   volume: float = 0.9, rate: int = 0) -> list[str]:
+                   volume: float = 1.0, rate: int = 0) -> list[str]:
     """拼出"念一句话"的 PowerShell 命令（**纯函数**，测试直接断言它）。
 
     PowerShell 单引号字符串里 `'` 要写成 `''`（否则用户的股票名里带个引号就把命令拼坏）。
@@ -794,7 +794,7 @@ class _VoiceOverride:
         self.notify_voice_name = str(getattr(base, "notify_voice_name", "") or "")
         self.notify_voice_volume = (
             float(volume) if volume is not None
-            else float(getattr(base, "notify_voice_volume", 0.9) or 0.9)
+            else float(getattr(base, "notify_voice_volume", 1.0) or 1.0)
         )
         # 语速锁定 1.0：调用方传进来的值一律忽略（保留形参只为兼容旧调用点）
         self.notify_voice_rate = RATE_LOCKED
@@ -853,7 +853,7 @@ def speak_now(text: str, *, cfg: Any = None, force: bool = False,
         run_command(_speak_command(
             body,
             voice=chosen_voice(cfg),
-            volume=float(getattr(cfg, "notify_voice_volume", 0.9) or 0.9),
+            volume=float(getattr(cfg, "notify_voice_volume", 1.0) or 1.0),
             rate=rate_to_sapi(RATE_LOCKED),
         ))
     except Exception as exc:  # noqa: BLE001

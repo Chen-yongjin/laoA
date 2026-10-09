@@ -42,9 +42,10 @@ from laoa_trader.ui import desktop_pet as pet_mod            # noqa: E402
 
 OUT_DIR = REPO / "docs" / "桌宠动态预览"
 
-#: `--demo` 造几帧 / 帧间隔（毫秒）
+#: `--demo` 造几帧；帧间隔默认跟程序一致（`pet_mod.FRAME_MS`），
+#: 这样预览的节奏与真机上看到的完全一样（主人要求"帧数不要过快"）
 DEMO_FRAMES = 8
-DEMO_MS = 120
+DEMO_MS = pet_mod.FRAME_MS
 #: `--demo` 的幅度：上下浮动像素与缩放百分比。
 #: 刻意很小 —— 桌宠是常驻桌面的，动作大了会抢注意力（主人要的是"活的"，不是"跳的"）
 DEMO_BOB = 4.0
@@ -80,6 +81,39 @@ def _make_demo_frames(count: int = DEMO_FRAMES) -> list[Path]:
     return made
 
 
+def _draw_state_sheet(states: dict[str, list[Path]]) -> Path | None:
+    """把五种状态各取一帧拼成一张图（"素材都齐了没、每种长什么样"一眼看全）。"""
+    from PySide6.QtGui import QFont
+
+    labels = {"idle": "待机", "walk": "走路（平时活动）", "act": "有提醒", "think": "干活中", "sad": "亏了/止损"}
+    picked = [(labels.get(key, key), value[0]) for key, value in states.items() if value]
+    if not picked:
+        return None
+    side = 200
+    gap = 10
+    canvas = QImage(side * len(picked) + gap * (len(picked) + 1),
+                    side + 40, QImage.Format.Format_ARGB32_Premultiplied)
+    canvas.fill(QColor("#111318"))
+    painter = QPainter(canvas)
+    try:
+        font = QFont()
+        font.setPointSizeF(font.pointSizeF() + 1.0)
+        painter.setFont(font)
+        painter.setPen(QColor("#e9e9ee"))
+        for index, (text, path) in enumerate(picked):
+            left = gap + index * (side + gap)
+            painter.drawPixmap(left, gap, QPixmap(str(path)).scaled(
+                side, side, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+            painter.drawText(left, side + 30, text)
+    finally:
+        painter.end()
+    path = OUT_DIR / "状态一览.png"
+    canvas.save(str(path), "PNG")
+    print(f"状态一览：{path.relative_to(REPO)}")
+    return path
+
+
 def _grab_frames(frames: list[Path], ms: int) -> tuple[list[QImage], QImage]:
     """把桌宠按帧抓成图片（走**真实控件**，所以看到的和装进程序里的一样）。"""
     from laoa_trader.ui import desktop_pet as pet_mod_local
@@ -113,24 +147,35 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="桌宠动图预览")
     parser.add_argument("--demo", action="store_true",
                         help="用现在的静态图程序化造一套帧（没有素材时看效果用）")
-    parser.add_argument("--ms", type=int, default=DEMO_MS, help="帧间隔（毫秒）")
+    parser.add_argument("--no-sheet", action="store_true",
+                        help="不出「五种状态一览」那张图")
+    parser.add_argument("--ms", type=int, default=DEMO_MS,
+                        help=f"帧间隔（毫秒），默认 {DEMO_MS}（与程序一致）")
     args = parser.parse_args()
 
     app = QApplication.instance() or QApplication([])
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    states: dict[str, list[Path]] = {}
     if args.demo:
         frames = _make_demo_frames()
+        states["walk"] = frames
         print(f"演示帧：{len(frames)} 张 → {frames[0].parent.relative_to(REPO)}")
     else:
-        frames = assets_mod.pet_frames() or assets_mod.pet_action_frames()
+        for state in ("idle", "walk", "act", "think", "sad"):
+            states[state] = assets_mod.pet_state_frames(state)
+        # 动图用**走路那一套**（"平时在右下角活动"就是它）；没有就走待机
+        frames = states.get("walk") or states.get("idle") or []
         if not frames:
             single = assets_mod.pet_png()
             if single is None:
                 raise SystemExit("没有任何桌宠素材（assets/pet/ 或 pet.png 都没有）")
             print("只有单张素材 → 出静态预览；想看动态请先放序列帧或用 --demo")
             frames = [single]
+        print("各状态帧数：" + "、".join(f"{k} {len(v)}" for k, v in states.items() if v))
 
+    if states and not args.no_sheet:
+        _draw_state_sheet(states)
     shots, first = _grab_frames(frames, args.ms)
     still = OUT_DIR / "桌宠预览-单帧.png"
     first.save(str(still), "PNG")

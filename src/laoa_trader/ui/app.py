@@ -5923,6 +5923,9 @@ if QT_AVAILABLE:
             y = int(getattr(self.cfg, "pet_y", 0) or 0)
             if x > 0 or y > 0:
                 pet.move(x, y)
+                # ⚠️ 必须告诉小家伙"你的落点在这" —— 走动是在**锚点**附近左右溜达的
+                # （见 `DesktopPet._roam_step`），不设锚点它就一动不动（第一次跑就踩了）
+                pet.set_anchor(x, y)
                 return
             screen = None
             try:
@@ -5932,8 +5935,12 @@ if QT_AVAILABLE:
             if screen is None:
                 return
             area = screen.availableGeometry()
-            pet.move(max(0, area.right() - pet.width() - 24),
-                      max(0, area.bottom() - pet.height() - 24))
+            # 没存过位置 → 屏幕**右下角**（避开任务栏留 24 像素），并把它作为走动锚点：
+            # 主人 2026-10-10："宠物平时在桌面右下角活动"
+            default_x = max(0, area.right() - pet.width() - 24)
+            default_y = max(0, area.bottom() - pet.height() - 24)
+            pet.move(default_x, default_y)
+            pet.set_anchor(default_x, default_y)
 
         def _announce(self, items: list[dict]) -> None:
             """桌宠冒气泡 + 中文朗读（念什么、念哪几样、多条怎么办都由设置页那三组勾选决定）。
@@ -5961,7 +5968,10 @@ if QT_AVAILABLE:
             pet = self._ensure_pet()
             if pet is not None:
                 try:
-                    pet.notify(self._announce_text(newest, extra=extra))
+                    # 带上提醒类型：亏了的那种（止损/跌破）让小家伙摆出 sad 表情，
+                    # 其余回到 idle —— 素材给了两套表情，情绪总得有个来处
+                    pet.notify(self._announce_text(newest, extra=extra),
+                               kind=str(newest.get("kind") or ""))
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(f"桌宠冒泡失败：{exc}")
             if multi == "all" and len(allowed) > 1:
@@ -6073,7 +6083,7 @@ if QT_AVAILABLE:
             text = self._announce_text(item)
             pet = self._ensure_pet()
             if pet is not None:
-                pet.notify(text)
+                pet.notify(text, kind=str(item.get("kind") or ""))
             self._start_alert_flash()
             # 朗读：**用户点了按钮就是想听**，所以 `force=True`（不受"静音"影响）——
             # 静音的意思是"别被盘中提醒打扰"，不是"我点它也不许出声"。
@@ -6768,6 +6778,15 @@ if QT_AVAILABLE:
             """
             self._job_running = bool(visible)
             self.progress.setVisible(bool(visible))
+            # 桌宠：有任务在跑就摆出"思考"的样子（主人给的素材里有 think 那一套帧）。
+            # 放在这里而不是散在各处调用点：`_set_progress_visible` 是"任务在不在跑"的
+            # 唯一开关，情绪跟着它走就不会出现"任务早完了，小家伙还在思考"。
+            pet = getattr(self, "pet", None)
+            if pet is not None:
+                try:
+                    pet.set_mood("think" if visible else "idle")
+                except Exception as exc:  # noqa: BLE001 - 桌宠是锦上添花，不许拖累主流程
+                    logger.debug(f"切桌宠情绪失败：{exc}")
 
         def _run_worker(self, fn, label: str, with_progress: bool = False,
                         with_stage: bool = False, with_note: bool = False) -> None:

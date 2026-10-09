@@ -357,8 +357,14 @@ def test_opaque_asset_falls_back_to_the_rounded_card(qapp, tmp_path) -> None:
 
 def test_pet_falls_back_to_a_drawn_face_when_the_asset_is_missing(
         qapp, monkeypatch: pytest.MonkeyPatch) -> None:
-    """素材缺失（打包漏了/被删了）时**不能开不起来** —— 退化成手画的小家伙。"""
+    """素材缺失（打包漏了/被删了）时**不能开不起来** —— 退化成手画的小家伙。
+
+    2026-10-10 起桌宠有五种状态帧（`assets/pet/`），所以"没有素材"要把**所有**
+    入口都清空：只清 `pet_png` 的话，真机上那套序列帧照样会被读到（实测踩过）。
+    """
     monkeypatch.setattr(pet_mod.assets, "pet_png", lambda: None)
+    monkeypatch.setattr(pet_mod.assets, "pet_state_frames", lambda state: [])
+    monkeypatch.setattr(pet_mod.assets, "pet_gif", lambda: None)
 
     widget = DesktopPet()
     try:
@@ -404,10 +410,18 @@ def test_a_pet_that_has_nothing_to_do_runs_no_timer(qapp) -> None:
     pet.close()
 
 
-def test_the_hop_timer_stops_when_the_animation_is_over(qapp) -> None:
-    """蹦跳动画**结束后必须把定时器停掉**（不是一直跑着等下一次）。"""
+def test_the_hop_timer_stops_when_the_animation_is_over(qapp, monkeypatch) -> None:
+    """蹦跳动画**结束后必须把定时器停掉**（不是一直跑着等下一次）。
+
+    这里刻意把**动作帧清空**：有 `act-*` 素材时"来消息"改成播动作帧、根本不蹦跳
+    （见 `hop()`），那就测不到"蹦跳定时器会停"这件事了 —— 这条管的是**没有动作帧**
+    的那条老路（用户换素材之前就是它）。
+    """
     import time
 
+    real_state_frames = pet_mod.assets.pet_state_frames
+    monkeypatch.setattr(pet_mod.assets, "pet_state_frames",
+                        lambda state: [] if state == "act" else real_state_frames(state))
     pet = DesktopPet()
     pet.show()
     pet.hop(times=2)

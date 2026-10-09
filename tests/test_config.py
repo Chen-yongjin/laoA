@@ -861,7 +861,7 @@ def test_default_pet_and_voice_are_on() -> None:
     cfg = load_config(use_env=False)
     assert cfg.notify_pet is True
     assert cfg.notify_voice is True
-    assert cfg.notify_voice_volume == 0.9        # 「大声喊」
+    assert cfg.notify_voice_volume == 1.0        # 「大声喊」（2026-10-10 起默认拉满）
     assert cfg.notify_voice_name == ""           # 空 = 自动挑中文音色
     # `notify_voice_rate` 已于 2026-09-21 删除（语速锁定 1.0，界面不给选）
     assert not hasattr(cfg, "notify_voice_rate")
@@ -893,7 +893,7 @@ def test_pet_and_voice_keys_are_validated(tmp_path: Path) -> None:
     path.write_text('notify_voice_volume = "响"\nnotify_voice_rate = "快"\n',
                     encoding="utf-8")
     cfg = load_config(path=path, use_env=False)
-    assert cfg.notify_voice_volume == 0.9 and not hasattr(cfg, "notify_voice_rate")
+    assert cfg.notify_voice_volume == 1.0 and not hasattr(cfg, "notify_voice_rate")
 
 
 def test_the_legacy_voice_rate_key_no_longer_has_any_effect(tmp_path: Path) -> None:
@@ -958,7 +958,7 @@ def test_fresh_install_defaults_for_voice_and_pet(tmp_path: Path) -> None:
     assert not hasattr(cfg, "notify_voice_rate"), "语速键已删除（语速锁定 1.0）"
     assert cfg.notify_pet is True, "全新安装桌宠应当默认开启"
     assert cfg.notify_voice is True
-    assert cfg.notify_voice_volume == 0.9        # "大声喊"，默认 90%
+    assert cfg.notify_voice_volume == 1.0        # "大声喊"，默认 100%
     assert cfg.notify_voice_name == ""           # 自动挑中文音色
 
 

@@ -32,6 +32,7 @@ from PySide6.QtCore import QEvent, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from laoa_trader.data import storage  # noqa: E402
+from laoa_trader.ui import desktop_pet as pet_mod  # noqa: E402
 from laoa_trader.notify import sound, voice  # noqa: E402
 
 
@@ -668,3 +669,27 @@ def test_settings_page_has_no_rate_control(window) -> None:
     # 也没有带 "×" 后缀的倍率控件（那是原来语速框的特征）
     for box in window.findChildren(QDoubleSpinBox) + window.findChildren(QSpinBox):
         assert "×" not in box.suffix(), f"还有个倍率控件：{box.suffix()}"
+
+
+def test_pet_gets_an_anchor_and_roams_there(window, qapp) -> None:
+    """桌宠**会动起来**：主窗口摆好它之后必须给一个"落点"（锚点），否则它一动不动。
+
+    为什么单拎一条：走动是在**锚点附近左右溜达**（见 `DesktopPet._roam_step`），
+    而锚点只由两件事设置 —— 主窗口摆位、用户拖动。第一版就漏了"主窗口摆位"那一处，
+    结果桌宠站得笔直（功能看着像没做）。这条把那个洞钉死。
+    """
+    pet = window._ensure_pet()
+    assert pet is not None
+    qapp.processEvents()
+    anchor = pet._anchor
+    assert anchor is not None, "主窗口摆好桌宠之后必须给它一个走动锚点"
+    assert anchor == (pet.x(), pet.y())
+
+    # 让它走一段：位置要在锚点附近变化，且**垂直方向不动**（右下角那一条上溜达）
+    pet._roam_dir = 1
+    pet._roam_walk_left = 5
+    for _ in range(5):
+        pet._roam_step()
+    assert pet.roam_offset() != 0
+    assert pet.y() == anchor[1]
+    assert abs(pet.roam_offset()) <= pet_mod.ROAM_RANGE

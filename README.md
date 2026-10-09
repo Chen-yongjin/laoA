@@ -270,7 +270,7 @@ laoA/
 | `notify_popup` / `notify_popup_seconds` / `notify_popup_max_items` | `false` / `8` / `5` | 右下角自绘浮窗（默认关） |
 | `notify_sound` / `notify_flash_seconds` | `true` / `6` | 提示音；图标闪烁秒数（0 = 不闪） |
 | `notify_pet` / `pet_x` / `pet_y` | `true` / `0` / `0` | 桌宠开关与位置（0 = 还没拖过，用屏幕右下角） |
-| `notify_voice` / `notify_voice_volume` / `notify_voice_name` | `true` / `0.9` / `""` | 语音朗读、音量、音色（`""` 自动 / `female` / `male`） |
+| `notify_voice` / `notify_voice_volume` / `notify_voice_name` | `true` / `1.0` / `""` | 语音朗读、音量、音色（`""` 自动 / `female` / `male`） |
 | `voice_kinds` / `voice_fields` / `voice_multi` | `[]` / 名称+代码+类型+现价 / `newest` | 播报内容：念哪些类型（空 = 全念）/ 一句里念哪几样 / 多条怎么念 |
 
 **盘中**

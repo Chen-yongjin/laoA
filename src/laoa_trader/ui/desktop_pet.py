@@ -57,6 +57,7 @@
 
 from __future__ import annotations
 
+import random
 from typing import Any
 
 from laoa_trader import assets
@@ -83,9 +84,19 @@ BUBBLE_SECONDS = 8
 HOP_HEIGHT = 12
 HOP_TIMES = 2
 
-#: 序列帧的播放间隔（毫秒）。8 帧两秒左右一圈是"呼吸感"最舒服的一档：
-#: 再快像在抽搐，再慢看不出在动（真机上定不下来时改这一个数就够）
-FRAME_MS = 120
+#: 序列帧的播放间隔（毫秒）。**2026-10-10 主人明确要求"帧数不要过快"**：
+#: 180ms ≈ 5.5 帧/秒 —— 走路三帧一圈 0.54 秒，看着像"慢慢溜达"；
+#: 再快（120ms 那档）在这个机器人素材上像抽搐，再慢（300ms 以上）又像卡住了。
+FRAME_MS = 180
+
+#: 走路时每一帧横向挪几像素（配合 FRAME_MS：3px / 180ms ≈ 17px/秒，慢慢走）
+WALK_STEP = 3
+#: "在桌面右下角活动"的范围：以用户摆的位置为锚点，左右各晃这么多像素。
+#: 不左右乱跑的原因见 `_roam_step` 的说明（它是常驻桌面的，不是玩具）
+ROAM_RANGE = 120
+#: 走一段、站一会儿：分别是"走几帧"与"歇几帧"的范围（随机取，免得像节拍器）
+ROAM_WALK_FRAMES = (6, 16)
+ROAM_REST_FRAMES = (8, 22)
 
 try:  # Qt 缺失时不该 import 就炸（与 ui/app.py 同一个约定）
     from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QTimer, Signal
@@ -97,6 +108,7 @@ try:  # Qt 缺失时不该 import 就炸（与 ui/app.py 同一个约定）
         QPainter,
         QPainterPath,
         QPixmap,
+        QTransform,
     )
     from PySide6.QtWidgets import QLabel, QMenu, QWidget
 
@@ -153,10 +165,23 @@ if QT_AVAILABLE:
             self.setFixedSize(self.size_, self.size_ + BUBBLE_HEIGHT)
             #: 素材（没有素材时是 None → 手画降级，见 `_load_assets`）
             self._pixmap = None
+            #: 各状态的帧：`idle` / `walk` / `act` / `think` / `sad`（没有的状态就是空表）
+            self._states: dict[str, list[Any]] = {}
             #: 待机序列帧（只有一张时长度为 1；GIF 时为空、走 `_movie`）
             self._frames: list[Any] = []
             #: "来消息了"的动作帧（没有就退回蹦两下）
             self._action_frames: list[Any] = []
+            #: 走路帧（含左右两个朝向：往左走时用镜像，不然会"倒着走"）
+            self._walk_frames: dict[int, list[Any]] = {1: [], -1: []}
+            #: 现在的情绪（`idle` / `think` / `sad`）：think = 有任务在跑，sad = 亏了/止损
+            self._mood = "idle"
+            #: 走动状态：还剩几帧要走 / 还剩几帧要歇 / 朝向 / 离锚点多少像素
+            self._roam_walk_left = 0
+            self._roam_rest_left = 0
+            self._roam_dir = 1
+            self._roam_offset = 0
+            #: 窗口的锚点（用户摆的位置）；走动只在这个锚点附近晃，不改锚点
+            self._anchor: tuple[int, int] | None = None
             #: GIF（`assets/pet.gif`）用的播放器；没有就是 None
             self._movie: Any = None
             self._frame_index = 0
@@ -226,12 +251,20 @@ if QT_AVAILABLE:
             无论走哪条路，`self._pixmap` 都是**第一帧** —— 尺寸、透明底判据、拖动与
             气泡逻辑因此一行都不用改（静态素材走的还是老路，用例也照旧）。
             """
-            self._frames = self._pixmaps(assets.pet_frames())
-            self._action_frames = self._pixmaps(assets.pet_action_frames())
+            for state in ("idle", "walk", "act", "think", "sad"):
+                self._states[state] = self._pixmaps(assets.pet_state_frames(state))
+            # `walk` 没有就退回用 idle 帧走（至少会平移，不至于"人在走、图不动"）
+            walk = self._states["walk"] or self._states["idle"]
+            self._walk_frames = {1: walk, -1: [self._mirror(frame) for frame in walk]}
+            self._action_frames = self._states["act"]
+            self._frames = self._states["idle"]
             if self._frames:
                 self._pixmap = self._frames[0]
-                logger.info(f"桌宠形象：序列帧 {len(self._frames)} 帧"
-                            f"（动作帧 {len(self._action_frames)} 帧）")
+                logger.info(
+                    "桌宠形象：待机 %d 帧 / 走路 %d 帧 / 动作 %d 帧（think %d、sad %d）"
+                    % (len(self._frames), len(self._states["walk"]),
+                       len(self._action_frames), len(self._states["think"]),
+                       len(self._states["sad"])))
                 return
             gif = assets.pet_gif()
             if gif is not None:
@@ -249,6 +282,13 @@ if QT_AVAILABLE:
             self._pixmap = self._load_pet()
             if self._pixmap is not None:
                 self._frames = [self._pixmap]
+
+        @staticmethod
+        def _mirror(pixmap: Any) -> Any:
+            """左右镜像一张帧（素材只画了朝右走，往左走时翻过来用）。"""
+            return pixmap.transformed(
+                QTransform().scale(-1.0, 1.0),
+                Qt.TransformationMode.SmoothTransformation)
 
         @staticmethod
         def _pixmaps(paths: list[Any]) -> list[Any]:
@@ -388,18 +428,104 @@ if QT_AVAILABLE:
                     self._frame_index = 0        # 动作播完回到待机第一帧
                 self.update()
                 return
-            self._frame_index = (self._frame_index + 1) % len(self._frames)
+            # 拖动的过程中不许自己走（鼠标还按着它却往前挪，手感像在抢）
+            if self._mood == "idle" and self._drag_from is None:
+                self._roam_step()
+            count = len(self._current_frame_set()) or 1
+            self._frame_index = (self._frame_index + 1) % count
             self.update()
 
+        def _current_frame_set(self) -> list[Any]:
+            """现在这一套帧（与 `current_pixmap` 同一套判据，供帧计数用）。"""
+            if self._action_left > 0 and self._action_frames:
+                return self._action_frames
+            mood = self._states.get(self._mood) or []
+            if self._mood != "idle" and mood:
+                return mood
+            if self._roam_walk_left > 0:
+                frames = self._walk_frames.get(self._roam_dir) or []
+                if frames:
+                    return frames
+            return self._frames
+
         def current_pixmap(self) -> Any:
-            """当前该画的那一张（动作帧 > GIF 当前帧 > 待机第 N 帧 > 单张图）。"""
+            """当前该画的那一张（动作帧 > 情绪帧 > 走路帧 > 待机帧 > GIF > 单张图）。"""
             if self._action_left > 0 and self._action_frames:
                 return self._action_frames[self._frame_index % len(self._action_frames)]
+            mood = self._states.get(self._mood) or []
+            if self._mood != "idle" and mood:
+                return mood[self._frame_index % len(mood)]
+            if self._roam_walk_left > 0:
+                frames = self._walk_frames.get(self._roam_dir) or []
+                if frames:
+                    return frames[self._frame_index % len(frames)]
             if self._movie is not None:
                 return self._movie.currentPixmap()
             if self._frames:
                 return self._frames[self._frame_index % len(self._frames)]
             return self._pixmap
+
+        # ── 情绪与走动 ───────────────────────────────────────────────
+
+        def mood(self) -> str:
+            """当前情绪：`idle` / `think`（有任务在跑）/ `sad`（亏了、止损）。"""
+            return self._mood
+
+        def set_mood(self, mood: str) -> None:
+            """切情绪（认不出来的名字按 `idle` 处理）。
+
+            `think` / `sad` 期间**不走动**（一边踱步一边"思考"只会让人分心），
+            帧表用各自那一套；没有对应素材的素材包在这里自动退回待机帧。
+            """
+            value = str(mood or "").strip().lower()
+            if value not in ("idle", "think", "sad"):
+                value = "idle"
+            if value == self._mood:
+                return
+            self._mood = value
+            self._frame_index = 0
+            if value != "idle":
+                self._roam_walk_left = 0
+                self._roam_rest_left = 0
+            self._sync_anim_timer()
+            self.update()
+
+        def set_anchor(self, x: int, y: int) -> None:
+            """记下"用户把我摆在哪"（走动的锚点）—— 换显示器/缩放时由主窗口重摆。"""
+            self._anchor = (int(x), int(y))
+            self._roam_offset = 0
+
+        def roam_offset(self) -> int:
+            """现在离锚点偏了多少像素（测试与排查用）。"""
+            return int(self._roam_offset)
+
+        def _roam_step(self) -> None:
+            """走一帧：**只在锚点附近左右晃**，不改用户在 config 里存的位置。
+
+            为什么限制范围而不是满屏乱跑：桌宠是**常驻桌面**的（用户开着别的工作也在），
+            满屏移动会一直抢注意力；"在右下角活动"要的是"它在动"，不是"它在逛"。
+            范围与步长见 `ROAM_RANGE` / `WALK_STEP`。
+            """
+            if self._roam_walk_left > 0:
+                self._roam_walk_left -= 1
+                self._roam_offset += self._roam_dir * WALK_STEP
+                if abs(self._roam_offset) >= ROAM_RANGE:
+                    self._roam_offset = max(-ROAM_RANGE, min(ROAM_RANGE, self._roam_offset))
+                    self._roam_dir = -self._roam_dir      # 到头了就掉头
+                if self._anchor is not None:
+                    self.move(self._anchor[0] + self._roam_offset, self._anchor[1])
+                if self._roam_walk_left == 0:
+                    self._roam_rest_left = random.randint(*ROAM_REST_FRAMES)
+                return
+            if self._roam_rest_left > 0:
+                self._roam_rest_left -= 1
+                return
+            low, high = ROAM_WALK_FRAMES
+            self._roam_walk_left = random.randint(low, high)
+            if abs(self._roam_offset) >= ROAM_RANGE - WALK_STEP:
+                self._roam_dir = -1 if self._roam_offset > 0 else 1
+            elif random.random() < 0.3:
+                self._roam_dir = -self._roam_dir
 
         def showEvent(self, event: Any) -> None:      # noqa: N802 - Qt 命名
             super().showEvent(event)
@@ -438,11 +564,25 @@ if QT_AVAILABLE:
             if self._hop_left <= 0:
                 self._hop_timer.stop()
 
-        def notify(self, text: str, *, hop: bool = True) -> None:
-            """来消息了：冒气泡 + 蹦两下（**声音由调用方负责** —— 这里只显示）。"""
+        def notify(self, text: str, *, hop: bool = True, kind: str = "") -> None:
+            """来消息了：冒气泡 + 动一下（**声音由调用方负责** —— 这里只显示）。
+
+            `kind` 是提醒类型（"止损提醒" / "涨停打开"…）：**亏了那种**让小家伙变 "sad"，
+            其余回到 "idle" —— 素材给了 sad / think 两套表情，情绪总得有个来处。
+            """
             self.show_bubble(text)
+            self.set_mood("sad" if self._is_bad_news(kind) else "idle")
             if hop:
                 self.hop()
+
+        @staticmethod
+        def _is_bad_news(kind: str) -> bool:
+            """这条提醒是不是"坏消息"（止损/跌破/亏损）—— 判据就是类型里的几个词。
+
+            宁可漏判（当成普通提醒）也别乱判：把"涨停打开"划成坏消息，用户会以为程序在哭。
+            """
+            text = str(kind or "")
+            return any(word in text for word in ("止损", "跌破", "亏", "风险"))
 
         # ── 右键菜单 ─────────────────────────────────────────────────
 
@@ -505,9 +645,13 @@ if QT_AVAILABLE:
                 self.move(event.globalPosition().toPoint() - self._drag_from)
 
         def mouseReleaseEvent(self, event: Any) -> None:    # noqa: N802
-            """松手才写配置：拖动过程中每移动一像素都写盘是浪费。"""
+            """松手才写配置：拖动过程中每移动一像素都写盘是浪费。
+
+            顺带把**走动锚点**挪到用户放手的地方 —— 他把它摆到哪，它就在那附近活动。
+            """
             if self._drag_from is not None and event.button() == Qt.MouseButton.LeftButton:
                 self._drag_from = None
+                self.set_anchor(self.x(), self.y())
                 self.moved.emit(int(self.x()), int(self.y()))
 
         def mouseDoubleClickEvent(self, event: Any) -> None:   # noqa: N802
