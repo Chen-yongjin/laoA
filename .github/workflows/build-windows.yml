@@ -545,6 +545,34 @@ jobs:
           # ↑ 标题也要一起改：`gh release edit --notes` **只改说明、不动标题**，所以改名
           # （换产品名）之前建的那个 Release 标题一直挂着旧名字
           # （2026-10-08 发现：附件与说明都已是新的，标题还是旧产品名）。
+
+          # ── 清掉**旧名字**的附件（主人 2026-10-09："从 workflow 加上清除旧资产"）──
+          # 这个产品换过两次 ASCII 名（LaoniuTrader → CaishenTrader → LuweikDecision），
+          # 而滚动 Release 是**长期存在**的那一个：不清理的话，下载页面上会同时挂着
+          # 三个产品的包（用户根本不知道该点哪个）。
+          # 判据用**前缀**而不是写死那几个文件名：以后再改名时，只改下面这一行前缀即可；
+          # `LuweikDecision*` 与作者专用的 `keygen.zip` 一律不碰。
+          $stale = @("CaishenTrader", "LaoniuTrader")
+          $names = gh release view $tag --json assets --jq '.assets[].name' 2>$null
+          $pruned = @()
+          foreach ($name in $names) {
+            $hit = $false
+            foreach ($prefix in $stale) { if ($name -like "$prefix*") { $hit = $true } }
+            if (-not $hit) { continue }
+            gh release delete-asset $tag $name --yes 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              $pruned += $name
+              Write-Host "已删掉旧名字的附件：$name"
+            } else {
+              # 删不掉不影响发布（权限/网络侧的事），但要说出来 —— 别让"以为清干净了"
+              Write-Host "::warning::旧附件 $name 没删掉（不影响这次发布，可在网页上手动删）"
+            }
+          }
+          if ($pruned.Count -gt 0) {
+            # 单独一个文件：下面的 `meta.txt` 是 `Set-Content` 整体重写的，
+            # 这里 Add-Content 进去会被覆盖掉（踩过一次）
+            "release_pruned=" + ($pruned -join ",") | Set-Content pruned-assets.txt
+          }
           Write-Host "::notice::已挂到 Release：https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/LuweikDecision.zip"
 
       - name: 打 tag 时创建 Release
@@ -613,6 +641,8 @@ jobs:
           # 构建日志只留尾部 200 行（nuitka.log 可能很大，全推会把 ci-log 分支吹起来）
           if (Test-Path nuitka.log) { Get-Content nuitka.log -Tail 200 | Set-Content ci-log/build-tail.log }
           if (Test-Path zip-meta.txt) { Get-Content zip-meta.txt | Add-Content ci-log/meta.txt }
+          # 这一轮清掉了哪些旧名字的附件（见 release 那一步）：写进 meta 便于事后核对
+          if (Test-Path pruned-assets.txt) { Get-Content pruned-assets.txt | Add-Content ci-log/meta.txt }
           # 报告文件本身也留一份（exe 的输出在 GUI 子系统下拿不到，这份是它自己写的）。
           # ⚠️ **先取冒烟那一步自己的数据目录**，只有它没有时才去默认数据目录找：
           # 默认目录里可能混进**跑测试时**写的那一份（`--doctor` 用例在配置解析失败时
