@@ -1,4 +1,4 @@
-"""「消息」窗口（仿 QQ 的消息列表）+ 匹配完成那条消息的测试。
+"""「消息」窗口（仿 QQ 的消息列表）+ 筛选完成那条消息的测试。
 
 用户 2026-09-18 的原话
 ----------------------
@@ -9,7 +9,7 @@
 * 未读怎么算（关着的时候来的算未读、开着的时候看过的算已读）；
 * **打开即已读**（窗口一显示，未读清零、主窗口停闪）；
 * 点一条看详情、【全部已读】【清空】的行为；
-* 匹配完成也会进同一个列表（`kind="pool"`，走既有的 `intraday_alert` 表）；
+* 筛选完成也会进同一个列表（`kind="pool"`，走既有的 `intraday_alert` 表）；
 * 飞书那条路**没被改坏**（用户明确要求保留，见 `tests/test_notify.py`）。
 
 这些只有把控件真的建出来才测得到，所以用 Qt 的 `offscreen` 平台在无显示器环境里跑。
@@ -195,11 +195,11 @@ def test_row_cap_keeps_the_newest(center) -> None:
     assert center.messages()[0]["symbol"] == f"{MAX_ROWS + 4:06d}"
 
 
-# ── 匹配完成那条消息（走既有的 intraday_alert 表）──
+# ── 筛选完成那条消息（走既有的 intraday_alert 表）──
 
 
 def test_pool_message_is_recorded_once_per_content(tmp_path: pathlib.Path) -> None:
-    """匹配完成写进 `intraday_alert`（`kind="pool"`）：同一批内容只留一条，换了内容才是第二条。"""
+    """筛选完成写进 `intraday_alert`（`kind="pool"`）：同一批内容只留一条，换了内容才是第二条。"""
     from laoa_trader.config import Config
     from laoa_trader.scheduler import _record_pool_message
 
@@ -228,14 +228,14 @@ def test_pool_message_is_recorded_once_per_content(tmp_path: pathlib.Path) -> No
 
 
 def test_pool_message_shows_as_selection_result(center) -> None:
-    """「匹配完成」在列表里显示成「匹配结果」，不是 `pool-3f2a…` 那串内部键。"""
+    """「筛选完成」在列表里显示成「筛选结果」，不是 `pool-3f2a…` 那串内部键。"""
     from laoa_trader.ui import app as ui_app
 
     # 标的列的写法由主窗口那个转换函数决定（`symbol` 是内容指纹，不是股票代码）
     target = ui_app.MainWindow._alert_target_text(
         {"symbol": "pool-3f2ac91b02", "kind": intraday.KIND_POOL}, {}
     )
-    assert target == "匹配结果"
+    assert target == "筛选结果"
 
     center.set_messages([_item(symbol="pool-3f2ac91b02", kind=intraday.KIND_POOL,
                                when=f"{DAY} 15:05:00",

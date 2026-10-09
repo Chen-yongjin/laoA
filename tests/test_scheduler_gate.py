@@ -17,7 +17,7 @@
 2. **本地数据 `needs_full`** → 跳过，同样不写标记 —— 所以数据下好之后
    当天仍然会补跑一次（用户预期："下完就该自动选一次"）。
 
-手动入口（界面【立即匹配并建池】、CLI `--once`）走同一口径：**明确拒绝 + 指路**，
+手动入口（界面【立即筛选并建池】、CLI `--once`）走同一口径：**明确拒绝 + 指路**，
 而不是"静默跑出个空池子"。
 
 全部离线：合成小库 + 假客户端，不联网（另有 `conftest._block_network` 兜底）。
@@ -283,7 +283,7 @@ def test_needs_incremental_without_auto_download_still_runs(cfg, monkeypatch,
 
     为什么这样定：落后几个交易日的数据**是可用的**（自检就把它当"能用但不新鲜"），
     所以不该像 `needs_full` 那样整轮跳过；而日更流程的第一步本来就是增量同步，
-    于是"先补数据再匹配"这个顺序天然成立。区别只在日志里说清
+    于是"先补数据再筛选"这个顺序天然成立。区别只在日志里说清
     "没有因为 auto_download_on_start=false 而额外去补数据"。
     """
     cfg.auto_run = True            # `auto_run` 默认已关；这条验的是闸门与顺序
@@ -472,8 +472,8 @@ def test_stale_helper_produces_expected_lag(cfg) -> None:
 
 # ── 6) 桌面导出：建池成功后写一份到桌面；导出失败**不影响**匹配 ──
 #
-# 用户要求："匹配结果直接进自选标的……（也可以同时 output 一个文件到桌面）"。
-# 导出挂在 `run_daily` 里**建池成功之后**（三条路——界面【开始匹配】、定时日更、
+# 用户要求："筛选结果直接进自选标的……（也可以同时 output 一个文件到桌面）"。
+# 导出挂在 `run_daily` 里**建池成功之后**（三条路——界面【开始筛选】、定时日更、
 # CLI `--once`——都经过它），所以这里用真的 `run_daily` 跑一遍钉住接线。
 #
 # **一律注入 `export_dir=tmp_path`**：不注入就会去找真桌面
@@ -502,7 +502,7 @@ def _patch_formulas(monkeypatch) -> None:
 
 
 def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_path) -> None:
-    """建池成功 → 往 `<export_dir>/luweik-匹配结果-<今天>.txt` 写一份结果。
+    """建池成功 → 往 `<export_dir>/luweik-筛选结果-<今天>.txt` 写一份结果。
 
     文件里的数量/每一行都与**这一轮**的池子对得上，标题里带行情日；
     状态栏（`stage_cb`）还要收到那句"结果已导出到 <路径>"（用户明确要求写了就说）。
@@ -520,21 +520,21 @@ def test_run_daily_exports_the_pool_to_the_injected_dir(cfg, monkeypatch, tmp_pa
     assert report["export_path"], report
     path = Path(report["export_path"])
     assert path.parent == desk and desk.is_dir()
-    assert path.name.startswith("luweik-匹配结果-")
+    assert path.name.startswith("luweik-筛选结果-")
     assert path.name.endswith(".txt")
-    # 文件名带日期（用户给定：`luweik-匹配结果-2026-09-18.txt`）
-    assert path.name == f"luweik-匹配结果-{_today()}.txt"
+    # 文件名带日期（用户给定：`luweik-筛选结果-2026-09-18.txt`）
+    assert path.name == f"luweik-筛选结果-{_today()}.txt"
     # 状态栏也说了这一句（界面上的 `_set_status` 就是接在这个回调上的）
     assert f"结果已导出到 {path}" in stages, stages
 
     text = path.read_text(encoding="utf-8-sig")
     lines = text.splitlines()
-    assert lines[0] == f"luweik · 匹配结果 · {_today()}（行情日 {report['data_date']}）"
+    assert lines[0] == f"luweik · 筛选结果 · {_today()}（行情日 {report['data_date']}）"
     assert lines[1] == f"共 {len(report['pool'])} 只（策略 1 · 自选 0）"
     assert "1. 反转样本(600001)" in lines[2]
     assert "现价" in lines[2]                        # 库里有收盘价 → 写上现价
     assert lines[-1] == pool.EXPORT_FOOTER
-    # 2026-09-21（主人要求"匹配结果不自动加入股池"）：**选出来的票不再落库** ——
+    # 2026-09-21（主人要求"筛选结果不自动加入股池"）：**选出来的票不再落库** ——
     # 导出是附赠产物，池子只留自选。所以这里断言"库里是空的、而导出的文件里是有的"。
     assert set(pool.pool_symbols(cfg.db_path)) == set()
     assert {row["symbol"] for row in report["pool"]} == {"600001"}
@@ -545,7 +545,7 @@ def test_export_failure_does_not_break_the_pipeline(cfg, monkeypatch, tmp_path,
     """导出抛异常 → 匹配/建池照旧跑完，原因进 `report["errors"]`（**不静默**）。
 
     删掉 `run_daily` 里那圈 try/except，这个用例就会红：异常会从这里冒出去，
-    `report` 根本拿不到 —— 而用户点的是一次【开始匹配】，不该因为桌面写不出去
+    `report` 根本拿不到 —— 而用户点的是一次【开始筛选】，不该因为桌面写不出去
     就没匹配。"记日志 + 说出来"是这一条的完整要求，只记日志不说也不行。
     """
     _ready_db(cfg)
@@ -560,13 +560,13 @@ def test_export_failure_does_not_break_the_pipeline(cfg, monkeypatch, tmp_path,
                              with_data=False, export_dir=tmp_path / "桌面")
 
     assert report["pool"], "导出失败不该影响建池"
-    # 匹配结果不再自动进池，所以"库里有行"这件事要靠自选；这里只要求建池本身没被影响
+    # 筛选结果不再自动进池，所以"库里有行"这件事要靠自选；这里只要求建池本身没被影响
     assert {row["symbol"] for row in report["pool"]} == {"600001"}
     assert report["export_path"] is None
     errors = "\n".join(report["errors"])
     assert "导出桌面文件" in errors and "RuntimeError" in errors
     text = messages(log_records)
-    assert "导出匹配结果失败（不影响匹配与推送）" in text
+    assert "导出筛选结果失败（不影响筛选与推送）" in text
     assert "桌面写不出去（模拟）" in text
 
 

@@ -653,7 +653,7 @@ def cli(argv: list[str] | None = None) -> int:
     if args.once:
         from laoa_trader.scheduler import data_gate, run_daily
 
-        # 数据闸门（与界面【开始匹配】、调度线程同一口径）：
+        # 数据闸门（与界面【开始筛选】、调度线程同一口径）：
         # 没数据就跑公式 = 选出错的票，所以这里明确拒绝并返回非零退出码
         gate = data_gate(cfg, DataEngine(cfg.db_path))
         if not gate["ok"]:
@@ -667,7 +667,7 @@ def cli(argv: list[str] | None = None) -> int:
         # 那是**默认的正常状态**。
         enabled = [str(n) for n in (getattr(cfg, "enabled_formulas", None) or [])]
         if enabled:
-            print("本次按勾选的策略匹配：" + "、".join(enabled))
+            print("本次按勾选的策略筛选：" + "、".join(enabled))
         else:
             print("没有勾选任何策略（enabled_formulas 为空）：本次只处理自选标的")
 

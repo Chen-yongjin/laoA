@@ -228,15 +228,15 @@ def test_window_renders_all_panels(window, qapp) -> None:
     assert [window.tabs.tabText(i) for i in range(5)] == list(ui_app.TAB_TITLES)
     # 2026-09-17：第一个页签从「全市概览」改回「大盘概览」（用户要求）——
     # 凡是按标题找页面的地方（截图脚本、`tabs.indexOf`、这条断言）都跟着改
-    assert list(ui_app.TAB_TITLES) == ["大盘概览", "自选标的", "持仓监控", "策略匹配",
+    assert list(ui_app.TAB_TITLES) == ["大盘概览", "自选标的", "持仓监控", "策略筛选",
                                        "系统设置"]
     assert ui_app.TAB_MARKET == "大盘概览"
     # 概览页是第一个页签（启动就停在它上面）：看盘第一眼要扫到
     assert window.tabs.widget(0) is window.market_page
     assert window.tabs.currentWidget() is window.market_page
-    # 「策略匹配」页里挂着公式编辑器（页面本身是"标题行 + 编辑器"的外壳）
-    assert window.tabs.tabText(window.tabs.indexOf(_tab_page(window, "策略匹配"))) == "策略匹配"
-    assert window.formula_page.parent() is _tab_page(window, "策略匹配")
+    # 「策略筛选」页里挂着公式编辑器（页面本身是"标题行 + 编辑器"的外壳）
+    assert window.tabs.tabText(window.tabs.indexOf(_tab_page(window, "策略筛选"))) == "策略筛选"
+    assert window.formula_page.parent() is _tab_page(window, "策略筛选")
 
     # 两张表都填好了：池子 1 只（seeded 里 600002 是策略标的）、持仓 1 只
     assert window.pool_table.rowCount() == 1
@@ -263,7 +263,7 @@ def test_title_area_is_one_row_and_progress_hides_when_idle(window, qapp) -> Non
     """标题区：软件名 · 运行状态 + 两个按钮，**没有那一排操作按钮**；进度条平时不显示。
 
     改版的核心一条就是这里：原来"三行状态 + 七个按钮"，同一件事说三遍，
-    而且【下载数据】和【开始匹配】并排 —— 用户点错是迟早的事。
+    而且【下载数据】和【开始筛选】并排 —— 用户点错是迟早的事。
     """
     # 标题区那一行里就是：软件名 / 分隔符 / "运行状态：" / 状态文本 / 【显示详情】【关于软件】
     assert window.app_title_label.text() == ui_app.APP_NAME
@@ -419,7 +419,7 @@ def test_status_area_never_shows_pipes_or_internal_terms(window, qapp, monkeypat
     win = window
     cases = {
         "正常": lambda: None,
-        "瞬时消息": lambda: win._set_status("✅ 开始匹配完成：池子 18 只"),
+        "瞬时消息": lambda: win._set_status("✅ 开始筛选完成：池子 18 只"),
         "下载中": lambda: (state.begin_download(), win.progress.setValue(42)),
         "落后": lambda: setattr(
             win, "preflight_result",
@@ -512,7 +512,7 @@ def test_buttons_are_short_with_full_tooltips(window, qapp) -> None:
 
     改版后按钮不再集中在一排：标题区只剩【显示详情】【关于软件】，
     数据那三个（下载/刷新/检查盘面）+【暂停提醒】在「系统设置」，
-    【开始匹配】在「策略匹配」 —— 这条用例就是钉住"一处只管一件事"。
+    【开始筛选】在「策略筛选」 —— 这条用例就是钉住"一处只管一件事"。
     """
     win = window
     top = [win.btn_details, win.btn_about]
@@ -528,9 +528,9 @@ def test_buttons_are_short_with_full_tooltips(window, qapp) -> None:
     from laoa_trader import hints
     assert (win.btn_download.text(), win.btn_details.text()) \
         == (ui_app.BTN_DOWNLOAD_TEXT, ui_app.BTN_DETAILS_TEXT)
-    assert win.btn_run.text() == ui_app.BTN_START_TEXT == hints.BTN_RUN_TEXT == "开始匹配"
+    assert win.btn_run.text() == ui_app.BTN_START_TEXT == hints.BTN_RUN_TEXT == "开始筛选"
 
-    # **归属**：数据那三个在「系统设置」页、匹配在「策略匹配」页、两个全局按钮在标题区
+    # **归属**：数据那三个在「系统设置」页、匹配在「策略筛选」页、两个全局按钮在标题区
     settings = _tab_page(win, ui_app.TAB_SETTINGS)
     formula_tab = _tab_page(win, ui_app.TAB_FORMULA)
     for button in data_row:
@@ -868,7 +868,7 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     五组由用户给定（`SETTINGS_GROUPS`）：数据来源 → 通知方式 → 竞价扫描 →
     **T策略** → 其他。T策略那一组是用户拍板的名字（原来叫「持仓风险」，用户要求把
     止损/止盈合并进来，原话：止盈止损比例给客户自己设置，在 T策略 中编辑）。
-    策略组/成员策略的启停**不在这一页**（按规格移到「策略匹配」的列表里）。
+    策略组/成员策略的启停**不在这一页**（按规格移到「策略筛选」的列表里）。
     「盘中使用实时数据」也**不在这一页、且全程序没有这个开关**：那是内置规则，
     主人 2026-09-23 明确划掉（"不需要加开关，按照我说的规则来"）——
     见 `test_no_switch_can_disable_the_intraday_caliber`（`tests/test_formula_lib.py`）。
@@ -1003,7 +1003,7 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
         assert len(box.toolTip()) >= 10                       # 每个阈值都写清"跟谁比、比多少"
     # 这七个控件**确实在「T策略」组里**（止损/止盈是用户要求合并进来的，
     # 只断言"窗口上有这些控件"是不够的 —— 它们可能在别的组里）。
-    # ⚠️ 按**组名**取，不要按下标：组会增减（2026-09-23 一度在它前面插过「匹配口径」，
+    # ⚠️ 按**组名**取，不要按下标：组会增减（2026-09-23 一度在它前面插过「筛选口径」，
     # 当天又被主人划掉 —— "不需要加开关，按照我说的规则来"）
     t_group = window.settings_sections["T策略"]
     assert t_group.title_label.text() == "T策略"
@@ -1226,7 +1226,7 @@ def test_pool_empty_label_visible_only_when_pool_empty(window, qapp, monkeypatch
 
     assert window.pool_table.rowCount() == 0
     assert window.pool_empty_label.isVisible() is True
-    assert "【开始匹配】" in window.pool_empty_label.text()
+    assert "【开始筛选】" in window.pool_empty_label.text()
     assert "自选" in window.pool_empty_label.text()
     assert window.pool_count_label.text() == "共 0 只（策略 0 · 自选 0）"
 
@@ -2201,7 +2201,7 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     # 39 → 38：2026-09-21 删掉"数字逐位念"开关 `notify_voice_digits`，
     # 主人原话："价格逐位不需要有选项，直接按我说的做就行了"；
     # 38 → 37：同一天删掉语速键 `notify_voice_rate`（"把播报速度直接锁定 1.0 吧"）。
-    # 2026-09-23 一度加过 `intraday_pick_live`（「匹配口径」那一组），当天又被主人划掉
+    # 2026-09-23 一度加过 `intraday_pick_live`（「筛选口径」那一组），当天又被主人划掉
     # ——"不需要加开关，按照我说的规则来"，所以个数回到 37；
     # 37 → 40：2026-10-05 加上语音播报内容那三项（`voice_kinds` / `voice_fields` /
     # `voice_multi`）—— 主人："语音播报有点乱，可以自由选择要提醒的内容"）
@@ -2385,10 +2385,10 @@ def test_save_settings_refuses_and_names_the_offending_item(window, seeded, qapp
 def test_formula_page_button_runs_the_pipeline_through_its_signal(
     seeded, qapp, monkeypatch
 ) -> None:
-    """**点页面那个【开始匹配】按钮** → 走 `start_pick_requested` → 到 `on_run_pipeline`。
+    """**点页面那个【开始筛选】按钮** → 走 `start_pick_requested` → 到 `on_run_pipeline`。
 
     这条是按契约收尾的验收（B2b 的页面只 emit 信号，流程在主窗口）：
-    - 同一页**只有一个**【开始匹配】（主窗口不许再自带一个，两个同名按钮没法解释哪个真的跑）；
+    - 同一页**只有一个**【开始筛选】（主窗口不许再自带一个，两个同名按钮没法解释哪个真的跑）；
     - 按钮**点到流程入口只走一条路**：点一次只能跑一轮（信号 + 直连=两条路会跑两轮，
       这条断言就是防那个）；
     - `btn_run` 指向页面那个按钮（托盘菜单/主题/测试都按这个名字找它）。
@@ -2402,10 +2402,10 @@ def test_formula_page_button_runs_the_pipeline_through_its_signal(
     win.show()
     qapp.processEvents()
     try:
-        # 这一页里的【开始匹配】按钮**只有一个**，而且就是页面自己那个
+        # 这一页里的【开始筛选】按钮**只有一个**，而且就是页面自己那个
         formula_tab = _tab_page(win, ui_app.TAB_FORMULA)
         buttons = [b for b in formula_tab.findChildren(QPushButton)
-                   if b.text() == "开始匹配"]
+                   if b.text() == "开始筛选"]
         assert len(buttons) == 1, [b.text() for b in buttons]
         assert buttons[0] is win.formula_page.btn_start_pick
         assert win.btn_run is buttons[0]
@@ -2506,11 +2506,11 @@ def test_test_connection_button_is_wired_and_never_dead(window, qapp) -> None:
 
 
 def test_pick_result_is_shown_on_the_formula_page_again(window, qapp) -> None:
-    """匹配跑完 → 结果**显示在「策略匹配」页的结果页上**（用户 2026-09-18 改的口径）。
+    """匹配跑完 → 结果**显示在「策略筛选」页的结果页上**（用户 2026-09-18 改的口径）。
 
     口径变过一次，两个日期都写在这里（免得下一个人以为哪一版是漏改）：
     2026-09-17 用户要求"这一页只显示策略，不显示结果"；2026-09-18 改成
-    "匹配状态时，策略列表界面变为匹配结果界面（平时隐藏），结果可以一键加入自选和导出"。
+    "匹配状态时，策略列表界面变为筛选结果界面（平时隐藏），结果可以一键加入自选和导出"。
 
     所以这条盯两件事：① 主窗口跑完 → 结果确实进了结果表、页面切到结果页；
     ② 主窗口对"没有这个方法的页面"仍然容错（`getattr` 老写法不许退化）。
@@ -2521,11 +2521,11 @@ def test_pick_result_is_shown_on_the_formula_page_again(window, qapp) -> None:
         "pool": [
             {"symbol": "600002", "name": "半导体甲", "strategy": "公式·放量上攻",
              "strategies": "公式·放量上攻"},
-            # 纯自选行（没有来源策略）→ 不算"本次匹配结果"
+            # 纯自选行（没有来源策略）→ 不算"本次筛选结果"
             {"symbol": "300750", "name": "电池龙头", "strategy": "", "strategies": ""},
         ],
     }
-    window._on_pipeline_done("开始匹配", report)      # 主窗口调它：不许抛
+    window._on_pipeline_done("开始筛选", report)      # 主窗口调它：不许抛
     qapp.processEvents()
 
     page = window.formula_page
@@ -2535,7 +2535,7 @@ def test_pick_result_is_shown_on_the_formula_page_again(window, qapp) -> None:
 
     # 结论照旧进运行状态（用户照样知道"跑完了、选出了几只"）
     text = window.status_label.fullText()
-    assert "开始匹配完成" in text and "池子 2 只" in text
+    assert "开始筛选完成" in text and "池子 2 只" in text
 
     # 主窗口是**容错调用**的：另一个模块没提供这个方法时不该让流程报错
     class NoResultPage:
@@ -2545,7 +2545,7 @@ def test_pick_result_is_shown_on_the_formula_page_again(window, qapp) -> None:
     original = window.formula_page
     window.formula_page = NoResultPage()
     try:
-        window._on_pipeline_done("开始匹配", report)     # 不抛异常
+        window._on_pipeline_done("开始筛选", report)     # 不抛异常
     finally:
         window.formula_page = original
 
@@ -2621,7 +2621,7 @@ def test_test_notify_uses_current_widgets_without_saving(window, qapp, monkeypat
 def test_run_pipeline_button_runs_in_background_and_is_idempotent(window, qapp,
                                                                   monkeypatch,
                                                                   seeded) -> None:
-    """【立即匹配并建池】：后台线程跑完整流程，写 signal/stock_pool，不崩界面。"""
+    """【立即筛选并建池】：后台线程跑完整流程，写 signal/stock_pool，不崩界面。"""
     from laoa_trader import scheduler as sched
 
     monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
@@ -2648,7 +2648,7 @@ def test_run_pipeline_button_runs_in_background_and_is_idempotent(window, qapp,
         signals = conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0]
         pool_rows = conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0]
     assert signals > 0 and pool_rows > 0
-    assert "立即匹配并建池完成" in window.status_label.fullText()
+    assert "立即筛选并建池完成" in window.status_label.fullText()
     assert "池子" in window.status_label.fullText()
 
     # 第二次点：幂等（行数不变），且不重复推送
@@ -2662,7 +2662,7 @@ def test_run_pipeline_button_runs_in_background_and_is_idempotent(window, qapp,
 
 
 def test_refresh_data_button_only_syncs(window, qapp, monkeypatch, seeded) -> None:
-    """【只刷新数据】：跑同步、不匹配、不推送；同步失败也要有中文结论。"""
+    """【只刷新数据】：跑同步、不筛选、不推送；同步失败也要有中文结论。"""
     from laoa_trader import scheduler as sched
 
     calls: list[str] = []
@@ -2998,7 +2998,7 @@ def test_download_without_api_key_shows_inline_hint_not_dialog(window, qapp,
     # 公开源退回兜底）——只说"缺 Key"会让人以为整个程序用不了
     assert "大盘概览" in win.key_hint.text()                     # 免 Key 兜底仍然可看
     assert "行情" in win.key_hint.text()
-    assert "匹配要 Key" in win.key_hint.text()                   # 但匹配确实要它
+    assert "筛选要 Key" in win.key_hint.text()                   # 但匹配确实要它
     assert "自动" in win.key_hint.text()                         # 当天的行情仍会自动落库
     assert "系统设置" in win.status_label.fullText()
     # 在 config.toml 里写好 Key（老用户的做法）→ 提示收掉，再点就能下载
@@ -3654,7 +3654,7 @@ def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp
         assert "主力净额" not in semi_tip
         # 那行小字（`note_label`）：口径 + 快照时间 + **缺什么**都写在上面。
         # 板块榜那一趟在测试环境里必然取不到（socket 封死）→ 退回**本地口径**：
-        # 涨停家数还有（本地涨停池，与匹配同一套），缺的只有主力净额 ——
+        # 涨停家数还有（本地涨停池，与筛选同一套），缺的只有主力净额 ——
         # 这行小字就是原来那句"本地口径 / 主力净额取不到"的接任者，必须说准是**哪一项**。
         assert market_window.market_sectors["source"] == "local"
         hot_note = hot.note_label
@@ -5436,7 +5436,7 @@ def test_pipeline_status_explains_why_nothing_was_pushed(window, qapp) -> None:
     它随 Python 策略引擎一起删掉了；老报告里带着 `push_skipped_kind="filtered"`
     也不该让界面出错 —— 那种报告只可能来自老版本，这里顺手钉住容错。）
     """
-    window._on_pipeline_done("开始匹配", {
+    window._on_pipeline_done("开始筛选", {
         "data_date": "2026-09-11",
         "pool": [{"symbol": "600001"}], "picks": 2, "signals": 2,
         "pushed": False,
@@ -5448,7 +5448,7 @@ def test_pipeline_status_explains_why_nothing_was_pushed(window, qapp) -> None:
     assert "未重复推送" in text
 
     # 老版本报告里的 filtered 原因：界面照旧把它显示出来（不崩、不吞）
-    window._on_pipeline_done("开始匹配", {
+    window._on_pipeline_done("开始筛选", {
         "pool": [{"symbol": "600002"}], "picks": 1, "signals": 1, "pushed": False,
         "push_skipped": "（老版本）另有 1 只只由「依赖开盘」的策略选出",
         "push_skipped_kind": "filtered",
@@ -5501,7 +5501,7 @@ def test_deleting_a_watchlist_row_that_is_also_in_todays_pool_removes_it_now(
 def test_deleting_a_symbol_added_from_the_result_page_removes_it_now(
     window, seeded, qapp,
 ) -> None:
-    """从匹配结果页点【加入自选】的票：删了也要**当场消失**（2026-10-08 实报的那个 bug 的另一半）。
+    """从筛选结果页点【加入自选】的票：删了也要**当场消失**（2026-10-08 实报的那个 bug 的另一半）。
 
     这一类带着"当初是哪条策略选出来的"（`watchlist.source_strategy`），所以池子行里
     **也有策略名**。按"有没有策略名"判"今天被没被选中"会把它当成策略标的留下来，

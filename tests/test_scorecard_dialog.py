@@ -16,7 +16,7 @@
    少了这两行，一个 +3% 可以来自 10 年，也可以来自 20 个交易日）；
 6. **后台与收尾**：计算在 `QThread` 里跑（主线程不阻塞）、【取消计算】要能停下、
    **还在跑的时候关窗不许把进程带走**；
-7. **入口在「策略匹配」页上**：有【成绩单】按钮、tooltip 说清代价、点了会打开对话框。
+7. **入口在「策略筛选」页上**：有【成绩单】按钮、tooltip 说清代价、点了会打开对话框。
 
 全部离线（合成 SQLite 小库，不联网）；没装 PySide6 的机器整个文件跳过
 （与 `test_formula_page.py` 同一约定）。
@@ -620,7 +620,7 @@ def test_closing_while_running_does_not_take_the_process_down(make_dialog, qapp,
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 6) 「策略匹配」页上的入口
+# 6) 「策略筛选」页上的入口
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -638,7 +638,7 @@ def page_cfg(cfg: Config, tmp_path: Path) -> Config:
 
 @pytest.fixture()
 def page(page_cfg: Config, tmp_path: Path, qapp):
-    """建出「策略匹配」页（公式目录指向 tmp_path，**绝不碰仓库里那份**）。"""
+    """建出「策略筛选」页（公式目录指向 tmp_path，**绝不碰仓库里那份**）。"""
     folder = tmp_path / "formulas"
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "收盘在5日线上.txt").write_text(

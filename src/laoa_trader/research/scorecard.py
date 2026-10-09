@@ -684,7 +684,7 @@ def build_picks(
     top_n: int | None = None,
     risk_symbols: set[str] | None = None,
 ) -> pd.DataFrame:
-    """生成某个信号定义在**每个交易日**的匹配（取每天前 top_n 只）。
+    """生成某个信号定义在**每个交易日**的筛选（取每天前 top_n 只）。
 
     Returns:
         DataFrame[date, symbol, factor]（已剔除 ST/退市风险股，已排序截断）。
@@ -882,7 +882,7 @@ def daily_t(values_by_date: dict[str, list[float]]) -> tuple[float | None, float
 
     为什么必须按信号日聚合：同一天选出的几十只票同涨同跌，把 3 万条信号当
     3 万个独立样本，t 值会虚高十倍以上（标准差被低估、样本量被高估）。
-    先算每日均值再做单样本 t 检验，才是"这个策略有没有稳定的匹配能力"。
+    先算每日均值再做单样本 t 检验，才是"这个策略有没有稳定的筛选能力"。
 
     残留偏差：持有 N 天的收益在相邻信号日之间仍重叠（自相关），t 值依然偏乐观。
     """

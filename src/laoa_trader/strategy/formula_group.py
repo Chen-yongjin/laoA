@@ -117,7 +117,7 @@ class FormulaRun:
     #: **告知**（不是错误）：典型是"盘中想用实时数据，但取不到快照 → 已退回日 K 线"。
     #: 与 `errors` 分开的理由：建池的"成功/失败"判据是"errors 是否为空"
     #: （`scheduler.Scheduler._report_succeeded`），把一句告知塞进 errors 会让一次
-    #: **正常完成**的匹配被判成失败（票选出来了、推送也发了，状态却写"未成功"再补跑一遍）。
+    #: **正常完成**的筛选被判成失败（票选出来了、推送也发了，状态却写"未成功"再补跑一遍）。
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -139,7 +139,7 @@ def run_enabled_formulas(
     * 只看**每只票最后一根 K 线**，且该票的最后一根必须是全市场最新行情日
       （口径与内置策略、与界面【试算】完全一致）；
     * **K 线口径按时间自动切**：开盘时间里的那一轮用实时快照拼出"今天"这一根
-      （见 `formulas.prepare_inputs`），所以【试算】与【开始匹配】的口径永远一致；
+      （见 `formulas.prepare_inputs`），所以【试算】与【开始筛选】的口径永远一致；
     * 数据长度不足 `min_history` 的票直接跳过（滚动窗口全是缺值 ⇒ 不可能出信号）；
     * **弱市抬门槛**（`market_regime`，2026-10-08）：大盘弱势时只留"近 N 日跑赢
       全市场"的票，挡掉多少只写在 `warnings` 里（界面原样显示）。这条判断与
@@ -174,12 +174,12 @@ def run_enabled_formulas(
     #: 「连续 N 个交易日都命中才算选中」（`signal_confirm_days`，默认 0 = 不确认）。
     #: 为什么要这一层：阈值型条件在边界上会今天命中、明天不命中，候选名单跟着抖
     #: （见 `fm.confirmed` 的说明）。**试算那条路用的是同一个判断**，
-    #: 否则会出现"【运行】说选出 5 只、【开始匹配】只有 2 只"这种无法解释的差异。
+    #: 否则会出现"【运行】说选出 5 只、【开始筛选】只有 2 只"这种无法解释的差异。
     confirm_days = confirm_days_of(cfg)
 
     # 输入（K 线口径 + 扩展字段）全部由 `lib.prepare_inputs` 一份逻辑给：
-    # "开盘时间里跑的匹配都是实时的"这条规矩在**试算与建池两条路上必须是同一份实现** ——
-    # 各写一份迟早会出现"点【运行】选出 3 只、点【开始匹配】选出 1 只"，而这种差异
+    # "开盘时间里跑的筛选都是实时的"这条规矩在**试算与建池两条路上必须是同一份实现** ——
+    # 各写一份迟早会出现"点【运行】选出 3 只、点【开始筛选】选出 1 只"，而这种差异
     # 用户没有任何办法解释。快照只在"公式真用到那些字段"或"此刻正走盘中口径"时才取一趟；
     # 一条都不需要时**一个请求都不发**（与"没这个功能"完全一样）。
     prepared = lib.prepare_inputs(cfg, db_path, active)
@@ -189,7 +189,7 @@ def run_enabled_formulas(
     day = prepared.kline_day
     result.caliber = prepared.caliber
     if prepared.caliber:
-        logger.info(f"策略匹配 {prepared.caliber}")
+        logger.info(f"策略筛选 {prepared.caliber}")
     for note in prepared.notes:
         # 影响"选不选得出来"的提示（典型：快照取不到 ⇒ 用到那些字段的条件一律不成立）
         # 走 `errors`：界面会把它显示在状态栏/结果页上，不然用户看到的是
@@ -199,7 +199,7 @@ def run_enabled_formulas(
     for warning in prepared.warnings:
         # 口径类的**告知**进 `warnings`，不进 `errors` —— 建池的"成功/失败"判据是
         # "errors 是否为空"（`scheduler.Scheduler._report_succeeded`）：一句"退回了日 K"
-        # 会让一次正常完成、票也选出来了的匹配被判成失败（还要在补跑点再跑一遍）。
+        # 会让一次正常完成、票也选出来了的筛选被判成失败（还要在补跑点再跑一遍）。
         result.warnings.append(warning)
         logger.warning(warning)
 
@@ -246,7 +246,7 @@ def run_enabled_formulas(
                     })
     except fm.FormulaDataError as exc:
         # 库不存在 / 读不出来这类**环境**问题：说清楚原因就返回，绝不让整轮建池失败
-        message = f"策略匹配：{exc}"
+        message = f"策略筛选：{exc}"
         logger.warning(message)
         result.errors.append(message)
         for name in result.ran:
@@ -256,7 +256,7 @@ def run_enabled_formulas(
 
     # ── 弱市抬门槛（`market_regime`）──
     # 大盘弱势时只留"近 N 日跑赢全市场"的票。**与试算那条路调的是同一个函数**
-    # （`formulas.preview_hits`），所以【运行】与【开始匹配】在任何大盘状态下
+    # （`formulas.preview_hits`），所以【运行】与【开始筛选】在任何大盘状态下
     # 都给出同一批票 —— 两处各写一套筛选就会出现"试算说 5 只、匹配只有 2 只"
     # 这种用户无法解释的差异（本文件里 K 线口径、连续确认也都是这么处理的）。
     #
@@ -275,7 +275,7 @@ def run_enabled_formulas(
     if gate.note:
         # ⚠️ 进 `warnings`（告知），**绝不进 `errors`**：建池的"成功/失败"判据是
         # "errors 是否为空"（`scheduler.Scheduler._report_succeeded`）——
-        # 把一句"弱市挡掉了 7 只"塞进 errors，会让一次**正常完成**的匹配被判成失败
+        # 把一句"弱市挡掉了 7 只"塞进 errors，会让一次**正常完成**的筛选被判成失败
         # （票选出来了、推送也发了，状态却写"未成功"再补跑一遍）。
         result.warnings.append(gate.note)
         logger.warning(gate.note)
@@ -303,7 +303,7 @@ def run_enabled_formulas(
     _remember(result.status)
     if result.picks:
         logger.info(
-            "策略匹配：" + "、".join(
+            "策略筛选：" + "、".join(
                 f"{formula_name_of(key)} {len(value)} 只"
                 for key, value in result.picks.items()
             )

@@ -4,12 +4,12 @@
 
     标题区：luweik决策系统 · 运行状态：<现在在干什么>      [显示详情] [关于软件]
             （下面是"没有数据"这一类**一句话提示**，以及只在任务运行时出现的细进度条）
-    页签：大盘概览 / 自选标的 / 持仓监控 / 策略匹配 / 系统设置
+    页签：大盘概览 / 自选标的 / 持仓监控 / 策略筛选 / 系统设置
 
 为什么要这样改（见 `docs/开发文档.md` 第 1、2 节）
 --------------------------------------------
-- 原来顶部是"三行状态 + 七个按钮"，同一件事说三遍，而按钮又分不清"数据"与"匹配"；
-  现在**标题区不做任何操作**：下载/刷新/检查在「系统设置」，匹配在「策略匹配」，
+- 原来顶部是"三行状态 + 七个按钮"，同一件事说三遍，而按钮又分不清"数据"与"筛选"；
+  现在**标题区不做任何操作**：下载/刷新/检查在「系统设置」，匹配在「策略筛选」，
   一处只管一件事；
 - 原来七个页签里有三个（股票池 / 自选标的 / 盘中提醒）说的是同一批票，
   用户要在三张表之间来回对；现在合成「自选标的」一张表（`来源` 列区分策略与自选），
@@ -71,7 +71,7 @@ logger = get_logger(__name__)
 #: ⚠️ 界面显示名与"自称"是两件事：`APP_NAME` 给窗口标题/关于页/托盘 tooltip 用；
 #: 推送标题、导出文件名、消息气泡里那种短自称用 `ASSISTANT_NAME`（手机上标题要短）。
 APP_NAME = "luweik决策系统"
-#: 短自称（推送标题 `luweik-标的池`、导出文件名 `luweik-匹配结果-<日期>.txt`、
+#: 短自称（推送标题 `luweik-标的池`、导出文件名 `luweik-筛选结果-<日期>.txt`、
 #: 桌面子目录 `luweik/` 都用它）
 ASSISTANT_NAME = "luweik"
 COPYRIGHT_TEXT = "版权所有 © 2026 async-chen，保留所有权利。"
@@ -96,7 +96,7 @@ SOURCE_TEXT = ("数据来源：同花顺金融数据服务（配置 Key 时）�
 TAB_MARKET = "大盘概览"
 TAB_WATCH = "自选标的"
 TAB_POSITION = "持仓监控"
-TAB_FORMULA = "策略匹配"
+TAB_FORMULA = "策略筛选"
 TAB_SETTINGS = "系统设置"
 TAB_TITLES: tuple[str, ...] = (TAB_MARKET, TAB_WATCH, TAB_POSITION, TAB_FORMULA, TAB_SETTINGS)
 
@@ -284,8 +284,8 @@ HEATMAP_TTL_SECONDS = 180
 #: 再"消息怎么发"，然后是两个具体功能（竞价扫描 / T策略），最后是零碎的偏好。
 #:
 #: ⚠️ 这里**没有**"盘中匹配用不用实时数据"的勾选框，而且不许加：2026-09-23 我加过一组
-#: 「匹配口径」，主人当场划掉 —— "不需要加开关，按照我说的规则来"。那条规则是内置的、
-#: 无条件的（开盘时间里跑匹配就是实时口径，其余时间用日 K，取不到快照退回日 K 并写明），
+#: 「筛选口径」，主人当场划掉 —— "不需要加开关，按照我说的规则来"。那条规则是内置的、
+#: 无条件的（开盘时间里跑筛选就是实时口径，其余时间用日 K，取不到快照退回日 K 并写明），
 #: 界面上只**显示**口径（结果页/提示区那句 `📊 本次口径：…`），不给用户关它。
 #:
 #: T策略那一组是用户拍板的名字：原来叫「持仓风险」，只装止损/止盈与四个做T阈值；
@@ -371,7 +371,7 @@ BTN_RESUME_TEXT = "恢复提醒"
 BTN_CHECK_TEXT = "检查盘面"
 BTN_DETAILS_TEXT = "显示详情"
 BTN_ABOUT_TEXT = "关于软件"
-#: 【匹配】按钮现在的名字（在「策略匹配」页里）—— 定义在 `hints.BTN_RUN_TEXT`
+#: 【匹配】按钮现在的名字（在「策略筛选」页里）—— 定义在 `hints.BTN_RUN_TEXT`
 BTN_START_TEXT = BTN_RUN_TEXT
 
 #: 托盘右键菜单里那一项【显示桌宠】的两种文案（用户 2026-09-20 要求加这一项）。
@@ -503,7 +503,7 @@ def probe_data_source(cfg: Config, api_key: str = "", client: Any = None) -> str
         # 这里只说这三件事，不承诺"装历史包"之类已经不存在的路（历史包方案已被用户否掉）。
         return ("❌ 还没填 API Key（这是【测试连接】要用的那一个）："
                 "不填也能看行情与大盘概览（免 Key 公开源）；"
-                "但完整历史与**匹配**要它 —— 自检要求复权事件与行业归属齐备")
+                "但完整历史与**筛选**要它 —— 自检要求复权事件与行业归属齐备")
     try:
         probe = client or hx.HithinkClient(api_key=key, timeout=8.0, retries=1)
         total = int(probe.special_pool_total(market.LIMIT_UP_PATH))
@@ -1386,7 +1386,7 @@ if QT_AVAILABLE:
                         row["name"] for row in down if row["limit_down"] is None
                     ]
                     note = ("口径：涨幅 = 板块**当天**涨跌幅；涨停数量 = 当日该板块涨停家数"
-                            "（本地涨停池，与匹配同一套）；跌停数量 = 当日该板块跌停家数"
+                            "（本地涨停池，与筛选同一套）；跌停数量 = 当日该板块跌停家数"
                             "（本地日线按实测过的跌停价规则算）；主力净额单位**亿**（正=净流入）。"
                             + ("" if down_counts else
                                "本地库里不足两个交易日，跌停数量这一列暂时是 —。"))
@@ -1682,7 +1682,7 @@ if QT_AVAILABLE:
             )
             # 快照一到就重画两张表（不然要等下一个 5 秒拍子，用户会觉得"现价没更新"）
             self.quotes.updated.connect(self._on_quotes_updated)
-            # 「策略匹配」的结果表要显示「实时股价 / 市值 / 换手率」：把**本窗口这一份**
+            # 「策略筛选」的结果表要显示「实时股价 / 市值 / 换手率」：把**本窗口这一份**
             # 快照缓存借给它（`QuotesService.quote`），别让它自己再建一个快照服务 ——
             # 两套缓存会有两个刷新节奏，同一个数在两张表里还可能不一样。
             # ⚠️ 必须在这里接（不是 `_build_ui()` 里）：`self.quotes` 就是上面这几行才
@@ -1774,7 +1774,7 @@ if QT_AVAILABLE:
             layout.setSpacing(PAGE_SPACING)
 
             # 标题区：软件名 · 运行状态 + 【显示详情】【关于软件】（见 `_build_title_area`）。
-            # **这一行不放任何操作按钮** —— 下载/刷新在「系统设置」，匹配在「策略匹配」
+            # **这一行不放任何操作按钮** —— 下载/刷新在「系统设置」，匹配在「策略筛选」
             layout.addWidget(self._build_title_area())
 
             # 五个页签（顺序即用户给定的顺序，见 `TAB_TITLES`）
@@ -1788,14 +1788,14 @@ if QT_AVAILABLE:
             self.position_page = self._build_position_page()
             self.tabs.addTab(self.position_page, TAB_POSITION)
 
-            # 4) 策略匹配：**顶部一行【开始匹配】+ 原来的公式编辑器**（编辑器原样挂过来，
+            # 4) 策略筛选：**顶部一行【开始筛选】+ 原来的公式编辑器**（编辑器原样挂过来，
             #    这一阶段只换"挂法"）
             self.formula_page = FormulaPage(self.cfg, status_cb=self._toast)
             # 未授权/试用到期时锁住「策略编辑」（用户原话："策略编辑锁住，点击提醒需要授权"）：
             # 这里只挂一个**回调**给页面，页面自己不判断授权（授权逻辑只有 licensing 一处）
             self.formula_page.open_editor_guard = self._editor_guard
-            # 【开始匹配】按钮在「策略匹配」页里（B2b 的 `FormulaPage` 提供），
-            # 它通过 `start_pick_requested` 信号请主窗口跑匹配 —— 主窗口这边**只连一次**：
+            # 【开始筛选】按钮在「策略筛选」页里（B2b 的 `FormulaPage` 提供），
+            # 它通过 `start_pick_requested` 信号请主窗口跑筛选 —— 主窗口这边**只连一次**：
             # 用 `getattr` 而不是直接取属性，是因为两个模块正在并行改，彼此不该因为
             # "对方还没落地"而 import 就崩（连不上时页面上少一个按钮，而不是程序起不来）。
             start_pick = getattr(self.formula_page, "start_pick_requested", None)
@@ -1803,7 +1803,7 @@ if QT_AVAILABLE:
                 start_pick.connect(self.on_run_pipeline)
             else:
                 logger.warning("FormulaPage 还没有 start_pick_requested 信号："
-                               "「策略匹配」页暂时没有【开始匹配】入口")
+                               "「策略筛选」页暂时没有【开始筛选】入口")
             self.tabs.addTab(self._build_formula_tab(), TAB_FORMULA)
 
             # 5) 系统设置：数据来源（含【下载数据】/【刷新数据】/【检查盘面】）+ 其余各组
@@ -1968,7 +1968,7 @@ if QT_AVAILABLE:
             layout.addWidget(self.pool_table, 1)
 
             self.pool_empty_label = QLabel(
-                "池子还是空的：点「策略匹配」里的【开始匹配】，或在上面填代码加自选"
+                "池子还是空的：点「策略筛选」里的【开始筛选】，或在上面填代码加自选"
             )
             self.pool_empty_label.setWordWrap(True)
             layout.addWidget(self.pool_empty_label)
@@ -2087,13 +2087,13 @@ if QT_AVAILABLE:
             return page
 
         def _build_formula_tab(self) -> Any:
-            """策略匹配页 = **FormulaPage 自己那一整页**（它内部已有【策略编辑】【开始匹配】）。
+            """策略筛选页 = **FormulaPage 自己那一整页**（它内部已有【策略编辑】【开始筛选】）。
 
-            改版后这一页的按钮与流程**都由 `FormulaPage` 起头**：它那个【开始匹配】
+            改版后这一页的按钮与流程**都由 `FormulaPage` 起头**：它那个【开始筛选】
             只 `emit start_pick_requested()`，主窗口把这个信号接到 `on_run_pipeline`
             （见 `_build_ui` 里的连接）—— 整条流程留在 `scheduler.run_daily()` 一处。
 
-            主窗口这边**不自己再造一个【开始匹配】**：同一页出现两个同名按钮，用户按哪个
+            主窗口这边**不自己再造一个【开始筛选】**：同一页出现两个同名按钮，用户按哪个
             都可能，而"哪个才真的会跑"只能靠猜（这正是"一处只管一件事"要避免的）。
             它只做三件事：
             1. 连信号（`_build_ui`）；
@@ -2117,8 +2117,8 @@ if QT_AVAILABLE:
             if self.btn_run is not None and signal is None:
                 # 页面有按钮、却没有那个信号（中间态）：直接连流程入口，
                 # 否则用户点下去什么都不发生 —— 那是"死按钮"，比少一个按钮更糟
-                logger.warning("FormulaPage 有【开始匹配】按钮但没有 start_pick_requested "
-                               "信号：暂时把点击直接接到匹配流程")
+                logger.warning("FormulaPage 有【开始筛选】按钮但没有 start_pick_requested "
+                               "信号：暂时把点击直接接到筛选流程")
                 self.btn_run.clicked.connect(self.on_run_pipeline)
             if self.btn_run is None:
                 row = QHBoxLayout()
@@ -2127,11 +2127,11 @@ if QT_AVAILABLE:
                 title = QLabel(TAB_FORMULA)
                 title.setFont(_scaled_font(title.font(), FONT_TITLE_DELTA, bold=True))
                 row.addWidget(title)
-                # 【开始匹配】：跑所有**启用**的策略 + 公式 → 结果直接进自选标的 → 发一条消息
+                # 【开始筛选】：跑所有**启用**的策略 + 公式 → 结果直接进自选标的 → 发一条消息
                 self.btn_run = QPushButton(BTN_START_TEXT)
                 self.btn_run.setObjectName("primaryAction")
                 self.btn_run.setToolTip(
-                    "开始匹配：增量数据 → 跑启用的策略 → 结果直接进「自选标的」"
+                    "开始筛选：增量数据 → 跑启用的策略 → 结果直接进「自选标的」"
                     " → 按「系统设置」里的通知方式推送一条"
                 )
                 # **走信号**（有的话）：与页面自己的按钮同一条路 —— 一处逻辑、两个入口，
@@ -2489,7 +2489,7 @@ if QT_AVAILABLE:
                 # 出处必须写出来：热力图这条路"价格一个源、市值另一个源补"是常态
                 bits.append(f"来源 {self.market_heatmap_source}")
             if str((self.market_sectors or {}).get("source") or "") == "local":
-                # 板块榜没取到，退回了本地口径：**涨停家数还是有的**（本地涨停池，与匹配同一套），
+                # 板块榜没取到，退回了本地口径：**涨停家数还是有的**（本地涨停池，与筛选同一套），
                 # 缺的只有主力净额。说成"两项都没有"是另一种误导。
                 bits.append("板块榜这一轮没取到：tooltip 里没有主力净额"
                             "（涨停家数用的是本地口径）")
@@ -3081,10 +3081,10 @@ if QT_AVAILABLE:
             )
             self.btn_download.clicked.connect(self.on_download)
             data_row.addWidget(self.btn_download)
-            # 【刷新数据】：只补数据（行情/涨停池/日历/行业/指数），不匹配、不推送
+            # 【刷新数据】：只补数据（行情/涨停池/日历/行业/指数），不筛选、不推送
             self.btn_refresh = QPushButton(BTN_REFRESH_TEXT)
             self.btn_refresh.setToolTip(
-                "只刷新数据：补行情 / 涨停池 / 交易日历 / 行业 / 指数，不匹配、不推送"
+                "只刷新数据：补行情 / 涨停池 / 交易日历 / 行业 / 指数，不筛选、不推送"
             )
             self.btn_refresh.clicked.connect(self.on_refresh_data)
             data_row.addWidget(self.btn_refresh)
@@ -3093,10 +3093,10 @@ if QT_AVAILABLE:
             self.btn_check.setToolTip("立即检查盘面：按当前池子 / 持仓 / 自选跑一次盘中提醒")
             self.btn_check.clicked.connect(self.on_intraday_once)
             data_row.addWidget(self.btn_check)
-            # 【暂停提醒】：暂停盘中提醒（匹配照跑），再点一次恢复。
+            # 【暂停提醒】：暂停盘中提醒（筛选照跑），再点一次恢复。
             # 它同时也在托盘右键菜单里（盯盘时窗口多半是收起来的）
             self.btn_pause = QPushButton(BTN_PAUSE_TEXT)
-            self.btn_pause.setToolTip("暂停盘中提醒（匹配照跑）；再点一次恢复。托盘右键里也有")
+            self.btn_pause.setToolTip("暂停盘中提醒（筛选照跑）；再点一次恢复。托盘右键里也有")
             self.btn_pause.clicked.connect(self.on_toggle_intraday)
             data_row.addWidget(self.btn_pause)
             data_row.addStretch(1)
@@ -3166,7 +3166,7 @@ if QT_AVAILABLE:
             # 闪一下让你知道有事，点托盘图标打开列表自己看。这一行说明它：
             msg_hint = QLabel(
                 "默认：提醒来时闪托盘/任务栏图标，点托盘图标打开「消息」窗口看列表"
-                "（盘中提醒 + 匹配完成都在里面，未读带圆点、打开即已读）。"
+                "（盘中提醒 + 筛选完成都在里面，未读带圆点、打开即已读）。"
                 "下面那个浮窗是**另一种**呈现方式，默认不弹。"
             )
             msg_hint.setObjectName("statusTag")
@@ -3721,11 +3721,11 @@ if QT_AVAILABLE:
             # 左键点托盘图标、或点这一项，都打开它；标题里的数字就是未读数。
             act_recent = QAction("消息", self)
             act_recent.setToolTip(
-                "打开消息列表（盘中提醒 + 匹配完成都在里面；未读的带圆点）"
+                "打开消息列表（盘中提醒 + 筛选完成都在里面；未读的带圆点）"
             )
             act_recent.triggered.connect(self.on_open_messages)
             self.act_messages = act_recent
-            # 【开始匹配】：与「策略匹配」页那个按钮**同一个回调**（一处逻辑两处入口）
+            # 【开始筛选】：与「策略筛选」页那个按钮**同一个回调**（一处逻辑两处入口）
             act_pool = QAction(BTN_START_TEXT, self)
             act_pool.setToolTip("跑启用的策略，结果直接进「自选标的」")
             act_pool.triggered.connect(self.on_run_pipeline)
@@ -3733,7 +3733,7 @@ if QT_AVAILABLE:
             # 用可勾选项（`setCheckable`）而不是"点了就切换文字"：勾选框一眼能看出当前状态
             act_pause = QAction(BTN_PAUSE_TEXT, self)
             act_pause.setCheckable(True)
-            act_pause.setToolTip("暂停盘中提醒（匹配照跑）；窗口收在托盘里时从这里开关最方便")
+            act_pause.setToolTip("暂停盘中提醒（筛选照跑）；窗口收在托盘里时从这里开关最方便")
             act_pause.triggered.connect(self.on_toggle_intraday)
             self.act_pause = act_pause
             # 【显示桌宠】（用户 2026-09-20 要求："加上显示桌宠"）：
@@ -3889,7 +3889,7 @@ if QT_AVAILABLE:
                 self.first_run_hint.setVisible(False)
 
         def _on_download_done(self, result: Any) -> None:
-            """下载完成（成功/取消）后：收掉"数据不足"提示 + 数据够了就自动跑一次匹配。
+            """下载完成（成功/取消）后：收掉"数据不足"提示 + 数据够了就自动跑一次筛选。
 
             下载过程中，标题区那一行提示（`first_run_hint`）一直说着"还没有行情数据"；
             下完之后它就该消失（否则用户会看着一句过期的话以为没下成功）。
@@ -4740,7 +4740,7 @@ if QT_AVAILABLE:
                 if entry is None:
                     monitor_item = self._monitor_cell(
                         symbol, False, alert,
-                        why="这只票是匹配选出来的（还不是自选）：点这一格就把它收进"
+                        why="这只票是筛选选出来的（还不是自选）：点这一格就把它收进"
                             "「自选标的」并开始盯它（止损/止盈/跌破5日线…）",
                     )
                 else:
@@ -4942,7 +4942,7 @@ if QT_AVAILABLE:
                     act_toggle = QAction("打开监控", menu)
                     act_toggle.setToolTip(
                         "收进「自选标的」并开始盯它：止损、止盈、跌破 5 日线等触发就提醒你。\n"
-                        "默认只监控持仓股票 —— 匹配选出来的票要盯哪只，由你在这里点"
+                        "默认只监控持仓股票 —— 筛选选出来的票要盯哪只，由你在这里点"
                     )
                     act_toggle.triggered.connect(
                         lambda _=False, s=symbol: self.on_watch_follow(s)
@@ -5017,7 +5017,7 @@ if QT_AVAILABLE:
               （自选是并进池子的，而这一页读的正是池子行；只删自选表的话那一行会
               原地不动，用户看到的是"点了删除没反应"）；
             - 它不在自选表里（纯策略/公式选中）→ 同样删掉今日池子里那一行。
-              下次【开始匹配】会重新评估，策略又选中它就还会回来（那是"重新选出来"，
+              下次【开始筛选】会重新评估，策略又选中它就还会回来（那是"重新选出来"，
               不是"没删掉"）。
             """
             from laoa_trader import pool as pool_mod
@@ -5305,7 +5305,7 @@ if QT_AVAILABLE:
         def on_watch_follow(self, symbol: str) -> None:
             """把一只**匹配选出来的票**收进来盯着（写自选表 + 打开监控）。
 
-            2026-10-05 主人："默认只监控持仓股票。" 于是匹配结果默认只当候选，
+            2026-10-05 主人："默认只监控持仓股票。" 于是筛选结果默认只当候选，
             用户在「自选标的」页里点某一行的监控开关 = "这一只我要盯"。
             状态存在 `watchlist.enabled`（只有这一处），所以这个动作同时是一次"加入自选"——
             界面上要能看出这一行从此进了自选（来源列写它原来那条策略名，不是"自选"）。
@@ -5408,9 +5408,9 @@ if QT_AVAILABLE:
             """
             symbol = str(row.get("symbol") or "").strip()
             if str(row.get("kind") or "") == intraday.KIND_POOL:
-                # "匹配完成"不是某只票（`symbol` 是内容指纹，见 scheduler 里那条注释）：
-                # 消息列表里它该显示成「匹配结果」，而不是 `pool-3f2a…` 这串。
-                return "匹配结果"
+                # "筛选完成"不是某只票（`symbol` 是内容指纹，见 scheduler 里那条注释）：
+                # 消息列表里它该显示成「筛选结果」，而不是 `pool-3f2a…` 这串。
+                return "筛选结果"
             name = str(names.get(symbol) or "").strip()
             if symbol:
                 return f"{name}({symbol})" if name else symbol
@@ -5753,7 +5753,7 @@ if QT_AVAILABLE:
             """念名字用的那一串 —— **绝不能把代码念两遍**。
 
             消息里那一位叫「标的」：`名称(代码)`，退化时只有代码（"600002"）或者
-            `匹配结果`（匹配完成那条不是某只票）。代码由 `_announce_code()` 单独念
+            `筛选结果`（筛选完成那条不是某只票）。代码由 `_announce_code()` 单独念
             （要逐位念），所以这里只取**名称部分**：目标就是裸代码/占位词时留空。
             """
             name = str(item.get("name") or "").strip()
@@ -5764,7 +5764,7 @@ if QT_AVAILABLE:
                 head = target[: target.rindex("(")].strip()
                 if head and head != target:
                     return head
-            if target.isdigit() or target == "匹配结果":
+            if target.isdigit() or target == "筛选结果":
                 return ""
             return target
 
@@ -5772,7 +5772,7 @@ if QT_AVAILABLE:
         def _announce_code(item: dict) -> str:
             """念代码时用的那一串：**只认 6 位数字代码**。
 
-            为什么要把关：匹配完成那条消息的 `symbol` 是 `pool-<指纹>`（它不是一只票），
+            为什么要把关：筛选完成那条消息的 `symbol` 是 `pool-<指纹>`（它不是一只票），
             念出来会变成一串谁也听不懂的字符；代码是 6 位数字以外的东西一律不念。
             """
             symbol = str(item.get("symbol") or "").strip()
@@ -6613,7 +6613,7 @@ if QT_AVAILABLE:
             self._tick()
 
         def _on_pipeline_done(self, label: str, report: dict) -> None:
-            """把匹配流程的 report 翻成一句中文结论（含失败原因，不弹窗打断）。"""
+            """把筛选流程的 report 翻成一句中文结论（含失败原因，不弹窗打断）。"""
             pool_count = len(report.get("pool") or [])
             data_date = report.get("data_date") or "无行情日"
             bits = [f"行情日 {data_date}", f"信号 {report.get('picks', 0)} 条",
@@ -6635,7 +6635,7 @@ if QT_AVAILABLE:
                     page.reload()
                 except Exception:  # noqa: BLE001 - 刷新列表失败不该影响结论显示
                     logger.debug("策略列表刷新失败", exc_info=True)
-                # 把**这一轮**的结果直接喂给「策略匹配」页的「本次匹配结果」区
+                # 把**这一轮**的结果直接喂给「策略筛选」页的「本次筛选结果」区
                 # （不喂它也能从 `stock_pool` 兜底读最近一次建池，但那是"库里那一份"：
                 # 遇到"没建成池 / 同一天跑了两次"时，直接给 report 才是刚跑完的这一批）。
                 # 用 getattr 容错：另一个模块可能还没提供这个方法，不该因此让流程报错。
@@ -6644,7 +6644,7 @@ if QT_AVAILABLE:
                     try:
                         show_result(report, data_date=report.get("data_date"))
                     except Exception:  # noqa: BLE001 - 结果区画不出来不影响结论与提醒
-                        logger.debug("填充本次匹配结果失败", exc_info=True)
+                        logger.debug("填充本次筛选结果失败", exc_info=True)
             if report.get("signals"):
                 bits.append(f"写入信号 {report['signals']} 行")
             if report.get("pushed"):
@@ -6670,7 +6670,7 @@ if QT_AVAILABLE:
                 # 2026-09-18 起候选只来自勾选的公式（内置策略已改成随包公式），
                 # 所以"没候选"最常见的原因就是"一条公式都没勾" —— 把它写在第一位
                 text += ("（今日没有候选：没勾任何策略 / 非交易日 / 数据不足；"
-                         "在「策略匹配」页勾上策略即可参与匹配）")
+                         "在「策略筛选」页勾上策略即可参与筛选）")
             self._toast(text)
 
         def _on_worker_failed(self, label: str, msg: str) -> None:
@@ -7269,7 +7269,7 @@ if QT_AVAILABLE:
                 return message
             message = f"✅ 已保存 {len(updates)} 项（已写入 {path.name}）{extra}"
             self._set_settings_hint(message)
-            # 「策略匹配」页里也有一行「竞价策略」（它开关的就是设置里那个
+            # 「策略筛选」页里也有一行「竞价策略」（它开关的就是设置里那个
             # `intraday_auction`）：这里是**所有保存路径的唯一出口**，所以顺手把那张表
             # 刷一次 —— 两个界面管同一个键时，最忌讳"这边改了、那边还显示旧状态"，
             # 而用户没法从任何一句提示里看出这一点。
@@ -7292,7 +7292,7 @@ if QT_AVAILABLE:
                 logger.debug(f"语音说明刷新失败：{exc}")
 
         def _reload_formula_list(self) -> None:
-            """刷新「策略匹配」的策略列表（失败只记日志：不该影响"设置已保存"这个事实）。"""
+            """刷新「策略筛选」的策略列表（失败只记日志：不该影响"设置已保存"这个事实）。"""
             page = getattr(self, "formula_page", None)
             reload_page = getattr(page, "reload", None)
             if not callable(reload_page):
@@ -7353,7 +7353,7 @@ if QT_AVAILABLE:
                 f"生效：主题 {theme_mod.theme_label(str(self.theme_box.currentData()))}；"
                 f"通知 {notify}；"
                 f"竞价扫描 {'开' if self.auction_on_box.isChecked() else '关'}；"
-                # ⚠️ 回显里**不说**"匹配口径"：那是内置规则、没有开关可点，
+                # ⚠️ 回显里**不说**"筛选口径"：那是内置规则、没有开关可点，
                 # 写在这里只会让用户去找一个不存在的控件（本轮口径显示在结果那一侧）
                 # 止损/止盈就在「T策略」组里（用户拍板），回显时一并念出来
                 f"T策略 {'开' if self.intraday_t_box.isChecked() else '关'}"
@@ -7402,7 +7402,7 @@ if QT_AVAILABLE:
         # ── 手动跑（与定时任务共用同一套流程，保证幂等）──
 
         def on_run_pipeline(self) -> None:
-            """【开始匹配】：先过**数据闸门** → 增量 → 策略 → 建池 → 推送。
+            """【开始筛选】：先过**数据闸门** → 增量 → 策略 → 建池 → 推送。
 
             闸门是必须的：数据没下好就点这个按钮，跑出来的池子是错的
             （在只写了一半的库上跑策略），所以这里**明确拒绝并指路**，
@@ -7411,7 +7411,7 @@ if QT_AVAILABLE:
             if self._busy():
                 return
             if state.is_downloading():
-                self._refuse_pipeline("正在下载历史数据，请等下载完成后再匹配")
+                self._refuse_pipeline("正在下载历史数据，请等下载完成后再筛选")
                 return
             gate = data_gate(self.cfg, self.engine)
             if not gate["ok"]:
@@ -7429,7 +7429,7 @@ if QT_AVAILABLE:
                 self.scheduler.mark_daily_ran(report)
                 return report
 
-            self._run_worker(_job, "立即匹配并建池",
+            self._run_worker(_job, "立即筛选并建池",
                              with_progress=True, with_stage=True)
 
         def _refuse_pipeline(self, message: str) -> None:
@@ -7442,7 +7442,7 @@ if QT_AVAILABLE:
             text = f"⚠️ {message}"
             self._toast(text)
             self._set_status(text)
-            logger.warning(f"已拒绝手动匹配：{message}")
+            logger.warning(f"已拒绝手动筛选：{message}")
             try:
                 index = self.tabs.indexOf(self.settings_page)
                 if index >= 0:
@@ -7453,7 +7453,7 @@ if QT_AVAILABLE:
                 pass
 
         def on_refresh_data(self) -> None:
-            """【{BTN_REFRESH_TEXT}】：只跑增量同步，不匹配、不推送。"""
+            """【{BTN_REFRESH_TEXT}】：只跑增量同步，不筛选、不推送。"""
             if self._busy():
                 return
             self._run_worker(
@@ -7495,11 +7495,11 @@ if QT_AVAILABLE:
                     f"（申请地址见上面那行的 {BUILTIN_KEY_URL}）。"
                     "没 Key 时能用的：实时行情（自选标的/持仓监控）与大盘概览 —— "
                     "每天也会自动把当天的行情与涨停池写进库；"
-                    "但**匹配要 Key**：数据自检要求「复权事件」与「行业归属」齐备"
-                    "（这两样只有同花顺那条路给得到），缺了就拒绝匹配"
+                    "但**筛选要 Key**：数据自检要求「复权事件」与「行业归属」齐备"
+                    "（这两样只有同花顺那条路给得到），缺了就拒绝筛选"
                     "（就是不让程序拿算错的复权价去选票）"
                 )
-                self._toast("❌ 匹配要同花顺 Key · 没 Key 时行情与大盘概览可用 · 见【系统设置】")
+                self._toast("❌ 筛选要同花顺 Key · 没 Key 时行情与大盘概览可用 · 见【系统设置】")
                 return
             self._hide_key_hint()
             self._run_worker(
@@ -7813,7 +7813,7 @@ if QT_AVAILABLE:
             """【策略编辑】的闸门：返回空串 = 放行；返回中文原因 = 已拦下。
 
             未授权时**弹授权对话框**（用户要的就是"点击提醒需要授权"），并返回一句
-            提示给「策略匹配」页显示 —— 用户点了按钮总得看到有反应。
+            提示给「策略筛选」页显示 —— 用户点了按钮总得看到有反应。
             """
             status = licensing.license_status(self.cfg)
             if status.get("licensed"):

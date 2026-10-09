@@ -673,8 +673,8 @@ def test_cli_once_ignores_a_typo_in_the_config_groups(wl_db, tmp_path, capsys,
 
     2026-09-18 口径：`enabled_groups` / `enabled_strategies` 已经从配置里删掉，
     `load_config()` 把它们当**未知键**忽略（用户文件里的其它内容一字不动）。
-    所以配置文件里写了个不存在的组名，这轮匹配照跑（只盯自选标的），
-    不该像老口径那样直接退出 1 —— 那会让人以为"匹配坏了"。
+    所以配置文件里写了个不存在的组名，这轮筛选照跑（只盯自选标的），
+    不该像老口径那样直接退出 1 —— 那会让人以为"筛选坏了"。
     """
     import laoa_trader.scheduler as sched
     from laoa_trader.__main__ import cli

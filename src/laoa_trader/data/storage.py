@@ -23,7 +23,7 @@
     limit_up_pool     涨停池（连板数/封单额/涨停时间/原因）
     stock_pool        每日精匹配票池
     position          持仓台账
-    signal            匹配信号落库
+    signal            筛选信号落库
     intraday_alert    盘中提醒去重表
     auction_scan      竞价扫描结果（全市场扫描的全部命中）
 """
@@ -199,7 +199,7 @@ SCHEMA: tuple[str, ...] = (
         updated_at TEXT
     );
     """,
-    # ── 匹配信号 ──
+    # ── 筛选信号 ──
     """
     CREATE TABLE IF NOT EXISTS signal (
         signal_date TEXT NOT NULL,
@@ -677,7 +677,7 @@ def delete_pool_symbol(
     为什么允许删池子行：用户在「自选标的」里右键删一只策略选出来的票时，
     期望的是"这张表里别再出现它"（自选那张表里删不掉它 —— 它本来就不是自选）。
     删的只是 `stock_pool` 里那一天的那一行，**不动** `signal` 台账；
-    下次【开始匹配】会重新评估（策略又选中它的话它会回来，界面上把这句话写明了）。
+    下次【开始筛选】会重新评估（策略又选中它的话它会回来，界面上把这句话写明了）。
     """
     if day is None:
         row = conn.execute("SELECT MAX(date) FROM stock_pool").fetchone()
@@ -1116,7 +1116,7 @@ def mark_pushed(
 ) -> bool:
     """记录"这一天、这一类、这份内容已经推过"，返回**是否首次**。
 
-    为什么需要：手动【立即匹配并建池】与 19:15 的定时任务可能同一天都跑，
+    为什么需要：手动【立即筛选并建池】与 19:15 的定时任务可能同一天都跑，
     池子内容一样却推两遍 —— 用户会被同一批卡片刷屏。
     这里用内容指纹（`pipeline.pool_fingerprint()`）判重：
     池子没变就不重复推；变了（例如盘中补了数据）才再推一次。

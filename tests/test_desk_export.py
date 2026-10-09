@@ -1,4 +1,4 @@
-"""桌面导出：匹配结果那份额外的纯文本文件（用户要求"也可以同时 output 一个文件到桌面"）。
+"""桌面导出：筛选结果那份额外的纯文本文件（用户要求"也可以同时 output 一个文件到桌面"）。
 
 这一组钉住四件事：
 
@@ -10,7 +10,7 @@
 3. **价格口径**：现价读**不复权**的 `stock_daily_raw`（后复权价写进给人看的文件里
    会变成"茅台 2600 元"这种假数字）；没有价格就**不写那一段**，不编数字；
 4. **不许出事**：写盘失败、目录建不出来、没有可写目录 —— 一律只记日志 + 返回 None，
-   绝不抛异常（导出是附赠产物，不能把匹配流程带走；调用方那一层另有用例，见
+   绝不抛异常（导出是附赠产物，不能把筛选流程带走；调用方那一层另有用例，见
    `tests/test_scheduler_gate.py`）。
 
 **测试一律注入 `dest_dir`/`home`（家目录用 tmp_path 造）**：
@@ -61,10 +61,10 @@ def test_file_name_carries_the_date_and_content_is_the_agreed_layout(tmp_path) -
         quotes={"600519": (1266.98, 0.71)},     # 注入行情：用例不碰库、不联网
     )
 
-    assert path == tmp_path / "luweik-匹配结果-2026-09-18.txt"
+    assert path == tmp_path / "luweik-筛选结果-2026-09-18.txt"
     assert path is not None and path.exists()
     assert path.read_text(encoding="utf-8-sig").splitlines() == [
-        "luweik · 匹配结果 · 2026-09-18（行情日 2026-09-17）",
+        "luweik · 筛选结果 · 2026-09-18（行情日 2026-09-17）",
         # M = 有来源策略的行（内置 + 公式），K = 自选 —— 与「自选标的」表头同一口径
         "共 3 只（策略 2 · 自选 1）",
         "1. 贵州茅台(600519)  现价 1266.98 +0.71%  来源：短期反转",
@@ -96,7 +96,7 @@ def test_file_name_defaults_to_today_in_beijing_time(tmp_path, monkeypatch) -> N
 
     path = pool.export_pick_file(_pool_rows(), dest_dir=tmp_path)
 
-    assert path is not None and path.name == "luweik-匹配结果-2026-09-18.txt"
+    assert path is not None and path.name == "luweik-筛选结果-2026-09-18.txt"
 
 
 def test_no_tooltip_or_reason_noise_but_source_label_is_kept(tmp_path) -> None:
@@ -175,7 +175,7 @@ def test_desktop_directory_is_used_when_it_exists(tmp_path) -> None:
     # 2026-09-21（主人要求）：桌面根目录不再散着文件，收进 `桌面/luweik/` 里
     assert pool.EXPORT_FOLDER_NAME == "luweik"
     assert path == (home / "Desktop" / pool.EXPORT_FOLDER_NAME
-                    / "luweik-匹配结果-2026-09-18.txt")
+                    / "luweik-筛选结果-2026-09-18.txt")
     assert not list(fallback.iterdir())                      # 没有重复写进数据目录
 
 
@@ -188,7 +188,7 @@ def test_chinese_desktop_name_is_found(tmp_path) -> None:
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  day="2026-09-18")
     assert path == (home / "桌面" / pool.EXPORT_FOLDER_NAME
-                    / "luweik-匹配结果-2026-09-18.txt")
+                    / "luweik-筛选结果-2026-09-18.txt")
 
 
 def test_onedrive_desktop_is_found(tmp_path) -> None:
@@ -210,7 +210,7 @@ def test_falls_back_to_the_data_dir_when_no_desktop_exists(tmp_path) -> None:
 
     # 回退目录里也套一层「luweik」（口径与桌面那条一致：文件永远收在一个文件夹里）
     assert path == (fallback / pool.EXPORT_FOLDER_NAME
-                    / "luweik-匹配结果-2026-09-18.txt")
+                    / "luweik-筛选结果-2026-09-18.txt")
     assert path.exists()
 
 
@@ -224,7 +224,7 @@ def test_no_desktop_and_no_fallback_says_so_and_returns_none(tmp_path, log_recor
                                  fallback_dir=None, day="2026-09-18") is None
     text = messages(log_records)
     assert "找不到桌面目录" in text
-    assert "不影响匹配与推送" in text
+    assert "不影响筛选与推送" in text
 
 
 def test_missing_dest_dir_is_created(tmp_path) -> None:
@@ -314,9 +314,9 @@ def test_write_failure_is_only_logged(tmp_path, monkeypatch, log_records) -> Non
     assert pool.export_pick_file(_pool_rows(), dest_dir=tmp_path,
                                  day="2026-09-18") is None
     text = messages(log_records)
-    assert "导出匹配结果到桌面失败" in text
+    assert "导出筛选结果到桌面失败" in text
     assert "OSError" in text and "磁盘满了（模拟）" in text
-    assert "不影响匹配与推送" in text
+    assert "不影响筛选与推送" in text
 
 
 def test_dest_dir_being_a_file_is_only_logged(tmp_path, log_records) -> None:
@@ -330,7 +330,7 @@ def test_dest_dir_being_a_file_is_only_logged(tmp_path, log_records) -> None:
 
     assert pool.export_pick_file(_pool_rows(), dest_dir=occupied,
                                  day="2026-09-18") is None
-    assert "导出匹配结果到桌面失败" in messages(log_records)
+    assert "导出筛选结果到桌面失败" in messages(log_records)
     assert occupied.read_text(encoding="utf-8") == "我不是目录"      # 没被破坏
 
 
@@ -363,7 +363,7 @@ def test_missing_db_just_means_no_prices(tmp_path) -> None:
 
 
 def test_export_carries_no_private_information(tmp_path) -> None:
-    """隐私：正文里只有匹配结果本身 —— 没有本地路径、没有 Key/Token。
+    """隐私：正文里只有筛选结果本身 —— 没有本地路径、没有 Key/Token。
 
     这份文件是用户要往外发的（贴群里、发给朋友），把本机路径或凭据写进去
     等于替他泄露环境信息。
@@ -384,20 +384,20 @@ def test_legacy_export_folder_is_moved_to_the_new_name(tmp_path) -> None:
     """改名后的第一次导出：老的 `桌面\\财神助手\\` 整个搬到 `桌面\\luweik\\`（历史文件不丢）。
 
     为什么要有这一步：目录名跟着产品名走，改名之后老用户那几个月攒下来的
-    `*-匹配结果-*.txt` 会留在一个再也不会被写入的旧文件夹里 —— 文件没丢，但用户
+    `*-筛选结果-*.txt` 会留在一个再也不会被写入的旧文件夹里 —— 文件没丢，但用户
     再也看不到、程序也不会再往里写，等于凭空少了一段历史。（2026-10-08 又一次改名时加。）
     """
     home = tmp_path / "home"
     desktop = home / "Desktop"
     legacy = desktop / "财神助手"
     legacy.mkdir(parents=True)
-    (legacy / "旧名-匹配结果-2026-09-01.txt").write_text("历史", encoding="utf-8")
+    (legacy / "旧名-筛选结果-2026-09-01.txt").write_text("历史", encoding="utf-8")
 
     path = pool.export_pick_file(_pool_rows(), dest_dir=None, home=home,
                                  day="2026-09-18")
 
     assert path.parent == desktop / pool.EXPORT_FOLDER_NAME
-    assert (path.parent / "旧名-匹配结果-2026-09-01.txt").read_text(encoding="utf-8") == "历史"
+    assert (path.parent / "旧名-筛选结果-2026-09-01.txt").read_text(encoding="utf-8") == "历史"
     assert not legacy.exists()                              # 旧目录搬走了（在同一块盘上是改名，不复制）
 
 

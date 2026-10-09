@@ -36,7 +36,7 @@
     volume   = **股**（腾讯 ×100）
     turnover = **元**（腾讯优先用 `[35]` 里的精确值）
     last_price / prev_close / open / high / low = **元**
-    另附（不在统一口径里，供匹配条件与界面以后用）：
+    另附（不在统一口径里，供筛选条件与界面以后用）：
     `turnover_rate`(%)、`circ_mktcap`(亿)、`total_mktcap`(亿)、`pe`、`pb`、
     `volume_ratio`(量比)、`avg_price`(均价)、`limit_up`/`limit_down`(涨跌停价)、`at`(数据时刻)
 """

@@ -677,7 +677,7 @@ def test_bad_config_falls_back_instead_of_crashing(tmp_path: Path) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 6) 两条路一致：试算（【运行】）与匹配（【开始匹配】）
+# 6) 两条路一致：试算（【运行】）与匹配（【开始筛选】）
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -692,13 +692,13 @@ def _formula_dir(tmp_path: Path, name: str = "门槛测试") -> Path:
 
 def test_preview_and_matching_agree_in_a_weak_market(
         tmp_path: Path, gate_cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
-    """**弱市**：同一条公式、同一份数据，【运行】与【开始匹配】选出同一批票。
+    """**弱市**：同一条公式、同一份数据，【运行】与【开始筛选】选出同一批票。
 
     顺带钉住两件容易写错的事：
     * 名单为什么变短，两条路上是**同一句话**（都从 `apply_gate` 拿）；
     * 那句话进的是 `warnings` / `notes`，**不是 `errors`** —— 建池的"成功/失败"
       判据是"errors 是否为空"（`scheduler.Scheduler._report_succeeded`），
-      塞进去会让一次正常完成的匹配被判成失败。
+      塞进去会让一次正常完成的筛选被判成失败。
     """
     db = _db(tmp_path, _plan_weak())
     folder = _formula_dir(tmp_path)

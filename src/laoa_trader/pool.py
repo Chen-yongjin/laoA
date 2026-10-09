@@ -89,7 +89,7 @@ def build_pool(
     """跑入选策略并合成当日股票池。
 
     除了内置策略，这里还会**自动并入 `enabled_formulas` 里勾选的自定义公式**
-    （作为与 short 等并列的「公式」组）—— 界面【开始匹配】、定时日更、CLI 三条路
+    （作为与 short 等并列的「公式」组）—— 界面【开始筛选】、定时日更、CLI 三条路
     都走这个函数，所以放在这里就不可能有哪条路"忘了带公式"。默认（没勾公式时）
     一次库都不读，行为与以前完全一致。
 
@@ -100,8 +100,8 @@ def build_pool(
         hot_only: 是否只保留热门行业（用户要求：池子只选热门行业，数量少、盯得过来）。
             **自定义公式不参与这道收敛**（条件本身就是用户写明的，见下面的说明）。
         save: 是否落库 `stock_pool`。
-        save_picks: **匹配结果（公式选出来的票）要不要一起落库**。
-            2026-09-21 主人要求"策略匹配结果改成不自动加入股池" —— 所以【开始匹配】
+        save_picks: **筛选结果（公式选出来的票）要不要一起落库**。
+            2026-09-21 主人要求"策略筛选结果改成不自动加入股池" —— 所以【开始筛选】
             这条路传 `False`：`stock_pool` 里只留**自选标的**（用户自己加的、以及在结果
             页面点【加入自选】加进来的），选出来的票只在结果页面显示，要不要留下由用户点。
             为什么不是整条建池都不做：`stock_pool` 同时是**盘中监控的盯盘清单**
@@ -135,7 +135,7 @@ def build_pool(
     # ── 「公式」组：用户自己在「公式匹配」页勾的自定义公式 ──
     #
     # 为什么放在这里（而不是让调用方先合并好）：**建池是唯一必须并入公式的地方** ——
-    # 界面上的【开始匹配】、定时任务、CLI 三条路都会走到 `build_pool`，
+    # 界面上的【开始筛选】、定时任务、CLI 三条路都会走到 `build_pool`，
     # 放在这里就不可能出现"某一条路忘了带公式"（那种 bug 极难发现：
     # 用户勾了公式，手动建池有、定时建池没有）。
     #
@@ -157,7 +157,7 @@ def build_pool(
             "ran": list(formula_run.ran),
             "picks": {k: len(v) for k, v in formula_run.picks.items()},
             "status": dict(formula_run.status),
-            # 这一轮用的 K 线口径（"开盘时间里跑的匹配都是实时的"，见 `formulas.prepare_inputs`）：
+            # 这一轮用的 K 线口径（"开盘时间里跑的筛选都是实时的"，见 `formulas.prepare_inputs`）：
             # 界面的结论行与结果页都会显示它 —— 同一份策略在盘中和收盘后选出的票不一样，
             # 不显示口径就没法解释。
             "caliber": formula_run.caliber,
@@ -229,7 +229,7 @@ def build_pool(
                    or datetime.now().strftime("%Y-%m-%d"))
             save_pool(engine.db_path, rows_to_save, day)
         else:
-            logger.info("这一轮没有自选标的要落库（匹配结果不再自动进池）")
+            logger.info("这一轮没有自选标的要落库（筛选结果不再自动进池）")
     return pool
 
 
@@ -309,7 +309,7 @@ def merge_watchlist(
             "reason": "自选" + (f"（{note}）" if note else ""),
             "note": note,
             "watchlist": True,
-            # 从匹配结果页加入自选的票带着"当初是哪条策略/公式选出来的"
+            # 从筛选结果页加入自选的票带着"当初是哪条策略/公式选出来的"
             # （`watchlist.source_strategy`）—— 推送正文、桌面文件、盘中提醒都读这一份，
             # 所以这里必须把它带上，否则同一只票在股池表里写 `公式·X+自选`、
             # 在推送里写「自选」，两处对不上（2026-09-21 主人实报的那个 bug）。
@@ -544,7 +544,7 @@ def remove_watch_symbol(
     池子行会原样留着、长得和原来一模一样，用户看到的就是"点了删除没反应"。
     实测：只要那只票在今日池子里（跑过一次建池之后就是常态）就必然复现。
 
-    删的只是**今天这一行**：`stock_pool` 是每日快照，下次【开始匹配】会重新评估，
+    删的只是**今天这一行**：`stock_pool` 是每日快照，下次【开始筛选】会重新评估，
     策略又选中它就还会回来（`signal` 台账与其它历史都不动）。
 
     Returns:
@@ -603,7 +603,7 @@ def push_tag(row: dict) -> str:
     （`.replace("Strategy", "")`）——那是服务器版的内部叫法，而推送是给**手机上的
     人**看的：用户收到的会是 `1. 平安银行(000001)LowPrice｜…`，
     而界面同一只票写的是「低价股」（`strategy_label()`）。同一件事两个名字，
-    用户根本分不清是"哪条策略选的"，也没法拿它去对照「策略匹配」列表。
+    用户根本分不清是"哪条策略选的"，也没法拿它去对照「策略筛选」列表。
 
     **与「来源」列的关系**：界面那一列写 `策略·低价股`（只写主策略，列宽只够一条），
     推送这一行把**所有**命中的策略名都列出来（`低价股、短期反转`）——
@@ -645,29 +645,29 @@ def format_pool_lines(pool: list[dict]) -> list[str]:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 桌面导出：匹配结果除了进「自选标的」，也 output 一个文件到桌面
+# 桌面导出：筛选结果除了进「自选标的」，也 output 一个文件到桌面
 # ══════════════════════════════════════════════════════════════════════════
 #
-# 用户原话：「匹配结果直接进自选标的……（也可以同时 output 一个文件到桌面）」
+# 用户原话：「筛选结果直接进自选标的……（也可以同时 output 一个文件到桌面）」
 #
 # 为什么放在 `pool.py`（而不是 `ui/` 或 `scheduler.py`）：
 #   1. 这里的每一行都是**池子行 → 给人看的文本**，与 `format_pool_lines()`
 #      （推送正文）是同一件事的两种排版；放一处才不会出现"两套写法"，
 #      而且两份文本用的是同一批中文名（`strategy_label` / `source_label`）。
-#   2. 界面【开始匹配】、定时日更、CLI `--once` **三条路都经过 `run_daily` → 建池**，
+#   2. 界面【开始筛选】、定时日更、CLI `--once` **三条路都经过 `run_daily` → 建池**，
 #      导出挂在这个位置三条路就都有桌面文件；挂在界面上则只有点按钮那条路有。
 #   3. 这一层不依赖 Qt、不联网、不读配置，可以单独测（`tests/test_desk_export.py`）。
 
-#: 导出文件名（用户给定：`luweik-匹配结果-2026-09-18.txt`）。
+#: 导出文件名（用户给定：`luweik-筛选结果-2026-09-18.txt`）。
 #: 同一天再跑一次会**覆盖同一个文件**：桌面不是归档目录，堆一串同名文件只会让人分不清。
-EXPORT_NAME_PREFIX = "luweik-匹配结果-"
+EXPORT_NAME_PREFIX = "luweik-筛选结果-"
 EXPORT_NAME_SUFFIX = ".txt"
 
 #: 文件名与正文里的日期写法（用户给定：`2026-09-18`）
 EXPORT_DAY_FORMAT = "%Y-%m-%d"
 
-#: 正文第一行（`luweik · 匹配结果 · 2026-09-18（行情日 2026-09-17）`）
-EXPORT_TITLE = "luweik · 匹配结果"
+#: 正文第一行（`luweik · 筛选结果 · 2026-09-18（行情日 2026-09-17）`）
+EXPORT_TITLE = "luweik · 筛选结果"
 
 #: 正文最后一行。**必须留着**：这份文件常被用户转发到群里，而里面的价格只是
 #: 公开来源的快照 —— 不写清楚，看到的人会当它是交易所行情。
@@ -681,13 +681,13 @@ EXPORT_FOOTER = (
 #: 所以 `_standard_desktop()` 还会**先**问 Qt/系统要一次答案（见那里的说明）。
 #: 桌面上的**子目录**：导出文件落在 `桌面/luweik/` 里（2026-09-21 主人要求）。
 #: 为什么要有这一层：以前直接扔在桌面根目录，用久了桌面上会散着一堆
-#: `luweik-匹配结果-*.txt`（每天一个），桌面本身就是用户摆东西的地方 ——
+#: `luweik-筛选结果-*.txt`（每天一个），桌面本身就是用户摆东西的地方 ——
 #: 收进一个以软件命名的文件夹里，找起来反而更快。
 EXPORT_FOLDER_NAME = "luweik"
 
 #: 改名前的桌面子目录名。**只用来搬一次家**（见 `_migrate_export_dir`）：
 #: 名字改过之后老用户的 `桌面\财神助手\` 会变成孤儿目录，那里面是他几个月攒下来的
-#: 匹配结果，不能就这么留在旧文件夹里"看不见"。
+#: 筛选结果，不能就这么留在旧文件夹里"看不见"。
 EXPORT_FOLDER_LEGACY_NAMES: tuple[str, ...] = ("财神助手",)
 
 
@@ -698,7 +698,7 @@ def _migrate_export_dir(target: Path) -> None:
     * 新的已经存在 → 什么都不做（用户可能两边都在用，合并两份历史不是程序该替他决定的事）；
     * 旧的也不存在 → 什么都不做（绝大多数用户）；
     * 只有旧的、没有新的 → `rename`（同一个盘上的目录改名，原子的、不复制文件）。
-    搬不动（占用/权限）只记一条日志：**导出失败绝不能把匹配流程带走**（与 `_write_export`
+    搬不动（占用/权限）只记一条日志：**导出失败绝不能把筛选流程带走**（与 `_write_export`
     同一个口径）。
     """
     if target.exists():
@@ -727,7 +727,7 @@ def _is_dir(path: Path) -> bool:
 
     为什么单独包一层：桌面目录是"猜"出来的，猜错的那台机器上可能是
     `C:\\Users\\别人\\Desktop` 这种读不动的路径 —— 个别 Windows 路径上
-    `is_dir()` 会抛 `OSError`，而"导出到桌面"这件事**不该**把匹配流程带走。
+    `is_dir()` 会抛 `OSError`，而"导出到桌面"这件事**不该**把筛选流程带走。
     """
     try:
         return path.is_dir()
@@ -870,11 +870,11 @@ def pick_export_text(
     day: str | None = None,
     quotes: dict[str, tuple[float, float | None]] | None = None,
 ) -> str:
-    """本次匹配结果 → 桌面文件的**正文**（纯函数：不碰磁盘、不联网、不读配置）。
+    """本次筛选结果 → 桌面文件的**正文**（纯函数：不碰磁盘、不联网、不读配置）。
 
     版式（用户给定）：
 
-        luweik · 匹配结果 · 2026-09-18（行情日 2026-09-17）
+        luweik · 筛选结果 · 2026-09-18（行情日 2026-09-17）
         共 N 只（策略 M · 自选 K）
         1. 贵州茅台(600519)  现价 1266.98 +0.71%  来源：策略·短期反转
         2. …
@@ -888,7 +888,7 @@ def pick_export_text(
       就是那条策略名），没有才算一次 —— 界面、推送、桌面文件同源；
     * **现价**来自 `quotes`（`latest_quotes()` 的结果或调用方注入），没有就不写这一段。
 
-    隐私：正文里**只有匹配结果本身**（代码、名称、价格、来源）—— 没有 Key、
+    隐私：正文里**只有筛选结果本身**（代码、名称、价格、来源）—— 没有 Key、
     没有本地路径、没有系统信息。这份文件是要被用户转发出去的。
     """
     rows = [row for row in (pool_rows or []) if row.get("symbol")]
@@ -927,7 +927,7 @@ def pick_export_text(
 
 
 def export_file_name(day: str) -> str:
-    """文件名（`luweik-匹配结果-2026-09-18.txt`，用户给定）。"""
+    """文件名（`luweik-筛选结果-2026-09-18.txt`，用户给定）。"""
     return f"{EXPORT_NAME_PREFIX}{day}{EXPORT_NAME_SUFFIX}"
 
 
@@ -953,13 +953,13 @@ def export_pick_file(
     home: Any = None,
     fallback_dir: Any = None,
 ) -> Path | None:
-    """把**本次匹配结果**写成一个桌面上的纯文本文件；失败只记日志、返回 None。
+    """把**本次筛选结果**写成一个桌面上的纯文本文件；失败只记日志、返回 None。
 
     用户要求："结果直接进自选标的……也可以同时 output 一个文件到桌面"。
     所以这是**附赠**产物：它绝不能影响匹配/建池/推送（调用方 `run_daily` 另有兜底
     try，这里自己也不再往外抛）。
 
-    落点（2026-09-21 主人要求）：`桌面/luweik/luweik-匹配结果-<日期>.txt` ——
+    落点（2026-09-21 主人要求）：`桌面/luweik/luweik-筛选结果-<日期>.txt` ——
     桌面根目录不再散着文件，都收进以软件命名的那个文件夹里；找不到桌面时退回数据目录，
     同样套一层 `luweik`。
 
@@ -981,7 +981,7 @@ def export_pick_file(
     """
     rows = [row for row in (pool_rows or []) if row.get("symbol")]
     if not rows:
-        logger.info("本次没有匹配结果，不导出桌面文件")
+        logger.info("本次没有筛选结果，不导出桌面文件")
         return None
     try:
         if day is None:
@@ -999,8 +999,8 @@ def export_pick_file(
             target = target / EXPORT_FOLDER_NAME
         if target is None:
             logger.warning(
-                "找不到桌面目录、也没有可用的回退目录：本次匹配结果没有导出"
-                "（不影响匹配与推送）"
+                "找不到桌面目录、也没有可用的回退目录：本次筛选结果没有导出"
+                "（不影响筛选与推送）"
             )
             return None
         # 改名后的第一次导出：先把旧名字那个目录搬过来，再建新目录
@@ -1015,11 +1015,11 @@ def export_pick_file(
         path = target / export_file_name(day)
         _write_export(path, pick_export_text(rows, data_date=data_date,
                                             day=day, quotes=quotes))
-        logger.info(f"匹配结果已导出到 {path}")
+        logger.info(f"筛选结果已导出到 {path}")
         return path
-    except Exception as exc:  # noqa: BLE001 - 导出失败绝不能把匹配流程带走
+    except Exception as exc:  # noqa: BLE001 - 导出失败绝不能把筛选流程带走
         logger.warning(
-            f"导出匹配结果到桌面失败（不影响匹配与推送）：{type(exc).__name__}: {exc}"
+            f"导出筛选结果到桌面失败（不影响筛选与推送）：{type(exc).__name__}: {exc}"
         )
         return None
 
@@ -1112,7 +1112,7 @@ def strategy_names(row: dict) -> list[str]:
     - `strategies` 是后加的列，**老库/手写的池子行可能只有 `strategy`** ——
       那时推送正文会退化成"自选"，把策略标的写成自选是最难查的那类错；
     - 中文名只有一份来源（`legacy.strategy_label`：老数据的类名 → 中文名）：手机上、表格里、tooltip 里
-      看到的必须是同一个词，否则用户没法拿它去对照「策略匹配」列表。
+      看到的必须是同一个词，否则用户没法拿它去对照「策略筛选」列表。
 
     自定义公式的合成名（`公式·放量上攻`）`strategy_label()` 认不出来会原样返回 ——
     正是我们要的：用户自己起的名字不能被翻译掉。
@@ -1305,7 +1305,7 @@ def watchlist_only_rows(db_path: str, day: str | None = None) -> list[dict]:
         if not symbol or symbol in in_pool:
             continue
         enabled = int(entry.get("enabled", 1)) == 1
-        # 「来源」列（2026-09-21 修）：这一只是**从匹配结果页加入自选**的，就显示
+        # 「来源」列（2026-09-21 修）：这一只是**从筛选结果页加入自选**的，就显示
         # `公式·尾盘超短策略+自选` —— 以前这里写死成「自选」，于是"从匹配列表加入的票
         # 到股池里全变成自选了"（主人实报）。纯手工加的票没有来源，仍是「自选」。
         source_fields = watchlist_source_fields(entry)

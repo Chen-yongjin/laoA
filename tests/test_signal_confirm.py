@@ -158,7 +158,7 @@ def test_preview_hits_drops_the_wobbler_when_confirmation_is_on(
 
 
 def test_matching_and_preview_agree(flip_db: str, confirm_cfg: Config, tmp_path: Path) -> None:
-    """**同一条公式、同一份数据，【运行】与【开始匹配】选出同一批票。**
+    """**同一条公式、同一份数据，【运行】与【开始筛选】选出同一批票。**
 
     这是这一层最该钉的一条：两处各写一份判断，迟早出现"试算说 5 只、匹配只有 2 只"，
     而用户没有任何办法解释。

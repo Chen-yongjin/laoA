@@ -19,7 +19,7 @@ from __future__ import annotations
 #: （原来挤在标题区那一排，与"匹配"混在一起分不清）—— 所以下面的指路文案里
 #: 必须带上"在【系统设置】里"，否则用户会满窗找一个不存在的按钮。
 BTN_DOWNLOAD_TEXT = "下载数据"
-BTN_RUN_TEXT = "开始匹配"
+BTN_RUN_TEXT = "开始筛选"
 BTN_REFRESH_TEXT = "刷新数据"
 
 #: 页面名（指路文案里要用它说明"去哪个页签"）

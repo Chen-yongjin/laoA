@@ -319,7 +319,7 @@ def test_source_states_default_order_and_texts() -> None:
     # Key 这类有用的，纯解释的长句全删"）。钉住的是"留下的是哪两件有用的事"：
     assert "主源" in hx_note and "申请" in hx_note             # 同花顺 = 主源 + 去哪申请
     assert "fuyao.aicubes.cn" in hx_note                        # 申请地址必须还在（可点）
-    assert "匹配" in hx_note                                    # 没 Key 的后果：匹配被自检拒绝
+    assert "筛选" in hx_note                                    # 没 Key 的后果：匹配被自检拒绝
     assert "config.toml" not in hx_note and "环境变量" not in hx_note   # 实现细节不上界面
     assert pub_note == "兜底源：免 Key，不用申请、不用填。"
     # 两句话都必须短（长文就是这次要清掉的东西）

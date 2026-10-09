@@ -770,7 +770,7 @@ def _download_history_inner(
         #    为什么必须在这里做、而且必须在写行情之后：
         #    首次下载以前只做"行情 + 股票名称"，行业归属压根没同步（它只在
         #    `daily_update`/【刷新数据】里跑），于是自检的行业覆盖率是 0%、
-        #    判成"数据不可用"，把用户挡在匹配之外，还指路去"重新下载 180MB"。
+        #    判成"数据不可用"，把用户挡在筛选之外，还指路去"重新下载 180MB"。
         #    而 `sync_industry` 只给库里**已有行情**的股票写行业 —— 所以顺序不能反。
         #    这三步失败不改变整体 `ok`（行情已经下好了），但要在 detail 里说清怎么补。
         light_results = sync_light(cfg, client=client, progress_cb=progress_cb,

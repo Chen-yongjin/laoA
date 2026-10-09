@@ -9,7 +9,7 @@
 
 * **目录定位** —— `formula_dir()` 同时支持源码运行与打包后的 exe（见下）；
 * **保存/删除** —— 文件名安全化 + 引擎认的注释头（`# 名称:` / `# 说明:`）；
-* **参与匹配名单** —— `enabled_names()`：把 `config.toml` 里的 `enabled_formulas`
+* **参与筛选名单** —— `enabled_names()`：把 `config.toml` 里的 `enabled_formulas`
   收紧成"目录里真实存在且语法通过"的名字，**找不到/写错的忽略并记日志**；
 * **运行 / 成绩单** —— 供界面上的【运行】（原【试算】）用（只读本地库，不联网）。
 
@@ -112,7 +112,7 @@ DEFAULT_CONVENTION_KEY = "B"
 
 #: 【运行】的结果**显示**最多列出多少只（名称（代码）格式太长，列满一屏就够了）。
 #: 注意：它只影响界面显示（返回值里的 `shown`），**不影响 `hits`** ——
-#: 【导出匹配结果】写的是全量命中（见 `preview_hits` 的 Returns）。
+#: 【导出筛选结果】写的是全量命中（见 `preview_hits` 的 Returns）。
 PREVIEW_LIMIT = 20
 
 #: 成绩单的进度回调类型（与本项目其它进度回调同一个签名：阶段 + 已完成 + 总数）
@@ -435,7 +435,7 @@ def save_formula(
 
     Args:
         name: 公式名称（会做安全化；**空名拒绝**）。
-        body: 公式正文（多行，最后一行是匹配条件）。
+        body: 公式正文（多行，最后一行是筛选条件）。
         description: 说明；None = 用 `describe_for_save()` 自动生成。
         directory: 公式目录；None = `formula_dir()`。
 
@@ -478,17 +478,17 @@ def delete_formula(name: str, directory: str | Path | None = None) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 参与匹配名单（config.toml 的 enabled_formulas）
+# 参与筛选名单（config.toml 的 enabled_formulas）
 # ══════════════════════════════════════════════════════════════════════════
 
 
 def enabled_names(cfg: Any = None, directory: str | Path | None = None) -> list[str]:
-    """本次**真正参与匹配**的公式名（按目录里的顺序）。
+    """本次**真正参与筛选**的公式名（按目录里的顺序）。
 
     三道收紧，缺一不可：
 
     1. 名字写在 `config.toml` 里、但 `formulas/` 里**没有这个文件** → 忽略 + 记日志
-       （用户删了文件、或改名了；静默失败会让他以为"公式匹配坏了"）；
+       （用户删了文件、或改名了；静默失败会让他以为"公式筛选坏了"）；
     2. 文件有、但公式**语法错** → 忽略 + 记日志（坏公式不该拖垮其它公式）；
     3. 名字里的首尾空格、重复项 → 去掉。
 
@@ -510,12 +510,12 @@ def enabled_names(cfg: Any = None, directory: str | Path | None = None) -> list[
         spec = by_name.get(name)
         if spec is None:
             logger.warning(
-                f"策略匹配：config.toml 里的 enabled_formulas 写着 {name!r}，"
+                f"策略筛选：config.toml 里的 enabled_formulas 写着 {name!r}，"
                 f"但策略目录里没有这条策略，已忽略"
             )
             continue
         if not spec.ok:
-            logger.warning(f"策略匹配：{name} 语法有错（{spec.error_text}），本次不参与")
+            logger.warning(f"策略筛选：{name} 语法有错（{spec.error_text}），本次不参与")
             continue
         if name not in picked:
             picked.append(name)
@@ -586,7 +586,7 @@ def latest_trading_day(db_path: str | Path) -> str | None:
 #: 分两类口径：
 #:   * 收盘型：`流通市值` / `换手率` —— 日线里没有，快照给的是"今天"的值；
 #:   * 盘中型（2026-09-23 加，用户："必须加进去啊"）：`现价` / `现涨幅` / `现量比` / `现换手`
-#:     —— 语义是"**现在这一刻**的盘面"，用户在盘中点【运行】/【开始匹配】时按当时的快照算；
+#:     —— 语义是"**现在这一刻**的盘面"，用户在盘中点【运行】/【开始筛选】时按当时的快照算；
 #:     非交易时段取不到（条件不成立、一只都不出），而且**没有历史、不能回测**。
 SNAPSHOT_FIELDS: tuple[str, ...] = ("流通市值", "换手率", "现价", "现涨幅", "现量比", "现换手")
 
@@ -707,11 +707,11 @@ def all_symbols(db_path: str | Path) -> list[str]:
 # K 线口径：按时间自动在「日 K 线」与「盘中实时」之间切换
 #
 # 主人 2026-09-23 的原话（这就是本段全部的规格）：
-#     "在软件内置规则里设定，开盘时间里运行的匹配，都是实时的，不是开盘时间，采用 K 线。"
+#     "在软件内置规则里设定，开盘时间里运行的筛选，都是实时的，不是开盘时间，采用 K 线。"
 # 同一天他又划掉了我加的那个开关："不需要加开关，按照我说的规则来" ——
 # 所以这里是**无条件**的规则，没有配置键、界面上也没有勾选框（有用例钉着"关不掉"）。
 #
-# 也就是说：**这件事不该由用户写进策略、也不该由他决定开关**。他在盘中点【运行】/【开始匹配】，
+# 也就是说：**这件事不该由用户写进策略、也不该由他决定开关**。他在盘中点【运行】/【开始筛选】，
 # 用的就该是此刻的盘面；收盘之后（或周末、或没网）再用库里那根日 K。
 # 于是策略里的 `C`、`C/REF(C,1)-1`、`量比()`、`C>MA(C,5)` 一个字都不用改，
 # 就自动变成盘中口径 —— 这是"内置规则"与"再教用户写一条盘中策略"的区别。
@@ -753,7 +753,7 @@ def _quote_rows(cfg: Any, codes: Sequence[str]) -> dict[str, dict]:
 
     单独抽出来是因为实时口径要**一趟快照干两件事**：拼"今天"这根 K 线（价格/量）
     与填 `流通市值 / 换手率 / 现价 / 现涨幅 / 现量比 / 现换手`（扩展字段）。
-    早先这两件事各取一次的话，同一轮匹配会看到两个时刻的盘面 —— 那是最没法解释的
+    早先这两件事各取一次的话，同一轮筛选会看到两个时刻的盘面 —— 那是最没法解释的
     一类不一致（涨幅与 K 线对不上，用户只能怀疑程序坏了）。
     """
     from laoa_trader.data import sources
@@ -803,11 +803,11 @@ def live_bars_from_quotes(quotes: dict[str, dict] | None) -> dict[str, fm.LiveBa
 
 @dataclass
 class Prepared:
-    """一次匹配要交给公式引擎的**全部输入**（含"用哪套 K 线口径"的结论）。
+    """一次筛选要交给公式引擎的**全部输入**（含"用哪套 K 线口径"的结论）。
 
     为什么打包成一个对象而不是让每个调用方自己拼：试算（`preview_hits`）与建池
     （`formula_group.run_enabled_formulas`）必须**完全同口径** —— 要是各写一份，
-    迟早出现"点【运行】选出 3 只、点【开始匹配】选出 1 只"这种没法解释的差异。
+    迟早出现"点【运行】选出 3 只、点【开始筛选】选出 1 只"这种没法解释的差异。
     """
     #: 库里最新的行情日（K 线口径的"今天"）
     kline_day: str | None = None
@@ -828,7 +828,7 @@ class Prepared:
     #: **告知**（不是错误）：典型是"盘中想用实时数据，但取不到快照 → 已退回日 K 线"。
     #: 为什么必须与 `notes` 分开：建池的"成功/失败"判据是"errors 是否为空"
     #: （`scheduler.Scheduler._report_succeeded`）—— 把一句"退回了日 K"塞进 errors，
-    #: 会让一次**正常完成**的匹配被判成失败（表现：明明选出了票、推送也发了，
+    #: 会让一次**正常完成**的筛选被判成失败（表现：明明选出了票、推送也发了，
     #: 状态却写"未成功"，还要在补跑时间再跑一遍）。
     warnings: list[str] = field(default_factory=list)
 
@@ -852,7 +852,7 @@ def _live_decision(cfg: Any, db_path: str | Path, kline_day: str | None,
     # ⚠️ 这里**没有**"用不用实时"的开关可查，而且不许加（主人 2026-09-23：
     # "不需要加开关，按照我说的规则来"）：判据只有时间、交易日、库里的数据这三条。
     # 延迟导入：`intraday` 会拉起数据层一大片（hithink/engine/storage），
-    # 而这个判据只有"真要跑匹配"时才用到；模块级导入会让 `import formulas`
+    # 而这个判据只有"真要跑筛选"时才用到；模块级导入会让 `import formulas`
     # 顺带把网络栈与数据库层拉进来（成绩单/策略列表页用不到它们）。
     from laoa_trader import intraday
 
@@ -913,7 +913,7 @@ def prepare_inputs(
             # 想实时却拿不到数据：退回日 K，并且**必须说清**（不然用户看到的是
             # "条件成立却一只都不出"，只能怀疑策略写错了）。
             # 走 `warnings` 而不是 `notes`：这是一句**告知**，这次匹配本身是正常完成的
-            # （建池那边把 `notes` 当错误，会让一次成功的匹配被判成"未成功"并安排补跑）。
+            # （建池那边把 `notes` 当错误，会让一次成功的筛选被判成"未成功"并安排补跑）。
             live, why = False, "盘中取不到实时快照"
             prepared.warnings.append(
                 "⚠️ 现在是开盘时间，本该按实时数据匹配，但取不到实时快照 → "
@@ -939,7 +939,7 @@ def prepare_inputs(
     ) else {}
 
     if prepared.today:
-        # ⚠️ 这句是**纯文本**（进 QLabel 的提示区、进匹配完成的结论），不是 markdown ——
+        # ⚠️ 这句是**纯文本**（进 QLabel 的提示区、进筛选完成的结论），不是 markdown ——
         # 写 `**加粗**` 的话用户看到的就是两个星号（用户明确说过不喜欢这种星号）。
         prepared.caliber = (f"📊 本次口径：盘中实时（{moment:%H:%M}，"
                             f"用现价拼出今天 {today} 这根 K 线）")
@@ -988,7 +988,7 @@ def preview_hits(
          "caliber": 这次用的 K 线口径（一句中文，界面直接显示）}
 
         `hits` 是**全量**命中清单（按代码排序、不截断），`limit` 只决定 `shown`：
-        界面按 `shown` 截断**显示**（提示区一行放不下 60 只票），而【导出匹配结果】
+        界面按 `shown` 截断**显示**（提示区一行放不下 60 只票），而【导出筛选结果】
         要写**完整**的一份 —— 给用户的文件里少几只，是最难被发现的那种错。
     """
     hits: list[dict] = []
@@ -1002,11 +1002,11 @@ def preview_hits(
     skipped = 0
     # 输入（K 线口径 + 扩展字段）全部由 `prepare_inputs` 一份逻辑给 —— 建池那条路
     # （`formula_group.run_enabled_formulas`）用的是**同一个函数**，所以
-    # 【运行】与【开始匹配】不可能出现两套口径。
+    # 【运行】与【开始筛选】不可能出现两套口径。
     prepared = prepare_inputs(cfg, db_path, [formula], symbols, now=now)
     day = prepared.kline_day
     # 「连续 N 日确认」与建池那条路**同一份口径**（`formula_group.confirm_days_of`）：
-    # 试算按 0 算、匹配按 2 算的话，用户会看到"【运行】选出 5 只、【开始匹配】只有 2 只"，
+    # 试算按 0 算、匹配按 2 算的话，用户会看到"【运行】选出 5 只、【开始筛选】只有 2 只"，
     # 而且没有任何办法解释。确认生效时这里也要说一句，免得用户以为公式坏了。
     # 延迟导入：`formula_group` 在模块级 import 本模块（它是公式库的外壳），
     # 这里再顶层 import 会成环。
@@ -1049,7 +1049,7 @@ def preview_hits(
     hits.sort(key=lambda hit: hit["symbol"])
     # ── 弱市抬门槛（`market_regime`）──
     # 大盘弱势时只留"近 N 日跑赢全市场"的票。**与建池那条路调的是同一个函数**
-    # （`formula_group.run_enabled_formulas`），所以【运行】与【开始匹配】
+    # （`formula_group.run_enabled_formulas`），所以【运行】与【开始筛选】
     # 在任何大盘状态下都会给出同一批票 —— 两处各写一套筛选，就会出现
     # "试算说 5 只、匹配只有 2 只"这种用户无法解释的差异。
     # 强市/中性/未知、或用户关掉 `market_regime_gate` 时：`kept` 就是原样的全部
@@ -1135,7 +1135,7 @@ def run_scorecard(
 
     # ⚠️ 成绩单**永远只用库里的日 K**（不带 `today`/`live_bars`）：它算的是"这条公式
     # 在历史上行不行"。塞一根盘中的"今天"进去，等于拿一个还没有收盘结果的样本去算胜率
-    # （而且同一份历史每次点都得到不同的数）。实时口径只属于【运行】/【开始匹配】那条路。
+    # （而且同一份历史每次点都得到不同的数）。实时口径只属于【运行】/【开始筛选】那条路。
     series_iter = fm.load_series(db_path, symbols=symbols, start=start)
     # 进度需要"总数"，而 `load_series` 是生成器（不知道总数）—— 先按库里的代码数
     # 报总步数：比"进度条永远停在 0%"好得多，且不额外读行情。

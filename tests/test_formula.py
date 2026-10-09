@@ -99,7 +99,7 @@ def sig(text: str, series: fm.Series) -> list[bool]:
 
 
 def raw(expr: str, series: fm.Series):
-    """**白盒**：只求值一个表达式（不要求它是匹配条件），用来核对指标数值。
+    """**白盒**：只求值一个表达式（不要求它是筛选条件），用来核对指标数值。
 
     为什么需要它：公开 API 的最后一行必须是条件，所以 `MA(C,5)` 这类中间序列
     没法直接看出数值；而"MA 算得对不对"恰恰是最该被钉死的东西。
@@ -476,24 +476,24 @@ def test_unbalanced_parentheses() -> None:
 
 def test_last_line_must_be_condition_numeric() -> None:
     err = compile_error("C")
-    assert "最后一行必须是匹配条件" in str(err)
+    assert "最后一行必须是筛选条件" in str(err)
     assert "数值序列" in str(err)
     assert err.code == "not_condition"
     err2 = compile_error("MA(C,5)")
-    assert "最后一行必须是匹配条件" in str(err2)
+    assert "最后一行必须是筛选条件" in str(err2)
 
 
 def test_last_line_must_be_condition_not_assignment() -> None:
     """最后一条语句只定义变量时：报 `not_condition`，而且**提示里点名那个变量**。
 
     2026-09-21 加强：主人从网上抄来的片段（一个横跨 5 行的 `BAN := NOT(...)`，
-    没有最后那行条件）原来只会收到"最后一行必须是匹配条件"—— 他知道该做什么，
+    没有最后那行条件）原来只会收到"最后一行必须是筛选条件"—— 他知道该做什么，
     但不知道该写哪个名字。现在提示直接给出「在最后再加一行 `M5`」，
     照抄一行就能跑；这条用例按新口径钉住（断言没放宽，反而更严：要出现变量名）。
     """
     err = compile_error("M5:=MA(C,5)")
     assert err.code == "not_condition"
-    assert "没有写匹配条件" in str(err)
+    assert "没有写筛选条件" in str(err)
     assert "M5" in str(err) and "M5" in (err.hint or ""), "提示里要点名该补的那个变量"
 
 
@@ -1166,7 +1166,7 @@ def test_load_series_end_to_end_selection(tmp_path: Path) -> None:
 
 # ── 盘中实时口径：把"今天"这一根接在日线后面（用户 2026-09-23 定的内置规则）──
 #
-# 规格："开盘时间里运行的匹配，都是实时的，不是开盘时间，采用 K 线"。
+# 规格："开盘时间里运行的筛选，都是实时的，不是开盘时间，采用 K 线"。
 # 所以引擎只需多做一件事：给它一根今天的快照，就把它接成**最后一根 K 线** ——
 # 之后 C / REF / 量比() 全部自动变成盘中口径，用户写的公式一个字都不用改。
 

@@ -13,7 +13,7 @@
     M10:=MA(C,10)
     C>M5 AND M10>REF(M10,1) AND V>MA(V,5)*1.5 AND 连板()>=2
 
-最后一行必须是**匹配条件**（返回 0/1 的表达式），其余行只能是 `X:=...` 赋值。
+最后一行必须是**筛选条件**（返回 0/1 的表达式），其余行只能是 `X:=...` 赋值。
 信号为 True 表示"当日收盘后选中"——与项目现有口径一致（匹配看每只票最后一根 K 线）。
 
 为什么**绝对不用** eval / exec
@@ -47,7 +47,7 @@
 而这是回测/匹配里最贵的一种错。（见 `_logic_combine` / `_not` / `_count`。）
 
 特别注意 IEEE 的坑：`NaN != 5` 在 float 语义下是 **True**。所以 `=`/`!=` 必须显式
-把缺值掩成 NaN（见 `_num_cmp`），否则"停牌日不等于 5"会变成一条匹配信号。
+把缺值掩成 NaN（见 `_num_cmp`），否则"停牌日不等于 5"会变成一条筛选信号。
 """
 
 from __future__ import annotations
@@ -193,11 +193,11 @@ FIELD_KINDS: dict[str, str] = {
 #: 目前有两类：
 #:
 #: 1. **快照字段**（只有"今天"这一个值，由调用方从实时快照塞进来）：
-#:    `流通市值`（亿元）、`换手率`（%）—— 它们是用户点名要的两个匹配条件，
+#:    `流通市值`（亿元）、`换手率`（%）—— 它们是用户点名要的两个筛选条件，
 #:    而日线里没有这两个数（同花顺的快照端点也不返回，见 `data/sources.py` 的
 #:    `SUPPLEMENT_FIELDS`）。写法：把"今天"的值放在数组**最后一个位置**、
 #:    其余填 NaN —— 于是 `流通市值>=10` 只在最后一根 K 线上成立，
-#:    与"只看最后一根匹配"的口径天然一致；取不到快照时整条都是 NaN，
+#:    与"只看最后一根筛选"的口径天然一致；取不到快照时整条都是 NaN，
 #:    条件不成立（**宁可不出信号，也不拿旧值凑**）。
 #: 2. **排除类标记**（0/1，**不需要联网**）：`ST`、`科创`、`北交所` ——
 #:    它们完全由代码与名称推出来，在 `Series.__post_init__` 里自动补齐，
@@ -209,7 +209,7 @@ EXTRA_FIELDS: dict[str, str] = {
     "换手率": "num",
     # ── 盘中快照口径（2026-09-23 加，用户："必须加进去啊"）──
     # 这四个与 `流通市值`/`换手率` 一样来自**实时快照**，但语义是"**现在这一刻**的盘面"
-    # （用户在盘中点【运行】/【开始匹配】时取当时的值），而不是日线最后一根的收盘值：
+    # （用户在盘中点【运行】/【开始筛选】时取当时的值），而不是日线最后一根的收盘值：
     #   `现价` = 最新价（元）；`现涨幅` = 当日涨跌幅（**百分数**，3.2 表示 +3.2%）；
     #   `现量比` = 量比（倍）；`现换手` = 换手率（%）。
     # ⚠️ 两个硬限制（界面的 tooltip 与文档都写着）：非交易时段取不到 → 条件不成立、
@@ -246,7 +246,7 @@ def is_st_name(name: Any) -> bool:
     """名称里带 `ST` 就算（`*ST` / `ST` / `SST` / `S佳通` 里的 `S` 不算）。
 
     A 股的风险警示股名称一定含 `ST`（`*ST` 也含），所以按名称判既准又不用额外数据；
-    名称取自本地 `stock_basic`（匹配流程本来就在读它）。
+    名称取自本地 `stock_basic`（筛选流程本来就在读它）。
     """
     return "ST" in str(name or "").upper()
 
@@ -358,7 +358,7 @@ _STYLE_MODS: frozenset[str] = frozenset({
 })
 
 #: 画图类语句（整句跳过）：它们产出的是图形而不是序列，匹配用不到。
-#: 为什么"忽略"而不是"报错"：通达信的匹配公式里常顺手带一句画线/标记，
+#: 为什么"忽略"而不是"报错"：通达信的筛选公式里常顺手带一句画线/标记，
 #: 报错就等于"网上下来的公式一条都跑不了"；忽略它并在界面上说明，
 #: 用户拿到的才是"能用的那部分条件"。
 _DRAWING_FUNCS: frozenset[str] = frozenset({
@@ -383,7 +383,7 @@ _IDENT_START_EXTRA = "_"
 #: 结果 `OPEN>PRE_CLOSE` 会被当成"注入"拒绝，而 OPEN 明明是开盘价的合法长名。
 #: 加条目时请先和 `FIELD_ALIASES` / `FUNCTIONS` 对一遍。
 _FORBIDDEN_WORDS: dict[str, str] = {
-    name: "策略只能写赋值与匹配条件，不支持导入模块、定义函数/类、循环、异常处理"
+    name: "策略只能写赋值与筛选条件，不支持导入模块、定义函数/类、循环、异常处理"
     for name in (
         "IMPORT", "FROM", "DEF", "CLASS", "LAMBDA", "RETURN", "YIELD", "GLOBAL",
         "NONLOCAL", "DEL", "ASSERT", "RAISE", "TRY", "EXCEPT", "FINALLY", "WITH",
@@ -780,7 +780,7 @@ class _Call:
 
 @dataclass(frozen=True, slots=True)
 class _Statement:
-    """一条语句：`name` 为 None 表示"裸表达式"（只允许出现在最后一行 = 匹配条件）。"""
+    """一条语句：`name` 为 None 表示"裸表达式"（只允许出现在最后一行 = 筛选条件）。"""
 
     name: str | None
     node: Any
@@ -1064,7 +1064,7 @@ def _logic_combine(op: str, a: Any, b: Any, n: int) -> np.ndarray:
 
     为什么"悲观"而不是 Kleene 三值逻辑的 `True OR 未知 = True`：
     匹配公式的输出是"买不买"，让缺值一路保持"不知道"（最终 False）永远不会造出
-    假信号；而 `True OR 未知 = True` 会让"数据不足"变成一条真的匹配信号。
+    假信号；而 `True OR 未知 = True` 会让"数据不足"变成一条真的筛选信号。
     宁可漏选，不可错选。
     """
     A = _as_cond_float(a, n)
@@ -1086,7 +1086,7 @@ def _num_cmp(op: str, a: Any, b: Any) -> Any:
     """数值比较 → 0.0 / 1.0 / NaN。**缺值给 NaN**（不是 False，见模块头）。
 
     `NaN != 5` 在 IEEE 语义下是 True，如果不显式抹掉，停牌日会满足 `C!=5`
-    从而变成一条匹配信号。所以这里统一：任一侧缺值 → NaN（既不算相等也不算不等）。
+    从而变成一条筛选信号。所以这里统一：任一侧缺值 → NaN（既不算相等也不算不等）。
     """
     A = _as_float(a)
     B = _as_float(b)
@@ -1273,7 +1273,7 @@ def _impl_vol_ratio(ev: _Evaluator, node: _Call, vals: list) -> Any:
 # ══════════════════════════════════════════════════════════════════════════
 # 通达信（TDX）兼容层：补齐匹配公式里高频出现的函数
 #
-# 为什么要有这一块：主人要求"通达信公式进来直接能跑"。下面这些函数在 TDX 的匹配
+# 为什么要有这一块：主人要求"通达信公式进来直接能跑"。下面这些函数在 TDX 的筛选
 # 公式里出现率极高（KDJ/RSI/BOLL、EXIST/EVERY/BETWEEN、SMA/DMA……），
 # 缺一个就整条公式报错。实现口径**照 TDX 官方定义**，关键几处写在各自的注释里：
 #   * `SMA(X,N,M)` 是**加权递推**，与 `MA` 不是一回事（这是最常见的误用）；
@@ -2025,7 +2025,7 @@ class _Parser:
                 raise FormulaError(
                     "一行只能写一条语句",
                     line=start.line, col=start.col, code="syntax",
-                    hint="每条语句独占一行（`:=` 定义变量，最后一行写匹配条件）",
+                    hint="每条语句独占一行（`:=` 定义变量，最后一行写筛选条件）",
                 )
             if start.kind == "ident" and start.value.upper() in _DRAWING_FUNCS:
                 # 通达信兼容层：画图语句整句跳过（匹配用不到图形），只记一条 note。
@@ -2048,7 +2048,7 @@ class _Parser:
         if not self.statements:
             raise FormulaError(
                 "策略是空的", line=1, col=1, code="empty",
-                hint="至少要写一行匹配条件，例如 `C>MA(C,5)`",
+                hint="至少要写一行筛选条件，例如 `C>MA(C,5)`",
             )
         if len(self.statements) > MAX_FORMULA_LINES:
             raise FormulaError(
@@ -2063,7 +2063,7 @@ class _Parser:
         line = start.line
         while self.pos < len(self.toks) and self.toks[self.pos].line == line:
             self.pos += 1
-        self._note(f"第 {line} 行的画图语句 {start.value}(…) 已忽略（画图对匹配没有影响）")
+        self._note(f"第 {line} 行的画图语句 {start.value}(…) 已忽略（画图对筛选没有影响）")
 
     def _eat_style(self) -> None:
         """吃掉通达信的输出样式修饰：`,COLORRED` / `,LINETHICK2` / `,NODRAW` / `,SHIFT3` …"""
@@ -2103,7 +2103,7 @@ class _Parser:
             raise FormulaError(
                 "中间语句必须是赋值",
                 line=start.line, col=start.col, code="syntax",
-                hint="中间行要写成 `X:=表达式`（例如 M5:=MA(C,5)），最后一行才是匹配条件",
+                hint="中间行要写成 `X:=表达式`（例如 M5:=MA(C,5)），最后一行才是筛选条件",
             )
         if leftover.kind == "rparen":
             raise FormulaError(
@@ -2118,7 +2118,7 @@ class _Parser:
         raise FormulaError(
             "一行只能写一条语句",
             line=leftover.line, col=leftover.col, code="syntax",
-            hint="每条语句独占一行（`:=` 定义变量，最后一行写匹配条件）",
+            hint="每条语句独占一行（`:=` 定义变量，最后一行写筛选条件）",
         )
 
     def _final_condition(self) -> Any:
@@ -2131,14 +2131,14 @@ class _Parser:
             # 所以直接把他刚定义的那个名字写进提示里，照抄一行就能跑。
             name = str(last.name)
             raise FormulaError(
-                f"这条策略只定义了中间变量 {name}，没有写匹配条件",
+                f"这条策略只定义了中间变量 {name}，没有写筛选条件",
                 line=last.line, col=last.col, code="not_condition",
                 hint=f"在最后再加一行 `{name}`（或者别的条件，例如 `{name} AND C>MA(C,5)`）"
                      " —— 最后一行才是「选出哪些票」的条件；`X:=...` 只是定义中间变量",
             )
         if last.node.dtype != _BOOL:
             raise FormulaError(
-                "策略最后一行必须是匹配条件（返回 0/1 的表达式），"
+                "策略最后一行必须是筛选条件（返回 0/1 的表达式），"
                 f"现在是{_KIND_LABEL[last.node.dtype]}序列",
                 line=last.line, col=last.col, code="not_condition",
                 hint="加一个比较，例如 `C>MA(C,5)`、`量比()>1.5`",
@@ -2822,7 +2822,7 @@ class _Evaluator:
             else:
                 self.env[statement.name] = value
         if result is None:  # pragma: no cover - 解析期保证存在
-            raise FormulaError("策略里没有匹配条件（内部错误）", code="internal")
+            raise FormulaError("策略里没有筛选条件（内部错误）", code="internal")
         return _as_cond_array(result, self.n)
 
     def eval_node(self, node: Any) -> Any:
@@ -3005,7 +3005,7 @@ def _live_arrays(
         # 同一天出现两根会让 REF/MA 这些窗口函数全部错位。
         return None
     if dates[-1] != kline_day:
-        return None                      # 停牌/数据缺天的票：不靠"接一根"混进今天的匹配
+        return None                      # 停牌/数据缺天的票：不靠"接一根"混进今天的筛选
     if not (bar.prev_close and bar.prev_close > 0 and bar.close and bar.close > 0):
         return None                      # 缺现价或缺昨收：拼不出来，退回日线
     factor = float(close[-1]) / float(bar.prev_close)
@@ -3152,14 +3152,14 @@ def load_series(
             不是一条历史序列；写成 `REF(热门行业,5)` 是没意义的（会得到缺值）。
         today: 「今天」的日期（`YYYY-MM-DD`）。给了就会在每只票的日线后面**接上今天
             这一根**（用 `live_bars` 里的实时快照拼），于是 `C` / `C/REF(C,1)-1` /
-            `量比()` 全部变成盘中口径 —— 这是"开盘时间里跑的匹配都是实时的，不是开盘
+            `量比()` 全部变成盘中口径 —— 这是"开盘时间里跑的筛选都是实时的，不是开盘
             时间才采用 K 线"那条规矩的实现点（见 `formulas.resolve_caliber`）。
             None（默认）= 完全按库里的日线走，与没有这个参数时**逐字一致**。
         live_bars: `{代码: LiveBar}`（实时快照的原始值）。缺某只票就不给它接今天这一根，
             它照旧按日线算。
         kline_day: 库里最新的行情日（`formulas.latest_trading_day`）。**必须给**：
             只有"最后一根正好是它"的票才接今天这一根 —— 否则停牌/缺天的票会靠
-            "接一根"混进今天的匹配，而且涨跌幅是假的（推导见 `_live_arrays`）。
+            "接一根"混进今天的筛选，而且涨跌幅是假的（推导见 `_live_arrays`）。
 
     Yields:
         Series（时间升序）。没有数据的代码会被跳过。
@@ -3393,7 +3393,7 @@ def compile_formula(
     """解析并校验公式。
 
     Args:
-        text: 公式正文（多行，最后一行是匹配条件）。
+        text: 公式正文（多行，最后一行是筛选条件）。
         name / description / source_path: 元信息（从公式文件加载时填，界面上显示）。
 
     Returns:
@@ -3522,7 +3522,7 @@ def load_formula_files(directory: str | Path) -> list[FormulaSpec]:
     """加载目录下的公式文件（`.txt` / `.tvf`，UTF-8）。
 
     约定：文件开头的 `#` 行是注释头，认 `# 名称: xxx` 与 `# 说明: xxx`；
-    其余部分是公式体（最后一行必须是匹配条件）。
+    其余部分是公式体（最后一行必须是筛选条件）。
 
     - 目录不存在 → 返回空列表（**不抛异常**：界面上没这个目录很正常）；
     - 单个文件语法错 → 只有它自己 `ok=False`，其余照常；

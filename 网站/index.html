@@ -93,13 +93,13 @@
             <li><b>通达信 / 同花顺的公式可以直接粘进来</b>：支持 <code>:=</code> 中间变量、<code>:</code> 输出线、<code>COLORRED</code> 这类写法，画图语句（<code>DRAWICON</code>、<code>STICKLINE</code>…）自动忽略。</li>
             <li><code>MA / EMA / REF / HHV / LLV / SUM / COUNT / CROSS / SMA / DMA / KDJ / RSI / BOLL</code> 等七十多个函数都能用。</li>
             <li><b>写完点【运行】就知道能选出几只</b>，不用等收盘、不用拿钱试。</li>
-            <li><b>开盘时间里跑的就是实时数据</b>：不用为「盘中」另写一条策略 —— 盘中点【运行】/【开始匹配】，用的就是此刻的现价（<code>C</code>、<code>C/REF(C,1)-1</code>、<code>量比()</code> 自动变成盘中口径）；收盘后自动改用当天收盘的 K 线。用的是哪套会写在结果里。</li>
-            <li>策略列表里每条策略都能改、能删、能勾选（勾上才参与匹配）。</li>
+            <li><b>开盘时间里跑的就是实时数据</b>：不用为「盘中」另写一条策略 —— 盘中点【运行】/【开始筛选】，用的就是此刻的现价（<code>C</code>、<code>C/REF(C,1)-1</code>、<code>量比()</code> 自动变成盘中口径）；收盘后自动改用当天收盘的 K 线。用的是哪套会写在结果里。</li>
+            <li>策略列表里每条策略都能改、能删、能勾选（勾上才参与筛选）。</li>
           </ul>
         </div>
-        <figure><img src="截图/06-策略匹配-编辑器.png" alt="策略编辑器：左边写公式，右边点按钮插入"></figure>
+        <figure><img src="截图/06-策略筛选-编辑器.png" alt="策略编辑器：左边写公式，右边点按钮插入"></figure>
       </div>
-      <figure class="wide"><img src="截图/04-策略匹配-列表.png" alt="策略列表"></figure>
+      <figure class="wide"><img src="截图/04-策略筛选-列表.png" alt="策略列表"></figure>
     </div>
   </section>
 
@@ -149,9 +149,9 @@
       </article>
 
       <article class="feature">
-        <h3>匹配结果：自己决定加不加</h3>
-        <p>跑完匹配，<b>结果只列出来、不自动进自选</b>：每行一个【加入自选】按钮，选中的才进股池；也可以【一键加入自选】，或导出到桌面的文本文件（<code>桌面\luweik\luweik-匹配结果-&lt;日期&gt;.txt</code>）。</p>
-        <figure><img src="截图/07-策略匹配-匹配结果.png" alt="匹配结果"></figure>
+        <h3>筛选结果：自己决定加不加</h3>
+        <p>跑完匹配，<b>结果只列出来、不自动进自选</b>：每行一个【加入自选】按钮，选中的才进股池；也可以【一键加入自选】，或导出到桌面的文本文件（<code>桌面\luweik\luweik-筛选结果-&lt;日期&gt;.txt</code>）。</p>
+        <figure><img src="截图/07-策略筛选-筛选结果.png" alt="筛选结果"></figure>
       </article>
 
       <article class="feature">
@@ -169,9 +169,9 @@
       <div class="split">
         <ol class="steps">
           <li><b>下载解压</b>：得到 <code>LuweikDecision</code> 文件夹，双击里面的 <code>luweik决策系统.exe</code>，不需要安装。</li>
-          <li><b>（可选）填同花顺 Key</b>：想要<b>完整历史数据</b>（匹配与回测要用）就去 <a href="https://fuyao.aicubes.cn" target="_blank" rel="noopener">fuyao.aicubes.cn</a> 申请一个，填在「系统设置 → 数据来源」；不填也能用（行情与提醒走免 Key 的公开源）。</li>
+          <li><b>（可选）填同花顺 Key</b>：想要<b>完整历史数据</b>（筛选与回测要用）就去 <a href="https://fuyao.aicubes.cn" target="_blank" rel="noopener">fuyao.aicubes.cn</a> 申请一个，填在「系统设置 → 数据来源」；不填也能用（行情与提醒走免 Key 的公开源）。</li>
           <li><b>免费试用 7 天</b>：所有功能都能用。到期后点【策略编辑】会提示需要授权。</li>
-          <li><b>加自选</b>：在「自选标的」里填代码添加，或者跑一次匹配，从结果里挑。</li>
+          <li><b>加自选</b>：在「自选标的」里填代码添加，或者跑一次筛选，从结果里挑。</li>
         </ol>
         <figure><img src="截图/10-授权窗口.png" alt="授权窗口：机器码与注册码"></figure>
       </div>
@@ -232,16 +232,16 @@
   <section id="faq" class="band">
     <div class="wrap">
       <h2>常见问题</h2>
-      <details><summary>非交易时段跑匹配，一只都选不出来？</summary>
-        <p>用到了「流通市值 / 换手率 / 现价 / 现涨幅 / 现量比 / 现换手」的策略会这样：这几个数来自<b>实时快照</b>，收盘后拿不到，所以条件一律不成立 —— 交易时段再跑就正常了。不依赖这几个数的策略不受影响：<b>开盘时间里跑匹配用的就是实时数据</b>（现价拼出「今天」这根 K 线，<code>C</code>、<code>量比()</code> 都是盘中口径），收盘后改用当天收盘的 K 线。</p></details>
+      <details><summary>非交易时段跑筛选，一只都选不出来？</summary>
+        <p>用到了「流通市值 / 换手率 / 现价 / 现涨幅 / 现量比 / 现换手」的策略会这样：这几个数来自<b>实时快照</b>，收盘后拿不到，所以条件一律不成立 —— 交易时段再跑就正常了。不依赖这几个数的策略不受影响：<b>开盘时间里跑筛选用的就是实时数据</b>（现价拼出「今天」这根 K 线，<code>C</code>、<code>量比()</code> 都是盘中口径），收盘后改用当天收盘的 K 线。</p></details>
       <details><summary>盘中和收盘后跑同一份策略，结果不一样？</summary>
-        <p>这是设计如此：<b>开盘时间里跑的匹配用实时数据</b>（此刻的现价/量），不在开盘时间才用本地 K 线。所以盘中不同时刻点【运行】会得到不同结果，而且盘中那一根的「后复权价」在部分票上跟现价不是同一个数（用 <code>现价</code> 写绝对价位条件最稳）。每次运行都会写清用的是哪套口径，例如「📊 本次口径：盘中实时（10:05）」。</p></details>
+        <p>这是设计如此：<b>开盘时间里跑的筛选用实时数据</b>（此刻的现价/量），不在开盘时间才用本地 K 线。所以盘中不同时刻点【运行】会得到不同结果，而且盘中那一根的「后复权价」在部分票上跟现价不是同一个数（用 <code>现价</code> 写绝对价位条件最稳）。每次运行都会写清用的是哪套口径，例如「📊 本次口径：盘中实时（10:05）」。</p></details>
       <details><summary>自选标的里「市值」「换手」显示 <code>—</code>？</summary>
         <p>同样是拿不到实时快照。收盘后、或者数据来源临时取不到时就是这个样子 —— <code>—</code> 表示「没有这个数」，不是 0。</p></details>
       <details><summary>设置里选「男声」听起来还是女声？</summary>
         <p>Windows 默认只装了一个中文女声。设置页会列出这台机器上<b>实际装着的音色</b>；要男声就自己去「Windows 设置 → 时间和语言 → 语音」里添加中文男声，加完这里就能选到。</p></details>
       <details><summary>为什么需要同花顺 Key？</summary>
-        <p>Key 只为「完整历史数据」——匹配与回测要用。不填也能用：行情概览、自选与持仓的实时提醒走免 Key 的公开源。</p></details>
+        <p>Key 只为「完整历史数据」——筛选与回测要用。不填也能用：行情概览、自选与持仓的实时提醒走免 Key 的公开源。</p></details>
       <details><summary>它会不会替我下单？</summary>
         <p>不会。它不接券商、不自动交易，只做「选出来 + 提醒你」。</p></details>
       <details><summary>数据是哪来的？</summary>

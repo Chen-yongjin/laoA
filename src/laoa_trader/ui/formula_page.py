@@ -1,18 +1,18 @@
-"""「策略匹配」页：**统一策略列表 + 傻瓜式公式编辑器 + 开始匹配**。
+"""「策略筛选」页：**统一策略列表 + 傻瓜式公式编辑器 + 开始筛选**。
 
 用户原话
 --------
-> 「策略匹配 -策略编辑（可直接兼容通达信成品公式）
+> 「策略筛选 -策略编辑（可直接兼容通达信成品公式）
 >   点击打开策略编辑器(傻瓜式编辑器左右界面，左边编辑框，右边变量+运算符)
 >   编辑完成命名(可添加备注)一下可以保存到公式列表。
 >   -策略列表 （名称-备注-状态）
 >   点击打开公式详情，可修改保存。右键菜单删除和启用/关闭。
->   -开始匹配(选好的股发送消息，直接添加自选。)」
+>   -开始筛选(选好的股发送消息，直接添加自选。)」
 
 这一页就按这三块摆（`docs/开发文档.md` 1.2 节）：
 
 1. **策略列表**（上半）：**随包公式与你自己的公式合成同一张表**，列固定为
-   `策略名称 | 说明 | 策略选取`。最上面一行是「竞价策略」（唯一不是匹配策略的行，
+   `策略名称 | 说明 | 策略选取`。最上面一行是「竞价策略」（唯一不是筛选策略的行，
    开关的是盘中竞价扫描），下面是公式；说明列取自公式文件里的 `# 说明:` 注释头。
    单击一行：公式 → 载入编辑器（可改可存）；竞价策略 → 只读详情。
    右键：启用/关闭、删除（公式可删，竞价策略那一行不可删）。
@@ -23,7 +23,7 @@
    每个按钮的字是中文（点一下插入的仍是引擎认的语法），中文 tooltip 第一步写着"插入 XX"，
    `MA` 自动带括号、光标落在括号里，`AND` 自动补空格 —— 这些交互是**实测过的**，
    见下面 `insert_token` / `insert_operator` 的注释（别回退）。
-   底部【校验】【运行】【导出匹配结果】【保存】【另存为】【删除】，名称旁边多了**备注**
+   底部【校验】【运行】【导出筛选结果】【保存】【另存为】【删除】，名称旁边多了**备注**
    （写进文件的 `# 说明:` 注释头）。
 
    **【运行】= 原来的【试算】**（用户 2026-09-18 要求"把试算直接改成运行"）：
@@ -33,29 +33,29 @@
    那些名字连着一批测试与文档里的引用，为一个文案做机械重命名只会制造噪音。
    看到 `preview` 就当"这条按钮"读。
 
-   【导出匹配结果】把**上一次【运行】的命中清单**（全量，不截断）写成桌面上的
-   `luweik-匹配结果-<日期>.txt` —— 与 `scheduler.run_daily()` 建池时导出的
+   【导出筛选结果】把**上一次【运行】的命中清单**（全量，不截断）写成桌面上的
+   `luweik-筛选结果-<日期>.txt` —— 与 `scheduler.run_daily()` 建池时导出的
    是**同一个函数**（`pool.export_pick_file`），版式、来源列、现价列完全一致。
-3. **【开始匹配】**（右上角）：本页**只 emit `start_pick_requested()`** ——
+3. **【开始筛选】**（右上角）：本页**只 emit `start_pick_requested()`** ——
    增量数据 → 跑策略与公式 → 建池 → 推送这一整套在主窗口（`ui/app.py`）里，
    这一页不碰它（也不联网）。
 4. **【成绩单】**（顶部那一排的最后）：按需打开 `ui/scorecard_dialog.py` 的对话框，
    把**勾选**的这几条策略在本地库上跑一遍历史成绩（预检 + 后台线程都在那个模块里）。
 
-匹配结果去哪了（用户 2026-09-17 的明确要求）
+筛选结果去哪了（用户 2026-09-17 的明确要求）
 --------------------------------------------
-用户原话：「策略匹配只要显示策略，不显示匹配结果，匹配结果直接进自选标的，
+用户原话：「策略筛选只要显示策略，不显示筛选结果，筛选结果直接进自选标的，
 可以在股池再添加删除。（也可以同时 output 一个文件到桌面）」
 
-所以这一页**只有策略列表**（`名称 | 备注 | 状态` + 【策略编辑】【开始匹配】【成绩单】）：
-旧版那块「本次匹配结果」表 + 一句话结论 + 【全部加为自选】按钮**已经删掉**。
+所以这一页**只有策略列表**（`名称 | 备注 | 状态` + 【策略编辑】【开始筛选】【成绩单】）：
+旧版那块「本次筛选结果」表 + 一句话结论 + 【全部加为自选】按钮**已经删掉**。
 结果有**两个**去处在界面上看得见，一个都不会丢：
 
 * **自选标的页**（主入口）：选出来的票就是 `stock_pool` 里的行，
   右键能【删除】、上面能【添加自选】—— 增删都在那一页做（用户原话"可以在股池再添加删除"）；
   这也是为什么这一页**不需要**再摆一张"结果表"：同一批票在一张表里看就够了。
 * **桌面文件**：`scheduler.run_daily()` 在建池成功后调 `pool.export_pick_file()`，
-  往桌面写一份 `luweik-匹配结果-<日期>.txt`（导出失败只记日志、不影响匹配）。
+  往桌面写一份 `luweik-筛选结果-<日期>.txt`（导出失败只记日志、不影响匹配）。
 
 `show_pick_result()` 这个方法**保留**（主窗口还在调它）：它现在是空实现，
 只写日志、不画任何东西 —— 删掉它会让 `ui/app.py` 那边 `AttributeError`
@@ -171,7 +171,7 @@ BUTTON_FONT_DELTA = 1
 #: 字号下限（再小就看不清了；某些平台默认字号本身就只有 8~9）
 BUTTON_FONT_MIN = 7
 
-#: 编辑区的最小高度（再小就看不见"最后一行是匹配条件"这件事了）
+#: 编辑区的最小高度（再小就看不见"最后一行是筛选条件"这件事了）
 EDITOR_MIN_HEIGHT = 130
 
 #: `Tab` 插入的空格数。**不跳焦点**：写公式时按 Tab 是想缩进，
@@ -193,11 +193,11 @@ THREAD_JOIN_MS = 3_000
 
 # ── 统一策略列表的两类行 ──
 ROW_FORMULA = "formula"      # 公式（`formulas/` 目录里的文件，可改可删；随包的那几条也是它）
-#: 「竞价策略」：**不是一个匹配策略**，而是把设置页那个「竞价扫描」搬进这张表 ——
+#: 「竞价策略」：**不是一个筛选策略**，而是把设置页那个「竞价扫描」搬进这张表 ——
 #: 勾上 = 每个交易日 9:20 / 9:25 各扫一次全市场并把强势股推给你（写回 `intraday_auction`）。
 #: 用户 2026-09-18 的要求原话："不是公式，是把「竞价扫描」做成策略"。
-#: 为什么它必须与匹配策略**分开一类**：勾它不会往池子里加票、也不改变匹配结果，
-#: 混在一起会让"勾上 = 参与匹配"这条规矩出现例外，而例外是用户最容易记错的东西。
+#: 为什么它必须与筛选策略**分开一类**：勾它不会往池子里加票、也不改变筛选结果，
+#: 混在一起会让"勾上 = 参与筛选"这条规矩出现例外，而例外是用户最容易记错的东西。
 ROW_AUCTION = "auction"
 #: 这一行的 key（唯一；公式行的 key 是公式名）
 AUCTION_KEY = "auction"
@@ -205,7 +205,7 @@ AUCTION_NAME = "竞价策略"
 
 #: 列表列头（用户给定，**一个字都不加**）。
 #: 2026-09-18 用户改过一次字：`名称 | 备注 | 状态` → `策略名称 | 说明 | 策略选取`
-#: （"策略选取"这一列就是那个勾：勾上 = 这条策略参与匹配）。
+#: （"策略选取"这一列就是那个勾：勾上 = 这条策略参与筛选）。
 LIST_COLUMNS: tuple[str, ...] = ("策略名称", "说明", "策略选取")
 
 #: 右键菜单项文案
@@ -223,7 +223,7 @@ MENU_DELETE_AUCTION = "删除（竞价策略是内置设置，不可删）"
 #: 得先翻过大段文字才看得见公式本身（同一个上限库里有 `MAX_DESC_CHARS`）。
 MAX_NOTE_CHARS = formulas_lib.MAX_DESC_CHARS
 
-#: 「本次匹配结果」表的列（用户 2026-09-18 要求把结果界面加回来）。
+#: 「本次筛选结果」表的列（用户 2026-09-18 要求把结果界面加回来）。
 #: 来源列与「自选标的」那一列**同一个词**（`短期反转` / `放量上攻`，2026-09-23 起不带前缀）——
 #: 两处说法不一样的话，用户没法拿它对账。
 RESULT_COLUMNS: tuple[str, ...] = (
@@ -245,7 +245,7 @@ RESULT_ADD_SIDE_PADDING = 20
 #: 上下同理（按钮高度不能小于"文字高度 + 上下留白"，否则字被上下切掉）
 RESULT_ADD_V_PADDING = 8
 
-#: 「本次匹配结果」表的 objectName。**只有一个用途**：让主题里那两条"多加一点内边距"
+#: 「本次筛选结果」表的 objectName。**只有一个用途**：让主题里那两条"多加一点内边距"
 #: 的规则（`ui/theme.py` 的 `resultTable`）精确命中这一张表 —— 这一页的列宽是按内容算的
 #: （`ResizeToContents`），内边距给得太紧时，换台机器（Windows 的微软雅黑）或系统缩放
 #: 125% 就会出现"字被切掉半个"。别的表不在这条规则的射程内。
@@ -264,17 +264,17 @@ RESULT_HEADER_TIPS: tuple[str, ...] = (
 
 #: 结果页在**还没跑过匹配**时那句话
 RESULT_HINT_IDLE = (
-    "这里显示**本次匹配结果**（平时隐藏）：点右上角【开始匹配】跑一轮，跑完结果就出现在这里，"
+    "这里显示**本次筛选结果**（平时隐藏）：点右上角【开始筛选】跑一轮，跑完结果就出现在这里，"
     "可以【一键加入自选】或【导出结果到桌面】。"
 )
 
 #: 顶部那行灰字说明（用户打开这一页先看到的东西）。
-#: **必须写明结果去哪了**：这一页不再显示匹配结果（用户要求），
-#: 不写的话用户点完【开始匹配】会以为"什么都没发生"。
+#: **必须写明结果去哪了**：这一页不再显示筛选结果（用户要求），
+#: 不写的话用户点完【开始筛选】会以为"什么都没发生"。
 PAGE_HINT = (
-    "勾「策略选取」列 = 这条策略参与匹配（只有「竞价策略」那一行例外：它开关的是盘中"
-    "竞价扫描，不参与匹配）；单击一行看详情（策略会载入编辑器）；右键 = 启用 / 关闭 / 删除；"
-    "点【开始匹配】跑一轮 —— 这一块会变成【本次匹配结果】，可以一键加入自选、导出到桌面，"
+    "勾「策略选取」列 = 这条策略参与筛选（只有「竞价策略」那一行例外：它开关的是盘中"
+    "竞价扫描，不参与筛选）；单击一行看详情（策略会载入编辑器）；右键 = 启用 / 关闭 / 删除；"
+    "点【开始筛选】跑一轮 —— 这一块会变成【本次筛选结果】，可以一键加入自选、导出到桌面，"
     "结果同时也会进「自选标的」并自动导出一份到桌面。"
 )
 
@@ -282,15 +282,15 @@ PAGE_HINT = (
 #: 2026-09-18（用户要求）：这里原来写的是"内置 5 条固定在前（备注列是它的实测证据，只读）"；
 #: 那 5 条内置策略改成了随包公式，所以现在列表就是"竞价策略 + 公式"两段。
 LIST_HINT = (
-    "策略列表：最上面那条「竞价策略」开关的是盘中竞价扫描（只做提示、不参与匹配）；"
+    "策略列表：最上面那条「竞价策略」开关的是盘中竞价扫描（只做提示、不参与筛选）；"
     "下面全是策略 —— 随包预置的那几条与你自己写的一条待遇相同（都能改、能删、能勾选），"
     "「说明」列来自策略文件里的「# 说明:」。"
 )
 
 #: 编辑器里那行灰字说明（小白第一眼看的就是它）
 EDITOR_HINT = (
-    "点右边的按钮就能插入；最后一行是匹配条件。"
-    "写完点【校验】→【运行】→【保存】；想留一份结果就点【导出匹配结果】。"
+    "点右边的按钮就能插入；最后一行是筛选条件。"
+    "写完点【校验】→【运行】→【保存】；想留一份结果就点【导出筛选结果】。"
 )
 
 #: 【新策略】按钮上的字（旧名【载入示例】，2026-09-21 主人要求改名；行为不变）。
@@ -340,7 +340,7 @@ VARIABLES: tuple[tuple[str, str, int | None, str], ...] = (
                 "口径与「大盘概览 → 热门板块」同一套）。例：热门行业>=1 表示只选上过榜的行业",
      None, "热门行业"),
     # ── 盘中快照口径（2026-09-23 加，用户："必须加进去啊"）──
-    # 语义是"**现在这一刻**的盘面"：盘中点【运行】/【开始匹配】时取当时的实时快照，
+    # 语义是"**现在这一刻**的盘面"：盘中点【运行】/【开始筛选】时取当时的实时快照，
     # 而不是日线最后一根（上一个收盘日）的值。所以：
     #   * 非交易时段取不到 → 条件不成立、一只都不出（tooltip 里必须写明，否则用户
     #     会以为公式写错了）；
@@ -468,8 +468,8 @@ class StrategyRow:
     note: str
     #: 「说明」列的 tooltip（完整说明/错误全文）
     note_tip: str
-    #: 是否参与匹配（公式查 `enabled_formulas`；竞价策略查 `intraday_auction` ——
-    #: 它不是匹配策略，这条注释只说明"状态从哪来"）
+    #: 是否参与筛选（公式查 `enabled_formulas`；竞价策略查 `intraday_auction` ——
+    #: 它不是筛选策略，这条注释只说明"状态从哪来"）
     enabled: bool
     #: 只读行的详情（只有竞价策略那一行用）
     detail: str = ""
@@ -478,7 +478,7 @@ class StrategyRow:
 
     @property
     def is_auction(self) -> bool:
-        """是不是「竞价策略」那一行（内置的竞价扫描开关，**不参与匹配**）。"""
+        """是不是「竞价策略」那一行（内置的竞价扫描开关，**不参与筛选**）。"""
         return self.kind == ROW_AUCTION
 
     @property
@@ -501,7 +501,7 @@ def _cfg_list(cfg: Any, key: str) -> str:
 # ── 「竞价策略」这一行（把设置页的「竞价扫描」搬进策略列表）──────────────
 #
 # 用户 2026-09-18 的要求："不是公式，是把「竞价扫描」做成策略"。
-# 所以这一行**不是一个匹配策略**：勾上它 = 开启竞价扫描（9:20 / 09:25 各扫一次全市场、
+# 所以这一行**不是一个筛选策略**：勾上它 = 开启竞价扫描（9:20 / 09:25 各扫一次全市场、
 # 按下面这套口径打分推送），写回的是 `config.toml` 的 `intraday_auction`，
 # 与 `enabled_formulas` 不相干（公式那一列写的是它）。
 #
@@ -560,15 +560,15 @@ def _auction_criteria(cfg: Any) -> list[str]:
 
 
 def auction_note(cfg: Any) -> str:
-    """「说明」列那句话：**先说清它不参与匹配**，再说口径。
+    """「说明」列那句话：**先说清它不参与筛选**，再说口径。
 
-    为什么把"不参与匹配"放在最前面：备注列是 Stretch 的，窗口一窄就会被省略号截掉 ——
+    为什么把"不参与筛选"放在最前面：备注列是 Stretch 的，窗口一窄就会被省略号截掉 ——
     而这半句正是这一行最要紧的东西（用户看到"竞价策略"四个字，第一反应必然是
-    "它也会给我匹配吗"）。把结论写在能被看见的位置，比藏在末尾强。
+    "它也会给我筛选吗"）。把结论写在能被看见的位置，比藏在末尾强。
     """
     s = _auction_settings(cfg)
     return (
-        "只做盘中提示、不参与匹配 ｜ "
+        "只做盘中提示、不参与筛选 ｜ "
         f"{' / '.join(s['at'])} 扫全市场：涨幅 {s['min_pct']:.1f}~{s['max_pct']:.1f}%、"
         f"量比≥{s['ratio']:.1f}、成交额≥{s['amount_wan']:.0f}万、打分≥{s['score']}"
         f" → 推前 {s['items']} 只"
@@ -576,9 +576,9 @@ def auction_note(cfg: Any) -> str:
 
 
 def auction_note_tip(cfg: Any) -> str:
-    """「说明」列的 tooltip：口径全文 + 两条硬限制（不参与匹配 / 无法回测）。"""
+    """「说明」列的 tooltip：口径全文 + 两条硬限制（不参与筛选 / 无法回测）。"""
     lines = [
-        f"{AUCTION_NAME}（{AUCTION_KEY}）：它不是匹配策略，而是「系统设置 → 竞价扫描」"
+        f"{AUCTION_NAME}（{AUCTION_KEY}）：它不是筛选策略，而是「系统设置 → 竞价扫描」"
         "那个功能的开关。",
         "",
         "每个交易日按下面这套口径扫全市场（约 5600 只，100 只一批，后台线程跑 20~30 秒）：",
@@ -589,7 +589,7 @@ def auction_note_tip(cfg: Any) -> str:
         "命中会进提醒（浮窗 + 托盘闪烁 + 提示音），9:25 那次推一条汇总；",
         "全部命中落库（`auction_scan` 表），详情弹窗里能看全市场结果。",
         "",
-        "⚠️ 它**不参与匹配**：勾上它不会往「自选标的」里加票，也不改变匹配结果。",
+        "⚠️ 它**不参与筛选**：勾上它不会往「自选标的」里加票，也不改变筛选结果。",
         "⚠️ 竞价数据**没有历史**（接口只给当天），所以它**无法回测** —— "
         "当成「当日走势的早期提示」，别当买入信号。",
         "",
@@ -615,15 +615,15 @@ def auction_detail(cfg: Any) -> str:
         "── 它是什么、不是什么 ──",
         "· 是：**盘中提示**。9:15–9:25 的真实买卖盘是全市场唯一能看到「今天谁在抢」的数据；",
         "  9:25 那一枪拿到的是**竞价终态**，命中直接推到浮窗/托盘（点详情看全部命中）。",
-        "· 不是：**匹配策略**。它**不参与匹配** —— 勾上不会往「自选标的」加票，"
-        "也不会改变【开始匹配】的结果；",
-        "  要按自己的条件匹配，就勾上列表里那几条策略（随包的也在里面），或自己写一条。",
+        "· 不是：**筛选策略**。它**不参与筛选** —— 勾上不会往「自选标的」加票，"
+        "也不会改变【开始筛选】的结果；",
+        "  要按自己的条件筛选，就勾上列表里那几条策略（随包的也在里面），或自己写一条。",
         "",
         "── 两条硬限制 ──",
         "1. 竞价数据**没有历史**（接口只给当天 stage=live/final，不接受日期）→ **无法回测**，",
         "   想验证只能实盘跑一段时间记录；",
         "2. 竞价指标与「当日后期涨停」的相关性只有 2 倍随机（本项目实测样本），",
-        "   覆盖率低 —— 所以它只够当提示，不够当匹配信号。",
+        "   覆盖率低 —— 所以它只够当提示，不够当筛选信号。",
         "",
         "参数怎么改：设置页「竞价扫描」那一组（涨幅上下限、成交额、量比、板块、打分、条数、扫描时刻）。",
     ]
@@ -653,7 +653,7 @@ def formula_row_note(spec: Any, runtime_error: str = "") -> tuple[str, str]:
     * 上一次运行的运行期错误（`⚠️ 运行时出错：…`，`formula_group.last_status()`）。
 
     为什么把这两条放「说明」列而不是「策略选取」列：列头只有三格，
-    而「策略选取」列被"参与匹配"这个勾占满了（一格一义），
+    而「策略选取」列被"参与筛选"这个勾占满了（一格一义），
     把错误塞进同一格会让"这一格到底能不能点"变得要猜。
     """
     note = str(getattr(spec, "description", "") or "").strip()
@@ -664,7 +664,7 @@ def formula_row_note(spec: Any, runtime_error: str = "") -> tuple[str, str]:
         tip = (tip + "\n\n" if tip else "") + "⛔ 这条策略现在编译不过：\n" + full
     if runtime_error:
         note = (note + " ｜" if note else "") + "⚠️ 运行时出错：" + _one_line(runtime_error, 40)
-        tip = (tip + "\n\n" if tip else "") + "⚠️ 上一次匹配时出错：\n" + str(runtime_error)
+        tip = (tip + "\n\n" if tip else "") + "⚠️ 上一次筛选时出错：\n" + str(runtime_error)
     return (note or "—"), tip
 
 
@@ -678,7 +678,7 @@ def build_strategy_rows(
 
     为什么第一行是竞价策略（2026-09-18）：老版本这里先是 5 条内置策略、再是公式；
     用户把内置策略改成了随包公式，于是公式成了列表的主体，而「竞价策略」被放在**最前面
-    一行**（它是唯一"不是匹配策略"的行，放最上面一眼就能看见，不会混进公式里）。
+    一行**（它是唯一"不是筛选策略"的行，放最上面一眼就能看见，不会混进公式里）。
     """
     runtime = runtime or {}
     known_formulas = set(str(n) for n in (getattr(cfg, "enabled_formulas", None) or []))
@@ -766,14 +766,14 @@ class RowMenu:
 if QT_AVAILABLE:
 
     class FormulaPage(QWidget):
-        """「策略匹配」页。
+        """「策略筛选」页。
 
         属性里刻意留着测试与主窗口要用的引用（`name_edit` / `note_edit` / `editor` /
         `hint_label` / `table` / `rows` / `palette_buttons` / `preview_worker`），
         不要去爬控件层级 —— 这一页的控件多，按层级取值的测试一改布局就集体失效。
         """
 
-        #: 【开始匹配】被点 → **只举手**，真正的流程在主窗口（见 `on_start_pick`）
+        #: 【开始筛选】被点 → **只举手**，真正的流程在主窗口（见 `on_start_pick`）
         start_pick_requested = Signal()
 
         def __init__(
@@ -811,7 +811,7 @@ if QT_AVAILABLE:
             self.scorecard_dialog: Any = None
             #: 【运行】按下按钮那一刻的公式快照（结果属于它，不属于编辑框里现在的内容）
             self.preview_formula: Any = None
-            #: **上一次【运行】的结果**（【导出匹配结果】导的就是它）：
+            #: **上一次【运行】的结果**（【导出筛选结果】导的就是它）：
             #: `{"name": 公式名, "date": 行情日, "hits": [{"symbol","name"}...], "count": N}`
             #: 或 None（还没跑过 / 跑失败了）。
             #:
@@ -831,8 +831,8 @@ if QT_AVAILABLE:
             self._row_boxes: dict[str, Any] = {}
             #: 「竞价策略」那一行的勾选框（只有一行，所以不放进上面两个字典）
             self._auction_box: Any = None
-            #: **本次匹配结果**（结果页那张表的行）：`[{"symbol","name","label"}...]`。
-            #: 平时是空的；点【开始匹配】跑完由主窗口调 `show_pick_result()` 填进来。
+            #: **本次筛选结果**（结果页那张表的行）：`[{"symbol","name","label"}...]`。
+            #: 平时是空的；点【开始筛选】跑完由主窗口调 `show_pick_result()` 填进来。
             #: 取实时快照的函数（主窗口注入 `QuotesService.quote`；没注入时实时列显示 —）
             self.quotes_provider: Any = None
             self.result_rows: list[dict] = []
@@ -853,10 +853,10 @@ if QT_AVAILABLE:
             layout.setContentsMargins(14, 14, 14, 12)
             layout.setSpacing(8)
 
-            # ── 顶部一行：【策略编辑】【开始匹配】 + 一句灰字说明 ──
+            # ── 顶部一行：【策略编辑】【开始筛选】 + 一句灰字说明 ──
             #
             # 为什么操作按钮在这一页而不是标题区：开发文档的原则是"标题区不再放操作按钮，
-            # 数据在「系统设置」、匹配在「策略匹配」" —— 点下去会发生什么，在这一页看得见。
+            # 数据在「系统设置」、匹配在「策略筛选」" —— 点下去会发生什么，在这一页看得见。
             top = QHBoxLayout()
             self.btn_edit = QPushButton("策略编辑")
             self.btn_edit.setToolTip(
@@ -868,7 +868,7 @@ if QT_AVAILABLE:
             self.btn_edit.clicked.connect(lambda _checked=False: self.on_open_editor())
             top.addWidget(self.btn_edit)
 
-            self.btn_start_pick = QPushButton("开始匹配")
+            self.btn_start_pick = QPushButton("开始筛选")
             self.btn_start_pick.setObjectName("primaryAction")   # 主操作按钮（主题精确命中）
             self.btn_start_pick.setToolTip(
                 "按上面勾选的策略跑一轮：结果直接进「自选标的」"
@@ -926,16 +926,16 @@ if QT_AVAILABLE:
         def _build_list_side(self) -> Any:
             """上半：**只有策略列表**（名称 | 备注 | 状态）。
 
-            为什么这里只剩一张表（用户原话："策略匹配只要显示策略，不显示匹配结果"）：
-            旧版下半还挂着一块「本次匹配结果」表 + 一句话结论 + 【全部加为自选】，
+            为什么这里只剩一张表（用户原话："策略筛选只要显示策略，不显示筛选结果"）：
+            旧版下半还挂着一块「本次筛选结果」表 + 一句话结论 + 【全部加为自选】，
             而同一批票本来就有一张更该看的表 —— 「自选标的」页（结果就在那里，
             还能右键删、手工加）。摆两块显示同一批票只会让用户不确定"哪一块说了算"。
             """
-            # 2026-09-18（用户要求）：列表与"本次匹配结果"**同一个位置两块页面** ——
-            # 平时显示策略列表；点【开始匹配】切到结果页，跑完就在那里看结果、
+            # 2026-09-18（用户要求）：列表与"本次筛选结果"**同一个位置两块页面** ——
+            # 平时显示策略列表；点【开始筛选】切到结果页，跑完就在那里看结果、
             # 一键加入自选、导出到桌面；点【返回策略列表】回来。
             # 为什么用 QStackedWidget 而不是把结果表藏在下面：用户明确说
-            # "策略列表界面变为匹配结果界面（平时隐藏）" —— 同一个位置切换，不占两份高度。
+            # "策略列表界面变为筛选结果界面（平时隐藏）" —— 同一个位置切换，不占两份高度。
             stack = QStackedWidget()
             self.list_page = self._build_list_page()
             self.result_page = self._build_result_page()
@@ -971,7 +971,7 @@ if QT_AVAILABLE:
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
             self._set_header_tooltip(0, "策略的名字（就是策略文件的名字）")
             self._set_header_tooltip(1, "说明：来自策略文件里的「# 说明:」，或者在编辑器里填的备注")
-            self._set_header_tooltip(2, "勾上 = 参与匹配（写回 config.toml 的 enabled_formulas）；"
+            self._set_header_tooltip(2, "勾上 = 参与筛选（写回 config.toml 的 enabled_formulas）；"
                                         "竞价策略那一行例外：它开关的是盘中竞价扫描")
             self.table.itemSelectionChanged.connect(self.on_row_selected)
             layout.addWidget(self.table, 1)
@@ -979,10 +979,10 @@ if QT_AVAILABLE:
             return side
 
         def _build_result_page(self) -> Any:
-            """匹配结果页（**平时隐藏**；点【开始匹配】或跑完匹配才切过来）。
+            """筛选结果页（**平时隐藏**；点【开始筛选】或跑完匹配才切过来）。
 
             用户 2026-09-18 的要求（推翻了 2026-09-17 的"这一页不显示结果"）：
-            "匹配状态时，策略列表界面变为匹配结果界面（匹配结果界面平时隐藏），
+            "匹配状态时，策略列表界面变为筛选结果界面（筛选结果界面平时隐藏），
             结果可以一键加入自选和导出。"
 
             所以这一页只有三样东西：一句结论（几只 / 行情日 / 有没有错）、
@@ -1011,7 +1011,7 @@ if QT_AVAILABLE:
             self.result_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
             self.result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             self.result_table.setToolTip(
-                "本次匹配选出来的票（按池子分数排序）。这张表是「刚跑完的这一批」的现场，"
+                "本次筛选选出来的票（按池子分数排序）。这张表是「刚跑完的这一批」的现场，"
                 "完整的池子看「自选标的」页"
             )
             header = self.result_table.horizontalHeader()
@@ -1043,14 +1043,14 @@ if QT_AVAILABLE:
             self.btn_export_result = QPushButton("导出结果到桌面")
             self.btn_export_result.setToolTip(
                 "把这张表里的票写成一个文本文件放到桌面："
-                "luweik-匹配结果-<今天>.txt（与【开始匹配】自动导出的那份同一个文件名，"
+                "luweik-筛选结果-<今天>.txt（与【开始筛选】自动导出的那份同一个文件名，"
                 "同一天会覆盖它）"
             )
             self.btn_export_result.clicked.connect(self.on_export_result)
             row.addWidget(self.btn_export_result)
 
             self.btn_back_to_list = QPushButton("返回策略列表")
-            self.btn_back_to_list.setToolTip("回到策略列表（结果还留着，下次匹配会刷新）")
+            self.btn_back_to_list.setToolTip("回到策略列表（结果还留着，下次筛选会刷新）")
             self.btn_back_to_list.clicked.connect(self.on_back_to_list)
             row.addWidget(self.btn_back_to_list)
             row.addStretch(1)
@@ -1215,10 +1215,10 @@ if QT_AVAILABLE:
             self.btn_preview.clicked.connect(self.on_preview)
             action_row.addWidget(self.btn_preview)
 
-            self.btn_export = QPushButton("导出匹配结果")
+            self.btn_export = QPushButton("导出筛选结果")
             self.btn_export.setToolTip(
                 "把上一次【运行】命中的全部股票写成一个文本文件，放在桌面上：\n"
-                "luweik-匹配结果-<今天>.txt（同一天再导出会覆盖这一个文件）"
+                "luweik-筛选结果-<今天>.txt（同一天再导出会覆盖这一个文件）"
             )
             self.btn_export.clicked.connect(self.on_export)
             action_row.addWidget(self.btn_export)
@@ -1400,13 +1400,13 @@ if QT_AVAILABLE:
         def reload(self) -> None:
             """重建统一策略列表（内置 + 公式）。
 
-            主窗口在匹配完成后会调它（`_on_pipeline_done`），所以这里**绝不碰编辑区**：
+            主窗口在筛选完成后会调它（`_on_pipeline_done`），所以这里**绝不碰编辑区**：
             用户可能正开着编辑器改公式，刷一次列表就把他的草稿换掉是不可接受的
             （旧版 `reload()` 会顺手选中第一行并载入编辑框 —— 在"列表在上、编辑器按需展开"
             的布局里那会变成"每次选完股，编辑器自己弹出来并顶掉我在写的东西"）。
 
             这里**也不再刷"本次结果"区**（那块界面已经按用户要求删掉，见模块 docstring
-            「匹配结果去哪了」）：结果在「自选标的」页与桌面文件里，不在这一页。
+            「筛选结果去哪了」）：结果在「自选标的」页与桌面文件里，不在这一页。
             """
             self.specs = formulas_lib.formula_files(self.directory)
             runtime = formula_group.last_status()
@@ -1433,7 +1433,7 @@ if QT_AVAILABLE:
                 name_item = QTableWidgetItem(row.name)
                 if row.is_auction:
                     name_item.setToolTip(
-                        "内置的「竞价扫描」开关（不是匹配策略）——勾上 = 每个交易日到点"
+                        "内置的「竞价扫描」开关（不是筛选策略）——勾上 = 每个交易日到点"
                         "自动扫全市场并推送，写回 config.toml 的 intraday_auction"
                     )
                 else:
@@ -1480,11 +1480,11 @@ if QT_AVAILABLE:
                 return (
                     "勾上 = 开启竞价扫描（写回 config.toml 的 intraday_auction）："
                     "每个交易日 09:20 / 09:25 各扫一次全市场，强势股直接推到浮窗/托盘\n"
-                    "它**不参与匹配** —— 不会往「自选标的」加票，也不改变匹配结果；"
+                    "它**不参与筛选** —— 不会往「自选标的」加票，也不改变筛选结果；"
                     "参数在「系统设置 → 竞价扫描」那一组里改"
                 )
             return (
-                "勾上 = 这条策略参与匹配（写回 config.toml 的 enabled_formulas）；"
+                "勾上 = 这条策略参与筛选（写回 config.toml 的 enabled_formulas）；"
                 "默认不勾 —— 你自己的策略要不要用，由你决定"
             )
 
@@ -1493,7 +1493,7 @@ if QT_AVAILABLE:
 
             为什么这条值得单独盯：`enabled_formulas` 里写了一个目录里没有的公式名
             （用户手改了 config.toml、或者把公式文件删了/改名了），
-            表现是"列表里一个勾都没有、点匹配什么都没跑"，而日志在他看不见的地方。
+            表现是"列表里一个勾都没有、点筛选什么都没跑"，而日志在他看不见的地方。
             （老版本这里盯的是 `enabled_groups` / `enabled_strategies` 的"交集为空"；
             那两个键 2026-09-18 已退役，`formulas.enabled_names()` 会跳过认不出的名字。）
             """
@@ -1504,7 +1504,7 @@ if QT_AVAILABLE:
                 self.list_hint.setText(
                     "⚠️ config.toml 里勾了这几条策略，但策略目录里找不到（这会让勾选与实跑"
                     "不一致）：" + "、".join(missing)
-                    + "　改完点【开始匹配】前先看一眼勾选是否与预期一致。"
+                    + "　改完点【开始筛选】前先看一眼勾选是否与预期一致。"
                 )
                 return
             self.list_hint.setText(LIST_HINT)
@@ -1591,9 +1591,9 @@ if QT_AVAILABLE:
             self.bottom_stack.setCurrentWidget(self.detail_page)
             self.bottom_stack.setVisible(True)
             self._set_hint(
-                f"「{row.name}」不是匹配策略，是盘中提示的开关：勾「策略选取」列（或右键"
+                f"「{row.name}」不是筛选策略，是盘中提示的开关：勾「策略选取」列（或右键"
                 "【启用】）就开启竞价扫描，每个交易日到点自动扫全市场。\n"
-                "它不会往「自选标的」加票、也不改变匹配结果；"
+                "它不会往「自选标的」加票、也不改变筛选结果；"
                 "涨幅 / 量比 / 成交额那些参数在「系统设置 → 竞价扫描」里改。"
             )
 
@@ -1645,21 +1645,21 @@ if QT_AVAILABLE:
                     toggle = menu.addAction(MENU_ENABLE)
                     toggle.setToolTip(
                         "开启竞价扫描：每个交易日 09:20 / 09:25 各扫一次全市场，"
-                        "强势股推到浮窗/托盘（不参与匹配）"
+                        "强势股推到浮窗/托盘（不参与筛选）"
                     )
             elif row.enabled:
                 toggle = menu.addAction(MENU_DISABLE)
-                toggle.setToolTip(f"让「{row.name}」退出匹配（下次【开始匹配】不再跑它）")
+                toggle.setToolTip(f"让「{row.name}」退出匹配（下次【开始筛选】不再跑它）")
             else:
                 toggle = menu.addAction(MENU_ENABLE)
-                toggle.setToolTip(f"让「{row.name}」参与匹配（下次【开始匹配】就会跑它）")
+                toggle.setToolTip(f"让「{row.name}」参与筛选（下次【开始筛选】就会跑它）")
                 if row.spec is not None and not row.spec.ok:
                     # 语法错的公式**勾上也跑不了**（`formulas.enabled_names()` 会跳过它），
                     # 所以"启用"这一项置灰并说明先修公式 —— 而不是让用户勾上之后
                     # 什么都看不到（那会变成"我勾了公式，池子里却没有"这种最难查的现象）
                     toggle.setEnabled(False)
                     toggle.setToolTip(
-                        "这条策略现在编译不过，勾上也不会参与匹配：先在编辑器里改好、"
+                        "这条策略现在编译不过，勾上也不会参与筛选：先在编辑器里改好、"
                         "点【校验】通过，再右键启用"
                     )
             toggle.triggered.connect(
@@ -1681,7 +1681,7 @@ if QT_AVAILABLE:
                 )
             return RowMenu(menu=menu, toggle=toggle, delete=delete)
 
-        # ── 「参与匹配」写回 config.toml ──────────────────────────────
+        # ── 「参与筛选」写回 config.toml ──────────────────────────────
 
         def set_row_enabled(self, kind: str, key: str, checked: bool) -> None:
             """统一的"启用/关闭"入口（勾选框与右键菜单都走这里 → 行为必然一致）。"""
@@ -1691,7 +1691,7 @@ if QT_AVAILABLE:
                 self.on_toggle_enabled(key, checked)
 
         def on_toggle_enabled(self, name: str, checked: bool) -> None:
-            """公式的「参与匹配」 → 写回 `enabled_formulas`（保留注释与未知键）。"""
+            """公式的「参与筛选」 → 写回 `enabled_formulas`（保留注释与未知键）。"""
             from laoa_trader.config import save_settings
 
             names = [str(n) for n in (getattr(self.cfg, "enabled_formulas", None) or [])]
@@ -1712,7 +1712,7 @@ if QT_AVAILABLE:
             if checked:
                 self._set_hint(
                     f"✅ 「{name}」已加入匹配（写回 {path.name}）。\n"
-                    "下次【开始匹配】时它会作为「策略」组参与：进池的票来源会标成"
+                    "下次【开始筛选】时它会作为「策略」组参与：进池的票来源会标成"
                     f"「{name}」。"
                 )
                 # 成功**不弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）；
@@ -1723,7 +1723,7 @@ if QT_AVAILABLE:
         def on_toggle_auction(self, checked: bool) -> None:
             """「竞价策略」的启用/关闭 → 写回 `intraday_auction`（**不是**匹配开关）。
 
-            为什么它写的是另一个键：这一行管的不是"匹配时跑不跑"，而是"开盘后要不要
+            为什么它写的是另一个键：这一行管的不是"筛选时跑不跑"，而是"开盘后要不要
             自动扫全市场并推提醒"。`config.toml` 里那个键与设置页「竞价扫描」那一组的
             开关是同一个 —— 两处改的是同一件事，所以改完这里、那边也跟着变（反之亦然）。
             """
@@ -1743,7 +1743,7 @@ if QT_AVAILABLE:
                 self._set_hint(
                     f"✅ 竞价策略已开启（写回 {path.name} 的 intraday_auction）："
                     f"每个交易日 {at} 各扫一次全市场，强势股直接推到浮窗 / 托盘。\n"
-                    "⚠️ 它不参与匹配：不会往「自选标的」加票，也不改变匹配结果；"
+                    "⚠️ 它不参与筛选：不会往「自选标的」加票，也不改变筛选结果；"
                     "竞价数据没有历史，所以它只能当盘中提示、无法回测。\n"
                     "参数在「系统设置 → 竞价扫描」里改。"
                 )
@@ -2016,7 +2016,7 @@ if QT_AVAILABLE:
             if not isinstance(result, dict):
                 self._set_hint("运行没有返回结果（请重试）")
                 return
-            # 记住这一轮，供【导出匹配结果】使用：导出的必须是**用户刚看过的**那一份
+            # 记住这一轮，供【导出筛选结果】使用：导出的必须是**用户刚看过的**那一份
             # （所以连行情日一起存下来，而不是导出时再查一次"最近交易日"——
             # 跑完到导出之间数据可能已经更新，那样文件里的日期会与提示区不一致）
             self.last_run = {
@@ -2029,7 +2029,7 @@ if QT_AVAILABLE:
             self._set_hint(self._preview_text(formula, result))
 
         def on_export(self) -> None:
-            """【导出匹配结果】：把**上一次【运行】**的命中清单写成桌面上的文本文件。
+            """【导出筛选结果】：把**上一次【运行】**的命中清单写成桌面上的文本文件。
 
             三条口径：
 
@@ -2041,18 +2041,18 @@ if QT_AVAILABLE:
             * **成败都要看得见**：产物落在桌面（这一页之外），"没反应"就等于
               "不知道导没导出去"，所以提示区写清楚 + 标题区弹一句。
 
-            用的函数与「开始匹配」建池时导出的是**同一个**（`pool.export_pick_file`）：
+            用的函数与「开始筛选」建池时导出的是**同一个**（`pool.export_pick_file`）：
             版式、来源列、现价列完全一致 —— 用户拿两个文件对比时不该看到两套格式。
             """
             run = self.last_run
             if run is None and self.preview_worker is not None and self.preview_worker.isRunning():
                 # 正在跑：这时候说"还没运行过"是骗人的（他刚点过），
                 # 而且这一轮的结果马上就有了 —— 让他等这一轮，别导出上一轮
-                self._set_hint("运行还没跑完：等它跑完再点【导出匹配结果】（导出的就是这一轮的命中）")
+                self._set_hint("运行还没跑完：等它跑完再点【导出筛选结果】（导出的就是这一轮的命中）")
                 return
             if not run:
                 self._set_hint(
-                    "还没有可导出的结果：先点【运行】看看能选出几只，再点【导出匹配结果】"
+                    "还没有可导出的结果：先点【运行】看看能选出几只，再点【导出筛选结果】"
                 )
                 return
             hits = [hit for hit in (run.get("hits") or []) if hit.get("symbol")]
@@ -2089,14 +2089,14 @@ if QT_AVAILABLE:
                 self._toast(message)
                 return
             if path is None:
-                # `export_pick_file` 把具体原因写进日志、只返回 None（它不许影响匹配流程），
+                # `export_pick_file` 把具体原因写进日志、只返回 None（它不许影响筛选流程），
                 # 所以这里给用户列出**可能**的原因与下一步，并让他去看日志
                 message = ("❌ 导出失败：文件没能写出去（桌面目录不存在、没有写权限，"
                            "或者文件正被别的程序占用）—— 详见日志")
                 self._set_hint(message)
                 self._toast(message)
                 return
-            message = (f"✅ 已导出匹配结果：{path.name}（{len(rows)} 只，行情日 {day_text}）"
+            message = (f"✅ 已导出筛选结果：{path.name}（{len(rows)} 只，行情日 {day_text}）"
                        f"\n文件位置：{path}")
             self._set_hint(message)
             self._set_hint(message)
@@ -2270,7 +2270,7 @@ if QT_AVAILABLE:
             #   「保存就自动显示在策略最下面，默认不勾选」→ 公式本来就追加在末尾
             #   （内置在前、公式在后，按文件名排序）；滚过去让它真的**看得见**，
             #   否则窗口小的时候它在视野外，用户会以为没保存上。**不自动勾选**：
-            #   参不参与匹配由用户自己决定，保存只管存。
+            #   参不参与筛选由用户自己决定，保存只管存。
             #   「成功不需要提示，失败再提示」→ 这里**一个字都不说**：列表最下面多出
             #   那一行就是成功的反馈；把"已保存"再讲一遍只是噪音。
             index = self.select_row(name)
@@ -2318,22 +2318,22 @@ if QT_AVAILABLE:
                 )
             self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
 
-        # ── 匹配结果（**这一页不再显示**）─────────────────────────────
+        # ── 筛选结果（**这一页不再显示**）─────────────────────────────
         #
-        # 用户 2026-09-17：「策略匹配只要显示策略，不显示匹配结果，匹配结果直接进
+        # 用户 2026-09-17：「策略筛选只要显示策略，不显示筛选结果，筛选结果直接进
         # 自选标的，可以在股池再添加删除。（也可以同时 output 一个文件到桌面）」
         #
-        # 所以旧的「本次匹配结果」表、一句话结论、[全部加为自选] 按钮与它们的
+        # 所以旧的「本次筛选结果」表、一句话结论、[全部加为自选] 按钮与它们的
         # 渲染/写库方法（`_refresh_result` / `_render_result` / `_load_result_from_db` /
         # `_result_row` / `on_add_all_to_watchlist`）**整体删掉**。结果的两个去处见模块
-        # docstring 的「匹配结果去哪了」：自选标的页（可右键删、可手工加）+ 桌面文件
+        # docstring 的「筛选结果去哪了」：自选标的页（可右键删、可手工加）+ 桌面文件
         # （`pool.export_pick_file()`，由 `scheduler.run_daily` 在建池成功后调用）。
 
         def show_pick_result(self, rows: Any = None, *, data_date: str | None = None) -> None:
             """把这一轮匹配的结果显示在**结果页**上（主窗口跑完 `run_daily` 会调它）。
 
             用户 2026-09-18 的要求（推翻了 2026-09-17 的"这一页不显示结果"）：
-            "匹配状态时，策略列表界面变为匹配结果界面（匹配结果界面平时隐藏），
+            "匹配状态时，策略列表界面变为筛选结果界面（筛选结果界面平时隐藏），
             结果可以一键加入自选和导出。"
 
             Args:
@@ -2363,7 +2363,7 @@ if QT_AVAILABLE:
                               caliber=caliber, warnings=warnings)
             self.show_result_page()
             logger.info(
-                "本次匹配结果已显示在「策略匹配」页：%d 只（行情日 %s）",
+                "本次筛选结果已显示在「策略筛选」页：%d 只（行情日 %s）",
                 len(self.result_rows), data_date or "未知",
             )
 
@@ -2427,7 +2427,7 @@ if QT_AVAILABLE:
             day = str(data_date or "未知")
             if self.result_rows:
                 self.result_hint.setText(
-                    f"本次匹配结果：共 {len(self.result_rows)} 只（行情日 {day}）。"
+                    f"本次筛选结果：共 {len(self.result_rows)} 只（行情日 {day}）。"
                     "结果不会自动进股池：要留下哪只就点它那一行的【加入自选】"
                     "（加进去之后记下加入价算盈亏；**默认不提醒**，要盯就去「自选标的」"
                     "打开那一行的监控开关），也可以【导出结果到桌面】。"
@@ -2440,7 +2440,7 @@ if QT_AVAILABLE:
                 )
             for message in (errors or []):
                 # 出错的那几条（数据闸门拦住、策略出错…）直接说在结论下面 ——
-                # 用户点完【开始匹配】最想知道的就是"为什么没结果"
+                # 用户点完【开始筛选】最想知道的就是"为什么没结果"
                 self.result_hint.setText(self.result_hint.text() + "\n❌ " + message)
             for warning in (warnings or []):
                 # 口径类的告知（不是错误）：也写在结论下面，让"这一轮为什么没用实时数据"
@@ -2625,7 +2625,7 @@ if QT_AVAILABLE:
             )
 
         def show_result_page(self) -> None:
-            """切到结果页（【开始匹配】按下时与跑完时都走这里）。"""
+            """切到结果页（【开始筛选】按下时与跑完时都走这里）。"""
             if getattr(self, "list_stack", None) is not None:
                 self.list_stack.setCurrentWidget(self.result_page)
 
@@ -2637,7 +2637,7 @@ if QT_AVAILABLE:
         def on_back_to_list(self) -> None:
             """【返回策略列表】：回到列表（结果留着，下次匹配刷新）。"""
             self.show_list_page()
-            self._set_hint("已回到策略列表（本次结果还留着，点【开始匹配】会刷新它）")
+            self._set_hint("已回到策略列表（本次结果还留着，点【开始筛选】会刷新它）")
 
         def on_add_all_to_watchlist(self) -> None:
             """【一键加入自选】：把本次结果的票写进 `watchlist`（**只写本地库，不联网**）。
@@ -2652,7 +2652,7 @@ if QT_AVAILABLE:
                池子重算后它们会离开池子，备注是这几只票"当初为什么在这"的唯一线索。
             """
             if not self.result_rows:
-                self._set_hint("❌ 还没有匹配结果：先点【开始匹配】跑一轮")
+                self._set_hint("❌ 还没有筛选结果：先点【开始筛选】跑一轮")
                 return
             from laoa_trader.data import storage
 
@@ -2711,12 +2711,12 @@ if QT_AVAILABLE:
         def on_export_result(self) -> None:
             """【导出结果到桌面】：把结果表里的票写成桌面文本文件。
 
-            与编辑器里那个【导出匹配结果】、以及 `scheduler.run_daily()` 自动导出的
+            与编辑器里那个【导出筛选结果】、以及 `scheduler.run_daily()` 自动导出的
             是**同一个函数**（`pool.export_pick_file`）：版式、来源列、现价列完全一致，
             同一天的文件名也一样（互相覆盖，不会攒出一堆）。
             """
             if not self.result_rows:
-                self._set_hint("❌ 还没有匹配结果：先点【开始匹配】跑一轮，再导出")
+                self._set_hint("❌ 还没有筛选结果：先点【开始筛选】跑一轮，再导出")
                 return
             rows = [{"symbol": row["symbol"], "name": row["name"], "source_label": row["label"]}
                     for row in self.result_rows]
@@ -2738,7 +2738,7 @@ if QT_AVAILABLE:
                 self._set_hint(message)
                 self._toast(message)
                 return
-            message = (f"✅ 已导出匹配结果：{path.name}（{len(rows)} 只）"
+            message = (f"✅ 已导出筛选结果：{path.name}（{len(rows)} 只）"
                        f"\n文件位置：{path}")
             self._set_hint(message)
             self._set_hint(message)
@@ -2778,8 +2778,8 @@ if QT_AVAILABLE:
         def scorecard_targets(self) -> list[Any]:
             """当前**勾选**的策略 → 成绩单要评估的清单（名字 + 正文）。
 
-            为什么只取勾选的（而不是"列表里全部"）：与【开始匹配】跑的是同一批，
-            用户看到的"参与匹配的这几条"就是他以为会被评估的那几条。
+            为什么只取勾选的（而不是"列表里全部"）：与【开始筛选】跑的是同一批，
+            用户看到的"参与筛选的这几条"就是他以为会被评估的那几条。
             偷偷把没勾的也算一遍，除了多扫十几遍全库，还会让结果里冒出一堆
             他早就不用的策略。
 
@@ -2808,9 +2808,9 @@ if QT_AVAILABLE:
             dialog.exec()
 
         def on_start_pick(self) -> None:
-            """【开始匹配】：**只举手**（emit `start_pick_requested`）。
+            """【开始筛选】：**只举手**（emit `start_pick_requested`）。
 
-            为什么这一页不自己跑匹配：整条流程（数据闸门 → 增量 → 策略 → 公式 → 建池 →
+            为什么这一页不自己跑筛选：整条流程（数据闸门 → 增量 → 策略 → 公式 → 建池 →
             推送 → 落库）都住在 `scheduler.run_daily()`，主窗口负责进度条与状态显示；
             这一页要是自己调一遍，就会出现两套流程、两套状态、两套错误处理
             （而且"这一页没跑数据闸门"会安静地跑出一个错的池子）。
@@ -2820,12 +2820,12 @@ if QT_AVAILABLE:
             否则用户点完看不到任何结果会以为程序没反应。
             """
             # 切到结果页先摆一句"正在匹配…"：用户按下按钮之后**马上**要有个地方等着结果
-            # （用户 2026-09-18 要求"匹配状态时，策略列表界面变为匹配结果界面"）。
+            # （用户 2026-09-18 要求"匹配状态时，策略列表界面变为筛选结果界面"）。
             # 跑完主窗口会调 `show_pick_result()` 把真正的结果填进来。
             self.result_hint.setText("正在匹配…（跑完结果就出现在这里，不用再点别的）")
             self.result_table.setRowCount(0)
             self.show_result_page()
-            self._toast("开始匹配：正在按勾选的策略跑一轮…"
+            self._toast("开始筛选：正在按勾选的策略跑一轮…"
                         "（结果会显示在这一页，并同时进「自选标的」+ 导出到桌面）")
             self.start_pick_requested.emit()
 

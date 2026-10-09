@@ -128,7 +128,7 @@ def test_formula_decides_the_picks(capsys, seeded, tmp_path, monkeypatch) -> Non
         pool_strategies = {r[0] for r in conn.execute(
             "SELECT DISTINCT strategy FROM stock_pool")}
     assert strategies == {"公式·反转"}            # 信号表里就是这一轮跑的公式
-    # 2026-09-21（主人要求"匹配结果不自动加入股池"）：`stock_pool` 里**不再有它**
+    # 2026-09-21（主人要求"筛选结果不自动加入股池"）：`stock_pool` 里**不再有它**
     assert pool_strategies == set()
     # 老配置里的退役键**原样留着**（用户文件不被改坏），文件字节不变
     assert seeded["config"].read_text(encoding="utf-8") == before
@@ -150,7 +150,7 @@ def test_config_groups_no_longer_decide_the_picks(capsys, seeded,
     )
     assert cli(["--cli", "--once", "--no-notify", "--config", str(seeded["config"])]) == 0
     out = capsys.readouterr().out
-    assert "本次按勾选的策略匹配：低价" in out
+    assert "本次按勾选的策略筛选：低价" in out
     # 候选由勾的公式决定：库里 signal 表记着这一轮的结果（stock_pool 不再自动落它）
     with storage.connect(seeded["cfg"].db_path) as conn:
         picked = {r[0] for r in conn.execute("SELECT DISTINCT symbol FROM signal")}
@@ -161,9 +161,9 @@ def test_config_groups_no_longer_decide_the_picks(capsys, seeded,
 
 def test_pool_command_shows_the_source_column(capsys, seeded,
                                              tmp_path, monkeypatch) -> None:
-    """`--pool` 打出池子表；来源列现在是 `自选`（匹配结果不再自动进池，见下）。
+    """`--pool` 打出池子表；来源列现在是 `自选`（筛选结果不再自动进池，见下）。
 
-    2026-09-21（主人要求"匹配结果不自动加入股池"）：`stock_pool` 里只剩**自选** ——
+    2026-09-21（主人要求"筛选结果不自动加入股池"）：`stock_pool` 里只剩**自选** ——
     所以这条用例先加一只自选（这一只既是自选、又恰好被勾的公式选中 → 来源是
     `公式·反转+自选`），再断言 `--pool` 打得出来源列。
     """

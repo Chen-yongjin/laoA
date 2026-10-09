@@ -81,7 +81,7 @@ SILVER_COLORS: dict[str, str] = {
     "btn_press_top": "#dde2e9",
     "btn_press_bottom": "#c9d0d9",
     "btn_disabled_bg": "#f0f1f3",
-    # 主操作按钮（【开始匹配】：略深的金属蓝灰 + 白字）
+    # 主操作按钮（【开始筛选】：略深的金属蓝灰 + 白字）
     "primary_top": "#5b6b7d",
     "primary_bottom": "#46566a",
     "primary_hover_top": "#66788c",
@@ -218,7 +218,7 @@ QPushButton {
     border: 1px solid $btn_border; border-radius: 4px;
     padding: 4px 12px; color: $text; min-height: 20px;
 }
-/* 「策略匹配」右侧元素区（变量 / 函数 / 运算符 / 排除，四组 52 个按钮）要**小一圈**：
+/* 「策略筛选」右侧元素区（变量 / 函数 / 运算符 / 排除，四组 52 个按钮）要**小一圈**：
    用户 2026-09-18 要求"把按键大小都缩小"。
    ⚠️ 这条规则里的 `min-height` **必须给一个具体值**（别写 0px、也别省）：
    一旦 #paletteButton 命中，通用规则里的 `min-height: 20px` 就不再对这批按钮生效，
@@ -344,7 +344,7 @@ QHeaderView::section {
 QHeaderView::section:hover { color: $text; }
 QTableCornerButton::section { border: none; border-bottom: 1px solid $border; }
 
-/* 「本次匹配结果」表（objectName 见 ui/formula_page.py 的 RESULT_TABLE_OBJECT）：
+/* 「本次筛选结果」表（objectName 见 ui/formula_page.py 的 RESULT_TABLE_OBJECT）：
    **只给这一张表**把单元格与表头的内边距放宽一点。
    为什么单独给它（用户 2026-09-21 实报"框体有点小，字显示不全"）：这一页的列宽是
    `ResizeToContents` 按内容算的，而通用规则只有 `padding: 2px 4px` / `4px 6px` ——

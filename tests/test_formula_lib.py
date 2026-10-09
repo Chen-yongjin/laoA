@@ -5,7 +5,7 @@
 1. **目录定位** —— 源码运行 / 打包后（exe 同级）/ 环境变量覆盖，三种形态都测；
 2. **保存与读回** —— 名称必填、非法字符安全化、注释头、UTF-8/BOM 都能被
    `load_formula_files()` 原样读回（这一条把"界面存、引擎读"这条缝钉死）；
-3. **参与匹配名单** —— 找不到的 / 语法错的公式名**忽略并记日志**；
+3. **参与筛选名单** —— 找不到的 / 语法错的公式名**忽略并记日志**；
 4. **连板()/涨停天数() 的历史坑** —— 用到就提醒，不用就不提醒；
 5. **试算** —— 合成小库上命中集合是**确定的**（不是"跑通就算过"）；
 6. **集成** —— 勾选的公式进池、来源标成「公式·名字」、推送行带公式名；
@@ -439,7 +439,7 @@ def test_delete_formula(tmp_path: Path) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 3) 参与匹配名单（enabled_formulas）
+# 3) 参与筛选名单（enabled_formulas）
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -500,7 +500,7 @@ def test_preview_hits_known_symbols(formula_db: str) -> None:
 def test_preview_hits_respects_limit_and_names(formula_db: str) -> None:
     """`limit` 只截断**显示**（`shown`），`hits` 必须是**全量**。
 
-    为什么要钉住"全量"：界面上的【导出匹配结果】写的就是 `hits`
+    为什么要钉住"全量"：界面上的【导出筛选结果】写的就是 `hits`
     （提示区只列前 20 只，文件里是全部命中）。哪天有人把 `hits[:limit]`
     改回来，用户导出的文件就会静默少票 —— 那种错在界面上完全看不出来。
     """
@@ -785,7 +785,7 @@ def test_push_title_mentions_formula_group(engine, formulas_cfg: Config, tmp_pat
 
 def test_formula_opt_in_writes_config_and_keeps_comments(formulas_cfg: Config,
                                                          tmp_path: Path) -> None:
-    """勾「参与匹配」→ 写回 `enabled_formulas`，而且**用户自己的注释不许丢**。"""
+    """勾「参与筛选」→ 写回 `enabled_formulas`，而且**用户自己的注释不许丢**。"""
     formulas_cfg.source_path = tmp_path / "config.toml"
     formulas_cfg.source_path.write_text(
         "# 我自己写的注释，别动\n"
@@ -931,7 +931,7 @@ def test_build_strategy_rows_marks_auction_and_formula_rows(formulas_cfg: Config
     assert auction.is_auction and auction.read_only
     assert auction.key == fp.AUCTION_KEY and auction.name == fp.AUCTION_NAME
     assert auction.enabled is False                    # 竞价默认关（intraday_auction=false）
-    assert "不参与匹配" in auction.note_tip and "无法回测" in auction.note_tip
+    assert "不参与筛选" in auction.note_tip and "无法回测" in auction.note_tip
     formula = rows[-1]
     assert formula.key == "放量上攻" and formula.note == "站上5日线"
     assert formula.enabled is True                     # 勾了才为真（写回 enabled_formulas）
@@ -986,7 +986,7 @@ def test_build_strategy_rows_shows_broken_and_runtime_errors(formulas_cfg: Confi
 #
 # 2026-09-18 用户给的那条策略要用「流通市值 10-300 亿 + 换手率 > 5%」，
 # 而这两个数**日线里没有**（同花顺的快照端点也不返回），只能从实时快照取一趟。
-# 这几条钉住三件事：取到了就真的参与匹配、**不用它的公式一个请求都不发**、
+# 这几条钉住三件事：取到了就真的参与筛选、**不用它的公式一个请求都不发**、
 # 取不到时给一句人话（否则"勾了却没出票"会被当成公式写错）。
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -1031,7 +1031,7 @@ def _off_hours_now() -> datetime:
 def off_hours(monkeypatch: pytest.MonkeyPatch) -> None:
     """把"现在"钉在收盘后（见 `_off_hours_now`）。
 
-    为什么这些用例要钉死时钟：内置规则是"开盘时间里跑的匹配用实时数据"
+    为什么这些用例要钉死时钟：内置规则是"开盘时间里跑的筛选用实时数据"
     （用户 2026-09-23 定），而"现在是不是开盘时间"只能看**真实时钟** ——
     不钉的话，同一个用例在 CI 的白天与深夜会走两条不同的路（一边取快照、一边不取），
     断言"一个请求都不发"就会变成"看跑测试的时间"。
@@ -1246,7 +1246,7 @@ def test_hot_industry_counts_is_the_union_over_the_window(formula_db: str,
 # ══════════════════════════════════════════════════════════════════════════
 # K 线口径按时间自动切（主人 2026-09-23 定的内置规则）
 #
-# 原话："在软件内置规则里设定，开盘时间里运行的匹配，都是实时的，不是开盘时间，
+# 原话："在软件内置规则里设定，开盘时间里运行的筛选，都是实时的，不是开盘时间，
 # 采用 K 线。" —— 同一天他又划掉了我加的那个开关："不需要加开关，按照我说的规则来"，
 # 所以这条规则是**无条件**的（下面 ④ 专门钉"关不掉"）。
 # 下面这几条就是这句话的四种情形 + 匹配链路同口径：
@@ -1255,7 +1255,7 @@ def test_hot_industry_counts_is_the_union_over_the_window(formula_db: str,
 #   ③ 开盘时间 + 没快照   → 退回日 K，并且必须说清（否则会被当成策略写错）
 #   ④ 没有任何开关能关掉它 → 配置里没有这个键、环境变量也没有、硬塞属性也不理
 #   ⑤ 匹配链路（建池）用**同一个函数**取口径，与【运行】不可能不一致
-#   ⑥⑦ 「退回日 K」是告知不是错误（不能让一次成功的匹配被判成失败）
+#   ⑥⑦ 「退回日 K」是告知不是错误（不能让一次成功的筛选被判成失败）
 # ══════════════════════════════════════════════════════════════════════════
 
 #: 盘中测试用的固定时刻：2026-09-14（周一）10:00 —— 夹具库的最后一天是 09-11（周五）
@@ -1438,7 +1438,7 @@ def test_run_enabled_formulas_uses_live_data_in_session(
     """⑤ 匹配链路（建池）与【运行】用**同一个函数**取口径 ⇒ 结果必须一致。
 
     这是"漏接一根线"的典型：快照早就在试算那条路上接通了，建池却没有 ——
-    用户看到的是"点【运行】选出 3 只、点【开始匹配】选出 1 只"，没有任何办法解释。
+    用户看到的是"点【运行】选出 3 只、点【开始筛选】选出 1 只"，没有任何办法解释。
     """
     fx = formulas_cfg.data_dir / "formulas"
     fx.mkdir(parents=True, exist_ok=True)

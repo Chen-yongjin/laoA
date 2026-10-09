@@ -349,7 +349,7 @@ def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> 
     assert pool.source_label(row, None) == "短期反转"
     line = pool.format_pool_lines([row])[0]
     assert line == "1. 半导体甲(600002)短期反转、地量后放量变盘｜缩量回踩"
-    # 推送标签里的每个中文名，都能在「策略匹配」列表里找到（同一份翻译表）
+    # 推送标签里的每个中文名，都能在「策略筛选」列表里找到（同一份翻译表）
     from laoa_trader import legacy
 
     for name in pool.strategy_names(row):
@@ -359,10 +359,10 @@ def test_push_line_lists_all_strategies_while_the_column_shows_the_primary() -> 
 
 # ── 选出来的票在「自选标的」里能删、能手工再加（用户要求）──
 #
-# 用户原话：「策略匹配只要显示策略，不显示匹配结果，匹配结果直接进自选标的，
+# 用户原话：「策略筛选只要显示策略，不显示筛选结果，筛选结果直接进自选标的，
 # **可以在股池再添加删除**」。
 #
-# 结果现在不再显示在「策略匹配」页，入口收敛到「自选标的」那一张表：
+# 结果现在不再显示在「策略筛选」页，入口收敛到「自选标的」那一张表：
 # 右键【删除】走 `storage.delete_pool_symbol()`，手工再加走
 # `storage.upsert_watchlist()`（界面上是【添加自选】/回车）。
 # 界面那两步的接线在 `ui/app.py`（属于另一个改动方），这里钉住**后端这两个入口**
@@ -492,7 +492,7 @@ def test_pool_rows_carry_no_group(engine, cfg, tmp_path, monkeypatch) -> None:
 # 现场：自选标的建池时会被并进 `stock_pool`（盘中监控按池子盯），而「自选标的」页
 # 读的正是池子行 —— 只删自选表的话，那一行会原地不动，用户看到的是"点了删除没生效"。
 # 口径（主人当天拍板）：**手动删的一律删干净，不替用户做决定** —— 所以下面这几条
-# 把"自选来源的行""今天真被策略选中的行""从匹配结果加入自选的行"都钉在"必须消失"上。
+# 把"自选来源的行""今天真被策略选中的行""从筛选结果加入自选的行"都钉在"必须消失"上。
 
 
 def _seed_row(cfg, *, symbol: str, strategy: str = "", reason: str = "自选",
@@ -525,7 +525,7 @@ def test_removing_a_watch_symbol_that_is_only_in_the_pool_deletes_both(cfg) -> N
 
 
 def test_a_symbol_added_from_the_result_page_still_deletes(cfg) -> None:
-    """**从匹配结果页点【加入自选】的票**：删了也必须消失（它只是"带着当初那条策略的名字"）。
+    """**从筛选结果页点【加入自选】的票**：删了也必须消失（它只是"带着当初那条策略的名字"）。
 
     这一类最容易判错：`watchlist.source_strategy` 记着"当初是哪条策略选出来的"，
     而来源列要显示它，于是**池子行里也有 `strategy`** —— 按"有没有 strategy"判
@@ -549,7 +549,7 @@ def test_removing_a_watch_symbol_that_a_strategy_also_picked_deletes_both(cfg) -
 
     2026-10-08 主人："只要是手动删除的，都即时删除，不需要留，我们不替用户做决定。"
     所以这里不再有"它还挂着某条策略、就替你留着"的分支 —— 删了就是删了。
-    （下次【开始匹配】策略又选中它，那是"重新选出来"，与"没删掉"是两回事。）
+    （下次【开始筛选】策略又选中它，那是"重新选出来"，与"没删掉"是两回事。）
     """
     storage.init_db(cfg.db_path)
     with storage.connect(cfg.db_path) as conn:

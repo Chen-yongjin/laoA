@@ -158,7 +158,7 @@ def qapp():
 
 @pytest.fixture()
 def page(cfg, qapp, tmp_path):
-    """「策略匹配」页（公式目录指到 tmp_path，绝不碰仓库里那份）。"""
+    """「策略筛选」页（公式目录指到 tmp_path，绝不碰仓库里那份）。"""
     storage.init_db(cfg.db_path)
     cfg.source_path = tmp_path / "config.toml"
     cfg.source_path.write_text("# 用户自己的注释\n", encoding="utf-8")
@@ -238,12 +238,12 @@ def _assert_no_formula_word(pairs: list[tuple[str, str]]) -> None:
 
 
 def test_no_formula_word_in_user_visible_text(window, qapp) -> None:
-    """主窗口（含「策略匹配」页与编辑器）里，**控件上任何一处都不许出现"公式"**。"""
+    """主窗口（含「策略筛选」页与编辑器）里，**控件上任何一处都不许出现"公式"**。"""
     pairs = _widget_texts(window)
     assert pairs, "一个控件都没扫到，这条用例就没意义了"
     # canary：确认编辑器那一页真的被扫到了（它平时是隐藏的，但控件一直存在）
     blob = "\n".join(text for _, text in pairs)
-    assert "策略名称" in blob and "策略匹配" in blob, "没扫到「策略匹配」页，判据不成立"
+    assert "策略名称" in blob and "策略筛选" in blob, "没扫到「策略筛选」页，判据不成立"
     _assert_no_formula_word(pairs)
 
 

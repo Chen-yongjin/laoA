@@ -670,7 +670,7 @@ def test_tray_menu_has_pause_intraday_item(win, qapp) -> None:
     texts = [a.text() for a in win.tray_menu.actions()]
     # 2026-09-18 起这一项叫【消息】（打开消息列表），不再是【最近提醒】（弹浮窗）
     assert "显示主窗口" in texts and "消息" in texts and "退出" in texts
-    assert ui_app.BTN_START_TEXT in texts                    # 【开始匹配】也在托盘上
+    assert ui_app.BTN_START_TEXT in texts                    # 【开始筛选】也在托盘上
     act = next(a for a in win.tray_menu.actions() if a.text() == "暂停提醒")
     assert act.isCheckable() is True
     assert act.isChecked() is False

@@ -1031,7 +1031,7 @@ def test_daily_update_public_writes_nothing_on_an_empty_snapshot(cfg, monkeypatc
     """快照为空（断网/被限流）→ **失败，且一个字节都不写**。
 
     "绝不写半份数据"：如果先写了代码表/日历、再发现行情为空，库里就出现
-    "有日历、有名字、没有当天 K 线"的中间态 —— 匹配会跑在半个市场上，
+    "有日历、有名字、没有当天 K 线"的中间态 —— 筛选会跑在半个市场上，
     而自检与界面都看不出哪里不对。
     """
     storage.init_db(cfg.db_path)

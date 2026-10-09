@@ -381,7 +381,7 @@ def sync_names_public(conn: sqlite3.Connection, rows: Sequence[dict]) -> int:
 
     行业留空的后果要如实说明：**公开源没有全市场行业分类**（实测没有可用的公开接口），
     而数据自检要求行业覆盖率 ≥90%（`preflight.MIN_INDUSTRY_COVERAGE`）——
-    所以没 Key 时**匹配会被自检拒绝**（见 `preflight` 与 `ui/app.py` 的【下载数据】说明），
+    所以没 Key 时**筛选会被自检拒绝**（见 `preflight` 与 `ui/app.py` 的【下载数据】说明），
     而不是"随便分个行业"混过去。行情与大盘概览不受影响。
     """
     payload = []

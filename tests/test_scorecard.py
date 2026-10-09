@@ -379,7 +379,7 @@ def test_custom_spec_filters_and_ranks(tmp_path: Path):
     """自定义 spec 的老路照旧能用：`spec_from_signal` + 排序 + 取前 N。
 
     （原来这条测的是内置「低价股」spec，它随策略引擎删掉了；这里改成自己写一个
-    等价的信号函数 —— 恰恰就是"用户想评估自己的匹配逻辑"时走的那条路。）
+    等价的信号函数 —— 恰恰就是"用户想评估自己的筛选逻辑"时走的那条路。）
     """
     days = workdays("2024-09-02", 25)          # 需要 20 日均额
     series = {

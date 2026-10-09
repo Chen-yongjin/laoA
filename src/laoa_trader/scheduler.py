@@ -212,7 +212,7 @@ def data_gate(
 
     - `ready` → 放行；
     - `needs_incremental` → **也放行**（数据可用，只是落后几天；`run_daily` 会先跑
-      增量再匹配，所以口径仍然是"先补数据再匹配"）；
+      增量再匹配，所以口径仍然是"先补数据再筛选"）；
     - `needs_full`（空库/跨度不足/缺复权事件/落后超窗口…）→ **拦下**，给出原因与下一步；
     - **只缺轻量项**（交易日历/行业归属/指数）→ 默认也拦下（但指路指向【刷新数据】，
       文案里不再是"重新下载"）；`auto_sync_light=True` 时**先自动补一次再复查**，
@@ -299,9 +299,9 @@ def run_daily(
 ) -> dict:
     """跑一次完整的日更流程：数据增量（可选）→ 策略 → 建池 → 导出桌面文件 → 推送。
 
-    **界面上的【开始匹配】（「策略匹配」页，或托盘菜单里的同名项）与 CLI `--once`
+    **界面上的【开始筛选】（「策略筛选」页，或托盘菜单里的同名项）与 CLI `--once`
     共用这一个函数** —— 按钮名取自 `hints.BTN_RUN_TEXT`，别处不许自己写一个
-    （改版后那个按钮叫【开始匹配】，老文档里的【匹配建池】已经不存在了）。
+    （改版后那个按钮叫【开始筛选】，老文档里的【匹配建池】已经不存在了）。
     口径一致才谈得上幂等：信号按 (行情日, 策略, 代码) upsert、池子按
     (行情日, 代码) upsert、推送按内容指纹去重（同一天同一批内容只推一次）。
 
@@ -313,7 +313,7 @@ def run_daily(
         selection: **2026-09-18 起不再用于匹配，只为兼容老调用方保留这个参数**。
             内置策略已整体改成随包公式（可改可删），"跑哪些策略"由 `config.toml` 的
             `enabled_formulas` 决定（建池里读它），外面传什么都不影响结果。
-        with_data: 是否先跑一次数据增量（只想重算匹配时传 False）。
+        with_data: 是否先跑一次数据增量（只想重算筛选时传 False）。
         stage_cb: 阶段名回调（界面状态栏显示"跑策略/建池/推送通知"；
             导出成功时还会收到一句 `结果已导出到 <路径>` —— 用户要求写成桌面文件就
             在状态栏里说一声）。
@@ -336,7 +336,7 @@ def run_daily(
     # `enabled_formulas` 勾了哪几条公式 —— 建池里读它（`formula_group`），
     # 这里不需要也不该再替它做一次选择。
     #
-    # `selection` 参数**只为兼容老调用方保留**（CLI/测试还在传），不再参与匹配。
+    # `selection` 参数**只为兼容老调用方保留**（CLI/测试还在传），不再参与筛选。
     report: dict[str, Any] = {
         "sync": [], "picks": 0, "signals": 0, "pool": [], "notify": {}, "errors": [],
         "data_date": None, "selection": {},
@@ -355,7 +355,7 @@ def run_daily(
     strategies_off = not enabled_formulas
     if strategies_off:
         logger.info("没有勾选任何策略：本次只处理自选标的"
-                    "（在「策略匹配」页勾上策略即可参与匹配）")
+                    "（在「策略筛选」页勾上策略即可参与筛选）")
         report["strategies_off"] = True
 
     def _stage(name: str) -> None:
@@ -376,9 +376,9 @@ def run_daily(
 
     # 2) 建池（候选由 `build_pool()` 里的「公式」组现算 —— 这是唯一的候选来源）
     #
-    # 2026-09-21（主人要求）：**匹配结果不再自动进股池** —— 所以这里传
+    # 2026-09-21（主人要求）：**筛选结果不再自动进股池** —— 所以这里传
     # `save_picks=False`：`stock_pool` 只落**自选标的**（用户自己加的、或在结果页面点
-    # 【加入自选】加进来的）。选出来的票仍然会：① 显示在「策略匹配」的结果页面
+    # 【加入自选】加进来的）。选出来的票仍然会：① 显示在「策略筛选」的结果页面
     # （每行一个【加入自选】）；② 导出到桌面那份文本文件；③ 进 `signal` 表。
     # 为什么不是"整条建池都不做"：`stock_pool` 同时是**盘中监控的盯盘清单**
     # （`intraday` 读它），自选标的必须继续被盯着。
@@ -395,7 +395,7 @@ def run_daily(
         report["picks"] = sum(len(v) for v in picks_all.values())
         if picks_all:
             # `save_signals()` 只是"把候选写进 signal 表"的写库函数（与策略实现无关），
-            # 所以继续借它用；`rules` 这个模块本身已经不参与匹配了。
+            # 所以继续借它用；`rules` 这个模块本身已经不参与筛选了。
             from laoa_trader import legacy
 
             report["signals"] = legacy.save_signals(
@@ -411,7 +411,7 @@ def run_daily(
         logger.info("今日无股票池（非交易日 / 数据不足 / 所选策略组无候选 / 没有自选标的），跳过推送")
         return report
 
-    # 2.5) 桌面导出：用户要求「匹配结果直接进自选标的，**也可以同时** output 一个文件到桌面」。
+    # 2.5) 桌面导出：用户要求「筛选结果直接进自选标的，**也可以同时** output 一个文件到桌面」。
     # 为什么挂在**建池成功之后**、推送之前：
     #   * 池子已经落库（`build_pool(save=True)`），导出的就是用户马上要在界面上看到的那一份；
     #   * 推送那一段有好几个提前 return（内容没变不重复推、全是"依赖开盘"的标的就整批不推），
@@ -430,7 +430,7 @@ def run_daily(
         # 内层 `export_pick_file` 自己已经兜过一层，这里是"万一它被换掉/被 monkeypatch
         # 成会抛的实现"时的最后一道 —— 测试用 monkeypatch 抛异常正是打这一条。
         report["errors"].append(f"导出桌面文件：{type(exc).__name__}: {exc}")
-        logger.warning(f"导出匹配结果失败（不影响匹配与推送）：{exc}")
+        logger.warning(f"导出筛选结果失败（不影响筛选与推送）：{exc}")
     else:
         if exported is not None:
             report["export_path"] = str(exported)
@@ -445,7 +445,7 @@ def run_daily(
             # 没写出来就必须让他知道，而不是只写进他自己不会去看的日志。
             report["errors"].append("导出桌面文件：没有写成功（原因见日志）")
 
-    # 2.6) 匹配完成 → 进「消息」列表（用户 2026-09-18：通知仿 QQ，盘中提醒与匹配推送
+    # 2.6) 筛选完成 → 进「消息」列表（用户 2026-09-18：通知仿 QQ，盘中提醒与匹配推送
     #      都进同一个列表）。放在这里（建池成功、导出之后）而不是推送那一段里：
     #      用户要的是"选完股消息列表里就有一条"，与他勾没勾推送频道无关。
     _record_pool_message(cfg, report.get("data_date"), pool_rows)
@@ -509,7 +509,7 @@ def refresh_data(
     *,
     progress_cb: sync.ProgressCb | None = None,
 ) -> list[sync.SyncResult]:
-    """只刷新数据：跑一遍增量同步（行情 + 涨停池 + 日历 + 行业 + 指数），不匹配、不推送。
+    """只刷新数据：跑一遍增量同步（行情 + 涨停池 + 日历 + 行业 + 指数），不筛选、不推送。
 
     界面上的【刷新数据】按钮用它（`hints.BTN_REFRESH_TEXT`）—— 数据没好之前跑策略毫无意义，
     所以单独给一个"只补数据"的动作。
@@ -530,7 +530,7 @@ def _record_pool_message(cfg: Config, day: str | None, pool_rows: list[dict]) ->
     """把"这一轮选出了几只"写进 `intraday_alert`（`kind="pool"`），供「消息」列表显示。
 
     用户 2026-09-18 的原话："通知仿照 QQ 桌面端，有消息软件图标闪烁，可以点开查看消息列表。"
-    —— 盘中提醒与**匹配完成**要进同一个列表，所以匹配这边也记一条。
+    —— 盘中提醒与**筛选完成**要进同一个列表，所以匹配这边也记一条。
 
     三条口径：
 
@@ -556,14 +556,14 @@ def _record_pool_message(cfg: Config, day: str | None, pool_rows: list[dict]) ->
                 "symbol": f"pool-{stamp}",
                 # 2026-10-05 主人："选股结果也不要播报，只提醒选股结果已出，请点击查看。"
                 # 所以这条消息**只当门铃**：不列票名、不报涨跌，看到就去点开看结果页。
-                # 票名与来源在「策略匹配 → 本次匹配结果」里本来就是一整张表。
+                # 票名与来源在「策略筛选 → 本次筛选结果」里本来就是一整张表。
                 "detail": f"{intraday.POOL_DONE_TEXT}（共 {len(pool_rows)} 只）",
                 "price": None,
             }], day)
         if fresh:
             logger.info(f"{intraday.POOL_DONE_TEXT}（已记入「消息」列表：{day}，{len(pool_rows)} 只）")
-    except Exception as exc:  # noqa: BLE001 - 消息落库失败不影响匹配结果
-        logger.warning(f"记录「匹配完成」消息失败（不影响匹配）：{exc}")
+    except Exception as exc:  # noqa: BLE001 - 消息落库失败不影响筛选结果
+        logger.warning(f"记录「筛选完成」消息失败（不影响匹配）：{exc}")
 
 
 def _pool_plan_lines(pool_rows: list[dict], cfg: Config) -> list[str]:
@@ -723,10 +723,10 @@ class Scheduler:
         progress_cb: sync.ProgressCb | None = None,
         stage_cb: Any = None,
     ) -> dict:
-        """立刻跑一次（不受时间限制）：界面【开始匹配】与 CLI `--once` 用。
+        """立刻跑一次（不受时间限制）：界面【开始筛选】与 CLI `--once` 用。
 
         `selection` 与 `run_daily()` 一样**只为兼容老调用方保留**（2026-09-18 起
-        不再参与匹配：候选只来自 `config.toml` 里 `enabled_formulas` 勾的公式）。
+        不再参与筛选：候选只来自 `config.toml` 里 `enabled_formulas` 勾的公式）。
         """
         report = run_daily(
             self.cfg, self.engine, notify=notify, with_data=with_data,
@@ -831,7 +831,7 @@ class Scheduler:
         if state.is_downloading():
             self._block_daily(
                 "正在下载历史数据：已跳过本次自动匹配；"
-                "下载完成后当天仍会自动补跑一次（也可以点【开始匹配】）",
+                "下载完成后当天仍会自动补跑一次（也可以点【开始筛选】）",
                 now,
             )
             return

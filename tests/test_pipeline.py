@@ -85,7 +85,7 @@ def test_run_twice_is_idempotent_for_signals_and_watchlist_rows(
         ready_db, tmp_path, monkeypatch) -> None:
     """同一天跑两次：`signal` 不产生重复行；`stock_pool` 里也**只有自选那一行**。
 
-    2026-09-21（主人要求"匹配结果不自动加入股池"）：选出来的票不再写进 `stock_pool`，
+    2026-09-21（主人要求"筛选结果不自动加入股池"）：选出来的票不再写进 `stock_pool`，
     所以"池子行不重复"这件事现在由**自选标的**那条路来验 —— 先加一只自选，再跑两轮，
     库里应当恰好一行（不是两行、也不是三行）。
     """
@@ -212,7 +212,7 @@ def test_enabled_formula_flows_to_pool_signals_and_watch(
         strategies = {r[0] for r in conn.execute("SELECT DISTINCT strategy FROM signal")}
         stored = [r["symbol"] for r in conn.execute("SELECT symbol FROM stock_pool")]
     assert strategies == {"公式·反转"}          # 信号表里的正是这一轮跑的公式
-    # ⚠️ 2026-09-21（主人要求）：**匹配结果不再自动进股池** —— 库里一行都不该有
+    # ⚠️ 2026-09-21（主人要求）：**筛选结果不再自动进股池** —— 库里一行都不该有
     assert stored == [], "选出来的票不该自动写进 stock_pool"
 
     # 观察面：2026-10-05 起**池子里的票默认不盯**，也不用"近期信号"兜底 ——

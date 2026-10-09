@@ -19,7 +19,7 @@
 
 谁在用（为什么必须**共用同一份判断**）
 ------------------------------------
-`strategy/formula_group.run_enabled_formulas()`（【开始匹配】那条路）与
+`strategy/formula_group.run_enabled_formulas()`（【开始筛选】那条路）与
 `formulas.preview_hits()`（策略编辑页【运行】那条路）**调的是同一个 `apply_gate()`**。
 两处各写一套筛选，迟早会出现"试算说 5 只、匹配只有 2 只"这种用户无法解释的差异 ——
 这与 `formulas.prepare_inputs`（K 线口径）、`formula_group.confirm_days_of`
@@ -537,7 +537,7 @@ def apply_gate(
     个股的相对强弱 = 该票近 N 日收益 − **同期全市场等权收益**（同一个窗口、
     同一份后复权价，见 `market_return` 的口径说明）；弱市时只留 `≥ min_pct%` 的票。
 
-    这是【开始匹配】与【试算】**共用的唯一一份筛选实现**：两处分别写一遍，
+    这是【开始筛选】与【试算】**共用的唯一一份筛选实现**：两处分别写一遍，
     就会出现"试算说 5 只、匹配只有 2 只"这种用户无法解释的差异。
 
     Args:
