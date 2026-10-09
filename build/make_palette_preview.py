@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""把**几套候选配色**各渲染一张主界面图，供主人挑一套（2026-10-10）。
+"""把**每一套皮肤**各渲染一张主界面图（配色对比 / 换皮肤后重出产品图都用它）。
 
 为什么要有这个脚本
 ------------------
-主人这次的要求是"界面做得更美观、更科技更高级一点"，同时说"配色先出三套图挑一挑"。
-配色是**看着挑**的东西：Agent 这边讲一堆"深空蓝配青绿更有质感"没有意义，
-把同一页、同一批数据、同样的排版在三套配色下各出一张图，一眼就分得出高下。
-（这也是 `文档/开发文档` 里那条原则："看不出渲染结果时，不做更容易误解的事"。）
+来由：主人 2026-10-10 要"界面更美观、更科技更高级一点"，配色是**看着挑**的东西 ——
+Agent 讲一堆"深空蓝配青绿更有质感"没有意义，把同一页、同一批数据、同样的排版
+在各套配色下各出一张图，一眼就分得出高下。主人已经从这套图里挑定了
+**午夜靛紫**为默认（"默认选午夜靛紫，其它几套也可以放在程序包里供用户选择"），
+所以这个脚本现在的用途是：① 改配色后重新出对比图；② 顺手给 README/站点换图。
+（这也是开发文档里那条原则："看不出渲染结果时，不做更容易误解的事"。）
 
 怎么跑：
     QT_QPA_PLATFORM=offscreen /tmp/laoa-test/bin/python build/make_palette_preview.py
@@ -49,24 +51,21 @@ for _key in ("APPDATA", "LOCALAPPDATA"):
 from PySide6.QtWidgets import QApplication                  # noqa: E402
 
 import make_screenshots as shots                            # noqa: E402
+from laoa_trader import config as config_mod                # noqa: E402
 from laoa_trader.ui import theme as theme_mod               # noqa: E402
 
 #: 出图目录（与 `docs/截图/` 分开：那批是"产品图"，这批是"挑配色的对比图"）
 OUT_DIR = REPO / "docs" / "配色预览"
 
-#: 配色名 → 图里用的中文名（字母前缀是为了排序，也方便主人回一句"我挑 D"）
+#: 配色名 → 图里用的中文名（前缀字母 = 主人挑配色时的编号，也方便他说"我看 E"）
 PALETTE_TITLES: dict[str, str] = {
-    # 第一批（已被主人否掉，留着以备"回头再看"）
-    "tech": "A-科技蓝（现在的默认）",
-    "obsidian": "B-曜黑电光蓝",
-    "graphite": "C-石墨紫罗兰",
-    # 第二批（2026-10-10 下午：主人"颜色我都不满意，再给几个组合选一下"）
+    "indigo": "E-午夜靛紫（现在的默认）",
     "sapphire": "D-深海宝蓝",
-    "indigo": "E-午夜靛紫",
     "amber": "F-石墨琥珀金",
     "rose": "G-暗夜玫红",
     "mist": "H-哑光雾蓝（低饱和）",
     "paper": "I-浅色高级灰",
+    "silver": "银-银色（金属感）",
 }
 
 #: 对比一览图：每套配色取窗口**顶部这一块**（标题栏 + 状态区 + 页签 + 卡片 + 数字），
@@ -83,8 +82,10 @@ PAGE_TITLES: dict[str, str] = {"market": "大盘概览", "watch": "自选标的"
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="渲染候选配色的界面预览图")
-    parser.add_argument("--themes", default=",".join(theme_mod.PREVIEW_THEMES),
-                        help="要出图的配色名（逗号分隔，见 theme.PALETTES）")
+    parser.add_argument(
+        "--themes", default=",".join(name for name in config_mod.UI_THEMES
+                                     if name != "system"),
+        help="要出图的皮肤名（逗号分隔，默认=设置页里能选的全部；见 theme.PALETTES）")
     parser.add_argument("--pages", default="market,settings",
                         help="要出图的页面：market / watch / settings")
     parser.add_argument("--size", default="1280x860", help="窗口尺寸，例如 1280x860")

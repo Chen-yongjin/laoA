@@ -136,7 +136,7 @@ def test_titlebar_colors_come_from_the_active_palette(qapp) -> None:
 
 def test_titlebar_styles_exist_in_every_palette(qapp) -> None:
     """两张皮肤都要有标题栏的样式（漏一个就会出现"标题栏没有底色"的半成品界面）。"""
-    for name in ("tech", "silver"):
+    for name in ("indigo", "silver"):
         qss = theme_mod.theme_qss(name)
         for selector in ("QWidget#titleBar", "QLabel#titleBarTitle",
                          "QFrame#titleBarAccent", 'QWidget#windowBody[frame="custom"]'):

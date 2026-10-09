@@ -11,13 +11,16 @@
    `setStyleSheet("color:…")` 设的，优先级高于这里的应用级样式表，所以在银底上照旧生效，
    不会与主题打架。
 
-两套皮肤（2026-10-08 新增「科技蓝（深色）」，并设为默认）
---------------------------------------------------------
-- **科技蓝（`tech`）**：深海军蓝底 + 青色强调（主按钮、页签下划线、进度条、选中态），
-  数据卡片是比底色亮一档的面板色，边界用细线而不是阴影 —— 目标是"有科技感但不像游戏 UI"。
-  深色底上**涨跌色要换一档**（`#2e7d32` 在深蓝上只有 ~2:1，数字会糊掉），
+皮肤与配色（2026-10-10 定稿：默认「午夜靛紫」，其余几套也都能选）
+------------------------------------------------------------------
+- **六套彩色皮肤 + 银色 + 系统默认**，设置页下拉框里全都能选（`config.UI_THEMES`）：
+  午夜靛紫（`indigo`，**默认**）、深海宝蓝（`sapphire`）、石墨琥珀金（`amber`）、
+  暗夜玫红（`rose`）、哑光雾蓝（`mist`）、浅色高级灰（`paper`）、
+  银色（`silver`）、系统默认（`system`）。
+  主人 2026-10-10 的原话是"默认选午夜靛紫 —— 其它几套也可以放在程序包里供用户选择"，
+  所以这几套**都是正式皮肤**，不是"临时候选"（早先那套科技蓝青色在挑配色时被否掉了）。
+- **深色底上涨跌色要换一档**（`#2e7d32` 在深蓝上只有 ~2:1，数字会糊掉），
   所以语义色按主题给（见 `value_color`）。
-- **银色（`silver`）**：原来的金属浅灰皮肤，保留给"看不惯深色"的用户与打印/截图场景。
 - **系统默认（`system`）**：清空样式表，回到 Qt 原生外观（安全绳）。
 
 设计取舍（保守而明确）
@@ -43,28 +46,31 @@ from laoa_trader.log import get_logger
 
 logger = get_logger(__name__)
 
-#: 主题名（与 `config.UI_THEMES` 同一份取值，避免两处各写一份）
-THEME_TECH = "tech"
-THEME_SILVER = "silver"
-THEME_SYSTEM = "system"
-
-#: 候选深色配色（2026-10-10）：**只用于出预览图/内部渲染，不进设置页下拉框**。
-#: 为什么这么分：配色是"看着挑"的东西，先用离屏渲染出几张图给主人比，
-#: 挑中的那一套再并进 `TECH_COLORS`（那样 `UI_THEMES` 与所有既有用例都不用动）。
-#: 主人定了之后这两个名字就可以删掉。
-THEME_OBSIDIAN = "obsidian"      # 曜黑 + 电光蓝
-THEME_GRAPHITE = "graphite"      # 石墨灰 + 紫罗兰
-# 第二批（2026-10-10 主人"颜色我都不满意，再给几个组合选一下"）：
+#: 主题名（与 `config.UI_THEMES` 同一份取值，避免两处各写一份）。
+#: 顺序 = 设置页下拉框的顺序 = 主人挑配色时的编号顺序（D/E/F/G/H/I）。
+THEME_INDIGO = "indigo"          # 午夜靛紫（**默认**）
 THEME_SAPPHIRE = "sapphire"      # 深海宝蓝
-THEME_INDIGO = "indigo"          # 午夜靛紫
 THEME_AMBER = "amber"            # 石墨琥珀金
 THEME_ROSE = "rose"              # 暗夜玫红
 THEME_MIST = "mist"              # 哑光雾蓝（低饱和）
-THEME_PAPER = "paper"            # 浅色高级灰（**唯一一套浅色**）
+THEME_PAPER = "paper"            # 浅色高级灰
+THEME_SILVER = "silver"          # 银色（金属感，浅色）
+THEME_SYSTEM = "system"          # 系统默认（空样式表）
 
-#: 下拉框里的中文名（用户看到的是这个，不是 tech/silver/system）
+#: 旧主题名 → 现在按哪套渲染。`tech` 是 2026-10-08~10-10 那套青色皮肤的配置值，
+#: 主人自己的 `config.toml` 里就写着它 —— 不能因为改名就让他的界面"莫名其妙变回默认"。
+LEGACY_THEME_ALIASES: dict[str, str] = {
+    "tech": THEME_INDIGO,
+}
+
+#: 下拉框里的中文名（用户看到的是这个，不是 indigo/silver/system）
 THEME_LABELS: dict[str, str] = {
-    THEME_TECH: "科技蓝（深色）",
+    THEME_INDIGO: "午夜靛紫（默认·深色）",
+    THEME_SAPPHIRE: "深海宝蓝（深色）",
+    THEME_AMBER: "石墨琥珀金（深色）",
+    THEME_ROSE: "暗夜玫红（深色）",
+    THEME_MIST: "哑光雾蓝（深色·低饱和）",
+    THEME_PAPER: "浅色高级灰",
     THEME_SILVER: "银色（金属感）",
     THEME_SYSTEM: "系统默认",
 }
@@ -140,91 +146,17 @@ SILVER_COLORS: dict[str, str] = {
     "close_hover": "#c62828",         # 关闭按钮悬停底色（红）
 }
 
-# ── 科技蓝主题的色板（与银色**同一批键名**，所以同一张样式表模板能渲染两套皮肤）──
-#
-# 取色原则（2026-10-08）：
-#   * 底：#0b1220（深海军蓝）→ 卡片 #121c2e → 背景条/表头 #16233a，三层差一档，
-#     层次靠**明度**而不是阴影（深色界面上阴影基本看不见）；
-#   * 强调：青色 #2ad4ea 只用在"要你点/正在发生"的地方（主按钮、页签选中、进度、
-#     选中行边框），别处一律中性色 —— 满屏发光就不叫专业了；
-#   * 文字对比度实测（在窗口底上）：正文 15.9:1、次要 7.4:1、涨跌 6.8/10.5:1，
-#     全部高于 WCAG AA 的 4.5:1（深色皮肤最容易翻车的就是"深绿字配深蓝底"）；
-#   * 主按钮是亮青底 + **深字**（#04222b 在青底上 9.2:1）—— 白字在青底上只有 1.8:1。
-TECH_COLORS: dict[str, str] = {
-    # 底色
-    "window": "#0b1220",
-    "panel": "#121c2e",
-    "section": "#16233a",
-    # 边框
-    "border": "#23334c",
-    "border_dark": "#33486a",
-    # 文字
-    "text": "#e6edf7",
-    "text_dim": "#93a4bd",
-    "text_disabled": "#7c8ea9",      # 比次要文字再暗一点，但在三种底色上都还看得清（≥4:1）
-    # 普通按钮（深色卡片上略亮一档 + 细边）
-    "btn_top": "#1b2946",
-    "btn_bottom": "#15203a",
-    "btn_border": "#2b3d5c",
-    "btn_hover_top": "#22314f",
-    "btn_hover_bottom": "#1a2742",
-    "btn_press_top": "#101a2e",
-    "btn_press_bottom": "#0d1526",
-    "btn_disabled_bg": "#131c2c",
-    # 主操作按钮（青色，要一眼看到）
-    "primary_top": "#2ad4ea",
-    "primary_bottom": "#12a4c2",
-    "primary_hover_top": "#45dff2",
-    "primary_hover_bottom": "#17b0cf",
-    "primary_press_top": "#0f93b0",
-    "primary_press_bottom": "#0b7d97",
-    "primary_border": "#0b7f98",
-    "primary_text": "#04222b",
-    # 页签 / 表格 / 滚动条 / 进度条
-    "tab_unselected": "#101a2c",
-    "tab_selected": "#121c2e",
-    "tab_accent": "#2ad4ea",
-    "tab_hover": "#18243c",
-    "alt_row": "#0f1a2b",
-    "grid": "#1b2942",
-    "selection": "#1d3a5c",
-    "selection_strong": "#26507c",
-    "focus": "#2ad4ea",
-    "progress_top": "#2ad4ea",
-    "progress_bottom": "#12a4c2",
-    "progress_track": "#16233a",
-    "scrollbar": "#2a3d59",
-    "scrollbar_hover": "#3a5478",
-    "tooltip_bg": "#16233a",
-    # ── 2026-10-10 新增（键名与银色一致，见 SILVER_COLORS 的说明）──
-    "window_top": "#0e1a2e",         # 比原来的纯色底亮一档：窗口有"上亮下暗"的纵深
-    "window_bottom": "#070d18",
-    "card_top": "#15233c",
-    "card_bottom": "#101a2c",
-    "section_top": "#1c2d4a",
-    "titlebar_top": "#16233c",
-    "titlebar_bottom": "#0f1a2d",
-    "titlebar_border": "#23334c",
-    "titlebar_text": "#e6edf7",
-    "titlebar_dim": "#8fa3bf",
-    "accent": "#2ad4ea",
-    "accent_dim": "#1f4f60",
-    "hover_soft": "#18243c",
-    "close_hover": "#e5484d",
-}
-
 #: 深色底上的**语义色**（红涨绿跌）——比浅色底那两档亮一档。
 #: 为什么必须分开：#2e7d32（深绿）在 #0b1220 上的对比度只有 ~2:1，盈亏数字会糊在背景里；
 #: 而浅色主题上不能换色（用户与用例都按 #d32f2f / #2e7d32 核过）。
-TECH_SEMANTIC: dict[str, str] = {
+DARK_SEMANTIC: dict[str, str] = {
     "up": "#ff6b6b",      # 涨（6.8:1）
     "down": "#3ddc84",    # 跌（10.5:1）
 }
 
-#: 主题名 → 语义色覆盖（没列到的主题走 `market.COLOR_UP/COLOR_DOWN`）
-SEMANTIC_BY_THEME: dict[str, dict[str, str]] = {
-    THEME_TECH: TECH_SEMANTIC,
-}
+#: 主题名 → 语义色覆盖（没列到的主题走 `market.COLOR_UP/COLOR_DOWN`）。
+#: 深色皮肤那几套在下面按 `DARK_THEMES` 一次性登记。
+SEMANTIC_BY_THEME: dict[str, dict[str, str]] = {}
 
 # ── 色板生成器：候选配色由"三块底色 + 一个强调色"推出来 ──────────────────
 #
@@ -421,132 +353,19 @@ def _light_palette(*, window: str, panel: str, section: str,
     }
 
 
-# ── 候选配色（2026-10-10）：只用来给主人挑，挑完并入 TECH_COLORS ──────────
+# ── 各套皮肤的色板（2026-10-10：主人挑定「午夜靛紫」为默认，其余几套也都能选）──
 #
 # 取色时的两条硬约束（不是我瞎讲究，A 股界面踩了就难看）：
 #   1. **强调色不能是红/绿**：A 股红涨绿跌，强调色撞上语义色就会让人分不清
-#      "这是涨"还是"这是按钮"。所以候选只用蓝、紫——青色的 `tech` 也是这个道理；
-#   2. 正文对比度 ≥ 4.5:1（WCAG AA），深色皮肤最容易翻车的就是"深绿字配深蓝底"。
+#      "这是涨"还是"这是按钮"。所以强调色只用蓝、紫、金、玫；
+#   2. 正文对比度 ≥ 4.5:1（WCAG AA），深色皮肤最容易翻车的就是"深绿字配深蓝底"
+#      —— 这几套都由用例按对比度核过（`tests/test_theme.py`）。
 #
-#: 曜黑 + 电光蓝：底压到近黑（#070a0f），全靠电光蓝 #4d9dff 提亮，冷、克制。
-OBSIDIAN_COLORS: dict[str, str] = {
-    "window": "#090d13",
-    "panel": "#0e141c",
-    "section": "#131b25",
-    "border": "#1d2734",
-    "border_dark": "#2c3b4d",
-    "text": "#e7edf5",
-    "text_dim": "#8d9cad",
-    "text_disabled": "#75828f",
-    "btn_top": "#141d29",
-    "btn_bottom": "#0f1721",
-    "btn_border": "#243040",
-    "btn_hover_top": "#1a2531",
-    "btn_hover_bottom": "#141e29",
-    "btn_press_top": "#0c131b",
-    "btn_press_bottom": "#090f16",
-    "btn_disabled_bg": "#0d141c",
-    "primary_top": "#4d9dff",
-    "primary_bottom": "#2f7ae6",
-    "primary_hover_top": "#68adff",
-    "primary_hover_bottom": "#3a86f0",
-    "primary_press_top": "#2a6cc9",
-    "primary_press_bottom": "#245bb0",
-    "primary_border": "#2a6cc9",
-    "primary_text": "#04101f",
-    "tab_unselected": "#0c121a",
-    "tab_selected": "#0e141c",
-    "tab_accent": "#4d9dff",
-    "tab_hover": "#131c26",
-    "alt_row": "#0b1119",
-    "grid": "#182130",
-    "selection": "#16304f",
-    "selection_strong": "#1e4270",
-    "focus": "#4d9dff",
-    "progress_top": "#4d9dff",
-    "progress_bottom": "#2f7ae6",
-    "progress_track": "#131b25",
-    "scrollbar": "#233042",
-    "scrollbar_hover": "#33465e",
-    "tooltip_bg": "#131b25",
-    "window_top": "#0b1119",
-    "window_bottom": "#05080c",
-    "card_top": "#131c27",
-    "card_bottom": "#0d141d",
-    "section_top": "#17202c",
-    "titlebar_top": "#0d151f",
-    "titlebar_bottom": "#0a1119",
-    "titlebar_border": "#1b2531",
-    "titlebar_text": "#e7edf5",
-    "titlebar_dim": "#93a3b5",
-    "accent": "#4d9dff",
-    "accent_dim": "#22456f",
-    "hover_soft": "#16202c",
-    "close_hover": "#e5484d",
-}
-
-#: 石墨灰 + 紫罗兰：中性石墨底（#111318）+ 紫罗兰 #a78bfa，偏"专业工具"的安静气质。
-GRAPHITE_COLORS: dict[str, str] = {
-    "window": "#111318",
-    "panel": "#191c22",
-    "section": "#1f232b",
-    "border": "#2a2f39",
-    "border_dark": "#3a4150",
-    "text": "#e9e9ee",
-    "text_dim": "#9b9aa6",
-    "text_disabled": "#83828d",
-    "btn_top": "#23262e",
-    "btn_bottom": "#1c1f26",
-    "btn_border": "#343945",
-    "btn_hover_top": "#2a2e37",
-    "btn_hover_bottom": "#22262e",
-    "btn_press_top": "#171a20",
-    "btn_press_bottom": "#14161b",
-    "btn_disabled_bg": "#1a1d23",
-    "primary_top": "#a78bfa",
-    "primary_bottom": "#8b5cf6",
-    "primary_hover_top": "#b9a1fb",
-    "primary_hover_bottom": "#9a6ef7",
-    "primary_press_top": "#7c4fe0",
-    "primary_press_bottom": "#6b41c4",
-    "primary_border": "#7c4fe0",
-    "primary_text": "#150a2e",
-    "tab_unselected": "#15181d",
-    "tab_selected": "#191c22",
-    "tab_accent": "#a78bfa",
-    "tab_hover": "#1e222a",
-    "alt_row": "#15181e",
-    "grid": "#23272f",
-    "selection": "#33285a",
-    "selection_strong": "#453374",
-    "focus": "#a78bfa",
-    "progress_top": "#a78bfa",
-    "progress_bottom": "#8b5cf6",
-    "progress_track": "#1f232b",
-    "scrollbar": "#333846",
-    "scrollbar_hover": "#454c5e",
-    "tooltip_bg": "#1f232b",
-    "window_top": "#171a20",
-    "window_bottom": "#0d0f13",
-    "card_top": "#1e222a",
-    "card_bottom": "#171a20",
-    "section_top": "#242833",
-    "titlebar_top": "#191c23",
-    "titlebar_bottom": "#14171c",
-    "titlebar_border": "#2a2f39",
-    "titlebar_text": "#e9e9ee",
-    "titlebar_dim": "#9b9aa6",
-    "accent": "#a78bfa",
-    "accent_dim": "#413a63",
-    "hover_soft": "#23262e",
-    "close_hover": "#e5484d",
-}
-
-# ── 第二批候选（主人 2026-10-10 下午："颜色我都不满意，再给几个组合选一下"）──
+# ── 六套皮肤（主人 2026-10-10 挑的这批；全都会出现在设置页下拉框里）──
 #
-# 这一批刻意拉开距离，覆盖"他可能想要的另一种方向"：四个有色调的（宝蓝/靛紫/琥珀金/玫红）、
-# 一个**低饱和**的哑光灰蓝（"不想要花哨"的那条路）、一个**浅色**（"其实我不想要深色"那条路）。
-# 全部由 `_dark_palette` / `_light_palette` 生成：键名与层次关系与正式皮肤完全同构。
+# 刻意拉开距离，覆盖"不同人/不同心情想要的方向"：四个有色调的（宝蓝/靛紫/琥珀金/玫红）、
+# 一个**低饱和**的哑光灰蓝（"不想要花哨"）、一个**浅色**（"看不惯深色"）。
+# 全部由 `_dark_palette` / `_light_palette` 生成：键名与层次关系完全同构。
 
 #: 深海宝蓝：最保守的一条深色路（金融软件的老配色），蓝得稳、不刺眼。
 SAPPHIRE_COLORS: dict[str, str] = _dark_palette(
@@ -586,43 +405,26 @@ PAPER_COLORS: dict[str, str] = _light_palette(
     accent="#4f46e5", accent_deep="#4338ca",
 )
 
-#: 主题名 → 色板（**所有能渲染的配色都在这里**：两套正式皮肤 + 两套候选）。
-#: `theme_qss()` 只认这张表 —— 出预览图时可以直接渲染候选配色。
+#: 主题名 → 色板（**所有能渲染的皮肤都在这里**；`system` 没有色板 —— 它是空样式表）。
+#: `theme_qss()` 只认这张表；`config.UI_THEMES` 与它必须一一对应（有用例钉着）。
 PALETTES: dict[str, dict[str, str]] = {
-    THEME_TECH: TECH_COLORS,
-    THEME_SILVER: SILVER_COLORS,
-    THEME_OBSIDIAN: OBSIDIAN_COLORS,
-    THEME_GRAPHITE: GRAPHITE_COLORS,
-    THEME_SAPPHIRE: SAPPHIRE_COLORS,
     THEME_INDIGO: INDIGO_COLORS,
+    THEME_SAPPHIRE: SAPPHIRE_COLORS,
     THEME_AMBER: AMBER_COLORS,
     THEME_ROSE: ROSE_COLORS,
     THEME_MIST: MIST_COLORS,
     THEME_PAPER: PAPER_COLORS,
+    THEME_SILVER: SILVER_COLORS,
 }
 
-#: 出对比图用的顺序（第一批两套已被主人否掉，出图默认只出第二批）
-PREVIEW_THEMES: tuple[str, ...] = (
-    THEME_SAPPHIRE, THEME_INDIGO, THEME_AMBER,
-    THEME_ROSE, THEME_MIST, THEME_PAPER,
-)
-
 #: 深色底的主题（要自己画颜色的控件、热力图、自绘标题栏都按这个判断）。
-#: **不能只写 THEME_TECH**：候选配色换上去之后 `system` 之外的全是深色
-#: —— 所以这里是"除浅色那几套之外的全集"，`PAPER` 与 `SILVER` 不在里面。
+#: **不能只写默认那一个**：换任何一套深色皮肤都得换色，`PAPER`/`SILVER` 不在里面。
 DARK_THEMES: tuple[str, ...] = (
-    THEME_TECH, THEME_OBSIDIAN, THEME_GRAPHITE, THEME_SAPPHIRE,
-    THEME_INDIGO, THEME_AMBER, THEME_ROSE, THEME_MIST,
+    THEME_INDIGO, THEME_SAPPHIRE, THEME_AMBER, THEME_ROSE, THEME_MIST,
 )
 
 for _name in DARK_THEMES:
-    SEMANTIC_BY_THEME.setdefault(_name, TECH_SEMANTIC)
-
-#: 背景条用的渐变：**由色板自己拼**（不再把色值写死在常量里 —— 换一套皮肤就得跟着改一次）
-TECH_BAR_GRADIENT = (
-    "background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,\n"
-    "                                      stop:0 %s, stop:1 %s);"
-) % (TECH_COLORS["section_top"], TECH_COLORS["section"])
+    SEMANTIC_BY_THEME.setdefault(_name, DARK_SEMANTIC)
 
 #: 银色主题的样式表模板。
 #: 用 `string.Template`（`$名字`）而不是 `str.format`：QSS 里大量 `{}`，
@@ -921,7 +723,7 @@ def resolve_palette_name(name: Any) -> str:
 
     与 `normalize_theme()` 的分工：那个管"用户能选的皮肤"（`config.UI_THEMES`，
     写错一律回默认）；这个管"**渲染得出来**的配色"（多了两套只用于出对比图的候选）。
-    出预览图时按候选名渲染，但设置页下拉框里不会出现它们（见 `PREVIEW_THEMES`）。
+    出对比图时按配色名直接渲染（`apply_palette`），不看用户能选什么。
     """
     value = str(name if name is not None else "").strip().lower()
     if value == THEME_SYSTEM:        # 空样式表那一档：保留原样，行为与改版前一致
@@ -975,7 +777,7 @@ def theme_qss(name: str, metal_url: str | None = None) -> str:
 
     所有皮肤共用同一张模板（`_SILVER_TEMPLATE`）与同一批键名，只是换一份色板：
     这样"按钮长什么样、圆角多少、间距多少"只有一处定义 —— 复制一份模板出来改，
-    迟早出现"银色改了、科技蓝没改"这种半新半旧的界面。
+    迟早出现"银色改了、别的皮肤没改"这种半新半旧的界面。
 
     纹理只是锦上添花：素材没打进包、被删掉、换名字，对应那行 `background-image`
     直接不出现，背景条仍然是纯色。缺素材绝不能让界面出错，也不能变成半透明的破版。
@@ -1011,6 +813,7 @@ def normalize_theme(name: Any) -> str:
     与 `config.pool_view` 同一套思路（写错就按默认来，用户看到的仍是一个能用的界面）。
     """
     value = str(name if name is not None else "").strip().lower()
+    value = LEGACY_THEME_ALIASES.get(value, value)      # 旧名（tech）先翻译
     return value if value in UI_THEMES else DEFAULT_UI_THEME
 
 
@@ -1022,18 +825,19 @@ def theme_label(name: Any) -> str:
 #: 放在 `normalize_theme()` 之后：`theme_qss()` 要用它把主题名收紧，而模块级这几行
 #: 是在 import 时执行的 —— 顺序反了就是 `NameError`（本轮踩过）。
 SILVER_QSS = silver_qss()
-TECH_QSS = theme_qss(THEME_TECH)
+DEFAULT_QSS = theme_qss(DEFAULT_UI_THEME)
 
-#: 主题名 → 样式表。`system` 是空串：把样式表清空 = 回到系统原生外观（安全绳）
+#: 主题名 → 样式表（键集合必须与 `config.UI_THEMES` 一致，有用例钉着）。
+#: `system` 是空串：把样式表清空 = 回到系统原生外观（安全绳）
 THEMES: dict[str, str] = {
-    THEME_TECH: TECH_QSS,
-    THEME_SILVER: SILVER_QSS,
-    THEME_SYSTEM: "",
+    name: (DEFAULT_QSS if name == DEFAULT_UI_THEME else theme_qss(name))
+    for name in UI_THEMES if name != THEME_SYSTEM
 }
+THEMES[THEME_SYSTEM] = ""
 
 
 def current_theme() -> str:
-    """当前生效的主题名（由 `apply_theme` 维护，默认科技蓝）。"""
+    """当前生效的主题名（由 `apply_theme` 维护，默认午夜靛紫）。"""
     return _CURRENT["name"]
 
 
@@ -1044,7 +848,7 @@ def is_dark() -> bool:
     不是 QSS，没法靠样式表跟着换色 —— 只能问一句"现在是不是深色底"，
     再决定用哪一档色（见 `data/market_map.block_color(dark=...)`）。
     `system` 按**浅色**处理：Qt 原生外观在 Windows 上是浅色的，猜深了会让文字看不见。
-    判据是 `DARK_THEMES`（不是"等于 tech"）：候选配色换上去之后也全是深色底。
+    判据是 `DARK_THEMES`：换任何一套深色皮肤都得跟着换色（浅色那几套不在里面）。
     """
     return current_theme() in DARK_THEMES
 
@@ -1053,7 +857,7 @@ def semantic(kind: str) -> str:
     """当前主题下的语义色：`"up"`（涨）/ `"down"`（跌）。
 
     浅色主题沿用 `market.COLOR_UP/DOWN`（`#d32f2f` / `#2e7d32`，全项目核过的那两档）；
-    深色主题换成亮一档的（见 `TECH_SEMANTIC` 的对比度说明）。**判据仍然只有一处**
+    深色主题换成亮一档的（见 `DARK_SEMANTIC` 的对比度说明）。**判据仍然只有一处**
     （`market.value_color`），这里只负责"换个主题换一档色"。
     """
     from laoa_trader import market          # 延迟导入：market 不依赖主题，避免环
@@ -1118,8 +922,7 @@ def apply_theme(app: Any = None, name: Any = None) -> str:
     素材缺失要能退回纯色，所以这里不走缓存那份字符串。
 
     送进来的名字按"**渲染得出来**"收紧（不认识就回默认）：这既保住了"写错一个字母
-    不该让界面起不来"，也让候选配色能被真的画出来（出对比图用，见 `PREVIEW_THEMES`）。
-    用户**能选**的范围仍然是 `config.UI_THEMES`（设置页下拉框与 `theme_label` 用它）。
+    不该让界面起不来"，也让任意一套色板都能被直接渲染出来（出对比图用）。
     """
     return apply_palette(
         app,
@@ -1131,7 +934,8 @@ def apply_palette(app: Any = None, name: Any = None) -> str:
     """按**配色名**应用样式表（候选配色也能渲染），返回实际生效的名字。
 
     与 `apply_theme` 的差别只有一处：这个不把名字收紧到 `UI_THEMES`，
-    所以 `apply_palette(app, "obsidian")` 能真的把那套候选配色画出来（出对比图用）。
+    所以 `apply_palette(app, "amber")` 能真的把那套色板画出来（出对比图用，
+    不经过 `normalize_theme` 那道"用户能选什么"的收紧）。
     """
     theme = resolve_palette_name(name if name is not None else current_theme())
     if theme == THEME_SYSTEM:

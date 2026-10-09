@@ -68,11 +68,15 @@ POOL_VIEWS: tuple[str, ...] = ("cards", "table")
 #: 为什么常量放在 config 里而不是 `ui/theme.py`：配置层要在**没有任何 Qt** 的环境下
 #: 也能 import（CLI、服务器版共存、打包前的静态检查），而 theme.py 会用到 Qt。
 #: 取值只有这一处，`theme.normalize_theme` 也读它，不会出现两份定义。
-#: 界面皮肤。`tech`（科技蓝深色，2026-10-08 起是默认）走深底亮字 + 青色强调；
-#: `silver` 是原来的金属浅灰；`system` 清空样式表回到 Qt 原生外观（安全绳）。
-#: 顺序 = 设置页下拉框的顺序。
-UI_THEMES: tuple[str, ...] = ("tech", "silver", "system")
-DEFAULT_UI_THEME = "tech"
+#: 界面皮肤。**默认 `indigo`（午夜靛紫）** —— 主人 2026-10-10 从六套配色里挑的，
+#: 同一天他说"其它几套也可以放在程序包里供用户选择"，所以这几套都是正式皮肤：
+#: 五个深色（靛紫 / 宝蓝 / 琥珀金 / 玫红 / 哑光雾蓝）+ 一个浅色（高级灰），
+#: 加上原来的银色金属浅灰与"清空样式表回 Qt 原生"的安全绳。
+#: 顺序 = 设置页下拉框的顺序；键集合必须与 `theme.PALETTES` + `system` 对得上（有用例钉着）。
+UI_THEMES: tuple[str, ...] = (
+    "indigo", "sapphire", "amber", "rose", "mist", "paper", "silver", "system",
+)
+DEFAULT_UI_THEME = "indigo"
 
 #: 窗口外观：`custom` = **自绘标题栏**（深色标题栏 + 自己画的最小化/最大化/关闭，
 #: 2026-10-10 起默认，主人原话"标题栏还用 Windows 自带的一点都不搭"）；
@@ -760,8 +764,8 @@ class Config:
     # ── 界面偏好（只影响"怎么显示"，不影响任何计算）──
     #: 股票池默认视图：`cards` = 卡片（默认，信息完整）/ `table` = 9 列表格（更密）
     pool_view: str = "cards"
-    #: 界面主题：`silver` = 银色金属感（默认）/ `system` = 系统默认皮肤。
-    #: 设置页下拉框可切换，**改完立即生效**（不用重启）；写错一个字母就回默认。
+    #: 界面主题：默认 `indigo`（午夜靛紫）；设置页下拉框可切换，**改完立即生效**（不用重启）；
+    #: 写错一个字母就回默认；旧值 `tech` 会被翻译成现在的默认（见 `theme.LEGACY_THEME_ALIASES`）。
     ui_theme: str = DEFAULT_UI_THEME
     #: 窗口外观（见 `WINDOW_FRAMES`）：默认自绘标题栏。**改完要重启才生效** ——
     #: 它管的是窗口自己（原生样式、消息钩子），不是"画一遍就好"的皮肤。
@@ -807,6 +811,8 @@ class Config:
         self.pool_view = value if value in POOL_VIEWS else "cards"
         # 主题同理：写错（"Silver " / "银色" / 少个字母）不该让界面起不来 —— 回默认
         theme = str(self.ui_theme or "").strip().lower()
+        if theme == "tech":                     # 旧默认名 → 现在的默认（别让老配置变回"默认"）
+            theme = DEFAULT_UI_THEME
         self.ui_theme = theme if theme in UI_THEMES else DEFAULT_UI_THEME
         # 窗口外观同理：写错（"Custom" / "自绘"）不该表现成"窗口没有标题栏"
         frame = str(getattr(self, "window_frame", "") or "").strip().lower()

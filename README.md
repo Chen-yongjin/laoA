@@ -298,7 +298,8 @@ laoA/
 | `market_overview` / `market_breadth` | `true` / `true` | 概览总开关；涨跌家数（多 6 个分页请求） |
 | `market_indices` / `market_sentiment_indices` / `market_sector_indices` | 见上文 | 三组指数代码，写 `000001.SH=我的上证` 可自定义显示名 |
 | `market_overview_ttl` | `55` | 概览缓存秒数（正整数） |
-| `pool_view` / `ui_theme` | `"cards"` / `"tech"` | 池子默认视图（卡片 / 表格）；界面皮肤（`tech` 科技蓝深色 / `silver` 银色金属 / `system` 系统默认） |
+| `pool_view` / `ui_theme` | `"cards"` / `"indigo"` | 池子默认视图（卡片 / 表格）；界面皮肤（默认 `indigo` 午夜靛紫；另有 `sapphire` / `amber` / `rose` / `mist` / `paper` / `silver` / `system`） |
+| `window_frame` | `"custom"` | 窗口外观：`custom` 自绘标题栏（与皮肤同色）/ `system` 系统标题栏（**改完重启生效**） |
 
 ### 环境变量覆盖
 
@@ -357,9 +358,13 @@ laoA/
 - tooltip 里每个数都写口径（市值加权涨跌幅、成分股只数、缺涨跌幅的只数、最大的一只、
   涨停家数、主力净额）；图下那行小字写出来源与快照时间 —— 用户要能自己核对，而不是相信一个颜色。
 
-### 界面皮肤：默认科技蓝（深色），涨跌色跟着主题走
+### 界面皮肤：默认午夜靛紫（深色），涨跌色跟着主题走
 
-- 三套皮肤（`ui_theme`）：`tech` **科技蓝（深色，默认）** / `silver` 银色（金属感）/ `system` 系统默认。
+- 八套皮肤（`ui_theme`）：`indigo` **午夜靛紫（默认）** / `sapphire` 深海宝蓝 /
+  `amber` 石墨琥珀金 / `rose` 暗夜玫红 / `mist` 哑光雾蓝 / `paper` 浅色高级灰 /
+  `silver` 银色（金属感）/ `system` 系统默认。设置页下拉框里切换，**立即生效**。
+- 窗口标题栏也是自绘的（与皮肤同色）；想用回 Windows 自带那条，
+  在「系统设置 → 其他 → 窗口外观」里选"系统标题栏"（重启生效）。
   设置页下拉框里切换**立即生效**并写回 `config.toml`；写错值一律回默认（换皮肤不该让界面起不来）。
 - **语义色按主题给一档**：判据始终只有一处（`market.value_color`：涨红跌绿），
   但深色底用亮一档的红绿（`#ff6b6b` / `#3ddc84`）—— `#2e7d32` 那种深绿在深蓝底上只有 ~2:1，

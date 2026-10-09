@@ -29,17 +29,26 @@ from tests._toml import p
 # ── 1) 主题名归一（配置 / 环境变量）──
 
 
-def test_theme_defaults_to_the_tech_skin(cfg) -> None:
-    """默认是**科技蓝（深色）**（2026-10-08 主人："改成吸引眼球的颜色组合，要科技感又专业"）；
-    取值表只有 config 一份。银色与系统默认仍然可选（一键切回的安全绳）。"""
-    assert config_mod.DEFAULT_UI_THEME == "tech"
-    assert config_mod.UI_THEMES == ("tech", "silver", "system")
-    assert config_mod.Config().ui_theme == "tech"
-    assert cfg.ui_theme == "tech"
-    # 界面层的取值表引用同一份定义，不会两处各写各的
-    for name in (theme.THEME_TECH, theme.THEME_SILVER, theme.THEME_SYSTEM):
+def test_theme_defaults_to_indigo_and_offers_every_palette(cfg) -> None:
+    """默认是**午夜靛紫**（主人 2026-10-10 从六套配色里挑的），其余几套照样能选
+    （原话："默认选午夜靛紫 —— 其它几套也可以放在程序包里供用户选择"）。
+
+    这里同时钉住"取值表只有一处"：`config.UI_THEMES` 与 `theme.THEMES` 的键集合必须一致，
+    而 `theme.PALETTES` 正好是除 `system`（空样式表）之外的那些。
+    """
+    assert config_mod.DEFAULT_UI_THEME == "indigo"
+    assert config_mod.UI_THEMES == (
+        "indigo", "sapphire", "amber", "rose", "mist", "paper", "silver", "system",
+    )
+    assert config_mod.Config().ui_theme == "indigo"
+    assert cfg.ui_theme == "indigo"
+    # 六套彩色皮肤一个都不能少（少一套 = 设置页里少一个选项）
+    for name in (theme.THEME_INDIGO, theme.THEME_SAPPHIRE, theme.THEME_AMBER,
+                 theme.THEME_ROSE, theme.THEME_MIST, theme.THEME_PAPER,
+                 theme.THEME_SILVER, theme.THEME_SYSTEM):
         assert name in config_mod.UI_THEMES
     assert set(theme.THEMES) == set(config_mod.UI_THEMES)
+    assert set(theme.PALETTES) == set(config_mod.UI_THEMES) - {"system"}
 
 
 @pytest.mark.parametrize("raw", ["system", " silver ", "SILVER", "System"])
@@ -48,12 +57,25 @@ def test_theme_accepts_valid_values(raw) -> None:
     assert theme.normalize_theme(raw) == raw.strip().lower()
 
 
-@pytest.mark.parametrize("raw", ["", None, "银色", "neon", "SILVE", 0, "1", "techy"])
+@pytest.mark.parametrize("raw", ["", None, "银色", "neon", "SILVE", 0, "1", "indigoo"])
 def test_theme_falls_back_to_default_on_bad_value(raw) -> None:
     """非法值一律回默认 —— 写错一个字母不该让界面起不来。"""
-    assert config_mod.Config(ui_theme=raw).ui_theme == "tech"
-    assert theme.normalize_theme(raw) == "tech"
-    assert theme.theme_label(raw) == theme.THEME_LABELS["tech"]
+    assert config_mod.Config(ui_theme=raw).ui_theme == "indigo"
+    assert theme.normalize_theme(raw) == "indigo"
+    assert theme.theme_label(raw) == theme.THEME_LABELS["indigo"]
+
+
+def test_old_tech_theme_name_maps_to_the_new_default() -> None:
+    """旧值 `tech`（2026-10-08~10-10 那套青色皮肤）**翻译成现在的默认**。
+
+    为什么必须认这个旧名：主人自己的 `config.toml` 里就写着 `ui_theme = "tech"`，
+    不认它就会"回默认"—— 结果一样，但含义变了（他以为在选旧的青色，实际拿到靛紫）。
+    认了它，升级后界面就是他挑的那套，且不会在配置里留下一个"非法值"。
+    """
+    assert theme.normalize_theme("tech") == "indigo"
+    assert theme.normalize_theme(" TECH ") == "indigo"
+    assert config_mod.Config(ui_theme="tech").ui_theme == "indigo"
+    assert "tech" not in config_mod.UI_THEMES
 
 
 def test_theme_from_config_file_and_env(tmp_path, monkeypatch) -> None:
@@ -71,25 +93,29 @@ def test_theme_from_config_file_and_env(tmp_path, monkeypatch) -> None:
     assert config_mod.load_config(path).ui_theme == "silver"     # 环境变量盖过文件
 
     monkeypatch.setenv("UI_THEME", "乱写的")
-    assert config_mod.load_config(path).ui_theme == "tech"       # 非法 → 回默认
+    assert config_mod.load_config(path).ui_theme == "indigo"     # 非法 → 回默认
 
     monkeypatch.setenv("UI_THEME", "System")
     assert config_mod.load_config(path).ui_theme == "system"     # 大小写不敏感
 
 
 def test_theme_labels_are_chinese_and_distinct() -> None:
-    assert theme.theme_label("tech") == "科技蓝（深色）"
+    """下拉框里的中文名：八项都要有、互不重复、默认那项写着"默认"。"""
+    assert theme.theme_label("indigo") == "午夜靛紫（默认·深色）"
     assert theme.theme_label("silver") == "银色（金属感）"
     assert theme.theme_label("system") == "系统默认"
+    labels = [theme.theme_label(name) for name in config_mod.UI_THEMES]
+    assert len(set(labels)) == len(labels) == len(config_mod.UI_THEMES)
+    assert "默认" in theme.theme_label(config_mod.DEFAULT_UI_THEME)
 
 
 def test_current_theme_tracks_applied(monkeypatch) -> None:
     """`current_theme()` 反映**实际应用**的主题（不是"配置里写了什么"）。"""
-    assert theme.current_theme() == "tech"
+    assert theme.current_theme() == "indigo"
     theme.apply_theme(_FakeApp(), "system")
     assert theme.current_theme() == "system"
     theme.apply_theme(_FakeApp(), "乱写的")
-    assert theme.current_theme() == "tech"            # 非法值回默认，不留在"乱写的"
+    assert theme.current_theme() == "indigo"          # 非法值回默认，不留在"乱写的"
 
 
 class _FakeApp:
@@ -228,7 +254,7 @@ def test_ui_asset_returns_none_for_unknown_name() -> None:
     assert assets.ui_asset("") is None
 
 
-# ── 3) 科技蓝（深色）主题：颜色与语义色 ──
+# ── 3) 深色皮肤的共性与对比度 ──
 #
 # 深色皮肤最容易翻车的两件事：① 深绿字配深蓝底看不清；② 主按钮换成了亮青底却还在用白字。
 # 这两条都用对比度/取色值钉住（改配色时不能只看"好不好看"）。
@@ -247,9 +273,9 @@ def _contrast(fg: str, bg: str) -> float:
     return (hi + 0.05) / (lo + 0.05)
 
 
-def test_tech_skin_text_is_readable_on_its_backgrounds() -> None:
-    """正文/次要文字/涨跌色在这块深底上都要够对比（AA 正文 4.5:1）。"""
-    colors = theme.TECH_COLORS
+def test_indigo_skin_text_is_readable_on_its_backgrounds() -> None:
+    """默认皮肤（午夜靛紫）：正文/次要文字/涨跌色在这几块深底上都要够对比（AA 4.5:1）。"""
+    colors = theme.INDIGO_COLORS
     for key in ("text", "text_dim", "text_disabled"):
         for bg_key in ("window", "panel", "section", "alt_row"):
             ratio = _contrast(colors[key], colors[bg_key])
@@ -258,19 +284,21 @@ def test_tech_skin_text_is_readable_on_its_backgrounds() -> None:
             assert ratio >= floor, (key, bg_key, round(ratio, 2))
     for key in ("up", "down"):
         for bg_key in ("window", "panel"):
-            ratio = _contrast(theme.TECH_SEMANTIC[key], colors[bg_key])
+            ratio = _contrast(theme.DARK_SEMANTIC[key], colors[bg_key])
             assert ratio >= 4.5, (key, bg_key, round(ratio, 2))
     # 主按钮上的字只在**它自己的底色**上被读：亮青底 + 深字（白字在青底上只有 1.8:1）
     for bg_key in ("primary_top", "primary_bottom", "primary_hover_top", "primary_press_top"):
         ratio = _contrast(colors["primary_text"], colors[bg_key])
         assert ratio >= 4.5, ("primary_text", bg_key, round(ratio, 2))
-    assert _contrast("#ffffff", colors["primary_top"]) < 2.0      # 记住为什么不能写白字
+    # 主按钮上的字是**算出来的**（`_primary_gradient` 连同悬停/按压四态一起比，
+    # 在"亮底深字"与"深底亮字"里挑更稳的那条），所以这里不钉具体色值，只钉对比度
+    assert theme.contrast_ratio(colors["primary_text"], colors["primary_top"]) >= 4.5
 
 
-def test_tech_skin_uses_cyan_and_not_the_metal_texture() -> None:
-    """强调色是青色；深色底**不贴**那张浅色拉丝纹理（贴上去就是一块脏斑）。"""
-    qss = theme.theme_qss("tech")
-    assert theme.TECH_COLORS["tab_accent"] in qss          # 青色进样式表
+def test_indigo_skin_uses_its_accent_and_not_the_metal_texture() -> None:
+    """强调色进样式表；深色底**不贴**那张浅色拉丝纹理（贴上去就是一块脏斑）。"""
+    qss = theme.theme_qss("indigo")
+    assert theme.INDIGO_COLORS["tab_accent"] in qss
     assert theme.TEXTURE_NAME not in qss                   # 不引用拉丝纹理
     assert "qlineargradient" in qss                        # 背景条用渐变
     # 银色那套仍然照旧带纹理（两条路互不影响）
@@ -293,27 +321,27 @@ def test_semantic_colors_follow_the_theme() -> None:
     assert theme.value_color(1.0) == market.COLOR_UP
     assert theme.value_color(-1.0) == market.COLOR_DOWN
 
-    theme.apply_theme(app, "tech")
-    assert theme.semantic("up") == theme.TECH_SEMANTIC["up"]
-    assert theme.semantic("down") == theme.TECH_SEMANTIC["down"]
-    assert theme.value_color(1.0) == theme.TECH_SEMANTIC["up"]
-    assert theme.value_color(-1.0) == theme.TECH_SEMANTIC["down"]
+    theme.apply_theme(app, "indigo")
+    assert theme.semantic("up") == theme.DARK_SEMANTIC["up"]
+    assert theme.semantic("down") == theme.DARK_SEMANTIC["down"]
+    assert theme.value_color(1.0) == theme.DARK_SEMANTIC["up"]
+    assert theme.value_color(-1.0) == theme.DARK_SEMANTIC["down"]
 
     # 平盘 / 取不到：**不上色**（空串），两种主题一致
-    for name in ("silver", "tech"):
+    for name in ("silver", "indigo"):
         theme.apply_theme(app, name)
         assert theme.value_color(0) == ""
         assert theme.value_color(None) == ""
 
 
-# ── 4) 候选配色（2026-10-10：主人要"三套配色出图挑一套"）──
+# ── 4) 每一套色板（主人 2026-10-10 挑配色时留下的那批）──
 
 def test_every_palette_defines_every_key() -> None:
     """**每套色板都必须有同一批键**：样式表模板是所有配色共用的那一张，
     少一个键 `Template.substitute` 就是 KeyError（换一套配色 = 整个界面打不开）。
 
-    这条看着琐碎，但候选配色是"临时拉出来给主人挑"的，最容易被漏写几个键；
-    挑中之后再并进 `TECH_COLORS`，那时漏键会直接表现成"界面起不来"。
+    这条看着琐碎，但这几套色板是**生成**出来的（`_dark_palette` / `_light_palette`），
+    以后再加皮肤也是照着改生成器 —— 一旦少一个键，那套皮肤一点就是"界面起不来"。
     """
     reference = set(theme.SILVER_COLORS)
     for name, colors in theme.PALETTES.items():
@@ -326,30 +354,29 @@ def test_every_palette_defines_every_key() -> None:
 
 
 def test_every_palette_renders_a_qss_from_its_own_colors() -> None:
-    """每套配色都渲染得出来，而且**用的确实是它自己的色**（不是悄悄退回默认那份）。"""
-    for name in theme.PREVIEW_THEMES:
+    """每套皮肤都渲染得出来，而且**用的确实是它自己的色**（不是悄悄退回默认那份）。"""
+    for name, colors in theme.PALETTES.items():
         qss = theme.theme_qss(name)
-        colors = theme.PALETTES[name]
         assert colors["window"] in qss
         assert colors["accent"] in qss
         assert colors["titlebar_top"] in qss
-        assert theme.TEXTURE_NAME not in qss          # 深色配色都不贴浅色拉丝纹理
+        if name != theme.THEME_SILVER:
+            assert theme.TEXTURE_NAME not in qss      # 深色皮肤不贴浅色拉丝纹理
 
 
-def test_candidate_palettes_are_not_user_selectable() -> None:
+def test_palette_table_matches_the_selectable_themes() -> None:
     """候选配色**不进设置页下拉框**：`UI_THEMES` 仍是那三个（写错一个字母回默认）。
 
-    这是"临时挑配色"与"用户能选的皮肤"之间的那道墙：候选可以渲染（出对比图），
-    但界面上选不到 —— 挑中的那套会并进 `TECH_COLORS`，不需要多一个用户选项。
+    2026-10-10 定稿后**六套都是正式皮肤**（主人要求"其它几套也可以放在程序包里供用户选择"），
+    所以这条用例改成钉"色板表与可选表严格对应"：多一套没登记的色板（渲染得出来但选不到）
+    或者少一套（选得到却渲染不出来）都会红。
     """
-    assert set(theme.PREVIEW_THEMES) <= set(theme.PALETTES)
-    candidates = set(theme.PALETTES) - set(config_mod.UI_THEMES)
-    assert candidates, "至少要留一套候选配色（主人挑配色时用）"
-    assert set(theme.PREVIEW_THEMES) <= candidates
-    # 用户把 config.toml 手写成候选名 → 回默认（不是"悄悄变成候选色"）
-    for name in candidates:
-        assert config_mod.Config(ui_theme=name).ui_theme == config_mod.DEFAULT_UI_THEME
-        assert theme.theme_label(name) == theme.THEME_LABELS[config_mod.DEFAULT_UI_THEME]
+    assert set(theme.PALETTES) == set(config_mod.UI_THEMES) - {"system"}
+    for name in theme.PALETTES:
+        assert config_mod.Config(ui_theme=name).ui_theme == name
+        assert theme.normalize_theme(name) == name
+        assert theme.theme_label(name) != theme.THEME_LABELS[config_mod.DEFAULT_UI_THEME] \
+            or name == config_mod.DEFAULT_UI_THEME
 
 
 def test_every_palette_text_is_readable() -> None:
@@ -377,8 +404,9 @@ def test_candidate_primary_buttons_are_readable_in_all_states() -> None:
     两条路里挑更清楚的那条，并顺着字色做悬停/按压）。这条用例验的就是那个算法：
     强调色改一个值就可能滑到糊字的区间，得有人盯着。
     """
-    for name in theme.PREVIEW_THEMES:
-        colors = theme.PALETTES[name]
+    for name, colors in theme.PALETTES.items():
+        if name == theme.THEME_SILVER or name == theme.THEME_PAPER:
+            continue                    # 浅色皮肤的主按钮（银/浅灰）另有专门断言
         text = colors["primary_text"]
         for key in ("primary_top", "primary_bottom"):
             ratio = _contrast(text, colors[key])
@@ -410,7 +438,7 @@ def test_dark_palettes_all_report_dark() -> None:
             theme.apply_palette(None, name)
             assert theme.current_theme() == name
             assert theme.is_dark() is True
-            assert theme.semantic("up") == theme.TECH_SEMANTIC["up"]
+            assert theme.semantic("up") == theme.DARK_SEMANTIC["up"]
         theme.apply_palette(None, "silver")
         assert theme.is_dark() is False
         assert theme.semantic("up") == market_color_up()

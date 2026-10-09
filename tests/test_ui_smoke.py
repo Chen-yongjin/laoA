@@ -575,23 +575,23 @@ def test_status_line_is_fully_visible_at_960_logical_width(screen_window, qapp) 
 
 
 def test_default_skin_is_applied_when_the_window_opens(window, qapp) -> None:
-    """默认皮肤 = **科技蓝（深色）**（2026-10-08 起）：窗口一建起来，样式表就已经是它了。
+    """默认皮肤 = **午夜靛紫（深色）**（主人 2026-10-10 挑的）：窗口一建起来就已经是它了。
 
-    银色那套仍然可用（下拉框里选），所以这里同时钉住"默认是深色"这件事 ——
-    皮肤换了默认值，界面、下拉框、配置三处必须一致，否则用户看到的是"设置里写着银色、
-    界面却是深色"。
+    其余几套皮肤仍然可用（下拉框里选），所以这里同时钉住"默认是哪一套"这件事 ——
+    皮肤换了默认值，界面、下拉框、配置三处必须一致，否则用户看到的是
+    "设置里写着别的、界面却是这一套"。
     """
     from laoa_trader.ui import theme as theme_mod
 
     qss = qapp.styleSheet()
-    assert theme_mod.current_theme() == "tech"
-    assert window.cfg.ui_theme == "tech"
+    assert theme_mod.current_theme() == "indigo"
+    assert window.cfg.ui_theme == "indigo"
     assert theme_mod.is_dark() is True                    # 深色底（热力图/自绘控件按它换色）
     assert "qlineargradient" in qss                       # 按钮/表头是渐变
     assert "QPushButton#primaryAction" in qss             # 主操作按钮按 objectName 命中
     assert window.btn_run.objectName() == "primaryAction"
-    assert theme_mod.TECH_COLORS["window"] in qss         # 窗口底：深海军蓝
-    assert theme_mod.TECH_COLORS["tab_accent"] in qss     # 青色强调
+    assert theme_mod.INDIGO_COLORS["window"] in qss       # 窗口底：近黑偏紫
+    assert theme_mod.INDIGO_COLORS["tab_accent"] in qss   # 强调色进样式表
     # 深色底**不贴**那张浅色拉丝纹理（贴上去就是一块脏斑），背景条改用深色渐变
     assert window.status_area.objectName() == "statusArea"
     assert window.market_footer.objectName() == "marketFooter"
@@ -604,11 +604,14 @@ def test_settings_theme_combo_switches_and_writes_back(window, qapp, seeded) -> 
     from laoa_trader.ui import theme as theme_mod
 
     box = window.theme_box
+    # 八项：六套彩色皮肤（默认靛紫）+ 银色 + 系统默认 —— 主人要求"其它几套也放进包里能选"
     assert [box.itemText(i) for i in range(box.count())] == [
-        "科技蓝（深色）", "银色（金属感）", "系统默认"]
-    assert box.currentData() == "tech"                    # 默认是科技蓝
-    tech_qss = qapp.styleSheet()
-    assert tech_qss                                       # 科技蓝：有样式表
+        "午夜靛紫（默认·深色）", "深海宝蓝（深色）", "石墨琥珀金（深色）",
+        "暗夜玫红（深色）", "哑光雾蓝（深色·低饱和）", "浅色高级灰",
+        "银色（金属感）", "系统默认"]
+    assert box.currentData() == "indigo"                  # 默认是午夜靛紫
+    default_qss = qapp.styleSheet()
+    assert default_qss                                    # 默认皮肤：有样式表
 
     # 切到"系统默认" → 样式表被清空（安全绳：一键回到原生外观）
     box.setCurrentIndex(box.findData("system"))
@@ -621,12 +624,12 @@ def test_settings_theme_combo_switches_and_writes_back(window, qapp, seeded) -> 
     assert "# 用户自己的注释（保存设置后必须还在）" in text        # 只改这一个键
     assert 'my_own_key = "别动我"' in text
 
-    # 切回科技蓝 → 样式表回来，界面照常刷新（换皮肤不许把界面换坏）
-    box.setCurrentIndex(box.findData("tech"))
+    # 切回默认皮肤 → 样式表回来，界面照常刷新（换皮肤不许把界面换坏）
+    box.setCurrentIndex(box.findData("indigo"))
     qapp.processEvents()
-    assert qapp.styleSheet() == tech_qss
-    assert window.cfg.ui_theme == "tech"
-    assert 'ui_theme = "tech"' in (seeded.data_dir / "config.toml").read_text(
+    assert qapp.styleSheet() == default_qss
+    assert window.cfg.ui_theme == "indigo"
+    assert 'ui_theme = "indigo"' in (seeded.data_dir / "config.toml").read_text(
         encoding="utf-8"
     )
     window._tick()
@@ -634,7 +637,7 @@ def test_settings_theme_combo_switches_and_writes_back(window, qapp, seeded) -> 
     assert window.pool_table.rowCount() == 1              # 池子还在、刷新没出异常
     # 2026-09-18 起**不再**往标题区弹"已切换"（用户："软件操作的一些提醒都不需要"）：
     # 这句回显现在写在设置页那行小字里
-    assert "界面主题已切换为「科技蓝（深色）」" in window.save_settings_hint.text()
+    assert "界面主题已切换为「午夜靛紫（默认·深色）」" in window.save_settings_hint.text()
     assert "界面主题已切换" not in window.status_label.fullText()
 
 
@@ -678,9 +681,9 @@ def test_illegal_theme_in_config_still_opens_window(seeded, qapp) -> None:
     win.show()
     qapp.processEvents()
     try:
-        assert theme_mod.current_theme() == "tech"
+        assert theme_mod.current_theme() == "indigo"
         assert qapp.styleSheet()                               # 仍然是默认皮肤
-        assert win.theme_box.currentData() == "tech"           # 下拉框显示默认
+        assert win.theme_box.currentData() == "indigo"         # 下拉框显示默认
         win._tick()
         qapp.processEvents()
         assert win.position_table.rowCount() == 1
@@ -3781,8 +3784,8 @@ def test_market_colors_each_value_on_its_own_move(market_window, qapp) -> None:
         theme_mod.apply_theme(None, "silver")
         assert theme_mod.semantic("up") == market.COLOR_UP
         assert theme_mod.semantic("down") == market.COLOR_DOWN
-        theme_mod.apply_theme(None, "tech")
-        assert theme_mod.semantic("up") == theme_mod.TECH_SEMANTIC["up"]
+        theme_mod.apply_theme(None, "indigo")
+        assert theme_mod.semantic("up") == theme_mod.DARK_SEMANTIC["up"]
     finally:
         market.clear_cache()
 
