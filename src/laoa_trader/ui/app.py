@@ -4617,7 +4617,8 @@ if QT_AVAILABLE:
                 item.setToolTip(tooltip)
             return item
 
-        def _row_tooltip(self, row: dict, monitor_off: bool = False) -> str:
+        def _row_tooltip(self, row: dict, monitor_off: bool = False,
+                         fund_line: str = "") -> str:
             """整行通用的 tooltip：**备注 + 监控状态 + 竞价那一行**。
 
             备注是用户自己写的（"龙头""消息面"），它是"为什么盯这只票"的答案；
@@ -4632,6 +4633,11 @@ if QT_AVAILABLE:
                     这时它虽然在池子里/是自选，也**不会产生任何盘中提醒** ——
                     必须以持仓上的开关为准（见 `intraday.monitor_off_symbols`），
                     而这件事在表里看不出来（表格只有 6 列），只能写在这儿。
+                fund_line: 「资金流」那一行的**现成文案**（`_fund_flow_lines` 拼好的，
+                    只有自选标的才有）。空串 = 这一行不加（策略标的没有资金流数据，
+                    也不该被承诺"以后会有"）。为什么是拼好的字符串而不是原始数据：
+                    文案与单位口径只有 `pool.fund_flow_text` 一处实现，
+                    界面这边不该再写一套"亿"的格式。
             """
             note = str(row.get("note") or "").strip()
             source = str(row.get("source") or "")
@@ -4661,6 +4667,9 @@ if QT_AVAILABLE:
                 *pool_mod.source_detail_lines(row),
                 f"涨停：{limit_up}" if limit_up else "",
                 f"竞价：{auction[3:]}" if auction else "",
+                # 资金流（2026-10-08）：**只对自选标的采集**，所以只有自选行才给这一行
+                # （策略标的加进来只会写"还没采集"，而它永远等不到采集）
+                fund_line,
             ]
             return "\n".join(p for p in parts if p)
 
@@ -4693,8 +4702,8 @@ if QT_AVAILABLE:
 
             为什么还留着"内容指纹"（`_pool_signature`）：每 5 秒重建一次整张表，
             会把用户正在看的选中行与滚动位置一起清掉（桌面程序里很显眼的毛病）。
-            指纹里带上价格、市值换手与监控开关那一格（含 tooltip），
-            所以价格一变、提醒一到、开关一拨，表就会重画。
+            指纹里带上价格、市值换手与监控开关那一格（含 tooltip）、以及资金流那一行，
+            所以价格一变、提醒一到、开关一拨、日更采到资金流，表就会重画。
             """
             rows = pool.pool_page_rows(self.cfg.db_path)
             symbols = [str(r.get("symbol") or "") for r in rows]
@@ -4704,6 +4713,9 @@ if QT_AVAILABLE:
             # 自选表一次查出来：每一行的监控开关状态要用它（原来右键菜单每条查一次，
             # 现在表格每行都要画这一格，逐行开连接就太浪费了）
             watchlist = self._watchlist_map()
+            # 资金流那一行（最近一日的主力净额/净占比）：**一次查询**取全表的文案，
+            # 但下面**只给自选行**用（策略标的没有、也不会有资金流，见 `_fund_flow_lines`）
+            fund_lines = self._fund_flow_lines(symbols)
             # 哪些票的**持仓**被右键关掉了监控（一次查询，见 `intraday.monitor_off_symbols`）：
             # 这一行即使是策略标的或自选，也不会产生任何盘中提醒 —— 要写进 tooltip，
             # 否则用户会以为"表里有它、提醒却从来不响"是坏了
@@ -4720,7 +4732,14 @@ if QT_AVAILABLE:
                 price_item, pct_item, _price = self._price_cells(symbol, local)
                 cap_item, turn_item = self._snapshot_cells(symbol)
                 alert = alerts.get(symbol)
-                row_tip = self._row_tooltip(row, monitor_off=symbol in monitor_off)
+                # 资金流那一行只给**自选行**：`watchlist` 是全量自选（含停用的），
+                # 与采集名单（`load_watchlist(enabled_only=False)`）逐字一致 ——
+                # 用"在不在自选里"判，而不是"有没有数据"判：没采到时也要给自选行写一句
+                # "还没采集"，用户才知道该等日更、而不是以为这只票没有资金流。
+                row_tip = self._row_tooltip(
+                    row, monitor_off=symbol in monitor_off,
+                    fund_line=fund_lines.get(symbol, "") if symbol in watchlist else "",
+                )
                 # 名称(代码)：**半角括号**，与 `docs/开发文档.md`的口径一致
                 name_item = self._tag_item(
                     f"{row.get('name') or ''}({symbol})".strip(), symbol, row_tip
@@ -4764,7 +4783,12 @@ if QT_AVAILABLE:
                  r.get("industry"), r.get("note"), r.get("watchlist_enabled"),
                  c[1].text(), c[2].text(), c[3].text(), c[4].text(),
                  c[WATCH_ADDED_COLUMN].text(), c[WATCH_PNL_COLUMN].text(),
-                 c[WATCH_MONITOR_COLUMN].text(), c[WATCH_MONITOR_COLUMN].toolTip())
+                 c[WATCH_MONITOR_COLUMN].text(), c[WATCH_MONITOR_COLUMN].toolTip(),
+                 # 资金流那一行（box 里没有它，所以直接取拼好的文案）：
+                 # 少了它，日更采到资金流之后这张表**不会重画** —— 收盘后价格不再变、
+                 # 指纹不变，用户看到的一直是"还没采集"（实测过同类毛病：
+                 # 状态栏/表格的"看不见的更新"最容易被当成功能没生效）
+                 fund_lines.get(str(r.get("symbol") or ""), ""))
                 for r, c in zip(rows, cells)
             )
             if signature == self._pool_signature:
@@ -4842,6 +4866,27 @@ if QT_AVAILABLE:
             except Exception as exc:  # noqa: BLE001 - 读不到就不显示开关状态
                 logger.debug(f"取自选表失败（监控开关按策略行画）：{exc}")
                 return {}
+
+        def _fund_flow_lines(self, symbols: list[str]) -> dict[str, str]:
+            """`{symbol: 「资金流」那一行的文案}`（**一次查询**，见 `pool.fund_flow_text`）。
+
+            为什么单独取一次、而不是每行查一次库：这张表每 5 秒重建一次，
+            逐行开连接就是每 5 秒几十次查询。
+            **表里没有数据的代码也给一条文案**（`—（还没采集…）`）—— 由调用方决定
+            "这行要不要显示它"：**只有自选行**显示（资金流只对自选采集，
+            见 `scheduler.sync_watchlist_fund_flow`；策略标的那一行写"还没采集"是在骗人，
+            它永远不会被采集）。读不到（老库还没这张表之类）就按"全都没采"返回，不报错。
+            """
+            from laoa_trader.data import storage
+
+            wanted = list(dict.fromkeys(str(s) for s in symbols if str(s or "").strip()))
+            rows: dict[str, dict] = {}
+            try:
+                with storage.connect(self.cfg.db_path) as conn:
+                    rows = storage.latest_fund_flow(conn, wanted)
+            except Exception as exc:  # noqa: BLE001 - 取不到就是"还没采集"
+                logger.debug(f"读资金流失败（自选表这一行显示未采集）：{exc}")
+            return {symbol: pool_mod.fund_flow_text(rows.get(symbol)) for symbol in wanted}
 
         def _alerts_today(self) -> dict[str, dict]:
             """今天每只票最新一条提醒（两张表共用一次查询）。"""

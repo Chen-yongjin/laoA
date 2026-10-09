@@ -1083,6 +1083,50 @@ def test_pool_table_shows_watchlist_rows_not_in_pool(window, seeded, qapp) -> No
         assert "备注：龙头" in window.pool_table.item(row, column).toolTip()
 
 
+def test_pool_row_tooltip_carries_fund_flow_only_for_watchlist(window, seeded, qapp) -> None:
+    """「资金流」那一行只在**自选行**的 tooltip 里，且单位是**亿元**。
+
+    2026-10-08：资金流**只对自选标的采集**（`scheduler.sync_watchlist_fund_flow`）——
+    所以策略标的加这一行只会写"还没采集"，而它永远不会被采集（那是在骗人）。
+    没有数据时也必须写出来（`—（还没采集，日更时会自动采）`），
+    否则用户分不清"这只票没有资金流"与"程序还没采"。
+
+    这张表**不加列**（10 列已经被主人嫌挤）：这一行只能住在 tooltip 里。
+    """
+    with storage.connect(seeded.db_path) as conn:
+        storage.upsert_watchlist(conn, "600001", name="低价样本", enabled=True)
+        storage.write_fund_flow(conn, [{
+            "date": "2026-10-08", "symbol": "600001", "main_net": 123456789.0,
+            "main_net_pct": 4.56, "super_net": 9e7, "big_net": 33456789.0,
+            "close": 3.1, "pct": 1.0,
+        }])
+    window._pool_signature = None
+    window._refresh_pool_table()
+    qapp.processEvents()
+
+    rows = {symbol: index for index, symbol in enumerate(_symbols_of(window.pool_table))}
+    watch_tip = window.pool_table.item(rows["600001"], 0).toolTip()
+    # 净额按**亿元**显示（库里是元：123456789 → +1.23 亿），占比是百分数原值
+    assert "资金流：主力 +1.23 亿（+4.56%） 2026-10-08" in watch_tip
+    # 策略标的（600002）**没有**这一行 —— 它不在采集名单里
+    assert "资金流" not in window.pool_table.item(rows["600002"], 0).toolTip()
+    # 表还是 10 列（用户嫌挤：不加列）
+    assert window.pool_table.columnCount() == 10
+
+
+def test_watchlist_row_without_collected_flow_says_so(window, seeded, qapp) -> None:
+    """自选但**还没采集** → 明说"日更时会自动采"（别让用户去猜是坏了还是没采）。"""
+    with storage.connect(seeded.db_path) as conn:
+        storage.upsert_watchlist(conn, "600001", name="低价样本", enabled=True)
+    window._pool_signature = None
+    window._refresh_pool_table()
+    qapp.processEvents()
+
+    row = _symbols_of(window.pool_table).index("600001")
+    assert "资金流：—（还没采集，日更时会自动采）" \
+        in window.pool_table.item(row, 0).toolTip()
+
+
 def test_pool_row_hover_shows_note_and_monitor_state(window, seeded, qapp) -> None:
     """悬浮看备注 + 监控状态（表里没有「状态」列，这两件事只能靠 tooltip 说清）。"""
     with storage.connect(seeded.db_path) as conn:

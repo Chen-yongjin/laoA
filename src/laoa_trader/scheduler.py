@@ -30,7 +30,15 @@ from pathlib import Path
 from typing import Any
 
 from laoa_trader import intraday, pool, state
-from laoa_trader.config import Config, get_config
+# 资金流天数的默认值与区间**只从配置层拿**（不在这一层再写一份数：
+# 两份数迟早会漂，而漂的表现是"改了配置没生效"或"采了 1000 天"）
+from laoa_trader.config import (
+    Config,
+    FUND_FLOW_DAYS_DEFAULT,
+    FUND_FLOW_DAYS_RANGE,
+    get_config,
+)
+from laoa_trader.data import eastmoney
 from laoa_trader.data import sync
 from laoa_trader.data import storage
 from laoa_trader.data.engine import DataEngine
@@ -286,6 +294,124 @@ def data_gate(
     }
 
 
+#: 资金流采集的**逐只间隔**（秒）。这是公开接口（东方财富），而采集只有自选那几十只
+#: —— 20 只 × 0.25 秒 ≈ 5 秒，既不至于连着打几十个请求被风控盯上，也不会让日更多等很久。
+#: 与 `eastmoney.PAGE_PAUSE`（0.2）/ `intraday.AUCTION_SCAN_PACE`（0.3）同一个量级。
+FUND_FLOW_PACE = 0.25
+
+
+def sync_watchlist_fund_flow(
+    db_path: str | Path,
+    cfg: Config | None = None,
+    *,
+    days: int | None = None,
+    progress_cb: sync.ProgressCb | None = None,
+    opener: Any = None,
+    pace: float = FUND_FLOW_PACE,
+) -> dict:
+    """**只对自选标的**采集资金流（`fund_flow` 表），供公式里的主力资金字段用。
+
+    口径（主人 2026-10-08 的原话："只按照自选标的来采集资金流"）：
+      * 名单 = `storage.load_watchlist(conn, enabled_only=False)` —— **自选标的，不管开关**。
+        停用的票也要采：`enabled` 那个开关管的是"要不要盯它"（进池/盘中提醒），
+        与"它有没有资金流数据"是两件事；按开关过滤会出现"打开监控之后资金流字段还是缺的"，
+        而用户没有任何办法解释为什么（他不会想到字段是加自选那一刻有没有开监控决定的）。
+      * **不做全市场采集**：`clist` 那条路（`eastmoney.snapshot_all`）一次能给全市场
+        5562 只的当日主力净额，但那是"多要两列即可"的顺带收获，不是本功能的采集口径 ——
+        全市场采集等于每天为 5000 多只票各存一行历史资金流，而公式里的资金流字段
+        **按设计只有自选标的才有值**（见 `formula.EXTRA_FIELDS`）。
+      * 自选为空 → **一个请求都不发**（与"没票就不取数"同一条纪律）。
+
+    逐只之间等 `pace` 秒（礼貌间隔）；**单只失败不影响其余**：取不到的写进 `failed`
+    并继续下一只（一次网络抖动不该让整天的资金流全空）。
+
+    Args:
+        db_path: 本地库。
+        cfg: 配置（`fund_flow_enabled=false` 时一只都不采）。
+        days: 每只取最近几个交易日。**`None` = 读配置 `fund_flow_days`**（默认 10）——
+            与配置项是同一个来源，免得两处各写一个数、"改了配置没生效"。
+        progress_cb: `(阶段, 完成, 总数)`，界面状态栏用。
+        opener: 注入式 HTTP（测试用固定响应，完全不联网）。
+        pace: 逐只间隔（秒）；测试传 0（别为了测试真的睡）。
+
+    Returns:
+        `{"symbols": 自选只数, "written": 实际写库行数, "failed": [中文原因…],
+          "skipped": 跳过原因（没跳过是 None）}`。
+        **任何失败都只进 `failed`**：调用方（日更）据此记日志，绝不该因此失败。
+    """
+    cfg = cfg or get_config()
+    if not getattr(cfg, "fund_flow_enabled", True):
+        logger.info("资金流采集已在配置里关闭（fund_flow_enabled=false）：一只都不采")
+        return {"symbols": 0, "written": 0, "failed": [],
+                "skipped": "配置里关掉了（fund_flow_enabled=false）"}
+    try:
+        span = int(days if days is not None
+                   else getattr(cfg, "fund_flow_days", FUND_FLOW_DAYS_DEFAULT))
+    except (TypeError, ValueError):
+        span = FUND_FLOW_DAYS_DEFAULT
+    if span <= 0:
+        # 与配置层同一条口径（`fund_flow_days` 写 0/负数 = 手滑）→ 回默认 10，
+        # **不是**"夹到 1 天"：那会让公式里的 `近5日主力净额` 只剩当天的数，
+        # 而用户看到的是一个**看着很合理**的小数字，没有任何线索指向"只取了 1 天"
+        span = FUND_FLOW_DAYS_DEFAULT
+    span = min(span, FUND_FLOW_DAYS_RANGE[1])
+
+    symbols: list[str] = []
+    try:
+        with storage.connect(db_path) as conn:
+            symbols = [
+                str(row["symbol"]).strip()
+                for row in storage.load_watchlist(conn, enabled_only=False)
+                if str(row["symbol"] or "").strip()
+            ]
+    except Exception as exc:  # noqa: BLE001 - 读自选失败就是"没有票可采"，不抛
+        logger.warning(f"读自选标的失败（本次不采集资金流）：{exc}")
+        return {"symbols": 0, "written": 0, "failed": [f"读自选标的失败：{exc}"],
+                "skipped": None}
+    if not symbols:
+        logger.info("自选标的为空：本次不采集资金流（一个请求都不发）")
+        return {"symbols": 0, "written": 0, "failed": [], "skipped": "自选标的为空"}
+
+    written = 0
+    failed: list[str] = []
+    for index, symbol in enumerate(symbols, start=1):
+        if index > 1 and pace > 0:
+            time.sleep(pace)
+        try:
+            rows = eastmoney.fund_flow_history(symbol, days=span, opener=opener)
+        except Exception as exc:  # noqa: BLE001 - 取数层自己兜过一层，这里是最后一道
+            failed.append(f"{symbol}：{type(exc).__name__}: {exc}")
+            logger.warning(f"资金流采集失败（{symbol}）：{exc}")
+            continue
+        if not rows:
+            # 空列表 = "这只票没有取到"（接口失败/没有这个标的/响应形状不对），
+            # 与"采集成功但某天没有资金流"不同 —— 后者在接口上不存在（每天都有行）
+            failed.append(f"{symbol}：没有取到资金流数据")
+            continue
+        for row in rows:
+            row["symbol"] = symbol
+        try:
+            with storage.connect(db_path) as conn:
+                written += storage.write_fund_flow(conn, rows)
+        except Exception as exc:  # noqa: BLE001 - 写库失败不连累其它票
+            failed.append(f"{symbol}：写库失败 {type(exc).__name__}: {exc}")
+            logger.warning(f"资金流写库失败（{symbol}）：{exc}")
+            continue
+        if progress_cb is not None:
+            try:
+                progress_cb("采集资金流", index, len(symbols))
+            except Exception:  # noqa: BLE001 - 界面回调出错不该影响采集
+                pass
+    if failed:
+        logger.warning(
+            f"资金流采集完成：{len(symbols)} 只里 {len(failed)} 只失败（已跳过，不影响筛选）："
+            f"{'；'.join(failed[:3])}"
+        )
+    else:
+        logger.info(f"资金流采集完成：{len(symbols)} 只，写入 {written} 行")
+    return {"symbols": len(symbols), "written": written, "failed": failed, "skipped": None}
+
+
 def run_daily(
     cfg: Config | None = None,
     engine: DataEngine | None = None,
@@ -325,7 +451,9 @@ def run_daily(
         {"sync": [...], "picks": n, "signals": n, "pool": [...], "notify": {...},
          "errors": [...], "data_date":…, "selection": {}(恒为空，只为兼容),
          "pushed": bool, "push_skipped": str|None,
-         "export_path": str|None（导出成功时是文件路径）}
+         "export_path": str|None（导出成功时是文件路径）,
+         "fund_flow": {"symbols","written","failed","skipped"}（资金流采集的结果；
+             失败**不在** errors 里 —— 见下面 2.4 那一段的理由）}
     """
     cfg = cfg or get_config()
     engine = engine or DataEngine(cfg.db_path)
@@ -343,6 +471,9 @@ def run_daily(
         "pushed": False, "push_skipped": None,
         # 桌面导出：成功时是文件路径，失败/跳过时是 None（失败原因进 errors，不静默）
         "export_path": None,
+        # 资金流采集（只对自选标的）：`{"symbols","written","failed","skipped"}`，
+        # 失败不进 `errors`（理由见 2.4 那一段：它不决定日更成不成功）
+        "fund_flow": {},
         # 推送过滤的遗留键：**2026-09-18 起恒为空**（那道过滤随策略引擎一起删掉了）。
         # 键保留是因为状态栏、CLI 与老调用方都在读它们（读不到会 KeyError）。
         "push_skipped_rows": [], "push_note": None, "push_skipped_kind": None,
@@ -404,6 +535,32 @@ def run_daily(
     except Exception as exc:  # noqa: BLE001
         report["errors"].append(f"匹配：{type(exc).__name__}: {exc}")
         logger.exception("匹配失败")
+
+    # 2.4) 资金流采集（**只对自选标的**，主人 2026-10-08："只按照自选标的来采集资金流"）。
+    #
+    # 为什么挂在**建池之后**（主人指定）而不是之前：建池那一趟要读全市场日线、算公式，
+    # 先采集就等于把日更往后拖（自选几十只 × 0.25 秒）；而且失败只记日志 ——
+    # 与导出桌面文件同一条纪律。
+    # ⚠️ 口径后果如实写在文档与字段注释里：**这一轮刚刚采到的资金流，要下一次筛选
+    #    （或明天这一轮）才会被公式用到**；界面上的资金流 tooltip 是即时的。
+    # 放在"池子为空就提前 return"**之前**：池子为空（没勾公式、自选又都停用）时
+    # 照样要采 —— 采集名单看的是自选，与池子里有没有票无关。
+    _stage("采集资金流")
+    try:
+        summary = sync_watchlist_fund_flow(cfg.db_path, cfg, progress_cb=progress_cb)
+        report["fund_flow"] = summary
+        if summary.get("failed"):
+            logger.warning(
+                f"资金流：{summary['symbols']} 只里 {len(summary['failed'])} 只没采到"
+                f"（不影响本次筛选）：{'；'.join(summary['failed'][:3])}"
+            )
+    except Exception as exc:  # noqa: BLE001 - 采资金流绝不能把日更带走
+        # **只记日志、不进 `errors`**：`errors` 是"这次日更成不成功"的判据
+        # （`Scheduler._report_succeeded`），把资金流失败塞进去会让一次成功的筛选被判成
+        # 失败并安排补跑 —— 而资金流只是"公式里两个字段有没有数"，缺了就是条件不成立。
+        report["fund_flow"] = {"symbols": 0, "written": 0,
+                               "failed": [f"{type(exc).__name__}: {exc}"], "skipped": None}
+        logger.warning(f"资金流采集失败（不影响筛选/推送）：{exc}")
 
     report["data_date"] = engine.get_latest_data_date()
     pool_rows = report["pool"]

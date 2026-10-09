@@ -43,6 +43,21 @@
    * 600519：`3307926407 ÷ 2623500 = 1261.0 元/股`，与同刻 `f2=1258.00` 齐平。
    若 `f5` 已经是"股"，这两个均价会差 100 倍、**两只都**会跑出当日区间
    （与 `intraday.intraday_vwap` 里对同花顺 `volume` 做的那道核对同一个思路）。
+6. **历史资金流** `GET push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?klt=101&lmt=10`
+   （2026-10-08 实测 `secid=1.600519`）→ `data.klines` 也是**字符串数组**，每行逗号分隔：
+   `日期, 主力净额(元), 小单净额, 中单净额, 大单净额, 超大单净额, 主力净占比(%),
+     小单净占比, 中单净占比, 大单净占比, 超大单净占比, 收盘价(元), 涨跌幅(%), ?, ?`
+   实测那一行：`2026-10-08,-126323568.0,-280648.0,126604240.0,-102005984.0,-24317584.0,
+   -4.02,-0.01,4.03,-3.24,-0.77,1255.79,-0.22,0.00,0.00`。
+   **两条算术核对**（列序不是照文档抄的，是拿这两条反推出来的，见 `_parse_fund_flow`）：
+   大单+超大单 = 主力净额；小+中+大+超大四类相加 ≈ 0。
+   ⚠️ 单位：净额是**元**、占比是**百分数**（−4.02 = −4.02%）；末尾两列恒为 `0.00`，
+   本次没用到、也不去猜它们是什么。
+7. **当日主力资金（快照字段）**：`clist` / `ulist.np` 加 `f62`（主力净额，元）、
+   `f184`（主力净占比，%）即得。实测（2026-10-08，`ulist.np` 批量端点）：
+   `{"f12":"600519","f14":"贵州茅台","f2":1272.08,"f62":242336816.0,"f184":9.53}`
+   —— 批量端点**也回**这两个字段，所以 `snapshot()` 那条路同样拿得到（`main_net_row`）。
+   （腾讯 `ff_` 返回 `pv_none_match`、新浪资金流返回空数组，两路都取不到 —— 别换源重试。）
 
 已知风险（如实写，不假装）
 --------------------------
@@ -96,7 +111,9 @@ MARKET_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
 #:     "f21":1583828386835}`
 #: ）—— 请求里不写这两个字段名，服务端**就不会返回它们**，所以字段串必须一起改。
 #: `f10` = **量比**（2026-09-23 加：盘中口径的公式要它；实测与腾讯 `[49]` 同一口径）
-SNAPSHOT_FIELDS = "f12,f14,f2,f3,f4,f5,f6,f15,f16,f17,f18,f8,f10,f21"
+#: `f62` / `f184` = **当日主力净额（元）/ 主力净占比（%）**（2026-10-08 加，见模块头第 7 条）。
+#: 这两个只给"当日"这一个值，且**不进统一行情口径**（理由见 `main_net_row`）。
+SNAPSHOT_FIELDS = "f12,f14,f2,f3,f4,f5,f6,f15,f16,f17,f18,f8,f10,f21,f62,f184"
 
 #: 单只快照 `stock/get` 的字段（**分口径**，见模块头第 2 条）：
 #:   f43 现价 / f44 最高 / f45 最低 / f46 今开 / f47 成交量(手) / f48 成交额(元) /
@@ -107,6 +124,17 @@ STOCK_FIELDS = "f43,f44,f45,f46,f47,f48,f57,f58,f60,f170"
 KLINE_FIELDS1 = "f1,f2,f3,f4,f5"
 #: `日期,开,收,高,低,成交量(手),成交额(元),振幅%`（实测 2026-09-16）
 KLINE_FIELDS2 = "f51,f52,f53,f54,f55,f56,f57,f58"
+
+#: 历史资金流字段（`stock/fflow/daykline/get`）：同样 fields1 是元信息、fields2 是列顺序。
+#: ⚠️ 与日K 的 `KLINE_FIELDS2` 都从 `f51` 起，但**同一个字段名在两条端点上是两种数据**
+#: （日K 是 OHLC、这里是资金流）—— 照日K 的列序去读资金流，会把"净额"当成"价格"，
+#: 而且数量级看着还挺像那么回事（1.26 亿 vs 12.63 元），所以列序必须由端点钉死。
+FUND_FLOW_FIELDS1 = "f1,f2,f3,f7"
+FUND_FLOW_FIELDS2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65"
+
+#: 历史资金流默认取几个交易日（配置键 `fund_flow_days` 的默认值也是 10；1~60）。
+#: 为什么默认 10：公式里的 `近5日主力净额` 要 5 天，多取一倍是留给"连着几天没采集上"的余量。
+FUND_FLOW_DAYS = 10
 
 #: 价格字段的口径。**同一个字段名 `f2`/`f43`，带不带 `fltt=2` 是两种单位**（模块头实测）：
 #:   * `CALIBER_YUAN`：带 `fltt=2` → 值就是元（`clist`/`ulist.np` 实测 `f2=1258.0`）；
@@ -379,6 +407,32 @@ def rows_to_map(rows: Iterable[dict], caliber: str = CALIBER_YUAN) -> dict[str, 
     return out
 
 
+#: `clist` / `ulist.np` 里"当日主力资金"的两个字段（2026-10-08 加，见模块头第 7 条）：
+#:   `f62` 主力净额（**元**）、`f184` 主力净占比（**百分数**，9.53 就是 +9.53%）。
+MAIN_NET_KEYS: tuple[str, ...] = ("main_net", "main_net_pct")
+
+
+def main_net_row(row: dict) -> dict:
+    """一行快照的**当日**主力资金 → `{"main_net": 元, "main_net_pct": %}`；缺就是 None。
+
+    为什么单独一个函数、**不并进 `normalize_row`**：`normalize_row` 的键集就是
+    `UNIFIED_KEYS`，而它与 `sources.QUOTE_FIELDS` 是**同一份契约**（`tests/test_eastmoney.py`
+    与 `tests/test_public_quotes.py` 都拿 `==` 把键集钉死）。在这里多出两个键，要么打破
+    那条契约，要么得连带改 `sources.py` 的统一口径与**每一个来源适配器**（腾讯/新浪根本
+    给不出主力资金）——两件事都超出"取当日资金"的范围。所以这两个键只在这个专门的函数里
+    出现：谁要当日主力净额，谁显式调它。
+
+    取不到时一律 `None`（批量端点没回这两个字段、停牌的 `-`）——**不编 0**：
+    `0` 的意思是"主力不买不卖"，与"没有这个数"是两件完全不同的事，公式里
+    `主力净额>0` 拿 0 去比会得到"条件不成立"这个**碰巧对**的结果，而
+    `主力净额<0` 就会被 0 误判成"成立"。
+    """
+    return {
+        "main_net": _num(row.get("f62")),        # 元（不动）
+        "main_net_pct": _num(row.get("f184")),   # 百分数（原值，不 ÷100）
+    }
+
+
 # ── 快照 ──
 
 
@@ -396,6 +450,13 @@ def snapshot_all(
     逐只问就是几千个请求（滥用公开接口）；分页 `pz=200` 只要 **28 个请求**。
     代价（如实说）：28 个请求按 `PAGE_PAUSE=0.2` 限流 ≈ 5.6 秒；
     只要几十只票请走 `snapshot()`（批量 secids，**1 个请求**）。
+
+    ⚠️ 返回的行**不带**当日主力资金：`f62`/`f184` 在请求里、也在原始响应里，但
+    `normalize_row` 的键集就是统一行情口径（`UNIFIED_KEYS`，与 `sources.QUOTE_FIELDS`
+    是同一份契约），**不装它们** —— 所以从这个函数的返回值里拿不到那两列。
+    要当日主力净额只有两条路：① 手上有原始行时调 `main_net_row()`；
+    ② 读本地 `fund_flow` 表（`storage.latest_fund_flow`，只对自选标的采集，见
+    `scheduler.sync_watchlist_fund_flow`）。
 
     Args:
         page_size: 每页行数。
@@ -468,6 +529,9 @@ def snapshot(
 
     代价：一次能带多少 secid 没有实测上限，按 `SECID_BATCH=100` 切批
     （超了多几个请求）；认不出 secid 的代码（`to_secid` 返回空）**直接跳过、不发请求**。
+
+    ⚠️ 与 `snapshot_all` 同一条：返回的行里**没有**当日主力资金（`f62`/`f184` 实测
+    批量端点也回，但它们不在统一行情口径里，见 `main_net_row`）。
     """
     out: list[dict] = []
     seen: set[str] = set()
@@ -655,6 +719,107 @@ def _compact_date(value: Any) -> str:
     return text
 
 
+# ── 历史资金流 ──
+
+
+def fund_flow_history(
+    symbol: str,
+    *,
+    days: int = FUND_FLOW_DAYS,
+    opener: Opener | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> list[dict]:
+    """单只标的最近 `days` 个交易日的资金流（**升序**），每项：
+
+        `{"date", "main_net"(元), "main_net_pct"(%), "super_net"(元),
+          "big_net"(元), "close"(元), "pct"(%)}`
+
+    为什么只取"净额 + 占比 + 收盘 + 涨跌幅"这六项：公式里要用的就是
+    「主力净额 / 主力净占比 / 近5日主力净额」，其余三类（小/中单）实测加起来正好与
+    主力互补（见模块头第 6 条的两条算术核对），本地存下来只是徒增列 ——
+    真要它们时再加，不猜。
+
+    ⚠️ **单位**（写错就是静默错 1e4 倍/100 倍，所以在这里再点一遍）：
+    净额是**元**（不是万元、不是亿元）、占比是**百分数**（−4.02 = −4.02%）。
+
+    Args:
+        symbol: 本地代码（裸 6 位 / 带后缀 / secid 都认，**前缀规则复用 `to_secid`**）。
+        days: 取最近几个交易日（配置键 `fund_flow_days`）；上限 60 由配置层夹。
+        opener: 注入式 HTTP（测试用固定响应，完全不联网）。
+        timeout: 单次请求超时（秒）。
+
+    Returns:
+        按日期**升序**的列表。认不出的代码、网络/接口错误、响应形状不对
+        **一律返回空列表**（只记一条日志）—— 调用方据此跳过这只票，
+        绝不能因为一只票取不到资金流就把整轮采集带走。
+    """
+    secid = to_secid(symbol)
+    if not secid:
+        logger.info(f"东方财富：认不出 secid 的代码 {symbol!r}，跳过资金流")
+        return []
+    limit = max(int(days), 1)
+    params = {
+        "secid": secid,
+        "fields1": FUND_FLOW_FIELDS1,
+        "fields2": FUND_FLOW_FIELDS2,
+        "klt": 101,             # 101 = 日线（与 `daily` 同一个口径）
+        "lmt": limit,
+    }
+    try:
+        data = _get_json(
+            f"{PUSH2HIS}/api/qt/stock/fflow/daykline/get", params, timeout, opener
+        )
+    except EastmoneyError as exc:
+        logger.info(f"东方财富资金流取数失败（{symbol}）：{exc}")
+        return []
+    payload = data.get("data")
+    klines = payload.get("klines") if isinstance(payload, dict) else None
+    if not isinstance(klines, list):
+        return []
+    rows = [row for row in (_parse_fund_flow(line) for line in klines) if row is not None]
+    rows.sort(key=lambda item: item["date"])
+    # 服务端**不一定**认 `lmt`（日K 那边实测过 `lmt=30` 与 `lmt=100` 返回同一段窗口），
+    # 所以"最近 days 条"这件事在这里自己保证：`近5日主力净额` 拿到的必须是**最近** 5 个
+    # 交易日，而不是"接口顺手多给的那几天里任意 5 天"。
+    return rows[-limit:]
+
+
+def _parse_fund_flow(line: Any) -> dict | None:
+    """`"日期,主力净额,小单,中单,大单,超大单,主力净占比,…,收盘,涨跌幅,?,?"` → 统一口径。
+
+    列序是**实测反推**的（模块头第 6 条），不是照文档抄的：两条算术核对
+    （大单+超大单 = 主力净额；五类净额相加 ≈ 0）只有在这一种读法下同时成立。
+    ⚠️ 最容易错的是"第 2 列是主力净额、第 5/6 列才是大单/超大单"——
+    照"小中大超大"的直觉顺序读，会拿到一条**看着合理、其实张冠李戴**的序列。
+    """
+    parts = str(line or "").split(",")
+    if len(parts) < 13:
+        return None
+    day = parts[0].strip()
+    try:
+        datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return None
+    main, big, super_ = _num(parts[1]), _num(parts[4]), _num(parts[5])
+    if None not in (main, big, super_) and abs(float(main) - (float(big) + float(super_))) > 1.0:
+        # 哨兵：列序被服务端改过时，这里会说一声（而不是悄悄把大单当中单用）。
+        # 只记日志、**照样返回接口给的主力净额**：丢行的症状（某几天没有资金流）
+        # 比"数值可能有偏差"更难查，而这一条日志足够定位。
+        logger.warning(
+            "东方财富资金流列序可疑（%s：主力净额 %s ≠ 大单 %s + 超大单 %s）—— 疑似端点改了列",
+            day, main, big, super_,
+        )
+    return {
+        "date": day,
+        "main_net": main,                 # 元
+        "main_net_pct": _num(parts[6]),   # 百分数（−4.02 = −4.02%）
+        "super_net": super_,              # 元
+        "big_net": big,                   # 元
+        "close": _num(parts[11]),         # 元
+        "pct": _num(parts[12]),           # 百分数
+    }
+
+
 def _int_or_none(value: Any) -> int | None:
     try:
         return int(value) if value is not None else None
@@ -723,7 +888,11 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "EastmoneyError",
     "FQT",
+    "FUND_FLOW_DAYS",
+    "FUND_FLOW_FIELDS1",
+    "FUND_FLOW_FIELDS2",
     "LOTS_TO_SHARES",
+    "MAIN_NET_KEYS",
     "MARKET_FS",
     "MAX_PAGES",
     "MAX_PLAUSIBLE_PRICE",
@@ -735,6 +904,8 @@ __all__ = [
     "UNIFIED_KEYS",
     "YUAN_TO_YI",
     "daily",
+    "fund_flow_history",
+    "main_net_row",
     "normalize_row",
     "rows_to_map",
     "snapshot",

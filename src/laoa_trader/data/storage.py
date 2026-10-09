@@ -26,6 +26,7 @@
     signal            筛选信号落库
     intraday_alert    盘中提醒去重表
     auction_scan      竞价扫描结果（全市场扫描的全部命中）
+    fund_flow         资金流日线（**只对自选标的采集**，见 `scheduler.sync_watchlist_fund_flow`）
 """
 
 from __future__ import annotations
@@ -261,6 +262,25 @@ SCHEMA: tuple[str, ...] = (
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_push_log_day ON push_log (day);",
+    # ── 资金流（**只对自选标的采集**，见 `scheduler.sync_watchlist_fund_flow`）──
+    # 为什么单独一张表而不是并进 `stock_daily_raw`：那张表是"每只票每天一根 K 线"，
+    # 全市场采集；资金流只有自选那几十只有、而且是**另一路取数**（东方财富
+    # `fflow/daykline`）。并进去的话，几百万行的行情表会多出两列几乎全空的数，
+    # 而且"哪些票有资金流"这件事就没法一眼看出来。
+    # 单位（与 `eastmoney.fund_flow_history` 出口一致，写错就是静默错 1e4/100 倍）：
+    #   `main_net` / `super_net` / `big_net` = **元**；`main_net_pct` = **百分数**（−4.02 = −4.02%）；
+    #   `close` = 元、`pct` = 百分数（都是接口随行给的，便于对账）。
+    """
+    CREATE TABLE IF NOT EXISTS fund_flow (
+        date TEXT NOT NULL, symbol TEXT NOT NULL,
+        main_net REAL, main_net_pct REAL, super_net REAL, big_net REAL,
+        close REAL, pct REAL, source TEXT, updated_at TEXT,
+        PRIMARY KEY (date, symbol)
+    );
+    """,
+    # 主键是 `(date, symbol)`，而查询全都是"按代码取最近 N 天"（公式与 tooltip），
+    # 没有这个索引就是每次全表扫（现在只有几十行看不出来，攒上几年就很明显了）
+    "CREATE INDEX IF NOT EXISTS idx_fund_flow_symbol ON fund_flow (symbol);",
     # ── 自选标的（用户手动加的，和策略标的并列进池、一起盯）──
     """
     CREATE TABLE IF NOT EXISTS watchlist (
@@ -288,7 +308,7 @@ SCHEMA: tuple[str, ...] = (
 EXPECTED_TABLES: frozenset[str] = frozenset({
     "stock_daily_raw", "adjust_event", "stock_basic", "index_daily", "trading_calendar",
     "limit_up_pool", "stock_pool", "position", "signal", "intraday_alert", "push_log",
-    "watchlist", "auction_scan",
+    "watchlist", "auction_scan", "fund_flow",
 })
 
 
@@ -1106,6 +1126,109 @@ def set_watchlist_enabled(conn: sqlite3.Connection, symbol: str, enabled: bool) 
     )
     conn.commit()
     return bool(cur.rowcount)
+
+
+# ── 资金流（只对自选标的采集）──
+
+
+#: `fund_flow` 的全部业务列（读写共用一份，免得"读的列比写的列少一个"这类静默错）
+_FUND_FLOW_COLS = (
+    "date", "symbol", "main_net", "main_net_pct", "super_net", "big_net",
+    "close", "pct", "source", "updated_at",
+)
+
+
+def write_fund_flow(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
+    """资金流 upsert（**幂等**：同一天同一只票重复采集只更新那一行）。
+
+    行 = `eastmoney.fund_flow_history()` 的出口（`date/main_net/…`）+ `symbol`。
+    `date` 与 `symbol` 缺任何一个的行**直接丢掉**：那说明调用方把行拼错了，
+    而"写进一只没有代码的票"比少写一行危险得多（它会永远挂在表里、谁也说不清是谁）。
+
+    单位照抄取数出口（**元 / 百分数**，见建表那里的说明）—— 这里不做任何换算：
+    换算是取数那一层的事，写库时再换一次就多一处能写错的地方。
+
+    为什么 upsert 而不是"先删这一天再整批插"：与 `stock_daily_raw` 同一条纪律
+    （模块头第 1 条）—— 采集中途失败时，不能把当天已经写好的行删掉。
+    """
+    now = _now()
+    payload = []
+    for row in rows or ():
+        symbol = str(row.get("symbol") or "").strip()
+        day = str(row.get("date") or "").strip()
+        if not symbol or not day:
+            continue
+        payload.append((
+            day, symbol, row.get("main_net"), row.get("main_net_pct"),
+            row.get("super_net"), row.get("big_net"), row.get("close"), row.get("pct"),
+            str(row.get("source") or "eastmoney"), str(row.get("updated_at") or now),
+        ))
+    if not payload:
+        return 0
+    return upsert(
+        conn, "fund_flow", _FUND_FLOW_COLS, payload, conflict=("date", "symbol"),
+    )
+
+
+def load_fund_flow(
+    conn: sqlite3.Connection,
+    symbols: Sequence[str] | None = None,
+    *,
+    days: int | None = None,
+) -> dict[str, list[dict]]:
+    """资金流 → `{代码: [最近 N 条**升序**]}`。
+
+    Args:
+        symbols: 只要这些代码。**`None` = 表里全部** —— 这张表里只有自选标的
+            （几十行），所以"取全部"是一次很便宜的查询，而**逐票查库**才是要避免的
+            （公式准备输入时几百上千只票各查一次，就是几百上千次查询）。
+            空列表的语义是"一只都不要"（返回 `{}`），与 `None` 不是一回事。
+        days: 每只票最多取最近几个交易日；`None` = 全部。
+
+    Returns:
+        只包含**有数据**的代码（表里没有的代码不会出现在结果里 ——
+        "没有这个键"与"键对应的值是空列表"都在说"没有资金流"，但前者更好判）。
+    """
+    wanted: list[str] | None = None
+    if symbols is not None:
+        wanted = [str(s) for s in dict.fromkeys(symbols) if str(s or "").strip()]
+        if not wanted:
+            return {}
+    limit = None if days is None else max(int(days), 1)
+    cols = ", ".join(_FUND_FLOW_COLS)
+    grouped: dict[str, list[dict]] = {}
+    # 分批：`IN (?,?,…)` 的变量数有上限（SQLite 默认 999），自选再多也不会到几百，
+    # 但调用方可能把"池子 + 自选 + 持仓"整个列表丢进来，所以这里照 `latest_raw_closes` 分块
+    chunks: list[list[str] | None] = (
+        [wanted[i:i + 500] for i in range(0, len(wanted), 500)] if wanted else [None]
+    )
+    for chunk in chunks:
+        sql = f"SELECT {cols} FROM fund_flow"  # noqa: S608 - 列名是模块常量
+        params: tuple = ()
+        if chunk:
+            sql += f" WHERE symbol IN ({', '.join('?' * len(chunk))})"
+            params = tuple(chunk)
+        sql += " ORDER BY symbol, date DESC"
+        for row in conn.execute(sql, params):
+            item = dict(row)
+            grouped.setdefault(str(item["symbol"]), []).append(item)
+    out: dict[str, list[dict]] = {}
+    for symbol, items in grouped.items():
+        # 查出来是"新 → 旧"（按 date DESC），取前 `limit` 条就是"最近 N 个交易日"，
+        # 再翻回升序 —— 下游（公式里"近 5 日之和"、tooltip 里的"最近一日"）都按升序读。
+        out[symbol] = list(reversed(items[:limit] if limit else items))
+    return out
+
+
+def latest_fund_flow(
+    conn: sqlite3.Connection, symbols: Sequence[str] | None = None
+) -> dict[str, dict]:
+    """每只票**最近一个交易日**的那一条 → `{代码: 行}`（没有的代码不在结果里）。"""
+    return {
+        symbol: rows[-1]
+        for symbol, rows in load_fund_flow(conn, symbols, days=1).items()
+        if rows
+    }
 
 
 # ── 推送去重 ──

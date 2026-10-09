@@ -114,6 +114,13 @@ AUCTION_BOARD_LABELS: dict[str, str] = {
 AUCTION_SCORE_RANGE: tuple[int, int] = (1, 6)
 #: 推送条数的取值范围（全市场扫描，上限放宽到 50）
 AUCTION_ITEMS_RANGE: tuple[int, int] = (1, 50)
+
+#: 资金流采集天数的默认值与合法区间（`fund_flow_days`，2026-10-08 加）。
+#: 与 `scheduler.FUND_FLOW_DAYS_RANGE` 是**同一个区间**：配置层在加载时收一次，
+#: 采集那一层在真正发请求前再收一次 —— 两边都收是因为中间可能有人直接改 `cfg` 对象
+#: （界面/测试），而"采 1000 天"这种事一旦漏过去就是一个很长很长的请求。
+FUND_FLOW_DAYS_DEFAULT = 10
+FUND_FLOW_DAYS_RANGE: tuple[int, int] = (1, 60)
 #: 扫描宽限窗口（分钟）：调度器是 60 秒一拍、相位不固定，卡在 09:20:00 那一秒上不现实；
 #: 到点后这段时间内跑一次就算这一档完成（而且**不会跨到下一档**，见 `intraday.auction_scan_due`）
 AUCTION_SCAN_GRACE_MIN = 3
@@ -139,8 +146,13 @@ DEFAULT_NOTIFY_FLASH_SECONDS = 6
 #: `intraday_t` 因此退出了这一群：它的默认已改成 **false**（用户拍板：T策略默认关），
 #: 两条路都落在"关"上，留在群里只会让读代码的人以为它默认还开着。
 #: （`intraday_auction` 等其它项一律不动 —— 本次只改默认值，不顺手改别人的语义。）
+#:
+#: 2026-10-08 加 `fund_flow_enabled`：它的默认也是 **true**，与上面那几条同一个道理 ——
+#: 手滑写成 `"maybe"` 应该是"没生效、仍是默认开着"，而不是把资金流采集悄悄关掉
+#: （关掉的症状是"公式里的主力资金字段永远没值"，而界面上不会有任何提示）。
 _STRICT_BOOL_FIELDS = frozenset(
-    {"market_overview", "market_breadth", "notify_popup", "notify_sound"}
+    {"market_overview", "market_breadth", "notify_popup", "notify_sound",
+     "fund_flow_enabled"}
 )
 
 #: 严格的真值 / 假值（与 `_as_bool` 的真值表保持一致）
@@ -668,6 +680,27 @@ class Config:
     #: 一次扫描最多推几只（默认 10，**上限 50**）：全市场扫描命中面更宽，条数也放宽。
     auction_alert_max_items: int = 10
 
+    # ── 资金流（**只对自选标的采集**，2026-10-08 主人："只按照自选标的来采集资金流"）──
+    #: 采集多少个交易日的历史资金流（**1~60**；写 0 / 负数 / 乱码回默认 10，写大了夹到 60）。
+    #: 为什么要有这个键：公式里的 `近5日主力净额` 要最近 5 个交易日，而"连着几天没采集上"
+    #: （机器没开、当天非交易日、接口抽风）时，取 10 天才有余量让那个和仍然是"最近 5 天"。
+    #: 边界与后果：
+    #:   * **只影响数据源那一路请求的条数**（东方财富 `fflow/daykline` 的 `lmt`），
+    #:     不改变公式字段的口径 —— `近5日主力净额` 永远是 5 天，字段名里就写着；
+    #:   * 写大（比如 60）只是每只票多存几十行（自选几十只 = 几千行，可忽略），
+    #:     但**历史不会回填**：采集是增量 upsert，改这个值不会补上过去的资金流；
+    #:   * 写 0 / 负数 / 乱码 → 回默认 10（不是"一只都不采"，那件事由下面那个开关负责）。
+    fund_flow_days: int = 10
+    #: 资金流采集总开关：**默认开**（关掉就一只都不采，一个请求都不发）。
+    #: 为什么默认开：这一路是免 Key 的公开接口（东方财富），采集面只有自选那几十只、
+    #: 日更那一趟一次，代价很小；而关着的话公式里的 `主力净额` / `主力净占比` /
+    #: `近5日主力净额` **永远没有值**（缺值 = 条件不成立 → 用到它们的策略一只都不出），
+    #: 用户只会以为公式写错了。
+    #: 什么时候该关：完全不用主力资金这几个字段时（那就一只都不采、请求数归零）。
+    #: 写错（`"maybe"` 这类词）→ **回到默认"开"**：把一个功能手滑写成别的词，
+    #: 不该让它静默消失（与 `market_overview` 那几个严格布尔键同一条规矩）。
+    fund_flow_enabled: bool = True
+
     #: 当日异动（涨停/跌停/大幅上涨下跌/快速反弹跳水）实时提醒：**默认关**。
     #: 为什么关（用户拍板）：异动是全市场一条请求、按自己的票过滤，额度不贵，
     #: 但**消息太多** —— 手里的票一天能触发好几条，多是"无用消息"，把真正要看的提醒淹掉。
@@ -793,6 +826,18 @@ class Config:
         self.auction_alert_max_items = _clamp_int(
             self.auction_alert_max_items, *AUCTION_ITEMS_RANGE, default=10
         )
+        # 资金流采集天数：夹在 1~60（**夹取**而不是"越界回默认"）——
+        # 写成 90 的意思是"想多存点历史"，按 60 办比丢回 10 更贴近本意；
+        # 而 0 / 负数 / 乱码是手滑（"一天都不采"几乎不可能是本意，那件事由
+        # `fund_flow_enabled` 负责），一律回默认 10。
+        raw_days = self.fund_flow_days
+        try:
+            days = int(raw_days)
+        except (TypeError, ValueError):
+            days = FUND_FLOW_DAYS_DEFAULT
+        if days <= 0:
+            days = FUND_FLOW_DAYS_DEFAULT
+        self.fund_flow_days = min(max(days, FUND_FLOW_DAYS_RANGE[0]), FUND_FLOW_DAYS_RANGE[1])
         # 板块多选：只留认得出的 key；**一个都没勾 = 不限制（全选）**，
         # 免得用户手滑把四个都取消之后看到"0 只命中"却不知道为什么
         picked = [str(b).strip().lower() for b in (self.auction_boards or [])]
@@ -1139,6 +1184,8 @@ def _apply_env(cfg: Config) -> Config:
         ("T_LOW_REBOUND_PCT", "t_low_rebound_pct"),
         ("INTRADAY_STOP_LOSS", "stop_loss"),
         ("INTRADAY_TAKE_PROFIT", "take_profit"),
+        # 资金流采集天数（整数；越界在 `__post_init__` 里夹到 1~60）
+        ("FUND_FLOW_DAYS", "fund_flow_days"),
         ("UI_THEME", "ui_theme"),           # 界面主题（分发后可临时切回系统皮肤）
         ("NOTIFY_POPUP_SECONDS", "notify_popup_seconds"),   # 浮窗自动消失秒数
         ("NOTIFY_POPUP_MAX_ITEMS", "notify_popup_max_items"),  # 浮窗最多列几条
@@ -1202,6 +1249,8 @@ def _apply_env(cfg: Config) -> Config:
         # 推送过滤：写错（"maybe"）→ 回到默认（**全推**，与新默认一致）
         # 持仓做T近似提示：写错（"maybe"）→ 回到默认（**关着**，与 `intraday_t` 新默认一致）
         ("INTRADAY_T", "intraday_t"),
+        # 资金流采集总开关：写错（"maybe"）→ 回到默认（**开着**，与 `fund_flow_enabled` 一致）
+        ("FUND_FLOW_ENABLED", "fund_flow_enabled"),
     ):
         raw = _env_str(env_name)
         if raw is not None:

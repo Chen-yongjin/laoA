@@ -1209,6 +1209,41 @@ def source_label(row: dict, watch_entry: dict | None) -> str:
     return parts[0] if parts else "自选"
 
 
+def fund_flow_text(entry: dict | None) -> str:
+    """「资金流」那一行（自选标的的行 tooltip 用）：最近一日的主力净额与净占比。
+
+    写法：`资金流：主力 +1.23 亿（+4.56%） 2026-10-08`；没有数据时是
+    `资金流：—（还没采集，日更时会自动采）`。
+
+    为什么必须把"还没采集"写出来、而不是干脆不显示这一行：用户会去猜
+    "到底是这只票没有资金流，还是程序没采"—— 而**采集是日更那一趟做的**
+    （`scheduler.sync_watchlist_fund_flow`），当天刚加进自选的票本来就要等到下一轮。
+    说清楚这一句，用户才知道该等还是该查。
+
+    **单位**（与公式里那三个字段同一份口径，见 `formula.EXTRA_FIELDS`）：
+    净额显示成**亿元**（库里存的是元，÷1e8）、占比是**百分数**原值（−4.02 = −4.02%）。
+
+    ⚠️ 界面**不给这张表加列**（用户嫌挤，列数被定死）：这一行只能住在 tooltip 里。
+    """
+    if not entry:
+        return "资金流：—（还没采集，日更时会自动采）"
+    main = entry.get("main_net")
+    pct = entry.get("main_net_pct")
+    if main is None and pct is None:
+        # 有行但两个数都是 NULL：如实说"没有数"，不写一个 0 出来（0 = 主力不买不卖）
+        return "资金流：—（这一天的数据是空的）"
+    if main is not None:
+        # 净额与占比写在一起（`主力 +1.23 亿（+4.56%）`）：一个是钱、一个是力度，
+        # 分开两行读起来像两件事。只有占比那一个数时另写一句，不编一个净额出来。
+        text = f"主力 {float(main) / 1e8:+.2f} 亿"
+        if pct is not None:
+            text += f"（{float(pct):+.2f}%）"
+    else:
+        text = f"主力净占比 {float(pct):+.2f}%"
+    day = str(entry.get("date") or "").strip()
+    return f"资金流：{text}" + (f" {day}" if day else "")
+
+
 def source_detail_lines(row: dict) -> list[str]:
     """一行的**来源明细**（行 tooltip 用）：哪条策略 / 哪个组 / 同批还被谁选中。
 

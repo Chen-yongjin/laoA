@@ -368,6 +368,29 @@ def test_palette_has_the_four_intraday_fields(page) -> None:
         assert page.palette_buttons[name].text() == name
 
 
+def test_palette_has_the_three_fund_flow_fields(page) -> None:
+    """右侧「变量」面板要有主力资金那三个字段，tooltip 写清**单位**与"只有自选才有值"。
+
+    `主力净额 / 主力净占比 / 近5日主力净额` 是 2026-10-08 加的（主人："只按照自选标的
+    来采集资金流"）。tooltip 里那两句不是可有可无的说明：
+
+    * **单位**（亿元 / 百分数）：写错的后果是静默差 1e8 倍或 100 倍，
+      而用户只会觉得"选出来的票不对"；
+    * **只有自选标的才有值**：这话不说，用户看到"全市场只有自选那几只被选中"，
+      第一反应是公式写错了 —— 而那正是这条采集口径的必然结果。
+    """
+    for name in ("主力净额", "主力净占比", "近5日主力净额"):
+        assert name in page.palette_buttons, f"面板里缺少「{name}」按钮"
+        button = page.palette_buttons[name]
+        tip = button.toolTip()
+        assert tip.startswith(f"插入 {name}"), tip
+        assert "自选标的" in tip, (name, tip)
+        assert button.text() == name
+    assert "亿元" in page.palette_buttons["主力净额"].toolTip()
+    assert "百分数" in page.palette_buttons["主力净占比"].toolTip()
+    assert "亿元" in page.palette_buttons["近5日主力净额"].toolTip()
+
+
 def test_palette_covers_variables_functions_operators(page) -> None:
     tokens = set(page.palette_buttons)
     assert {"C", "O", "H", "L", "V", "AMO", "PRE", "INDUSTRY"} <= tokens

@@ -590,6 +590,22 @@ def latest_trading_day(db_path: str | Path) -> str | None:
 #:     非交易时段取不到（条件不成立、一只都不出），而且**没有历史、不能回测**。
 SNAPSHOT_FIELDS: tuple[str, ...] = ("流通市值", "换手率", "现价", "现涨幅", "现量比", "现换手")
 
+#: 需要**本地资金流**（`fund_flow` 表）的公式字段。
+#: 这三个与上面那六个的区别是**完全不联网**：表是日更那一趟采好的
+#: （`scheduler.sync_watchlist_fund_flow`，只采自选标的），这里读的是本地库。
+#: 值由 `fund_flow_extra()` 一次查询铺进 `Series.extra`。
+FUND_FLOW_FIELDS: tuple[str, ...] = ("主力净额", "主力净占比", "近5日主力净额")
+
+#: 资金流字段的单位换算：库里（与接口）存的是**元**，公式里用的是**亿元**。
+#: 1e8 与 `eastmoney.YUAN_TO_YI` 是同一个数（同一个物理量，写死在这里只是不想让
+#: `formulas` 在模块级 import 数据层；有测试钉着两个数相等）。
+FUND_FLOW_YI = 1e8
+
+#: `近5日主力净额` 的窗口（交易日）。**写死 5**：字段名里就写着"近5日"，
+#: 做成配置项会让"字段名说的"与"实际算的"变成两套口径（改配置的人不会想到字段名会跟着变）。
+#: 采集天数（`fund_flow_days`）可以比它大，那就是"表里有几天可用"的余量。
+FUND_FLOW_WINDOW = 5
+
 #: 公式字段名 → 快照字典（`sources.QUOTE_FIELDS`）里的键名。
 #: 只有这一张表说了算：名字与键名对不上的症状是"字段永远是 NaN、一只都不出"，
 #: 而界面上完全看不出原因（与 `_FuncSpec.uses_fields` 那个坑同一类）。
@@ -684,6 +700,68 @@ def snapshot_extra(
                 "交易时段再试，或者在「系统设置 → 数据来源」里确认来源可用。"
                 "（注意：`现价 / 现涨幅 / 现量比 / 现换手` 是**盘中口径**，只有盘中运行时才有值，"
                 "而且没有历史、不能回测。）")
+
+
+def fund_flow_extra(
+    db_path: str | Path,
+    symbols: Sequence[str] | None = None,
+    *,
+    days: int = FUND_FLOW_WINDOW,
+) -> dict[str, dict[str, float]]:
+    """本地 `fund_flow` 表 → `{代码: {"主力净额": 亿, "主力净占比": %, "近5日主力净额": 亿}}`。
+
+    为什么单独一个函数（而不是并进 `snapshot_extra`）：那条路是**联网**取快照、
+    失败要提示用户"现在取不到、条件一律不成立"；这一条读的是本地表，**不联网**，
+    表里没有这只票就是"没有资金流"这一个安静的事实 —— 两种失败模式完全不同，
+    混在一个函数里就必然要写"有时候要提示、有时候不要"的分支。
+
+    单位换算**只在这一处做**（库里存的是**元**，公式里用**亿元**）：
+    与 `snapshot_extra` 把市值换成亿、`eastmoney._yi` 把 `f21` 换成亿是同一条纪律 ——
+    单位在"进引擎之前"换好，公式里写 `主力净额>1` 就是"主力净买入过亿"。
+
+    Args:
+        symbols: 只要这些代码；`None` = 表里全部（**资金流表里只有自选标的**，
+            几十行，所以"全取"比"逐票查库"便宜得多，也是默认口径）。
+        days: `近5日主力净额` 的窗口（默认 `FUND_FLOW_WINDOW` = 5）。
+
+    Returns:
+        只包含**有数据**的代码。表为空/库读不了 → `{}`（公式里那三个字段
+        于是全是缺值 → 用到它们的条件一律不成立，一只都不出；**不报错**）。
+
+    ⚠️ **没有历史**（与 `流通市值` / `换手率` 同一条限制，虽然这里的表里确实存着历史）：
+    这里的值是按"只有最后这一个数"铺进 `Series.extra` 的（`load_series` 的规矩），
+    所以**成绩单/回测**那条路（它不传 `extra`）里这三个字段一律是缺值、不会产生历史信号。
+    要拿它们做历史验证，得先给引擎铺"逐日一维序列"（那是引擎层的事，不是这一处）。
+    """
+    from laoa_trader.data import storage      # 延迟导入：与 `snapshot_extra` 同一个理由
+
+    try:
+        with storage.connect(db_path) as conn:
+            rows_by_symbol = storage.load_fund_flow(conn, symbols, days=max(int(days), 1))
+    except Exception as exc:  # noqa: BLE001 - 读不到就是"没有资金流"，不该让整轮筛选失败
+        logger.info(f"读资金流失败（主力资金三个字段这次没有值）：{exc}")
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for symbol, rows in rows_by_symbol.items():
+        if not rows:
+            continue
+        values: dict[str, float] = {}
+        latest = rows[-1]
+        main = latest.get("main_net")
+        if main is not None:
+            values["主力净额"] = float(main) / FUND_FLOW_YI          # 元 → 亿元
+        pct = latest.get("main_net_pct")
+        if pct is not None:
+            values["主力净占比"] = float(pct)                        # 已是百分数，不换算
+        nets = [float(row["main_net"]) for row in rows if row.get("main_net") is not None]
+        if nets:
+            # **不足 5 天就是能取到的那些天之和**（表刚建、或这只票刚加进自选时会不足）：
+            # 不拿 0 补成 5 天 —— 补 0 等于"说主力那几天不买不卖"，会把净流入的票算小，
+            # 而用户看到的是一个**看着很合理**的小数字（没有任何线索指向"少算了几天"）。
+            values["近5日主力净额"] = sum(nets) / FUND_FLOW_YI       # 元 → 亿元
+        if values:
+            out[symbol] = values
+    return out
 
 
 def all_symbols(db_path: str | Path) -> list[str]:
@@ -896,6 +974,11 @@ def prepare_inputs(
     today = moment.strftime("%Y-%m-%d")
     kline_day = latest_trading_day(db_path)
     want_snapshot = any(set(f.fields) & set(SNAPSHOT_FIELDS) for f in (formulas or ()))
+    # 资金流字段（主力净额 / 主力净占比 / 近5日主力净额）**只来自本地 `fund_flow` 表**，
+    # 与快照那条路是两回事：这条路不联网、没有"取不到"的失败模式，所以没有 note，
+    # 也**不必**因为"这次要走盘中口径"就去读它。与快照同一条纪律：**没用到就不读**
+    # （用到才读，读的是一次小查询；一条都没用到时 `extra` 与改动前逐字一致）。
+    want_fund_flow = any(set(f.fields) & set(FUND_FLOW_FIELDS) for f in (formulas or ()))
     live, why = _live_decision(cfg, db_path, kline_day, today, moment)
 
     prepared = Prepared(kline_day=kline_day)
@@ -933,6 +1016,13 @@ def prepare_inputs(
         prepared.extra = extra
         if note:
             prepared.notes.append(note)
+
+    if want_fund_flow:
+        # 合并（不是赋值）：同一轮里既用到 `流通市值` 又用到 `主力净额` 时，两份都要留下。
+        # 资金流这一份是**全表取回**（`fund_flow` 里只有自选标的，几十行）——
+        # 不按 `targets` 过滤的原因：`targets` 在这一刻可能是空的（不需要快照时压根没算），
+        # 而空列表的语义是"一只都不要"，会让主力资金字段静默全缺。
+        prepared.extra = {**prepared.extra, **fund_flow_extra(db_path)}
 
     prepared.hot = hot_industry_counts(db_path) if formulas and any(
         set(f.fields) & set(HOT_FIELDS) for f in formulas
@@ -1299,10 +1389,14 @@ __all__ = [
     "SEED_STATE_NAME",
     "HOT_FIELDS",
     "HOT_WINDOW_DAYS",
+    "FUND_FLOW_FIELDS",
+    "FUND_FLOW_WINDOW",
+    "FUND_FLOW_YI",
     "SNAPSHOT_FIELDS",
     "SNAPSHOT_FIELD_KEYS",
     "Prepared",
     "caliber_now",
+    "fund_flow_extra",
     "hot_industry_counts",
     "live_bars_from_quotes",
     "prepare_inputs",
