@@ -834,6 +834,56 @@ def _grab_desktop(win, pet, name: str) -> Path:
     return _save_canvas(_desktop_canvas(win.grab(), pet.grab()), name)
 
 
+def _pretend_windows_data_path(win) -> None:
+    r"""把设置页那两行路径改成 **Windows 样子**（这批图是发给 Windows 用户看的）。
+
+    为什么要假装：脚本在 Linux 上跑，真实的演示数据目录是 `/tmp/laoa-shots-xxxx/data`，
+    那两行会明晃晃写着 `/tmp/...` —— 一眼就看出"这不是给我这个系统做的"。而它们正好在
+    设置页第二屏、是用户最常看也最常贴出来的位置（报障三件套之一就是这两行路径）。
+
+    只改**显示**（那两个只读 QLineEdit 的文字），**不动** `cfg.data_dir`：数据、导出、
+    日志仍然落在临时目录里 —— 改 cfg 会让取数/建池去找一个不存在的路径
+    （这个脚本已经踩过一次同类坑：晚一步拦取数，真实行情就写进了缓存）。
+    """
+    for attr, value in (
+        ("data_dir_edit",
+         r"C:\Users\Administrator\AppData\Local\LuweikDecision\data"),
+        ("log_path_edit",
+         r"C:\Users\Administrator\AppData\Local\LuweikDecision\data\logs\luweik.log"),
+    ):
+        edit = getattr(win, attr, None)
+        if edit is not None:
+            edit.setText(value)
+
+
+def _after_window_built(win, app) -> None:
+    """窗口建好之后的几件小事：注入演示行情、把路径显示成 Windows 样子、刷一次表。"""
+    _apply_fake_quotes(win)
+    _pretend_windows_data_path(win)
+    for widget in (getattr(win, "voice_hint", None),):
+        if widget is not None:
+            win._refresh_voice_hint()
+    win._refresh_pool_table()
+    win._refresh_positions()
+    app.processEvents()
+
+
+def _build_pet(app):
+    """桌宠（**先建出来**：主界面那几张要把它合成到右下角）。
+
+    气泡有效期给足 —— 默认 8 秒，抓七八张图的时间足够它自己消失，
+    那样后面几张图里桌宠就没气泡了（同一批图里必须长一个样）。
+    """
+    from laoa_trader.ui.desktop_pet import DesktopPet
+
+    pet = DesktopPet(None)
+    pet.set_unread(3)
+    pet.show_bubble(PET_BUBBLE_CORNER, seconds=3600)
+    pet.show()
+    app.processEvents()
+    return pet
+
+
 def main() -> int:
     app = QApplication.instance() or QApplication([])
 
@@ -869,24 +919,8 @@ def main() -> int:
     win.show()
     app.processEvents()
 
-    _apply_fake_quotes(win)
-    for widget in (getattr(win, "voice_hint", None),):
-        if widget is not None:
-            win._refresh_voice_hint()
-    win._refresh_pool_table()
-    win._refresh_positions()
-    app.processEvents()
-
-    # 桌宠（**先建出来**：主界面那几张要把它合成到右下角）。
-    # 气泡有效期给足 —— 默认 8 秒，抓七八张图的时间足够它自己消失，
-    # 那样后面几张图里桌宠就没气泡了（同一批图里必须长一个样）。
-    from laoa_trader.ui.desktop_pet import DesktopPet
-
-    pet = DesktopPet(None)
-    pet.set_unread(3)
-    pet.show_bubble(PET_BUBBLE_CORNER, seconds=3600)
-    pet.show()
-    app.processEvents()
+    _after_window_built(win, app)
+    pet = _build_pet(app)
 
     # ① 大盘概览（注入假客户端，避免联网）
     win.refresh_market_overview(force=True, client=_fake_market_client())
