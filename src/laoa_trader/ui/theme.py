@@ -48,6 +48,13 @@ THEME_TECH = "tech"
 THEME_SILVER = "silver"
 THEME_SYSTEM = "system"
 
+#: 候选深色配色（2026-10-10）：**只用于出预览图/内部渲染，不进设置页下拉框**。
+#: 为什么这么分：配色是"看着挑"的东西，先用离屏渲染出几张图给主人比，
+#: 挑中的那一套再并进 `TECH_COLORS`（那样 `UI_THEMES` 与所有既有用例都不用动）。
+#: 主人定了之后这两个名字就可以删掉。
+THEME_OBSIDIAN = "obsidian"      # 曜黑 + 电光蓝
+THEME_GRAPHITE = "graphite"      # 石墨灰 + 紫罗兰
+
 #: 下拉框里的中文名（用户看到的是这个，不是 tech/silver/system）
 THEME_LABELS: dict[str, str] = {
     THEME_TECH: "科技蓝（深色）",
@@ -107,6 +114,23 @@ SILVER_COLORS: dict[str, str] = {
     "scrollbar": "#c3c9d2",
     "scrollbar_hover": "#a8b0ba",
     "tooltip_bg": "#fffdf0",
+    # ── 2026-10-10 新增：窗口/卡片层次与自绘标题栏（见下面「科技感升级」一节）──
+    # 这些键**每套色板都必须有**：样式表模板是所有主题共用的一张（少一个键
+    # `Template.substitute` 就 KeyError），候选配色也一样。
+    "window_top": "#f8f9fb",          # 窗口底渐变（上）
+    "window_bottom": "#eceff4",       # 窗口底渐变（下）
+    "card_top": "#ffffff",            # 卡片渐变（上）
+    "card_bottom": "#fbfcfe",         # 卡片渐变（下）
+    "section_top": "#eef1f5",         # 背景条渐变（上）；下面那条用 section
+    "titlebar_top": "#eef2f7",        # 自绘标题栏渐变（上）
+    "titlebar_bottom": "#e2e8f0",     # 自绘标题栏渐变（下）
+    "titlebar_border": "#c9d1db",     # 标题栏下边那条细线
+    "titlebar_text": "#1f2328",       # 标题栏上的软件名
+    "titlebar_dim": "#6b7280",        # 标题栏上的次要字（版本号等）
+    "accent": "#5b6b7d",              # 强调色（分组标题、页签下划线）
+    "accent_dim": "#c3c9d2",          # 强调色的弱化版（细边、禁用态）
+    "hover_soft": "#eef1f6",          # 极轻的悬停底色（页签/表头/列表项）
+    "close_hover": "#c62828",         # 关闭按钮悬停底色（红）
 }
 
 # ── 科技蓝主题的色板（与银色**同一批键名**，所以同一张样式表模板能渲染两套皮肤）──
@@ -165,6 +189,21 @@ TECH_COLORS: dict[str, str] = {
     "scrollbar": "#2a3d59",
     "scrollbar_hover": "#3a5478",
     "tooltip_bg": "#16233a",
+    # ── 2026-10-10 新增（键名与银色一致，见 SILVER_COLORS 的说明）──
+    "window_top": "#0e1a2e",         # 比原来的纯色底亮一档：窗口有"上亮下暗"的纵深
+    "window_bottom": "#070d18",
+    "card_top": "#15233c",
+    "card_bottom": "#101a2c",
+    "section_top": "#1c2d4a",
+    "titlebar_top": "#16233c",
+    "titlebar_bottom": "#0f1a2d",
+    "titlebar_border": "#23334c",
+    "titlebar_text": "#e6edf7",
+    "titlebar_dim": "#8fa3bf",
+    "accent": "#2ad4ea",
+    "accent_dim": "#1f4f60",
+    "hover_soft": "#18243c",
+    "close_hover": "#e5484d",
 }
 
 #: 深色底上的**语义色**（红涨绿跌）——比浅色底那两档亮一档。
@@ -180,11 +219,151 @@ SEMANTIC_BY_THEME: dict[str, dict[str, str]] = {
     THEME_TECH: TECH_SEMANTIC,
 }
 
-#: 科技蓝主题背景条用的渐变（代替银色那张拉丝纹理：深色底上贴浅色纹理就是一块脏斑）
+# ── 候选配色（2026-10-10）：只用来给主人挑，挑完并入 TECH_COLORS ──────────
+#
+# 取色时的两条硬约束（不是我瞎讲究，A 股界面踩了就难看）：
+#   1. **强调色不能是红/绿**：A 股红涨绿跌，强调色撞上语义色就会让人分不清
+#      "这是涨"还是"这是按钮"。所以候选只用蓝、紫——青色的 `tech` 也是这个道理；
+#   2. 正文对比度 ≥ 4.5:1（WCAG AA），深色皮肤最容易翻车的就是"深绿字配深蓝底"。
+#
+#: 曜黑 + 电光蓝：底压到近黑（#070a0f），全靠电光蓝 #4d9dff 提亮，冷、克制。
+OBSIDIAN_COLORS: dict[str, str] = {
+    "window": "#090d13",
+    "panel": "#0e141c",
+    "section": "#131b25",
+    "border": "#1d2734",
+    "border_dark": "#2c3b4d",
+    "text": "#e7edf5",
+    "text_dim": "#8d9cad",
+    "text_disabled": "#75828f",
+    "btn_top": "#141d29",
+    "btn_bottom": "#0f1721",
+    "btn_border": "#243040",
+    "btn_hover_top": "#1a2531",
+    "btn_hover_bottom": "#141e29",
+    "btn_press_top": "#0c131b",
+    "btn_press_bottom": "#090f16",
+    "btn_disabled_bg": "#0d141c",
+    "primary_top": "#4d9dff",
+    "primary_bottom": "#2f7ae6",
+    "primary_hover_top": "#68adff",
+    "primary_hover_bottom": "#3a86f0",
+    "primary_press_top": "#2a6cc9",
+    "primary_press_bottom": "#245bb0",
+    "primary_border": "#2a6cc9",
+    "primary_text": "#04101f",
+    "tab_unselected": "#0c121a",
+    "tab_selected": "#0e141c",
+    "tab_accent": "#4d9dff",
+    "tab_hover": "#131c26",
+    "alt_row": "#0b1119",
+    "grid": "#182130",
+    "selection": "#16304f",
+    "selection_strong": "#1e4270",
+    "focus": "#4d9dff",
+    "progress_top": "#4d9dff",
+    "progress_bottom": "#2f7ae6",
+    "progress_track": "#131b25",
+    "scrollbar": "#233042",
+    "scrollbar_hover": "#33465e",
+    "tooltip_bg": "#131b25",
+    "window_top": "#0b1119",
+    "window_bottom": "#05080c",
+    "card_top": "#131c27",
+    "card_bottom": "#0d141d",
+    "section_top": "#17202c",
+    "titlebar_top": "#0d151f",
+    "titlebar_bottom": "#0a1119",
+    "titlebar_border": "#1b2531",
+    "titlebar_text": "#e7edf5",
+    "titlebar_dim": "#93a3b5",
+    "accent": "#4d9dff",
+    "accent_dim": "#22456f",
+    "hover_soft": "#16202c",
+    "close_hover": "#e5484d",
+}
+
+#: 石墨灰 + 紫罗兰：中性石墨底（#111318）+ 紫罗兰 #a78bfa，偏"专业工具"的安静气质。
+GRAPHITE_COLORS: dict[str, str] = {
+    "window": "#111318",
+    "panel": "#191c22",
+    "section": "#1f232b",
+    "border": "#2a2f39",
+    "border_dark": "#3a4150",
+    "text": "#e9e9ee",
+    "text_dim": "#9b9aa6",
+    "text_disabled": "#83828d",
+    "btn_top": "#23262e",
+    "btn_bottom": "#1c1f26",
+    "btn_border": "#343945",
+    "btn_hover_top": "#2a2e37",
+    "btn_hover_bottom": "#22262e",
+    "btn_press_top": "#171a20",
+    "btn_press_bottom": "#14161b",
+    "btn_disabled_bg": "#1a1d23",
+    "primary_top": "#a78bfa",
+    "primary_bottom": "#8b5cf6",
+    "primary_hover_top": "#b9a1fb",
+    "primary_hover_bottom": "#9a6ef7",
+    "primary_press_top": "#7c4fe0",
+    "primary_press_bottom": "#6b41c4",
+    "primary_border": "#7c4fe0",
+    "primary_text": "#150a2e",
+    "tab_unselected": "#15181d",
+    "tab_selected": "#191c22",
+    "tab_accent": "#a78bfa",
+    "tab_hover": "#1e222a",
+    "alt_row": "#15181e",
+    "grid": "#23272f",
+    "selection": "#33285a",
+    "selection_strong": "#453374",
+    "focus": "#a78bfa",
+    "progress_top": "#a78bfa",
+    "progress_bottom": "#8b5cf6",
+    "progress_track": "#1f232b",
+    "scrollbar": "#333846",
+    "scrollbar_hover": "#454c5e",
+    "tooltip_bg": "#1f232b",
+    "window_top": "#171a20",
+    "window_bottom": "#0d0f13",
+    "card_top": "#1e222a",
+    "card_bottom": "#171a20",
+    "section_top": "#242833",
+    "titlebar_top": "#191c23",
+    "titlebar_bottom": "#14171c",
+    "titlebar_border": "#2a2f39",
+    "titlebar_text": "#e9e9ee",
+    "titlebar_dim": "#9b9aa6",
+    "accent": "#a78bfa",
+    "accent_dim": "#413a63",
+    "hover_soft": "#23262e",
+    "close_hover": "#e5484d",
+}
+
+#: 主题名 → 色板（**所有能渲染的配色都在这里**：两套正式皮肤 + 两套候选）。
+#: `theme_qss()` 只认这张表 —— 出预览图时可以直接渲染候选配色。
+PALETTES: dict[str, dict[str, str]] = {
+    THEME_TECH: TECH_COLORS,
+    THEME_SILVER: SILVER_COLORS,
+    THEME_OBSIDIAN: OBSIDIAN_COLORS,
+    THEME_GRAPHITE: GRAPHITE_COLORS,
+}
+
+#: 出对比图用的顺序（第一张是现在的默认皮肤 = 现状）
+PREVIEW_THEMES: tuple[str, ...] = (THEME_TECH, THEME_OBSIDIAN, THEME_GRAPHITE)
+
+#: 深色底的主题（要自己画颜色的控件、热力图、自绘标题栏都按这个判断）。
+#: **不能只写 THEME_TECH**：候选配色换上去之后 `system` 之外的全是深色。
+DARK_THEMES: tuple[str, ...] = (THEME_TECH, THEME_OBSIDIAN, THEME_GRAPHITE)
+
+for _name in DARK_THEMES:
+    SEMANTIC_BY_THEME.setdefault(_name, TECH_SEMANTIC)
+
+#: 背景条用的渐变：**由色板自己拼**（不再把色值写死在常量里 —— 换一套皮肤就得跟着改一次）
 TECH_BAR_GRADIENT = (
     "background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,\n"
-    "                                      stop:0 #1b2b46, stop:1 #16233a);"
-)
+    "                                      stop:0 %s, stop:1 %s);"
+) % (TECH_COLORS["section_top"], TECH_COLORS["section"])
 
 #: 银色主题的样式表模板。
 #: 用 `string.Template`（`$名字`）而不是 `str.format`：QSS 里大量 `{}`，
@@ -194,18 +373,51 @@ _SILVER_TEMPLATE = Template(
 /* ── 底色与文字 ─────────────────────────────────────────── */
 QWidget { background-color: $window; color: $text; }
 QMainWindow, QDialog, QMessageBox, QInputDialog { background-color: $window; }
+/* 窗口主体（objectName 见 ui/app.py 的 _build_ui）：上亮下暗的极轻渐变。
+   为什么给"主体"而不是 QMainWindow：QMainWindow 上面盖着 central widget，
+   画在 QMainWindow 上根本看不见（被 central 的纯色底盖掉了）。 */
+QWidget#windowBody {
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 $window_top, stop:1 $window_bottom);
+}
+/* 自绘标题栏（objectName 见 ui/titlebar.py）：**无边框模式**下这一条就是窗口的"脸"。
+   主人在 2026-10-10 说"标题栏还用 Windows 自带的一点都不搭"，于是菜单栏级别的
+   品牌区改由我们自己画（系统标题栏那套还能在设置页里切回来）。 */
+QWidget#titleBar {
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 $titlebar_top, stop:1 $titlebar_bottom);
+    border-bottom: 1px solid $titlebar_border;
+}
+QWidget#titleBar QLabel { background-color: transparent; color: $titlebar_text; }
+QLabel#titleBarTitle { color: $titlebar_text; }
+QLabel#titleBarTag { color: $titlebar_dim; }
+/* 右上角的最小化/最大化/关闭是**自绘**的（QPainter，不是 QSS）：Windows 11 那三根
+   细线用字体符号画不准，见 ui/titlebar.py 的 WindowButton。这里只声明它们的底色透明。 */
+QWidget#titleBar QAbstractButton { background-color: transparent; border: none; }
+/* 软件名左边那道强调色小竖条 */
+QFrame#titleBarAccent { background-color: $accent; border: none; border-radius: 2px; }
+QLabel#titleBarIcon { background-color: transparent; }
+/* 自绘标题栏模式下，窗口四周补一条 1 像素的细边（原生标题栏没了，靠它划出窗口的边界）。
+   `[frame="custom"]` 是动态属性选择器，属性由 `ui/app.py` 设在 central widget 上；
+   系统标题栏那一档不命中这条 —— 那一档有系统外框，再来一条内嵌线就是"双边框"。 */
+QWidget#windowBody[frame="custom"] { border: 1px solid $titlebar_border; }
 QLabel, QCheckBox, QRadioButton { background-color: transparent; color: $text; }
 QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled { color: $text_disabled; }
 QFrame { background-color: transparent; }
 QToolTip {
     background-color: $tooltip_bg; color: $text;
-    border: 1px solid $btn_border; padding: 4px 6px;
+    border: 1px solid $btn_border; border-radius: 6px; padding: 5px 7px;
 }
 
 /* ── 背景条：顶部状态区 / 概览页页脚 / 表头 ──
    唯一用"素材"的地方：极淡的横向拉丝纹理（拿不到素材时这一行整体不出现，
    底色仍是浅银灰，界面不会变成半透明破版） */
-QWidget#statusArea, QWidget#marketFooter,
+QWidget#statusArea {
+    background-color: $section;
+    $metal
+    border: 1px solid $border; border-radius: 10px;
+}
+QWidget#marketFooter,
 QHeaderView::section, QTableCornerButton::section {
     background-color: $section;
     $metal
@@ -215,7 +427,7 @@ QHeaderView::section, QTableCornerButton::section {
 QPushButton {
     background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                       stop:0 $btn_top, stop:1 $btn_bottom);
-    border: 1px solid $btn_border; border-radius: 4px;
+    border: 1px solid $btn_border; border-radius: 6px;
     padding: 4px 12px; color: $text; min-height: 20px;
 }
 /* 「策略筛选」右侧元素区（变量 / 函数 / 运算符 / 排除，四组 52 个按钮）要**小一圈**：
@@ -255,7 +467,8 @@ QPushButton:default { border: 1px solid $focus; }
 QPushButton#primaryAction {
     background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                       stop:0 $primary_top, stop:1 $primary_bottom);
-    border: 1px solid $primary_border; color: $primary_text; font-weight: bold;
+    border: 1px solid $primary_border; border-radius: 8px;
+    color: $primary_text; font-weight: bold;
 }
 QPushButton#primaryAction:hover {
     background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -304,33 +517,42 @@ QSpinBox::up-button:hover, QSpinBox::down-button:hover { background-color: $btn_
 /* ── 勾选类：只改文字与间距，指示器留给系统画（纯 QSS 画不出对勾） ── */
 QCheckBox, QRadioButton { spacing: 6px; padding: 2px 0; }
 QGroupBox {
-    border: 1px solid $border; border-radius: 4px;
+    border: 1px solid $border; border-radius: 10px;
+    background-color: $panel;
     margin-top: 10px; padding: 8px 8px 6px 8px; color: $text;
 }
-QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: $text_dim; }
+/* 分组标题用**强调色**：一页里十几个分组，标题就是视觉骨架（原来跟正文一个色，
+   整页糊成一片） */
+QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; color: $accent; }
 
 /* ── 页签 ──────────────────────────────────────────────── */
 QTabWidget::pane {
-    border: 1px solid $border; border-radius: 4px;
+    border: 1px solid $border; border-radius: 10px;
     background-color: $panel; top: -1px;
 }
+/* 页签改成"下划线"式（原来是文件夹标签那套）：底不再分块、选中项由一条 2px 的
+   强调色下划线说话 —— 五个页签从"五个小方块"变成一条整齐的导航，更像现代控制台。
+   `border-bottom: 2px solid transparent` 是**占位**：不预留这 2px，
+   选中时多出来的下划线会把整排页签顶高一档，切换页签会看到文字上下跳。 */
 QTabBar::tab {
-    background-color: $tab_unselected; color: $text_dim;
-    border: 1px solid $border; border-bottom: none;
-    border-top-left-radius: 4px; border-top-right-radius: 4px;
-    padding: 5px 14px; margin-right: 2px;
+    background-color: transparent; color: $text_dim;
+    border: none; border-bottom: 2px solid transparent;
+    padding: 6px 16px; margin-right: 4px;
 }
-QTabBar::tab:hover:!selected { background-color: $tab_hover; }
+QTabBar::tab:hover:!selected {
+    background-color: $hover_soft; color: $text;
+    border-top-left-radius: 6px; border-top-right-radius: 6px;
+}
 QTabBar::tab:selected {
-    background-color: $tab_selected; color: $text;
-    border-top: 2px solid $tab_accent;
+    background-color: transparent; color: $text;
+    border-bottom: 2px solid $tab_accent; font-weight: bold;
 }
 QTabBar::tab:disabled { color: $text_disabled; }
 
 /* ── 表格 ──────────────────────────────────────────────── */
 QTableWidget, QTableView, QTreeView, QListView {
     background-color: $panel; alternate-background-color: $alt_row;
-    gridline-color: $grid; border: 1px solid $border; border-radius: 4px;
+    gridline-color: $grid; border: 1px solid $border; border-radius: 8px;
     selection-background-color: $selection; selection-color: $text;
 }
 QTableWidget::item, QTableView::item, QTreeView::item { padding: 2px 4px; border: none; }
@@ -341,7 +563,7 @@ QHeaderView::section {
     color: $text_dim; padding: 4px 6px;
     border: none; border-right: 1px solid $border; border-bottom: 1px solid $border;
 }
-QHeaderView::section:hover { color: $text; }
+QHeaderView::section:hover { color: $text; background-color: $hover_soft; }
 QTableCornerButton::section { border: none; border-bottom: 1px solid $border; }
 
 /* 「本次筛选结果」表（objectName 见 ui/formula_page.py 的 RESULT_TABLE_OBJECT）：
@@ -359,12 +581,12 @@ QTableWidget#resultTable QHeaderView::section { padding: 4px 9px; }
 QScrollArea { border: none; background-color: transparent; }
 QScrollArea > QWidget > QWidget { background-color: transparent; }
 QScrollBar:vertical {
-    background-color: transparent; width: 12px; margin: 0;
-    border: none; border-radius: 6px;
+    background-color: transparent; width: 10px; margin: 0;
+    border: none; border-radius: 5px;
 }
 QScrollBar:horizontal {
-    background-color: transparent; height: 12px; margin: 0;
-    border: none; border-radius: 6px;
+    background-color: transparent; height: 10px; margin: 0;
+    border: none; border-radius: 5px;
 }
 QScrollBar::handle:vertical {
     background-color: $scrollbar; min-height: 24px;
@@ -405,7 +627,9 @@ QMenu::separator { height: 1px; background-color: $border; margin: 4px 8px; }
    它们是"名称 / 点位 / 涨跌幅"三列对齐的文本行（上一轮定稿的版式），
    十几个条目都套上卡片会让页面变成一片白盒子，反而更乱 */
 QFrame#marketKpiCard, QFrame#poolCard {
-    background-color: $panel; border: 1px solid $border; border-radius: 6px;
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 $card_top, stop:1 $card_bottom);
+    border: 1px solid $border; border-radius: 10px;
 }
 /* 小号灰字：用 objectName 精确上色（不依赖 palette 角色 —— 应用级样式表里
    `QLabel { color }` 会把角色的灰盖掉，写死在这里才稳定） */
@@ -433,28 +657,82 @@ QPushButton#alertPopupRow:pressed { background-color: $selection_strong; }
 )
 
 
+def resolve_palette_name(name: Any) -> str:
+    """把 `name` 收紧到**能渲染的**配色名（`PALETTES` 里有色板的那种）。
+
+    与 `normalize_theme()` 的分工：那个管"用户能选的皮肤"（`config.UI_THEMES`，
+    写错一律回默认）；这个管"**渲染得出来**的配色"（多了两套只用于出对比图的候选）。
+    出预览图时按候选名渲染，但设置页下拉框里不会出现它们（见 `PREVIEW_THEMES`）。
+    """
+    value = str(name if name is not None else "").strip().lower()
+    if value == THEME_SYSTEM:        # 空样式表那一档：保留原样，行为与改版前一致
+        return THEME_SYSTEM
+    return value if value in PALETTES else DEFAULT_UI_THEME
+
+
+def palette(name: Any = None) -> dict[str, str]:
+    """取某套配色的色板（默认取当前生效的那套）。**界面代码不要再手写色值。**"""
+    key = resolve_palette_name(name if name is not None else current_theme())
+    if key not in PALETTES:
+        key = DEFAULT_UI_THEME
+    return PALETTES[key]
+
+
+def chrome_colors() -> dict[str, str]:
+    """自绘标题栏要用的那几个颜色（那是 QPainter 画的，QSS 管不着）。
+
+    `system` 那一档按**浅色**给：那一档用的是系统标题栏（我们不画），万一被打开
+    也不该画成深色的 —— Windows 原生外观在浅色模式下是浅底的。
+    """
+    key = current_theme() if current_theme() in PALETTES else THEME_SILVER
+    colors = PALETTES[key]
+    return {
+        "top": colors["titlebar_top"],
+        "bottom": colors["titlebar_bottom"],
+        "border": colors["titlebar_border"],
+        "text": colors["titlebar_text"],
+        "dim": colors["titlebar_dim"],
+        "hover": colors["hover_soft"],
+        "pressed": colors["btn_press_bottom"],
+        "close_hover": colors["close_hover"],
+        "accent": colors["accent"],
+        "border_soft": colors["border"],
+    }
+
+
+def _bar_gradient(colors: dict[str, str]) -> str:
+    """背景条（状态区 / 表头）的渐变：**由色板拼出来**，不再写死色值。
+
+    深色皮肤不能贴银色那张浅色拉丝纹理（贴上去就是一块脏斑），所以除银色之外的
+    主题都走这里：一段同色系的纵向渐变。
+    """
+    return ("background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,\n"
+            "                                      stop:0 %s, stop:1 %s);"
+            % (colors["section_top"], colors["section"]))
+
+
 def theme_qss(name: str, metal_url: str | None = None) -> str:
     """按主题名渲染样式表；`metal_url=None` 表示**不用纹理**（背景条退回纯色）。
 
-    两套皮肤共用同一张模板（`_SILVER_TEMPLATE`）与同一批键名，只是换一份色板：
+    所有皮肤共用同一张模板（`_SILVER_TEMPLATE`）与同一批键名，只是换一份色板：
     这样"按钮长什么样、圆角多少、间距多少"只有一处定义 —— 复制一份模板出来改，
     迟早出现"银色改了、科技蓝没改"这种半新半旧的界面。
 
     纹理只是锦上添花：素材没打进包、被删掉、换名字，对应那行 `background-image`
     直接不出现，背景条仍然是纯色。缺素材绝不能让界面出错，也不能变成半透明的破版。
-    科技蓝主题**不用**那张拉丝纹理（深色底上贴浅色纹理就是一块脏斑），改用一段深色渐变。
+    深色皮肤**不用**那张拉丝纹理，改用一段同色系渐变（见 `_bar_gradient`）。
     """
-    theme = normalize_theme(name)
-    if theme == THEME_TECH:
-        colors = TECH_COLORS
-        metal = TECH_BAR_GRADIENT
-    else:
+    theme = resolve_palette_name(name)
+    if theme in (THEME_SILVER, THEME_SYSTEM):
         colors = SILVER_COLORS
         metal = ""
         if metal_url:
             metal = ("background-image: url(%s);\n"
                      "    background-repeat: repeat-x;\n"
                      "    background-position: top left;" % metal_url)
+    else:
+        colors = PALETTES[theme]
+        metal = _bar_gradient(colors)
     return _SILVER_TEMPLATE.substitute(metal=metal, **colors)
 
 
@@ -507,8 +785,9 @@ def is_dark() -> bool:
     不是 QSS，没法靠样式表跟着换色 —— 只能问一句"现在是不是深色底"，
     再决定用哪一档色（见 `data/market_map.block_color(dark=...)`）。
     `system` 按**浅色**处理：Qt 原生外观在 Windows 上是浅色的，猜深了会让文字看不见。
+    判据是 `DARK_THEMES`（不是"等于 tech"）：候选配色换上去之后也全是深色底。
     """
-    return current_theme() == THEME_TECH
+    return current_theme() in DARK_THEMES
 
 
 def semantic(kind: str) -> str:
@@ -578,8 +857,24 @@ def apply_theme(app: Any = None, name: Any = None) -> str:
     为什么每次应用都重新生成银色 QSS（而不是直接用 `THEMES["silver"]`）：
     纹理路径要按**当前**的素材情况与屏幕缩放解析 —— 打包后路径不同、
     素材缺失要能退回纯色，所以这里不走缓存那份字符串。
+
+    送进来的名字按"**渲染得出来**"收紧（不认识就回默认）：这既保住了"写错一个字母
+    不该让界面起不来"，也让候选配色能被真的画出来（出对比图用，见 `PREVIEW_THEMES`）。
+    用户**能选**的范围仍然是 `config.UI_THEMES`（设置页下拉框与 `theme_label` 用它）。
     """
-    theme = normalize_theme(name if name is not None else current_theme())
+    return apply_palette(
+        app,
+        resolve_palette_name(name if name is not None else current_theme()),
+    )
+
+
+def apply_palette(app: Any = None, name: Any = None) -> str:
+    """按**配色名**应用样式表（候选配色也能渲染），返回实际生效的名字。
+
+    与 `apply_theme` 的差别只有一处：这个不把名字收紧到 `UI_THEMES`，
+    所以 `apply_palette(app, "obsidian")` 能真的把那套候选配色画出来（出对比图用）。
+    """
+    theme = resolve_palette_name(name if name is not None else current_theme())
     if theme == THEME_SYSTEM:
         qss = THEMES[THEME_SYSTEM]        # 空串 = 清空样式表，回到系统原生
     else:

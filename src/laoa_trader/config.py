@@ -74,6 +74,13 @@ POOL_VIEWS: tuple[str, ...] = ("cards", "table")
 UI_THEMES: tuple[str, ...] = ("tech", "silver", "system")
 DEFAULT_UI_THEME = "tech"
 
+#: 窗口外观：`custom` = **自绘标题栏**（深色标题栏 + 自己画的最小化/最大化/关闭，
+#: 2026-10-10 起默认，主人原话"标题栏还用 Windows 自带的一点都不搭"）；
+#: `system` = 系统标题栏（安全绳：这台机器上自绘出了问题，用户自己就能切回来）。
+#: 与 `theme.FRAME_*` 同一份取值，取值只有这两处、都指同一批字符串。
+WINDOW_FRAMES: tuple[str, ...] = ("custom", "system")
+DEFAULT_WINDOW_FRAME = "custom"
+
 #: 大盘概览默认盯的宽基指数（同花顺代码）。实测这五个都能取到；
 #: `899050.BJ`（北证50）**不存在**，混进去会让整批快照失败，别往这里加。
 DEFAULT_MARKET_INDICES: tuple[str, ...] = (
@@ -756,6 +763,9 @@ class Config:
     #: 界面主题：`silver` = 银色金属感（默认）/ `system` = 系统默认皮肤。
     #: 设置页下拉框可切换，**改完立即生效**（不用重启）；写错一个字母就回默认。
     ui_theme: str = DEFAULT_UI_THEME
+    #: 窗口外观（见 `WINDOW_FRAMES`）：默认自绘标题栏。**改完要重启才生效** ——
+    #: 它管的是窗口自己（原生样式、消息钩子），不是"画一遍就好"的皮肤。
+    window_frame: str = DEFAULT_WINDOW_FRAME
 
     # ── 大盘概览（启动默认页：涨跌停家数 / 成交额 / 涨跌家数 / 三组指数）──
     #: 总开关：关掉则概览**一个请求都不发**（卡片显示 `—` 并说明原因）
@@ -798,6 +808,9 @@ class Config:
         # 主题同理：写错（"Silver " / "银色" / 少个字母）不该让界面起不来 —— 回默认
         theme = str(self.ui_theme or "").strip().lower()
         self.ui_theme = theme if theme in UI_THEMES else DEFAULT_UI_THEME
+        # 窗口外观同理：写错（"Custom" / "自绘"）不该表现成"窗口没有标题栏"
+        frame = str(getattr(self, "window_frame", "") or "").strip().lower()
+        self.window_frame = frame if frame in WINDOW_FRAMES else DEFAULT_WINDOW_FRAME
         # 竞价阈值：写 0/负数会让"打分"失真（任何票都算强）→ 回默认值
         for name, fallback in (("auction_min_pct", 2.0),
                                ("auction_min_volume_ratio", 2.0),
@@ -1187,6 +1200,7 @@ def _apply_env(cfg: Config) -> Config:
         # 资金流采集天数（整数；越界在 `__post_init__` 里夹到 1~60）
         ("FUND_FLOW_DAYS", "fund_flow_days"),
         ("UI_THEME", "ui_theme"),           # 界面主题（分发后可临时切回系统皮肤）
+        ("WINDOW_FRAME", "window_frame"),   # 窗口外观（自绘/系统标题栏，需重启）
         ("NOTIFY_POPUP_SECONDS", "notify_popup_seconds"),   # 浮窗自动消失秒数
         ("NOTIFY_POPUP_MAX_ITEMS", "notify_popup_max_items"),  # 浮窗最多列几条
         ("NOTIFY_FLASH_SECONDS", "notify_flash_seconds"),   # 图标闪烁秒数

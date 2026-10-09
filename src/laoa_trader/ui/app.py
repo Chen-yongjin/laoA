@@ -424,6 +424,9 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
     # 提醒浮窗：自己画的窗口（Windows 原生 Toast 的点击行为不受我们控制，见该模块说明）
     from laoa_trader.ui.alert_popup import AlertPopup
     from laoa_trader.ui.message_center import MessageCenter
+    # 自绘标题栏 + 无边框窗口（主人 2026-10-10：「标题栏还用 Windows 自带的一点都不搭」）。
+    # 拖动/缩放/贴边这些系统行为全保留，见 ui/titlebar.py 的模块说明
+    from laoa_trader.ui import titlebar as titlebar_mod
     # 公式编辑器（「公式匹配」页）：单独一个模块 —— 主窗口这边只负责把它挂成页签
     from laoa_trader.ui.formula_page import FormulaPage
 
@@ -1663,6 +1666,11 @@ if QT_AVAILABLE:
             window_icon = _load_icon()
             if not window_icon.isNull():
                 self.setWindowIcon(window_icon)
+            # 窗口外观（自绘标题栏）与它的 Windows 消息控制器：`_build_ui` 里才落地，
+            # 但信号回调可能在那之前就被调到（比如启动时的窗口状态变化），所以先占位
+            self.window_frame = self._frame_mode()
+            self.titlebar: Any = None
+            self.chrome: Any = None
             self._apply_screen_geometry()
             self._build_ui()
             self._build_tray()
@@ -1767,11 +1775,32 @@ if QT_AVAILABLE:
 
         def _build_ui(self) -> None:
             central = QWidget()
-            layout = QVBoxLayout(central)
+            # 窗口主体（QSS 里 `QWidget#windowBody` 就是它）：底色是"上亮下暗"的渐变
+            central.setObjectName("windowBody")
+            outer = QVBoxLayout(central)
+            # 外层只管"标题栏 + 内容"这两块，**不留边距** —— 自绘标题栏要顶到窗口边上
+            # （留 12 像素的边距会让最上面那条 12 像素宽的缝拖不动窗口）
+            outer.setContentsMargins(0, 0, 0, 0)
+            outer.setSpacing(0)
+
+            # ── 自绘标题栏（软件名 + 版本标签 + 最小化/最大化/关闭）──
+            # 系统标题栏那一档它会整体隐藏（`apply_window_frame`），布局自动收上去
+            self.titlebar = titlebar_mod.TitleBar(
+                APP_NAME, tag=self._window_tag(), icon=_load_icon(32), parent=central)
+            self.titlebar.minimize_requested.connect(self.showMinimized)
+            self.titlebar.maximize_requested.connect(self._toggle_maximized)
+            self.titlebar.close_requested.connect(self.close)
+            outer.addWidget(self.titlebar)
+
+            # 标题栏下面才是原来的内容（边距沿用 WINDOW_MARGINS，与改版前一致）
+            content = QWidget()
+            content.setObjectName("windowContent")
+            layout = QVBoxLayout(content)
             # 统一间距：整窗只有这两组值（页面外边距 14/12、控件间距 8），
             # 不再出现"这里 16、那里 4"的参差
             layout.setContentsMargins(*WINDOW_MARGINS)
             layout.setSpacing(PAGE_SPACING)
+            outer.addWidget(content, 1)
 
             # 标题区：软件名 · 运行状态 + 【显示详情】【关于软件】（见 `_build_title_area`）。
             # **这一行不放任何操作按钮** —— 下载/刷新在「系统设置」，匹配在「策略筛选」
@@ -1816,6 +1845,9 @@ if QT_AVAILABLE:
             layout.addWidget(self.tabs, 1)
 
             self.setCentralWidget(central)
+            # 窗口外观（自绘标题栏 / 系统标题栏）：**必须等 central 建好之后**再调 ——
+            # 它要拿标题栏控件的位置去做命中测试，也要给 central 打上 `frame` 属性
+            self._apply_window_frame()
 
         def _build_title_area(self) -> Any:
             """标题区：一行「软件名 · 运行状态 + 两个按钮」，下面是一行提示与细进度条。
@@ -1855,6 +1887,8 @@ if QT_AVAILABLE:
             ruler = QLabel("·")           # 分隔符：小号灰字，不抢视线
             ruler.setForegroundRole(QPalette.ColorRole.PlaceholderText)
             row.addWidget(ruler)
+            #: 自绘标题栏没接管成功时要把它和软件名一起放回来（见 `_fallback_system_frame`）
+            self._status_ruler = ruler
             prefix = QLabel("运行状态：")
             prefix.setForegroundRole(QPalette.ColorRole.PlaceholderText)
             row.addWidget(prefix)
@@ -1895,7 +1929,142 @@ if QT_AVAILABLE:
             outer.addWidget(self.progress)
 
             self.status_area = area
+            # 自绘标题栏那一档：软件名已经在上面的标题栏里了（而且更醒目），
+            # 状态区就不再重复一遍 —— 同一件事说两遍正是这次改版要消掉的毛病。
+            # 系统标题栏那一档没有自绘标题栏，软件名**必须**留在这里（否则窗口没有名字）。
+            if self._frame_mode() == titlebar_mod.FRAME_CUSTOM:
+                self.app_title_label.setVisible(False)
+                ruler.setVisible(False)
             return area
+
+        def _frame_mode(self) -> str:
+            """当前配置要的窗口外观（`custom` 自绘标题栏 / `system` 系统标题栏）。
+
+            判据只有 `cfg.window_frame` 一处（`config.__post_init__` 已经把非法值收紧过），
+            这里再兜一次底：配置对象是早期版本造的（没有这个字段）也要能开窗口。
+            """
+            value = str(getattr(self.cfg, "window_frame", "") or "").strip().lower()
+            return value if value in config.WINDOW_FRAMES else config.DEFAULT_WINDOW_FRAME
+
+        def _window_tag(self) -> str:
+            """标题栏上软件名后面那行小字（版本号）。拿不到版本就不写，绝不显示 `vNone`。"""
+            version = str(getattr(laoa_trader, "__version__", "") or "").strip()
+            return f"单机版 · v{version}" if version else "单机版"
+
+        # ── 窗口外观（自绘标题栏 / 无边框）──
+
+        def _apply_window_frame(self) -> None:
+            """按配置装/卸自绘标题栏，并把 `frame` 动态属性打到窗口主体上。
+
+            为什么要有这个动态属性：QSS 里那条窗口外框线只该在**自绘**模式下出现
+            （`QWidget#windowBody[frame="custom"]`）。系统标题栏那一档本来就有系统外框，
+            再画一条就是"双边框"。属性改完要手动 repolish 一次，Qt 才会重算样式。
+            """
+            mode = self._frame_mode()
+            self.window_frame, self.chrome = titlebar_mod.apply_window_frame(
+                self, mode, titlebar=getattr(self, "titlebar", None),
+                controller=getattr(self, "chrome", None))
+            body = self.centralWidget()
+            if body is not None:
+                body.setProperty("frame", self.window_frame)
+                style = body.style()
+                if style is not None:
+                    style.unpolish(body)
+                    style.polish(body)
+
+        def _toggle_maximized(self) -> None:
+            """最大化/还原（标题栏上那个方块按钮，以及标题栏双击的兜底路径）。"""
+            if self.isMaximized():
+                self.showNormal()
+            else:
+                self.showMaximized()
+            titlebar = getattr(self, "titlebar", None)
+            if titlebar is not None:
+                titlebar.set_maximized(self.isMaximized())
+
+        def _sync_window_chrome(self) -> None:
+            """窗口显示出来之后把自绘标题栏"对一次账"，并写下诊断日志。
+
+            两个必须做的事：
+            1. `sync_geometry()` —— Qt 以为窗口上面还有 31 像素的系统标题栏，
+               会把外框撑大一圈（`resize` 得到的客户区比要的大）。自绘模式下客户区
+               **就是**外框，所以这里量一次、对不上就用 `SetWindowPos` 校正；
+            2. 把"到底生效没有"写进日志：这台机器上没法验 Windows 的真实行为，
+               用户报"标题栏怪怪的"时，这一行日志就是第一手证据。
+            """
+            chrome = getattr(self, "chrome", None)
+            if chrome is None:
+                return
+            try:
+                state = chrome.sync_geometry()
+                # 量完还是"没接管"（`WM_NCCALCSIZE` 没被我们拿到）→ 当场退回系统标题栏：
+                # 让窗口上挂着两条标题栏是最难看的结果，不如先退回能用的样子
+                if chrome.enabled and not chrome.disabled and not chrome.nc_applied:
+                    self._fallback_system_frame()
+                    return
+                logger.info(f"窗口外观：{self.window_frame}；{chrome.report()}；"
+                            f"尺寸校正={state}")
+            except Exception as exc:  # noqa: BLE001 - 诊断失败不该影响窗口
+                logger.debug(f"窗口外观自检失败：{exc}")
+
+        def _fallback_system_frame(self) -> None:
+            """自绘标题栏没接管成功 → 本次运行退回系统标题栏（**不再显示自绘那一条**）。
+
+            判据只有一条：Windows 上 `WM_NCCALCSIZE` 没被我们拿到 —— 那意味着原生标题栏
+            还在画，此时我们那条 38 像素的品牌栏挂在下面就是"两条标题栏"，
+            比"没换成"还难看。退回时要把软件名放回状态区（自绘模式下它是藏起来的），
+            否则窗口就没有名字了。**下次启动仍然按配置试一次自绘**。
+            """
+            logger.warning(
+                "窗口外观：自绘标题栏没能接管非客户区，本次运行退回系统标题栏；"
+                "想彻底避免每次都要退一次，可在「系统设置 → 其他 → 窗口外观」里选系统标题栏")
+            self.window_frame = titlebar_mod.FRAME_SYSTEM
+            titlebar = getattr(self, "titlebar", None)
+            if titlebar is not None:
+                titlebar.setVisible(False)
+            label = getattr(self, "app_title_label", None)
+            if label is not None:
+                label.setVisible(True)
+            ruler = getattr(self, "_status_ruler", None)
+            if ruler is not None:
+                ruler.setVisible(True)
+            body = self.centralWidget()
+            if body is not None:
+                body.setProperty("frame", self.window_frame)
+                style = body.style()
+                if style is not None:
+                    style.unpolish(body)
+                    style.polish(body)
+            chrome = getattr(self, "chrome", None)
+            if chrome is not None:
+                chrome.detach()
+
+        def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt 命名
+            """窗口第一次显示出来 → 自绘标题栏对账（HWND 这时才存在）。"""
+            super().showEvent(event)
+            if not getattr(self, "_chrome_checked", False):
+                self._chrome_checked = True
+                QTimer.singleShot(200, self._sync_window_chrome)
+
+        def nativeEvent(self, event_type: Any, message: Any) -> Any:  # noqa: N802 - Qt 命名
+            """Windows 窗口消息：把 `WM_NCCALCSIZE` / `WM_NCHITTEST` 转给自绘标题栏。
+
+            这是"看着是自己画的、动起来是系统的"那条路的入口（见 ui/titlebar.py）：
+            尺寸边与拖动都让**系统**来做，我们只回答"这一点的性质"。
+            没有自绘标题栏（非 Windows / 系统标题栏那一档）时原样交给 Qt。
+            """
+            chrome = getattr(self, "chrome", None)
+            if chrome is not None:
+                handled, result = chrome.native_event(event_type, message)
+                if handled:
+                    return True, result
+            # 没接管的消息原样交给 Qt；`nativeEvent` 每动一下鼠标都会被叫到，
+            # 这里绝不能把异常抛出去（抛出去就是"鼠标一动日志就刷一条"）。
+            try:
+                return super().nativeEvent(event_type, message)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"窗口消息转交 Qt 失败（已忽略）：{exc}")
+                return False, 0
 
         # ── 「自选标的」页 ──
 
@@ -3612,6 +3781,27 @@ if QT_AVAILABLE:
             theme_hint = QLabel("换主题立即生效（不用重启），选择也会写回 config.toml")
             theme_hint.setObjectName("statusTag")     # 小号灰字（与状态区同一个样式）
             body.addWidget(theme_hint)
+
+            # 窗口外观（自绘标题栏 / 系统标题栏）：**与皮肤分开**的一个开关 ——
+            # 皮肤是"画出来的颜色"，窗口外观管的是窗口自己（有没有系统标题栏、谁处理拖动），
+            # 两者互不影响。放这里是因为用户找"外观"只会翻到这一个地方。
+            frame_row = QHBoxLayout()
+            frame_row.addWidget(QLabel("窗口外观："))
+            self.frame_box = QComboBox()
+            self.frame_box.setToolTip(
+                "自绘标题栏 = 与皮肤同色的标题栏（默认）；系统标题栏 = Windows 自带那一条。"
+                "自绘那一档的拖动/缩放/贴边仍由系统处理，**重启软件后生效**"
+            )
+            self.frame_box.addItem("自绘标题栏（与皮肤同色）", titlebar_mod.FRAME_CUSTOM)
+            self.frame_box.addItem("系统标题栏（Windows 自带）", titlebar_mod.FRAME_SYSTEM)
+            self.frame_box.setCurrentIndex(
+                max(0, self.frame_box.findData(self._frame_mode())))
+            frame_row.addWidget(self.frame_box)
+            frame_row.addStretch(1)
+            body.addLayout(frame_row)
+            frame_hint = QLabel("窗口外观**重启软件后生效**（它管的是窗口本身，不是一层皮肤）")
+            frame_hint.setObjectName("statusTag")
+            body.addWidget(frame_hint)
 
             self.anomaly_box = QCheckBox("当日异动提醒（涨停/跌停/大幅波动…，默认关）")
             self.anomaly_box.setChecked(bool(getattr(self.cfg, "intraday_anomaly", False)))
@@ -7236,6 +7426,9 @@ if QT_AVAILABLE:
                 "t_low_rebound_pct": float(self.t_low_rebound_box.value()),
                 # 5) 其他
                 "ui_theme": str(self.theme_box.currentData() or self.cfg.ui_theme),
+                # 窗口外观（自绘/系统标题栏）：**重启后生效**，界面上的提示已写明
+                "window_frame": str(
+                    self.frame_box.currentData() or self._frame_mode()),
                 "intraday_anomaly": self.anomaly_box.isChecked(),
                 "watchlist_max": int(self.watchlist_max_box.value()),
                 "watchlist_in_pool": self.watchlist_in_pool_box.isChecked(),
@@ -7988,12 +8181,25 @@ if QT_AVAILABLE:
             self._restore_window()
 
         def changeEvent(self, event: Any) -> None:  # noqa: N802 - Qt 命名
-            """主窗口被激活（用户点开了它）→ 立刻停止闪烁。"""
+            """主窗口被激活（用户点开了它）→ 立刻停止闪烁。
+
+            顺带同步自绘标题栏的两处状态（2026-10-10）：最大化/还原要换图标，
+            失活时软件名要变暗 —— 这两件事只有窗口自己知道（Qt 不会替我们通知控件）。
+            """
             try:
                 if (event.type() == QEvent.Type.ActivationChange and self.isActiveWindow()):
                     self._stop_alert_flash()
             except Exception as exc:  # noqa: BLE001 - 停闪失败不该影响窗口事件
                 logger.debug(f"处理激活事件失败：{exc}")
+            titlebar = getattr(self, "titlebar", None)
+            if titlebar is not None:
+                try:
+                    if event.type() == QEvent.Type.WindowStateChange:
+                        titlebar.set_maximized(self.isMaximized())
+                    elif event.type() == QEvent.Type.ActivationChange:
+                        titlebar.set_active(self.isActiveWindow())
+                except Exception as exc:  # noqa: BLE001 - 外观同步失败不该影响窗口
+                    logger.debug(f"同步标题栏状态失败：{exc}")
             super().changeEvent(event)
 
         def shutdown(self) -> None:

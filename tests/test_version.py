@@ -162,11 +162,32 @@ def test_package_names_are_renamed_everywhere() -> None:
     assert payload["file"].startswith(f"{ARTIFACT_NAME}-") and payload["file"].endswith(".zip")
     assert payload["version"] in payload["file"]
     _assert_manifest_points_at_a_real_package(payload)
-    # 用过的旧包名一个字都不许剩（初版 `LaoniuTrader`、上一版 `CaishenTrader`）
+    # 用过的旧包名一个字都不许剩（初版 `LaoniuTrader`、上一版 `CaishenTrader`）。
+    # ⚠️ 判据是"**代码/链接**里不许有"，所以先去掉注释行：改名历史写在注释里是**有意保留**的
+    # （"这个产品换过两次 ASCII 名"那段是给人看的档案，2026-10-10 加清理旧附件那一步时
+    # 正是写在注释里 —— 不去掉注释，这条用例会把档案本身判成违规）。
     for label, text in (("CI", workflow), ("script.js", script), ("index.html", index),
                         ("latest.json", manifest)):
+        code = _strip_comments(text)
         for stale in ("LaoniuTrader", "CaishenTrader"):
-            assert stale not in text, f"{label} 里还留着旧包名 {stale}"
+            for shape in (f"{stale}.zip", f"{stale}-", f"downloads/{stale}",
+                          f"dist/{stale}", f"name: {stale}", f'name="{stale}"',
+                          f"artifact: {stale}", f"'{stale}.zip'"):
+                assert shape not in code, f"{label} 里还留着旧包名：{shape}"
+
+
+def _strip_comments(text: str) -> str:
+    """去掉注释：`#` / `//` 开头的行，以及 `<!-- … -->` 那一整段。
+
+    只做"整行/整段"级的过滤 —— 这条用例要防的是"包名与下载链接真的还指着旧名"，
+    不是"文档里提了一句当年的名字"。
+    """
+    import re
+
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    lines = [line for line in text.splitlines()
+             if not line.strip().startswith(("#", "//"))]
+    return "\n".join(lines)
 
 
 def _assert_manifest_points_at_a_real_package(payload: dict) -> None:

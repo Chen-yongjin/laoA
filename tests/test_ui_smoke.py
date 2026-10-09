@@ -2208,7 +2208,8 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
     "stop_loss", "take_profit", "intraday_t", "t_high_min_gain_pct",
     "t_high_pullback_pct", "t_low_min_drop_pct", "t_low_rebound_pct",
     # 6) 其他
-    "ui_theme", "intraday_anomaly", "watchlist_max", "watchlist_in_pool",
+    "ui_theme", "window_frame", "intraday_anomaly", "watchlist_max",
+    "watchlist_in_pool",
     # 7) 数据来源那一行里**用户自己填的** Key（2026-09-18 起内置同花顺也有输入框了）
     "hithink_api_key",
 })
@@ -2248,8 +2249,9 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     # 2026-09-23 一度加过 `intraday_pick_live`（「筛选口径」那一组），当天又被主人划掉
     # ——"不需要加开关，按照我说的规则来"，所以个数回到 37；
     # 37 → 40：2026-10-05 加上语音播报内容那三项（`voice_kinds` / `voice_fields` /
-    # `voice_multi`）—— 主人："语音播报有点乱，可以自由选择要提醒的内容"）
-    assert len(updates) == 40
+    # `voice_multi`）—— 主人："语音播报有点乱，可以自由选择要提醒的内容"；
+    # 40 → 41：2026-10-10 加上窗口外观 `window_frame`（自绘标题栏 / 系统标题栏））
+    assert len(updates) == 41
     # 2026-09-18 起**必须收**它：内置同花顺那一行有输入框，一键保存就该把它写回去
     # （出厂值是空串，程序从不预置；"填了没保存"才是要防的那件事）
     assert "hithink_api_key" in updates
@@ -3353,8 +3355,9 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     #  39 + 1 → 38 + 1：2026-09-21 删掉"数字逐位念"开关；
     #  38 + 1 → 37 + 1：同一天删掉语速键（语速锁定 1.0）
     #  —— 2026-09-23 加过又划掉的 `intraday_pick_live` 让个数回到 37 + 1；
-    #  37 + 1 → 40 + 1：2026-10-05 加上语音播报内容那三项）
-    assert window.save_settings_hint.text().startswith("✅ 已保存 41 项")
+    #  37 + 1 → 40 + 1：2026-10-05 加上语音播报内容那三项；
+    #  40 + 1 → 41 + 1：2026-10-10 加上窗口外观 `window_frame`）
+    assert window.save_settings_hint.text().startswith("✅ 已保存 42 项")
     # 内置同花顺的 Key 也在这份键集合里（它的输入框和替身来源的走同一条规则）
     assert "hithink_api_key" in window._collect_settings_updates()
 

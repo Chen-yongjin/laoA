@@ -304,3 +304,74 @@ def test_semantic_colors_follow_the_theme() -> None:
         theme.apply_theme(app, name)
         assert theme.value_color(0) == ""
         assert theme.value_color(None) == ""
+
+
+# ── 4) 候选配色（2026-10-10：主人要"三套配色出图挑一套"）──
+
+def test_every_palette_defines_every_key() -> None:
+    """**每套色板都必须有同一批键**：样式表模板是所有配色共用的那一张，
+    少一个键 `Template.substitute` 就是 KeyError（换一套配色 = 整个界面打不开）。
+
+    这条看着琐碎，但候选配色是"临时拉出来给主人挑"的，最容易被漏写几个键；
+    挑中之后再并进 `TECH_COLORS`，那时漏键会直接表现成"界面起不来"。
+    """
+    reference = set(theme.SILVER_COLORS)
+    for name, colors in theme.PALETTES.items():
+        missing = reference - set(colors)
+        extra = set(colors) - reference
+        assert missing == set(), f"{name} 少了这些键：{sorted(missing)}"
+        assert extra == set(), f"{name} 多了这些键：{sorted(extra)}"
+        for key, value in colors.items():
+            assert re.fullmatch(r"#[0-9a-fA-F]{6}", value), (name, key, value)
+
+
+def test_every_palette_renders_a_qss_from_its_own_colors() -> None:
+    """每套配色都渲染得出来，而且**用的确实是它自己的色**（不是悄悄退回默认那份）。"""
+    for name in theme.PREVIEW_THEMES:
+        qss = theme.theme_qss(name)
+        colors = theme.PALETTES[name]
+        assert colors["window"] in qss
+        assert colors["accent"] in qss
+        assert colors["titlebar_top"] in qss
+        assert theme.TEXTURE_NAME not in qss          # 深色配色都不贴浅色拉丝纹理
+
+
+def test_candidate_palettes_are_not_user_selectable() -> None:
+    """候选配色**不进设置页下拉框**：`UI_THEMES` 仍是那三个（写错一个字母回默认）。
+
+    这是"临时挑配色"与"用户能选的皮肤"之间的那道墙：候选可以渲染（出对比图），
+    但界面上选不到 —— 挑中的那套会并进 `TECH_COLORS`，不需要多一个用户选项。
+    """
+    assert set(theme.PREVIEW_THEMES) - set(config_mod.UI_THEMES) == {"obsidian", "graphite"}
+    for name in theme.PREVIEW_THEMES:
+        assert name in theme.PALETTES
+    # 用户把 config.toml 手写成候选名 → 回默认（不是"悄悄变成候选色"）
+    assert config_mod.Config(ui_theme="obsidian").ui_theme == config_mod.DEFAULT_UI_THEME
+    assert theme.theme_label("obsidian") == theme.THEME_LABELS[config_mod.DEFAULT_UI_THEME]
+
+
+def test_dark_palettes_all_report_dark() -> None:
+    """`is_dark()` 认的是 `DARK_THEMES` 那一批：候选配色换上去后热力图/自绘控件也要换色。
+
+    `apply_palette(app=None, …)` 在没有 QApplication 的环境里只更新"当前主题"这个名字
+    （`app` 为 None 就不去设样式表），所以这条用例不需要 Qt。
+    """
+    original = theme.current_theme()
+    try:
+        for name in theme.DARK_THEMES:
+            theme.apply_palette(None, name)
+            assert theme.current_theme() == name
+            assert theme.is_dark() is True
+            assert theme.semantic("up") == theme.TECH_SEMANTIC["up"]
+        theme.apply_palette(None, "silver")
+        assert theme.is_dark() is False
+        assert theme.semantic("up") == market_color_up()
+    finally:
+        theme.apply_palette(None, original)
+
+
+def market_color_up() -> str:
+    """浅色皮肤下"涨"的色值（`market.COLOR_UP`，全项目核过的那一档）。"""
+    from laoa_trader import market
+
+    return market.COLOR_UP
