@@ -427,6 +427,8 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
     # 自绘标题栏 + 无边框窗口（主人 2026-10-10：「标题栏还用 Windows 自带的一点都不搭」）。
     # 拖动/缩放/贴边这些系统行为全保留，见 ui/titlebar.py 的模块说明
     from laoa_trader.ui import titlebar as titlebar_mod
+    # 滚轮防误触（主人 2026-10-10：「把设置页的鼠标滚轮功能给限制掉，会无意触发」）
+    from laoa_trader.ui import wheel_guard as wheel_guard_mod
     # 公式编辑器（「公式匹配」页）：单独一个模块 —— 主窗口这边只负责把它挂成页签
     from laoa_trader.ui.formula_page import FormulaPage
 
@@ -1671,6 +1673,10 @@ if QT_AVAILABLE:
             self.window_frame = self._frame_mode()
             self.titlebar: Any = None
             self.chrome: Any = None
+            # 滚轮防误触：设置页那三十多个控件是纵向排一列的，滚轮划过下拉框/数字框
+            # 会直接改值（Qt 默认行为，与焦点无关）—— 用户只是想往下翻页，
+            # 结果把止损 % 改了。装一次应用级过滤器拦住（见 ui/wheel_guard.py）。
+            self.wheel_guard = wheel_guard_mod.install(QApplication.instance())
             self._apply_screen_geometry()
             self._build_ui()
             self._build_tray()
