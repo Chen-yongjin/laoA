@@ -1,0 +1,13 @@
+# 名称: 长期趋势L1（中长线多头）
+# 说明: 中长线趋势多头 + 站上 MA60 + MACD 偏多：①MA20>MA60>MA120（中长线多头排列）②收盘站上 MA60 ③MACD 的 DIF>DEA ④上市满 60 个交易日、当日有成交（VOL>0）、非 ST。适合熊末/震荡市做初筛（池子偏大），要更严就再叠 L2。口径提醒：本引擎没有 DYNAINFO(39) 的 PE，材料里那条 PE 过滤没有写进来（见 docs/兼容性.md）；ST=0 相当于材料里的 NOT(NAMELIKE('S'))。随包公式，可改可删；进池时每条公式最多 3 只。
+MA20:=MA(C,20)
+MA60:=MA(C,60)
+MA120:=MA(C,120)
+中长多:=MA20>MA60 AND MA60>MA120
+站上中线:=C>MA60
+DIF:=EMA(C,12)-EMA(C,26)
+DEA:=EMA(DIF,9)
+MACD偏多:=DIF>DEA
+非新股:=BARSCOUNT(C)>60
+非停牌:=V>0
+中长多 AND 站上中线 AND MACD偏多 AND 非新股 AND 非停牌 AND ST=0
