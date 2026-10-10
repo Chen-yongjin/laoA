@@ -2704,3 +2704,23 @@ def test_adding_an_existing_symbol_fills_the_missing_source_only(page, page_cfg)
     assert float(row["added_price"]) == pytest.approx(5.0)  # 加入价没被重置
     assert "已经在自选里了" in page.hint_text
     assert _pool_row(page_cfg, "600003")["source_label"] == "尾盘超短策略（已停用）"
+
+
+def test_top_buttons_are_not_stretched_across_the_row(page, qapp) -> None:
+    """顶部那三个按钮**不许被拉长铺满整行**（2026-10-11 主人实报的排版毛病）。
+
+    起因：这一行原来右侧挂着一句灰字说明，多出来的宽度被它吃掉了；界面文字瘦身把那句说明
+    删掉之后，多出来的宽度摊到三个按钮上 —— 三个按钮被拉成等宽、铺满一行。
+    修法是这一行最后收一个 `addStretch(1)`；这条用例按"渲染出来的宽度"把结果钉住
+    （只看代码里有没有 addStretch 是不够的：布局策略一改就会重演）。
+    """
+    page.resize(1200, 760)
+    page.show()
+    qapp.processEvents()
+
+    for button in (page.btn_edit, page.btn_start_pick, page.btn_scorecard):
+        natural = button.sizeHint().width()
+        assert button.width() <= natural + 12, (
+            f"「{button.text()}」被拉长了：宽 {button.width()}，自然宽 {natural}")
+    # 三个按钮仍然靠左排（右侧留白）：最后一个按钮的右边缘远不到整页宽度
+    assert page.btn_scorecard.geometry().right() < page.width() - 100

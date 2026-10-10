@@ -205,6 +205,21 @@ def _tab_page(window, title: str):
     return window.tabs.widget(titles.index(title))
 
 
+def _settings_group_text(window, title: str) -> str:
+    """某一组设置里**用户看得见的静态文字**（标签 + 按钮文字，不含输入框内容）。
+
+    2026-10-11 主人要"数据来源那里只保留同花顺那栏，其它都精简掉"，
+    所以断言"某句话不再出现在界面上"时得有个取证入口 ——
+    逐控件找比断言"某个属性不存在"更硬：字被换个控件贴上去也会被抓到。
+    """
+    from PySide6.QtWidgets import QLabel, QAbstractButton
+
+    box = window.settings_sections[title]
+    parts = [w.text() for w in box.findChildren(QLabel)]
+    parts += [w.text() for w in box.findChildren(QAbstractButton)]
+    return "\n".join(parts)
+
+
 def _header_texts(table) -> list[str]:
     """表格的列头文字（断言"列就是这几列、顺序就是这个顺序"的唯一入口）。"""
     return [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
@@ -904,44 +919,18 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     assert not hasattr(window, "group_boxes")
     assert not hasattr(window, "strategy_boxes")
 
-    # 数据来源：**来源列表**。2026-09-18 用户拍板把主次换回来了 ——
-    # 默认 `["hithink", "public"]`（同花顺是主源、免 Key 的公开源是兜底），
-    # 所以列表里是两行、同花顺排第一（**列表顺序 = 优先级**）
-    assert window.cfg.data_sources == ["hithink", "public"]   # 2026-09-18：同花顺回到主源
-    assert "同花顺金融数据服务（内置）" in window.data_source_label.text()
-    assert "公开行情源" in window.data_source_label.text()      # 两个来源都如实列出来
-    # 顺序 = 优先级：同花顺（主源）必须排在公开源**前面**（这是用户看这一行的目的）
-    label = window.data_source_label.text()
-    assert label.startswith("当前来源（按优先级）")
-    assert label.index("同花顺") < label.index("公开行情源")
-    # 2026-09-20（用户："纯解释的长句全删…界面不需要教配置"）：配置键名与那串 TOML
-    # 写法不再出现在界面上 —— 用户看这一行只想知道"现在用哪几个来源"
-    assert "config.toml" not in label and "data_sources" not in label
-    # 列表只画**已启用**的来源（这一份配置里的两个）；能力文案来自注册表
-    assert list(window.source_rows) == [ui_app.BUILTIN_SOURCE, "public"]
+    # 数据来源：**界面上只剩同花顺那一行**（2026-10-11 主人："设置中，数据来源那里
+    # 只保留同花顺那栏，可以填写同花顺KEY，其它都精简掉。"）。
+    # 但 `config.data_sources` **照旧生效、照旧是默认两个** —— 功能没有退化，
+    # 只是界面不再把它当"要用户配的东西"展示（公开源仍是免 Key 的内部兜底）
+    assert window.cfg.data_sources == ["hithink", "public"]
+    assert list(window.source_rows) == [ui_app.BUILTIN_SOURCE]
     from laoa_trader.data import sources as sources_mod
 
     state = {s["id"]: s for s in sources_mod.source_states(window.cfg)}
     builtin = window.source_rows[ui_app.BUILTIN_SOURCE]
     assert builtin.name_label.text() == state["hithink"]["name"]
-    # 排第一的那个 = 主来源（角色标记只给第一位）
-    assert builtin.tag_label.text() == "主来源"
-    # 公开源排在它后面 → 不给角色标记，而是按 Key 状态显示"免 Key"（它确实不用 Key）
-    public = window.source_rows["public"]
-    assert public.tag_label.text() == "免 Key"
-    # 能力说明写在界面上（换来源会丢掉什么，用户必须看得见）——**文案来自真相源**。
-    # 2026-09-20（用户："压成一句…把罗列压缩到一行内、别换行成墙"）：正文只留**短标签**。
-    # 2026-10-11 主人："宁可删干净" —— 连"（换来源会影响这些）"这半句解释也去掉了，
-    # 同一层意思挪进了下面那句**短 tooltip**（"换来源会丢掉这些能力"）。
-    assert builtin.capability_label.text() == "提供：" + state["hithink"]["capabilities_brief"]
-    assert builtin.capability_label.text() == "提供：实时快照、日线、股票列表"
-    # 2026-10-11 主人要求界面文字瘦身：tooltip 只留**一句短的**，
-    # 完整说法（`capabilities_text`）不再塞进界面（它还在数据源注册表里，报障/写文档用）
-    assert builtin.capability_label.toolTip() == "换来源会丢掉这些能力"
-    assert builtin.enabled_box.isChecked() is True
-    assert builtin.enabled_box.isEnabled() is False            # 内置来源不能在界面上关
-    # 非当前页签里的控件 `isVisible()` 恒为 False，所以这里看的是「有没有被显式藏起来」
-    assert builtin.btn_delete.isHidden() is True               # 也不能删
+    assert builtin.name_label.text() == ui_app.DATA_SOURCE_LABELS[ui_app.BUILTIN_SOURCE]
     # **有 Key 输入框、也有【测试连接】**（2026-09-18 用户澄清："设置里让你不要配 KEY，
     # 但是你也要给个 key 的输入口啊" —— 那句"不保留自己的 KEY"说的是**程序里不许预置
     # 开发者自己的 Key**，不是不给用户填）。同一条规则仍然成立：**程序不预置任何 Key**
@@ -957,23 +946,35 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     # 输入框是**密码框**（Key 不该明晃晃挂在屏幕上）
     from PySide6.QtWidgets import QLineEdit
     assert builtin.key_edit.echoMode() == QLineEdit.EchoMode.Password
-    # 申请地址那一行照样在（输入框 + 申请地址并存）
-    assert "fuyao.aicubes.cn" in builtin.key_label.text()
-    # 2026-09-18：用户把主源换回同花顺（公开接口实测会限流，同花顺不会轻易限流），
-    # 所以这一行的标记从"备用源"改回"主来源" —— 标记与文案都由 `ui_app` 的常量给出，
-    # 这里同时钉"常量本身"和"界面上渲染出来的那行字"，免得两处各改一半
-    assert ui_app.BUILTIN_BACKUP_TAG == "主来源"
+    # 说明那一行 = "需要 Key（申请地址 …）"：地址可点开、**只有一句话**
     assert builtin.key_notice_text == ui_app.BUILTIN_BACKUP_TEXT.format(
         url=ui_app.BUILTIN_KEY_URL)
-    assert builtin.key_notice_text.startswith("主来源：同花顺金融数据服务（需要 Key，申请地址")
-    assert "主来源：同花顺金融数据服务（需要 Key，申请地址" in builtin.key_label.text()
-    assert "备用源" not in builtin.key_label.text()          # 旧口径的标记不许再出现
+    assert builtin.key_notice_text == "需要 Key（申请地址 https://fuyao.aicubes.cn）"
+    assert "需要 Key" in builtin.key_label.text()
     assert f'href="{ui_app.BUILTIN_KEY_URL}"' in builtin.key_label.text()   # 地址可点开
     assert builtin.key_label.openExternalLinks() is True
-    # 注册表里还有**没启用**的来源（东方财富）→ 进【添加来源】候选，不画进列表
-    assert [s["id"] for s in window._addable_sources()] == ["eastmoney"]
-    assert "东方财富" in window.source_add_hint.text()
-    assert window.btn_add_source.text() == "添加来源"
+    # 2026-10-11 精简掉的**整块东西**（来源列表 / 添加来源 / 删除 / 能力与角色标签）：
+    # 控件与方法都必须真的不在，不然"精简"只是把字藏起来
+    for gone in ("data_source_label", "source_list_layout", "btn_add_source",
+                 "source_add_hint", "_source_states", "_fallback_source_state",
+                 "_addable_sources", "_rebuild_source_rows", "_refresh_source_hint",
+                 "_source_add_menu", "on_add_source_clicked", "on_add_source",
+                 "on_remove_source", "_source_text", "_source_label"):
+        assert not hasattr(window, gone), f"{gone} 应该随来源列表一起删掉"
+    for gone in ("SOURCE_CAPABILITIES", "SOURCE_ADD_UNAVAILABLE_TEXT",
+                 "BUILTIN_BACKUP_TAG"):
+        assert not hasattr(ui_app, gone), f"{gone} 应该随来源列表一起删掉"
+    # 那一行自己也不再挂角色/能力/开关/删除按钮（`SourceRow` 瘦成一行）
+    for gone in ("tag_label", "capability_label", "note_label", "enabled_box",
+                 "btn_delete"):
+        assert not hasattr(builtin, gone), f"SourceRow.{gone} 应该删掉"
+    # 界面上不再出现"添加/删除来源"这种操作文案（连提示行都没有了）
+    group_text = _settings_group_text(window, "数据来源")
+    for text in ("添加来源", "删除来源", "可以添加：", "免 Key", "列表顺序",
+                 "当前来源（按优先级）", "主来源", "备用源", "config.toml",
+                 "data_sources"):
+        assert text not in group_text, text
+    # 数据量：显示成"几个月"，可编辑的是 history_years
     # 数据量：显示成"几个月"，可编辑的是 history_years
     assert window.history_years_box.value() == pytest.approx(window.cfg.history_years)
     assert "6 个月" in window.data_amount_label.text()
@@ -2182,10 +2183,11 @@ def test_save_notify_feishu_without_credentials_hints(window, seeded, qapp) -> N
 SETTINGS_KEYS: frozenset[str] = frozenset({
     # 1) 数据来源
     #
-    # **没有 `hithink_api_key`**（2026-09-17 用户要求）：界面上不提供填 Key 的入口
-    # （那一行只剩"主来源 + 申请地址"的说明；2026-09-18 用户把主源换回同花顺，
-    # 角色标记随之从"备用源"改回"主来源"），所以一键保存
-    # 也不该再写这个键。读取路径一个字没改（config.toml / 环境变量照旧生效）。
+    # ⚠️ 这里**没有 `data_sources`**，而且不许加（2026-10-11）：界面上的来源列表、
+    # 【添加来源】、【删除】全删掉了，所以没有任何一个控件能改它 ——
+    # 用户手写的顺序/来源名因此**一个字符都不会被动**（有逐字节比对的用例：
+    # `test_saving_settings_never_touches_a_hand_written_data_sources`）。
+    # 它照旧生效：`data/sources.py` 按它决定取数顺序与启停，公开源仍在链子里。
     "history_years",
     # 2) 通知方式
     "notify_popup", "notify_channels", "notify_sound", "notify_flash_seconds",
@@ -2222,23 +2224,15 @@ def test_collect_settings_updates_covers_exactly_the_four_groups(window) -> None
     **程序里不许预置自己的 Key**，不是不给填，
     所以内置同花顺那一行重新有了输入框，一键保存也就该把它写回去；
     出厂包里这个值始终是空串，程序从不写死它）。
-    在此之上，每个**已启用、需要 Key 且界面上真有输入框**的来源会按注册表给的
-    `key_config` 多收一个键 —— 内置同花顺就是靠这条规则被收进来的
-    （`test_source_list_key_field_enters_the_one_click_save`
-    再用一个注册表测试替身把"将来再加要 token 的来源"那条分支钉住）。
-    公开行情源是**免 Key** 的（它那行连输入框都没有），所以一个都不多收。
+    这个键**不是写死的**：收集函数按"界面上那一行自己的 `key_config`"收，
+    也就是"界面上有没有输入框"是唯一判据（所以哪天再加一个要 Key 的来源，
+    它的 Key 会自动进这份键集合 —— 见下一条断言）。
+    `data_sources` 则**一个都不多收**：界面上已经没有能改它的控件了。
     """
-    from laoa_trader.data import sources as sources_mod
-
-    extra_key_fields = {
-        state["key_config"] for state in sources_mod.source_states(window.cfg)
-        if state["enabled"] and state["needs_key"] and state["key_config"]
-        # 内置同花顺也会被收（它那行现在有输入框），所以这里用替身来源单独验这条分支，
-        # 而"界面上有没有这个框"正是"要不要收这个键"的判据
-        and state["id"] != ui_app.BUILTIN_SOURCE
-    } - SETTINGS_KEYS
     updates = window._collect_settings_updates()
-    assert set(updates) == SETTINGS_KEYS | extra_key_fields
+    assert set(updates) == SETTINGS_KEYS
+    # 界面管不着 `data_sources`：它既不在收集函数的字典里，也不在界面的任何控件上
+    assert "data_sources" not in updates
     # 当前：37 个固定键（35 → 33：删掉 Windows 通知那一路时
     # `notify_windows_sound` / `notify_windows_open_url` 随之取消；
     # 33 → 37：加上桌宠与中文朗读的 4 个键；
@@ -2264,17 +2258,29 @@ def test_collect_settings_updates_covers_exactly_the_four_groups(window) -> None
     # 竞价那 9 个键**一个都不在**（它们在 `Config` 上连字段都没了）
     assert not [k for k in updates if k.startswith("auction")], sorted(updates)
     assert "intraday_auction" not in updates
+    # 收集规则本身（"界面上有输入框的每一行，按它自己的 key_config 收"）：
+    # 界面上现在只有同花顺一行，所以这一份键集合里**只该有** `hithink_api_key`
+    # 这一个 Key 类键 —— 多收一个就说明有哪一行没被精简掉
+    row_key_fields = {
+        str(getattr(row, "key_config", "") or "")
+        for row in window.source_rows.values()
+        if getattr(row, "key_edit", None) is not None
+    }
+    assert row_key_fields == {"hithink_api_key"}
+    key_like = {k for k in updates if k.endswith("_api_key") or k.endswith("_token")}
+    assert key_like == {"hithink_api_key"}, sorted(key_like)
 
 
 def _change_every_settings_control(window) -> None:
     """把设置页**每一个**控件都改一遍（一键保存的验收要用；不留一个"没被覆盖"的键）。
 
-    2026-09-17：这一组里**没有** Key 输入框了（同花顺那一行只有"主来源 + 申请地址"
-    的说明；2026-09-18 用户把主源换回同花顺，角色标记随之改回"主来源"），所以这里也不改它 ——
-    `_collect_settings_updates()` 的键集合里同样没有 `hithink_api_key`。
+    数据来源那一组现在只有两个控件：数据量（`history_years`）与同花顺那一行的
+    Key 输入框（`hithink_api_key`）—— 两个都要改，改完一键保存就该都落盘。
+    `data_sources` **没有控件**，所以这里也不改它（这正是"界面不动它"的由来）。
     """
     # 1) 数据来源
     window.history_years_box.setValue(1.5)
+    window.source_rows[ui_app.BUILTIN_SOURCE].key_edit.setText("key-from-one-click")
     # 2) 通知方式（四个勾选框 + 参数）
     window.popup_box.setChecked(False)
     for name, box in window.channel_boxes.items():
@@ -2309,18 +2315,23 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
     同时验证"保留用户自己的注释与未知键"（`config.update_config_file` 是**就地改写**，
     不是重写整个文件）—— 这是这一页敢一次写回 32 个键的前提。
     """
+    # 输入框的初值**只能是**用户配置里的原值（界面不预置任何 Key）
+    row = window.source_rows[ui_app.BUILTIN_SOURCE]
+    assert row.key_edit.text() == window.cfg.hithink_api_key
     _change_every_settings_control(window)
     qapp.processEvents()
     config_file = seeded.data_dir / "config.toml"
-    before_key = window.cfg.hithink_api_key       # 测试配置里是 "test-key"
+    key_from_ui = row.key_edit.text()             # 上面刚改成 "key-from-one-click"
+    assert key_from_ui != window.cfg.hithink_api_key
 
     window.save_settings_button.click()          # ← **一次点击**
     qapp.processEvents()
     text = config_file.read_text(encoding="utf-8")
 
     for line in (
-        # `hithink_api_key` **不在**这一批里（界面上没有它的入口了，见 SETTINGS_KEYS 的说明）
         "history_years = 1.5",
+        # 数据来源那一组现在还有一个控件：同花顺那一行的 Key 输入框（见下）
+        f'hithink_api_key = "{key_from_ui}"',
         "notify_popup = false",
         'notify_channels = ["feishu"]',
         "notify_sound = false",
@@ -2351,14 +2362,16 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
     assert 'my_own_key = "别动我"' in text
     # 回显：写了几项、写到哪个文件、现在生效的是什么
     hint = window.save_settings_hint.text()
-    # 项数就是固定键那份集合：内置同花顺那一行的 Key 现在也在里面
+    # 项数就是固定键那份集合：内置同花顺那一行的 Key 也在里面
     # （用户 2026-09-18 要回了输入口，`hithink_api_key` 属于固定键）
     assert hint.startswith(f"✅ 已保存 {len(SETTINGS_KEYS)} 项（已写入 config.toml）")
     assert "生效：主题 系统默认；" in hint and "T策略 开" in hint
-    # 那一行的 Key 现在**会被写回**：值就是输入框里显示的（= 用户 config 里的原值），
-    # 所以内容不变、但**写这一下是有的**（"填了没保存"才是要防的那件事）
-    assert f'hithink_api_key = "{before_key}"' in text
-    assert window.cfg.hithink_api_key == before_key
+    # 那一行的 Key **会被写回**：改动来自界面那个输入框（"填了没保存"是要防的那件事）
+    assert f'hithink_api_key = "{key_from_ui}"' in text
+    assert window.cfg.hithink_api_key == key_from_ui
+    # 而 `data_sources` **没有**被这次保存塞进文件（界面没有任何入口能改它；
+    # 逐字节比对见 `test_saving_settings_never_touches_a_hand_written_data_sources`）
+    assert "data_sources" not in text
     # 内存里的配置同步跟上（不用重启）
     assert window.cfg.history_years == 1.5
     assert window.cfg.notify_popup is False
@@ -2922,6 +2935,16 @@ _DELETED_EXPLANATION_PHRASES: tuple[str, ...] = (
     "点右边的按钮就能插入；最后一行是筛选条件",            # EDITOR_HINT
     "勾「策略选取」列 = 这条策略参与筛选",                 # PAGE_HINT
     "口径：面积 = 行业流通市值合计",                       # 热力图那行小字里的口径段
+    # 2026-10-11（主人："数据来源那里只保留同花顺那栏…其它都精简掉"）：
+    # 【添加来源】/【删除】/能力标签/角色标记那一套整块删掉，这几句原话不许回来
+    "添加来源",
+    "可以添加：",
+    "没有可添加的来源了",
+    "这个来源名是你在 config.toml 的 data_sources 里写的",
+    "当前来源（按优先级）",
+    "主来源",
+    "备用源",
+    "免 Key",
 )
 
 
@@ -3351,175 +3374,174 @@ def test_market_page_is_a_tab_of_its_own(window) -> None:
     assert window.market_scroll.widgetResizable() is True
     assert window.market_scroll.horizontalScrollBar().isVisible() is False
 
-# ── 「数据来源」的来源列表（可添加的多个来源，各自用自己的 Key）──
+# ── 「数据来源」：**界面上只剩同花顺那一行**（2026-10-11 主人精简）──
+#
+# 主人原话："设置中，数据来源那里只保留同花顺那栏，可以填写同花顺KEY，其它都精简掉。"
+# 这一组因此**没有任何"来源列表"**了：没有【添加来源】、没有【删除】、没有能力标签、
+# 没有"列表顺序 = 优先级"的说明行。下面这几条钉的是**精简之后仍然成立的两件事**：
+#   1. 界面**一个字都不改** `config.data_sources`（用户手写的顺序/来源名原样保留）；
+#   2. 公开行情源**照旧是免 Key 的内部兜底**（同花顺没配 Key 时行情还得靠它）——
+#      精简的是界面，不是功能。
 
 
-def test_source_list_adds_eastmoney_without_a_fake_key_box(
-    window, seeded, qapp
+def test_source_group_shows_only_hithink_and_keeps_the_public_fallback(
+    window, qapp
 ) -> None:
-    """**【添加来源】→ 东方财富**：写回 `data_sources`、列表出现它那一行、
-    **免 Key 的来源不给假输入框**，再删掉就回到原样。
+    """界面上只有同花顺一行；但**公开源仍在链子里**（免 Key 兜底，功能没退化）。
 
-    这条用的是**真实的第二个来源**（`data/sources.py` 的 `eastmoney`），不是测试替身：
-    候选、名称、能力文案、风险说明全部来自注册表 —— 界面不自己维护第二份。
+    为什么这条必须有：这次改动最大的风险不是"少画了几个控件"，
+    而是有人顺手把公开源从 `data_sources` 或注册表里也删了 —— 那一刀下去，
+    没配 Key 的用户就**一点行情都取不到**（正是当初引入公开源要解决的问题）。
     """
     from laoa_trader.data import sources as sources_mod
 
-    config_file = seeded.data_dir / "config.toml"
-    assert window.cfg.data_sources == ["hithink", "public"]   # 2026-09-18：同花顺回到主源
-    assert "eastmoney" in sources_mod.REGISTRY           # 后端已实现第二个来源
-
-    # 【添加来源】的菜单里就是它（抽成方法之后测试不用去点会阻塞的 `exec`）
-    menu = window._source_add_menu()
-    assert [action.text() for action in menu.actions()] == ["东方财富（公开接口，免 Key）"]
-    assert "未文档化" in menu.actions()[0].toolTip()      # 风险说明也在菜单里
-
-    window.on_add_source("eastmoney")
-    qapp.processEvents()
-    assert window.cfg.data_sources == ["hithink", "public", "eastmoney"]
-    assert 'data_sources = ["hithink", "public", "eastmoney"]' in config_file.read_text(
-        encoding="utf-8")
-    # 列表顺序 = 优先级：同花顺（主）→ 公开源（兜底）→ 用户新加的（追加在末尾）
-    assert list(window.source_rows) == ["hithink", "public", "eastmoney"]
-    row = window.source_rows["eastmoney"]
-    assert row.name_label.text() == "东方财富（公开接口，免 Key）"
-    assert row.tag_label.text() == "免 Key"
-    # **免 Key 的来源不给假输入框**（用户会去找一个根本不存在的 Key）
-    assert row.key_edit is None
-    assert row.btn_test is None
-    assert "免 Key" in row.key_label.text()
-    # 2026-09-20（用户："按同一把尺子压成一句，只留结论，实现细节别放界面上"）：
-    # 那一大段（实测条数/单位是手/限流细节/能力边界/klt 参数）压成**一句话**，
-    # 逐字钉住 —— 只留"什么时候轮得到它 + 有什么风险"。
-    assert row.note_label.text() == (
-        "兜底源之一：需要【添加来源】才会用到，接口未文档化、会被限流，只作备用。")
-    for jargon in ("klt", "单位是手", "实测", "降级", "涨停池"):
-        assert jargon not in row.note_label.text(), jargon
-    assert "**" not in row.note_label.text()             # markdown 星号不上界面
-    # 能力文案来自真相源（短的那份），且**不许**出现它没有的能力（涨停池/复权因子这类）
-    assert row.capability_label.text() == "提供：" + \
-        sources_mod.capabilities_brief(sources_mod.REGISTRY["eastmoney"])
-    assert "涨停" not in row.capability_label.text()
-    assert row.btn_delete.isHidden() is False             # 用户加的可以删
-    assert window._source_add_menu() is None              # 没有别的可加了
-    assert window.source_add_hint.text().startswith("没有可添加的来源了")
-
-    # 删除 → 回到原来的两个来源
-    row.btn_delete.click()
-    qapp.processEvents()
-    assert window.cfg.data_sources == ["hithink", "public"]   # 2026-09-18：同花顺回到主源
-    assert list(window.source_rows) == ["hithink", "public"]   # 2026-09-18：同花顺回到主源
-    assert 'data_sources = ["hithink", "public"]' in config_file.read_text(
-        encoding="utf-8")
-    # 内置那一条**删不掉**（历史日K 的 dump 只有它提供）
-    window.on_remove_source("hithink")
-    assert "hithink" in window.source_rows
-    assert "不能删除" in window.status_label.fullText()
+    # ① 界面：只有一行（同花顺），带 Key 输入框
+    assert list(window.source_rows) == [ui_app.BUILTIN_SOURCE]
+    assert window.source_rows[ui_app.BUILTIN_SOURCE].key_edit is not None
+    page = _tab_page(window, ui_app.TAB_SETTINGS)
+    texts = [w.text() for w in page.findChildren(ui_app.QPushButton)]
+    assert "添加来源" not in texts and "删除" not in texts
+    # ② 后端：配置里那两个来源照旧、公开源照旧"现在就能用"（免 Key）
+    assert window.cfg.data_sources == ["hithink", "public"]
+    usable = [info.id for info in sources_mod.usable_sources(window.cfg)]
+    assert "public" in usable
+    # ③ 而且它真的在链子末尾等着（同花顺没 Key 时会被用到）
+    assert [info.id for info in sources_mod.active_sources(window.cfg)] == [
+        "hithink", "public",
+    ]
+    # 界面上的文字里不许再出现"添加 / 删除来源"这类操作（连提示行都没了）
+    assert "添加来源" not in _settings_group_text(window, "数据来源")
 
 
-def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
-                                                         monkeypatch) -> None:
-    """**将来再加"需要 Key 的来源"时，它的 Key 自动进一键保存的键集合**。
+def test_hithink_key_field_enters_the_one_click_save(window, seeded, qapp) -> None:
+    """同花顺那一行的 Key 输入框**一键保存就会写回** `hithink_api_key`。
 
-    用一条**注册表里的测试替身**验证契约（公开源与东方财富都是免 Key 的，走不到这条分支）：
-    `key_config` 指到哪个配置键，一键保存就写哪个键 —— 界面上的输入框与写回
-    config.toml 的键一一对应，不存在"填了没保存"。
-    这也顺带证明：同花顺不再被收进这份键集合，是**因为界面上没有它的输入框**，
-    而不是因为代码里写死了一个"同花顺除外"的例外。
+    这一行的输入口是用户唯一要动手的地方（2026-09-18 用户要回来的输入口），
+    所以"填了没保存"是最该防的问题：键名由那一行自己的 `key_config` 给
+    （不是代码里写死的特例），收集函数按"界面上有没有这个框"判。
     """
-    from laoa_trader.data import sources as sources_mod
-
-    fake_key = "fake_source_token"
-    monkeypatch.setitem(sources_mod.REGISTRY, "fakesrc", sources_mod.SourceInfo(
-        id="fakesrc", name="测试来源（要 Key）", needs_key=True,
-        capabilities=frozenset({sources_mod.CAP_DAILY_HISTORY}),
-        note="测试替身：只用来验证「要 Key 的来源」这条分支。",
-        key_config=fake_key,
-    ))
-    seeded.data_sources = ["hithink", "public", "fakesrc"]
-    window._rebuild_source_rows()
-    qapp.processEvents()
-    row = window.source_rows["fakesrc"]
-    assert row.key_edit is not None                       # 要 Key → 有输入框
-    assert row.tag_label.text() == "未配 Key"
-    # 同花顺那一行的输入口由它**自己的** `key_config` 决定（不是写死的特例）
-    # 2026-09-18：内置同花顺那一行**有**输入框（用户要回了输入口）
-    assert window.source_rows["hithink"].key_edit is not None
-    row.key_edit.setText("token-abc")
+    row = window.source_rows[ui_app.BUILTIN_SOURCE]
+    row.key_edit.setText("key-from-ui")
     updates = window._collect_settings_updates()
-    assert updates[fake_key] == "token-abc"               # 它的 Key 进了一键保存的键集合
-    # 写盘路径也是通的（`fake_source_token` 不是 Config 的字段，但存进文件没问题）
+    assert updates["hithink_api_key"] == "key-from-ui"
     window.save_settings_button.click()
     qapp.processEvents()
+    assert window.save_settings_hint.text().startswith("✅ 已保存")
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
-    assert f'{fake_key} = "token-abc"' in text
-    # 32 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 33 项
-    # （35 + 1 → 33 + 1：2026-09-18 删掉 Windows 通知那一路少了两个键；
-    #  33 + 1 → 37 + 1：加上桌宠与中文朗读的四个键；
-    #  37 + 1 → 38 + 1：用户要求"桌宠声音可以自由改"，加上 `notify_voice_name`；
-    #  39 + 1 → 38 + 1：2026-09-21 删掉"数字逐位念"开关；
-    #  38 + 1 → 37 + 1：同一天删掉语速键（语速锁定 1.0）
-    #  —— 2026-09-23 加过又划掉的 `intraday_pick_live` 让个数回到 37 + 1；
-    #  37 + 1 → 40 + 1：2026-10-05 加上语音播报内容那三项；
-    #  40 + 1 → 41 + 1：2026-10-10 加上窗口外观 `window_frame`；
-    #  41 + 1 → 32 + 1：2026-10-11 删掉「竞价扫描」那一组的 9 个键）
-    assert window.save_settings_hint.text().startswith("✅ 已保存 33 项")
-    # 内置同花顺的 Key 也在这份键集合里（它的输入框和替身来源的走同一条规则）
-    assert "hithink_api_key" in window._collect_settings_updates()
+    assert 'hithink_api_key = "key-from-ui"' in text
 
 
-def test_source_list_falls_back_when_the_registry_is_unreadable(
-    window, seeded, qapp, monkeypatch, caplog
+def test_saving_settings_never_touches_a_hand_written_data_sources(
+    window, seeded, qapp
 ) -> None:
-    """`data/sources.py` 读不出来（还没写好 / 它自己抛异常）→ **退回内置那一行**，窗口照开。
+    """**保存设置不动 `data_sources`** —— 逐字节比对那一行（用户手写的也不动）。
 
-    一张设置页绝不该把整个程序拖死：真出问题时用户连界面都进不去，什么都问不出来。
-    兜底那一行必须**如实说明**为什么只有它（而不是默默只显示同花顺）。
+    为什么用"逐字节"而不是"值相等"：界面这次删掉了所有改来源的入口，
+    这条用例就是那个结论的**取证**。值相等还不够 —— 顺手把用户写的注释抹掉
+    （`_toml_value` 重新格式化数组、丢掉行尾注释）同样是他不想要的改动。
+
+    所以这里特意写一行**带注释、带自定义顺序**的 `data_sources`，
+    然后点一次【保存设置】：那一行必须一个字符都不变。
+    """
+    config_file = seeded.data_dir / "config.toml"
+    hand_written = 'data_sources = ["public", "hithink"]   # 主人自己排的顺序\n'
+    config_file.write_text(
+        config_file.read_text(encoding="utf-8") + hand_written, encoding="utf-8"
+    )
+    before = config_file.read_text(encoding="utf-8")
+    assert hand_written in before
+
+    # 改一个**别的**键（证明这次保存真的写了东西 —— 否则"没动"没有意义）
+    window.source_rows[ui_app.BUILTIN_SOURCE].key_edit.setText("k2")
+    window.save_settings_button.click()
+    qapp.processEvents()
+    assert window.save_settings_hint.text().startswith("✅ 已保存")
+
+    after = config_file.read_text(encoding="utf-8")
+    assert after != before                                   # 确实写盘了
+    assert hand_written in after                             # 但那一行一个字符没变
+    assert after.count("data_sources") == before.count("data_sources")
+    assert 'hithink_api_key = "k2"' in after                 # 该写的还是写了
+    # 收集函数里根本没有这个键（"界面会不会改它"的唯一入口就是它）
+    assert "data_sources" not in window._collect_settings_updates()
+
+
+def test_window_opens_with_a_public_only_config_and_leaves_it_alone(
+    seeded, qapp
+) -> None:
+    """老配置里**只有公开源**（`data_sources = ["public"]`）→ 窗口照开、照不改它。
+
+    这类配置是真会存在的（用户在早先的版本里删掉过同花顺那一行）。界面精简之后
+    必须做到两件事：窗口正常打开（不是"配置里没写同花顺就崩"），
+    并且保存设置**不把它悄悄加回来** —— 用户没要求过的事，界面不该替他改。
+    同花顺那一行的输入框照旧在（他随时可以填 Key，但填不填由他）。
+    """
+    seeded.data_sources = ["public"]
+    win = ui_app.MainWindow(seeded)
+    win.show()
+    qapp.processEvents()
+    try:
+        assert list(win.source_rows) == [ui_app.BUILTIN_SOURCE]
+        assert win.source_rows[ui_app.BUILTIN_SOURCE].key_edit is not None
+        config_file = seeded.data_dir / "config.toml"
+        config_file.write_text(
+            config_file.read_text(encoding="utf-8")
+            + 'data_sources = ["public"]\n', encoding="utf-8")
+        win.save_settings_button.click()
+        qapp.processEvents()
+        assert 'data_sources = ["public"]' in config_file.read_text(encoding="utf-8")
+        assert seeded.data_sources == ["public"]             # 内存里那份也没被动过
+    finally:
+        win._timer.stop()
+        win._market_timer.stop()
+        win.scheduler.stop()
+        win.quotes.stop()
+        win.scores.stop()
+        win.shutdown()
+        win.tray.hide()
+        win.deleteLater()
+        qapp.processEvents()
+
+
+def test_source_group_builds_without_the_source_registry(
+    seeded, qapp, monkeypatch, caplog
+) -> None:
+    """`data/sources.py` 读不出来（还没写好 / 它自己抛异常）→ **窗口照开、那一行照画**。
+
+    一条设置页绝不该把整个程序拖死（真出问题时用户连界面都进不去，什么都问不出来）。
+    2026-10-11 精简之后这条更简单了：那一行**是内置的**（名字、申请地址、
+    要写的配置键全是本地常量），所以注册表读不出来也不影响它 ——
+    但这条用例留着，因为它同时钉住"**Key 还是要能填、能存**"。
     """
     from laoa_trader.data import sources as sources_mod
-    from laoa_trader.ui import app as ui_app
 
     def boom(_cfg):
         raise RuntimeError("注册表炸了")
 
     monkeypatch.setattr(sources_mod, "source_states", boom)
-    window._rebuild_source_rows()
+    monkeypatch.setattr(sources_mod, "REGISTRY", {})
+    win = ui_app.MainWindow(seeded)
+    win.show()
     qapp.processEvents()
-    assert list(window.source_rows) == [ui_app.BUILTIN_SOURCE]
-    row = window.source_rows[ui_app.BUILTIN_SOURCE]
-    assert "注册表暂时读不出来" in row.note_label.text()      # 如实说明，不是空白
-    # 这一行照旧是"主来源 + 申请地址"（它不依赖注册表，是内置的）
-    assert row.tag_label.text() == ui_app.BUILTIN_BACKUP_TAG
-    # 输入框也在：它不依赖注册表（写死的就是 `hithink_api_key`），而且这一行**需要 Key**
-    assert row.key_edit is not None
-    assert "fuyao.aicubes.cn" in row.key_label.text()
-    assert row.key_label.openExternalLinks() is True
-    assert window._addable_sources() == []                     # 没有候选 → 不会画假条目
-    assert window._source_add_menu() is None
-    # 兜底那一行也有输入口，所以一键保存照样收 `hithink_api_key`
-    #（注册表读不出来**不影响**这一点：这个键名是内置的，不靠注册表告诉它）
-    assert "hithink_api_key" in window._collect_settings_updates()
-
-
-def test_source_list_shows_unknown_names_truthfully(window, seeded, qapp) -> None:
-    """配置里手写了认不出的来源名 → **照实显示**并注明没有实现，不假装认识它。
-
-    改写死一行"主来源：同花顺"的话，用户改过 `data_sources` 之后界面就在说假话。
-    """
-    seeded.data_sources = ["hithink", "mystery"]
-    window._rebuild_source_rows()
-    qapp.processEvents()
-    # **列表顺序 = 配置里写的顺序**（那是真实的取数优先级）：配置里同花顺写在前面，
-    # 界面就照实画在前面 —— 界面只在"配置里漏写了它"时把它补在**最后**（备用位置）
-    assert list(window.source_rows) == ["hithink", "mystery"]
-    unknown = window.source_rows["mystery"]
-    assert unknown.name_label.text() == "mystery"          # 键本身就当名字显示
-    assert unknown.tag_label.text() == "未实现"
-    # **没有它的 Key 输入这回事**：不画一个填不了东西的框（画了用户会去找 Key）
-    assert unknown.key_edit is None
-    assert "界面还没有这个来源的实现" in unknown.key_label.text()
-    assert unknown.capability_label.text() == "提供：—"
-    assert "mystery" in window.data_source_label.text()    # 配置原值也写出来
+    try:
+        assert list(win.source_rows) == [ui_app.BUILTIN_SOURCE]
+        row = win.source_rows[ui_app.BUILTIN_SOURCE]
+        assert row.key_edit is not None                      # 输入口不依赖注册表
+        assert "fuyao.aicubes.cn" in row.key_label.text()     # 申请地址也不依赖它
+        assert row.key_label.openExternalLinks() is True
+        row.key_edit.setText("k-without-registry")
+        # 一键保存照样收这个键（键名是内置的，不靠注册表告诉它）
+        assert win._collect_settings_updates()["hithink_api_key"] == "k-without-registry"
+    finally:
+        win._timer.stop()
+        win._market_timer.stop()
+        win.scheduler.stop()
+        win.quotes.stop()
+        win.scores.stop()
+        win.shutdown()
+        win.tray.hide()
+        win.deleteLater()
+        qapp.processEvents()
 
 
 def test_settings_tab_is_scrollable_so_the_window_can_shrink(window, qapp) -> None:
@@ -5679,3 +5701,175 @@ def test_deleting_a_symbol_added_from_the_result_page_removes_it_now(
 
     assert "600001" not in _symbols_of(window.pool_table)
     assert "600001" not in pool_mod.pool_symbols(seeded.db_path)
+
+
+# ── 按钮**不许被拉长铺满**（主人 2026-10-11 实报的那一类回归）──
+#
+# 症状与根因（主人原话："说明内容去掉以后，策略选股页的 3 个按钮都拉长铺满了"）：
+# 一行里原来右侧挂着一句灰字说明，**多出来的宽度被它吃掉了**；界面文字瘦身把说明删掉
+# 之后，那一行没有任何东西再去吃多余宽度，于是宽度摊到剩下的控件上 —— 按钮被拉成
+# 等宽、铺满整行（实测：`策略编辑` 宽 385 / 自然宽 80；`复制路径` 宽 674 / 自然宽 74）。
+#
+# 所以判据只有一个：**渲染出来的宽度不许明显超过它的自然宽度**
+# （`width() <= sizeHint().width() + 12`）—— 只断言"代码里有 addStretch"是拦不住回归的
+# （把 `addStretch(1)` 删掉、那条断言照样绿）。
+
+
+def _stretched_buttons(container) -> list[tuple[str, int, int]]:
+    """容器里**被拉长**的按钮：`(文字, 实际宽, 自然宽)`（空列表 = 都保持自然宽度）。"""
+    from PySide6.QtWidgets import QPushButton
+
+    out: list[tuple[str, int, int]] = []
+    for button in container.findChildren(QPushButton):
+        if not button.isVisible():
+            continue                      # 没在当前页签上的控件量不到宽度
+        natural = button.sizeHint().width()
+        if natural <= 0:
+            continue
+        if button.width() > natural + 12:
+            out.append((button.text(), button.width(), natural))
+    return out
+
+
+def test_settings_rows_do_not_stretch_their_buttons(window, qapp) -> None:
+    """「系统设置」各组里的按钮**保持自然宽度**（含【复制路径】那一个）。
+
+    2026-10-11 修的：`复制路径` 原来直接挂在竖直布局上（`body.addWidget(btn)`），
+    于是它撑满整行 —— 实测宽 674、自然宽只有 74，与主人报的"按钮拉长铺满"同一种病。
+    现在它在自己的行里、行尾有 `addStretch(1)`。
+    """
+    settings_page = _tab_page(window, ui_app.TAB_SETTINGS)
+    window.tabs.setCurrentWidget(settings_page)     # 非当前页签量不到宽度
+    window.resize(1280, 820)
+    qapp.processEvents()
+
+    assert window.btn_copy_paths.isVisible() is True
+    assert window.btn_copy_paths.width() <= window.btn_copy_paths.sizeHint().width() + 12
+    assert _stretched_buttons(settings_page) == [], _stretched_buttons(settings_page)
+
+
+def test_no_visible_button_is_stretched_in_any_tab(window, qapp) -> None:
+    """**通用护栏**：每一页（含「策略筛选」的两个子页）里都不许有被拉长的按钮。
+
+    逐个页签量渲染宽度，而不是去 grep `addStretch`：这条会在"删掉某行末尾的说明文字"
+    或者"删掉 `addStretch(1)`"时立刻变红，正是主人这次实报的那类回归。
+    窗口先调到 1280 宽 —— 行里得有剩余宽度，才有"被拉长"这回事。
+    """
+    window.resize(1280, 820)
+    qapp.processEvents()
+    problems: list[str] = []
+    for i in range(window.tabs.count()):
+        window.tabs.setCurrentIndex(i)
+        qapp.processEvents()
+        window._tick()
+        qapp.processEvents()
+        for text, width, natural in _stretched_buttons(window.tabs.widget(i)):
+            problems.append(f"{window.tabs.tabText(i)}：{text!r} 宽={width} 自然={natural}")
+    # 页内的两个子页（策略列表 / 筛选结果）也要各量一遍
+    formula_page = window.formula_page
+    for attr in ("list_stack", "bottom_stack"):
+        stack = getattr(formula_page, attr, None)
+        if stack is None:
+            continue
+        for i in range(stack.count()):
+            stack.setCurrentIndex(i)
+            qapp.processEvents()
+            for text, width, natural in _stretched_buttons(stack.widget(i)):
+                problems.append(f"{attr}[{i}]：{text!r} 宽={width} 自然={natural}")
+    assert problems == [], problems
+
+
+def test_other_windows_do_not_stretch_their_buttons(window, seeded, qapp) -> None:
+    """**对话框与顶层窗口**里的按钮同样不许被拉长（它们的排法与页签不同）。
+
+    覆盖：消息中心 / 提醒浮窗 / 桌宠 / 授权对话框 / 成绩单对话框 —— 这几张都不在页签里，
+    上面那条通用护栏看不到它们，而它们清一色是"左边几个按钮 + 右边【关闭】"的排法：
+    中间的 `addStretch(1)` 一旦被删掉，整排按钮就会一起被拉宽（正是要防的那类回归）。
+    """
+    from laoa_trader.ui.alert_popup import AlertPopup
+    from laoa_trader.ui.desktop_pet import DesktopPet
+    from laoa_trader.ui.license_dialog import LicenseDialog
+    from laoa_trader.ui.message_center import MessageCenter
+    from laoa_trader.ui.scorecard_dialog import ScorecardDialog
+
+    problems: list[str] = []
+    made: list = []
+    try:
+        center = MessageCenter(window)
+        center.set_messages([{"symbol": "600001", "name": "低价样本", "kind": "选股结果",
+                              "detail": "测试", "at": "2026-09-11 09:35:00"}])
+        made.append(("消息中心", center))
+        made.append(("浮窗", AlertPopup()))
+        made.append(("桌宠", DesktopPet()))
+        made.append(("授权对话框", LicenseDialog(None, None)))
+        made.append(("成绩单", ScorecardDialog(None, cfg=window.cfg,
+                                              targets=[("样本策略", "C>0")],
+                                              db_path=seeded.db_path)))
+        for name, widget in made:
+            widget.show()
+            qapp.processEvents()
+            window.resize(1280, 820)
+            for text, width, natural in _stretched_buttons(widget):
+                problems.append(f"{name}：{text!r} 宽={width} 自然={natural}")
+    finally:
+        # 收尾要**等线程真的退出**（授权窗口在读机器码、成绩单在预检）：留着在飞的
+        # `QThread` 会打到已销毁的控件上，后面的用例会成倍变慢
+        for _name, widget in made:
+            for method in ("shutdown", "_stop_threads"):
+                stop = getattr(widget, method, None)
+                if callable(stop):
+                    stop()
+            widget.close()
+            widget.deleteLater()
+        qapp.processEvents()
+    assert problems == [], problems
+
+
+def test_formula_tab_fallback_run_button_does_not_stretch(
+    seeded, qapp, monkeypatch
+) -> None:
+    """兜底那条【开始筛选】也不许被拉长（它那一行的说明文字同样被删掉过）。
+
+    `MainWindow._build_formula_tab` 里有一段**兜底分支**：页面没有 `btn_start_pick`
+    时（中间的半成品状态 / 将来页面改版）主窗口自己建一个按钮。那一行原来右侧挂着一句
+    灰字说明，2026-10-11 删掉了 —— 删完就必须补 `addStretch(1)`，否则这个按钮会撑满整行。
+
+    正常路径上这段分支不执行（页面自己有按钮），所以只能**造一个没有那个按钮的页面**
+    才量得到它；这也正是它容易被漏掉的原因。
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    class _PageWithoutRunButton(ui_app.FormulaPage):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.btn_start_pick = None          # 模拟"页面没提供按钮"的中间态
+
+    monkeypatch.setattr(ui_app, "FormulaPage", _PageWithoutRunButton)
+    win = ui_app.MainWindow(seeded)
+    win.resize(1280, 820)
+    win.show()
+    qapp.processEvents()
+    try:
+        page = _tab_page(win, ui_app.TAB_FORMULA)
+        win.tabs.setCurrentWidget(page)
+        qapp.processEvents()
+        button = win.btn_run
+        assert isinstance(button, QPushButton)
+        assert button is not None
+        assert button.isVisible() is True
+        assert button.width() <= button.sizeHint().width() + 12, (
+            f"兜底的【开始筛选】被拉长了：宽 {button.width()} / 自然 "
+            f"{button.sizeHint().width()}"
+        )
+    finally:
+        win._timer.stop()
+        win._market_timer.stop()
+        win.scheduler.stop()
+        win.quotes.stop()
+        win.scores.stop()
+        win.shutdown()
+        win.tray.hide()
+        win.close()
+        win.deleteLater()
+        qapp.processEvents()
+

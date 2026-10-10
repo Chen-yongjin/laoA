@@ -722,6 +722,11 @@ if QT_AVAILABLE:
             self.btn_scorecard.setToolTip("回测勾选的策略（几十秒，要扫全库）")
             self.btn_scorecard.clicked.connect(lambda _checked=False: self.on_scorecard())
             top.addWidget(self.btn_scorecard)
+            # ⚠️ 必须**收一个尾巴**：这一行原来右侧挂着一句灰字说明，它把多出来的宽度吃掉了；
+            # 说明删掉之后（2026-10-11 界面文字瘦身），多出来的宽度就摊到三个按钮上 ——
+            # 三个按钮被拉成等宽铺满整行，很难看（主人实报："3 个按钮都拉长铺满了"）。
+            # `addStretch` 之后按钮保持自己的自然宽度、靠左排，与别的页面一致。
+            top.addStretch(1)
 
             layout.addLayout(top)
 

@@ -1,6 +1,6 @@
 [project]
 name = "luweik-decision"
-version = "1.9.0"
+version = "1.9.1"
 description = "luweik决策系统（Windows 单机版）：A 股匹配 + 盯盘 + 提醒"
 authors = [{ name = "async-chen" }]           # 与「关于」对话框、README 的版权信息一致
 requires-python = ">=3.11"

@@ -305,38 +305,33 @@ HEATMAP_TTL_SECONDS = 180
 SETTINGS_GROUPS: tuple[str, ...] = (
     "数据来源", "通知方式", "T策略", "其他",
 )
-# ── 「数据来源」：来源列表（**同花顺是主源，公开源是兜底**）──
-#: 内置来源的键（它仍然读 `cfg.data_sources` 决定启停与优先级）。
+# ── 「数据来源」：**界面上只留同花顺那一行** ──
+#
+# ⚠️ 2026-10-11 主人："设置中，数据来源那里只保留同花顺那栏，可以填写同花顺KEY，
+# 其它都精简掉。" —— 于是界面上**没有**来源列表、没有【添加来源】、【删除】、
+# 能力标签与"列表顺序 = 取数优先级"那行说明了。
+#
+# **但功能没有退化**（这一点最容易搞错，所以写在这里）：
+#   * `config.data_sources` **照旧起作用** —— 默认还是 `["hithink", "public"]`，
+#     界面只是**不再收集、不再改写**它（见 `_collect_settings_updates`：一键保存
+#     一个键都不碰 data_sources），用户手改过的值也照常生效；
+#   * `data/sources.py` 的**注册表与降级链一个字没动** —— 同花顺取不到数时，
+#     公开行情源（腾讯/新浪/东财，免 Key）仍然是内部兜底，`snapshot_map` /
+#     `supplement_map` 还是按 `data_sources` 的顺序往后找；
+#   * 所以"界面看不到公开源"只是**不再把它当可选项展示**：它是个免 Key 的兜底，
+#     不是要用户配的东西 —— 没有 Key 的输入框、没有可点的开关，
+#     画一行出来只会让用户以为"这里也要我操作"。
+#: 内置来源的键（`cfg.data_sources` 里写的就是它；界面靠它取"那一行的 Key 输入框"）。
 BUILTIN_SOURCE = "hithink"
-#: **读不到 `data/sources.py` 时**内置来源那一行用的能力文案（兜底，不是真相源）。
-#: 正常路径的能力文案来自 `sources.source_states()` 的 `capabilities_text` ——
-#: 界面**不另维护一份"谁有什么能力"的判断**，抄一份出来就一定会和第二来源对不上。
-SOURCE_CAPABILITIES: dict[str, str] = {
-    BUILTIN_SOURCE: "实时快照 · 历史日K · 股票代码表",
-}
-#: **没有可添加的来源**时那一行如实说明（用户点【添加来源】也会看到同一句）。
-#: 什么时候会走到它：注册表里的来源都已经加进 `data_sources` 了，或者
-#: `data.sources` 读不出来（那时列表里只有内置同花顺那一行 + 兜底说明）。
-SOURCE_ADD_UNAVAILABLE_TEXT = (
-    # 2026-09-20 按用户"只保留有用的"精简：原来三句里只有"怎么停用一个来源"是操作，
-    # 其余（为什么没有可加的、去查日志）都是解释 —— 真出问题时日志照旧有记录。
-    "没有可添加的来源了。想停用一个：点它那一行的【删除】。"
-)
-#: 数据来源的显示名：键 → 中文。
-#: 界面上**如实显示配置里的值**，认不出的键原样显示 + 注明"界面没有它的实现" ——
-#: 改写死一行"主来源：同花顺"的话，用户手改过 `data_sources` 之后就与界面说的不一致了。
+#: 数据来源的显示名：键 → 中文（界面只显示同花顺那一行）。
 DATA_SOURCE_LABELS: dict[str, str] = {BUILTIN_SOURCE: "同花顺金融数据服务（内置）"}
-#: 同花顺那一行显示标记 / 说明用的两种文案（用户 2026-09-17 给定）：
-#: 那一行是"<标记>：同花顺金融数据服务（需要 Key，申请地址 …）"，地址做成可点的链接；
-#: 它**在 Key 输入框下面**（2026-09-18：输入框按用户要求加回来了）。
-#: 2026-09-18（用户拍板）：**同花顺回到主源**，公开源降为兜底 ——
-#: 理由是公开接口实测会限流（腾讯 fqkline 抓 700 只左右开始连续失败、新浪列表接口
-#: 回 456），而同花顺是正经 API。所以这一行的标记从"备用源"改回"主来源"，
-#: 并且要**如实说明为什么值得为它申请一个 Key**：完整历史只有它给得到。
-BUILTIN_BACKUP_TAG = "主来源"
+#: 同花顺那一行的说明文案：地址做成可点的链接，它**在 Key 输入框下面**。
+#: 2026-10-11 主人要"其它都精简掉"之后，"主来源 / 主源 / 备用源"这类**角色词**也跟着删了 ——
+#: 名称那一行已经写着"同花顺金融数据服务（内置）"，再来一句"主来源：同花顺金融数据服务…"
+#: 是把同一个名字说两遍；用户在这一行只关心两件事：**要不要 Key**、**去哪儿申请**。
 BUILTIN_KEY_URL = "https://fuyao.aicubes.cn"
-#: 那一行的原文（`{url}` 会被换成可点的 `<a href>`，见 `_backup_key_notice`）。
-BUILTIN_BACKUP_TEXT = "主来源：同花顺金融数据服务（需要 Key，申请地址 {url}）"
+#: 那一行的原文（`{url}` 会被换成可点的 `<a href>`）。
+BUILTIN_BACKUP_TEXT = "需要 Key（申请地址 {url}）"
 #: `history_years` 那一行的中文口径：一年 ≈ 250 个交易日，0.5 年 ≈ 6 个月
 #: （与 `config.history_years` 的默认值同源，用户给定：超短线不需要长历史）
 MONTHS_PER_YEAR = 12
@@ -520,7 +515,7 @@ def probe_data_source(cfg: Config, api_key: str = "", client: Any = None) -> str
         # 这里只说这三件事，不承诺"装历史包"之类已经不存在的路（历史包方案已被用户否掉）。
         return ("❌ 还没填 API Key（这是【测试连接】要用的那一个）："
                 "不填也能看行情与大盘概览（免 Key 公开源）；"
-                "但完整历史与**筛选**要它 —— 自检要求复权事件与行业归属齐备")
+                "但完整历史与筛选要它 —— 自检要求复权事件与行业归属齐备")
     try:
         probe = client or hx.HithinkClient(api_key=key, timeout=8.0, retries=1)
         total = int(probe.special_pool_total(market.LIMIT_UP_PATH))
@@ -698,41 +693,25 @@ if QT_AVAILABLE:
             super().setText(text)
 
     class SourceRow(QFrame):
-        """「数据来源」里的一行：**来源名 + 提供什么 + Key（或"免 Key"）+ 启用 + 删除**。
+        """「数据来源」那一行 —— **现在只有同花顺一行**。
 
-        用户要求数据来源做成"可添加的多个来源，各自用他自己的 Key"，所以这一行是
-        列表里的一格，而不是把 Key 输入框散在页面上：
-
-            ┌ 同花顺金融数据服务（内置）  [主来源]                            [✓] 启用 ┐
-            │ 提供：实时快照、日线、股票列表（换来源会影响这些）                       │
-            │ [••••••]（Key 输入框，默认空白）        [测试连接]                     │
-            │ 主来源：同花顺金融数据服务（需要 Key，申请地址 fuyao.aicubes.cn）       │
-            └────────────────────────────────────────────────────────────────────────┘
-            ┌ 公开行情源（腾讯为主，免 Key）  [免 Key]                      [✓] 启用 ┐
-            │ 提供：实时快照（换来源会影响这些）                                      │
-            │ 兜底源：免 Key，不用申请、不用填。                                      │
+            ┌ 同花顺金融数据服务（内置）                                             ┐
+            │ [••••••]（Key 输入框，初始值 = 用户 config.toml 里那个）  [测试连接]    │
+            │ 需要 Key（申请地址 fuyao.aicubes.cn，可点开）                            │
             └────────────────────────────────────────────────────────────────────────┘
 
-        三种行的差异全部由**构造参数**表达（不在类里 if 来源名）：
-        - 内置行：`deletable=False` + 启用勾选框 `setEnabled(False)`（"在 data_sources 里就在用"）；
-        - 用户添加的来源：可删、可停用，Key 落到它自己的配置键上；
-        - 认不出的来源（用户手改过 `data_sources`）：只读展示 + 注明"界面没有它的实现"。
+        2026-10-11 主人："设置中，数据来源那里只保留同花顺那栏，可以填写同花顺KEY，
+        其它都精简掉。" —— 于是这一类从"来源列表里的一格"瘦成"同花顺那一行"：
+        原来那些 `tag_label`（主来源/免 Key/已配 Key…）、`enabled_box`、
+        `btn_delete`、`capability_label`（"提供：实时快照、日线…"）、`note_label`
+        **全部删掉**，只留**名称 + Key 输入框 + 【测试连接】+ 申请地址那一行**。
 
-        "要不要填 Key"**完全听调用方的**（`needs_key`，来自 `data.sources.source_states`）：
-        免 Key 的来源**不给输入框** —— 画一个填不了东西的框，比不画更糟
-        （用户会去找一个根本不存在的 Key）。
-
-        2026-09-17 → 2026-09-18：内置同花顺那一行**先**被改成"只有一行申请地址、没有输入框"，
-        用户随后澄清了那句话的意思 —— **"不要配 KEY" = 程序里不许预置自己的 Key，
-        不是不给用户填**（原话："设置里让你不要配 KEY，但是你也要给个 key 的输入口啊"）。
-        所以现在是：**输入框（默认空白）+【测试连接】+ 下面一行可点开的申请地址**。
         程序侧一个字都没写死：`key_text` 只来自用户自己的 `config.toml`
-        （`hithink_api_key`）/ 环境变量 `HITHINK_FINANCE_API_KEY`，出厂包里的这两个值都是空的。
+        （`hithink_api_key`）/ 环境变量 `HITHINK_FINANCE_API_KEY`，出厂包里的这两个值都是空的
+        ——"不要配 KEY"那句说的是**程序里不许预置开发者自己的 Key**，不是不给用户填。
 
-        属性（测试与将来的第二来源都按这些名字取）：`source`（键）、`name_label`、
-        `tag_label`、`capability_label`、`note_label`、`key_label`、`key_edit`（**免 Key 的
-        来源才为 None**）、`enabled_box`、`btn_delete`、`btn_test`（免 Key 时为 None）、
-        `key_notice_text`（内置行那句说明的纯文本）。
+        属性（测试按这些名字取）：`source`、`name_label`、`key_label`、
+        `key_edit`、`btn_test`、`key_notice_text`、`key_config`。
         """
 
         def __init__(
@@ -740,29 +719,19 @@ if QT_AVAILABLE:
             source: str,
             *,
             name: str,
-            capability: str = "",
-            #: 完整说法（tooltip 用）。与 `capability` 是同一份能力集合的两种长度：
-            #: 界面上写短的（一行放得下），需要抠细节的人鼠标一停看到完整那份
-            capability_full: str = "",
-            note: str = "",
-            builtin: bool = False,
-            implemented: bool = True,
-            needs_key: bool = True,
             has_key: bool = False,
             key_text: str = "",
             key_placeholder: str = "API Key",
             key_config: str = "",
             key_echo_password: bool = True,
-            tag: str = "",
             key_notice: str = "",
             key_notice_url: str = "",
         ) -> None:
             super().__init__()
             self.source = source
-            self.builtin = builtin
-            self.implemented = implemented
-            self.needs_key = bool(needs_key)
             self.key_config = key_config
+            self.needs_key = True                 # 界面只画"要 Key"的这一行（同花顺）
+            self.has_key = bool(has_key)
             self.setObjectName("sourceRow")
             self.setFrameShape(QFrame.Shape.StyledPanel)
             self.setStyleSheet(
@@ -780,109 +749,29 @@ if QT_AVAILABLE:
                 _scaled_font(self.name_label.font(), FONT_VALUE_DELTA, bold=True)
             )
             head.addWidget(self.name_label)
-            # 标记：主来源 / 免 Key / 已配 Key / 未配 Key / 未实现 ——
-            # 一眼看出这个来源的状态。调用方给了 `tag` 就用它（"主来源"那一行是按
-            # `data_sources` 的顺序算出来的，类里判不出来，所以由调用方传进来）
-            if not tag:
-                if not implemented:
-                    tag = "未实现"
-                elif not self.needs_key:
-                    tag = "免 Key"
-                elif has_key:
-                    tag = "已配 Key"
-                else:
-                    tag = "未配 Key"
-            self.tag_label = QLabel(tag)
-            self.tag_label.setObjectName("statusTag")      # 小号灰字
-            self.tag_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-            head.addWidget(self.tag_label)
             head.addStretch(1)
-            self.enabled_box = QCheckBox("启用")
-            self.enabled_box.setChecked(True)
-            # 为什么这个勾选框点不动：启停只由 `data_sources` 一个键表达（见
-            # `data/sources.py` 的模块头）——**列表里出现 = 已启用**，
-            # 想停用它就用【删除】。画一个能点、点了却不改变任何东西的开关，
-            # 就是在骗用户（他会以为关掉了）
-            self.enabled_box.setEnabled(False)
-            # 2026-10-11 主人："tooltip 只留一句短的" —— 原来这里各写了 2~3 句
-            # （含"为什么不能关""为什么不做一个开关"这类讲理由的话），删成一句
-            self.enabled_box.setToolTip(
-                "内置来源不能关；想停用它就删除这一行"
-                if builtin else
-                "列表里出现 = 已启用；停用请点【删除】"
-            )
-            head.addWidget(self.enabled_box)
-            self.btn_delete = QPushButton("删除")
-            self.btn_delete.setToolTip("从列表里去掉这个来源")
-            self.btn_delete.setVisible(not builtin)
-            head.addWidget(self.btn_delete)
             outer.addLayout(head)
-
-            # 能力说明：**换来源会丢掉什么**，用户必须看得见（文案来自 `source_states`）。
-            # 2026-09-20（用户："压成一句…保留"换来源会丢掉什么"这层意思，但把罗列压缩到
-            # 一行内"）：正文只写短列表 + 一句后果；完整说法（`capabilities_text`）进 tooltip，
-            # 需要抠细节的人鼠标一停就能看到 —— 信息没丢，只是不再占满屏幕。
-            brief = plain_text("提供：" + capability) if capability else (
-                "提供：—" if not implemented else "提供：（未知）")
-            # 2026-10-11：原来这里还缀着"（换来源会影响这些）"—— 那是**讲理由**，
-            # 按主人"宁可删干净"的要求去掉；同一句意思留在下面的**短 tooltip** 里
-            self.capability_label = QLabel(brief)
-            # 2026-10-11：这里原来塞了两行（"这个来源能提供的东西…" + 完整说法），
-            # 现在只留一句短的
-            self.capability_label.setToolTip("换来源会丢掉这些能力")
-            self.capability_label.setObjectName("statusTag")
-            self.capability_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-            self.capability_label.setWordWrap(True)
-            outer.addWidget(self.capability_label)
-
-            # 一句话说明（含**已知风险**，例如东方财富是未文档化接口）：直接显示，
-            # 不用点开、不用看文档 —— 用户要在这里就知道自己换了什么
-            self.note_label = QLabel(plain_text(note))
-            self.note_label.setObjectName("statusTag")
-            self.note_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-            self.note_label.setWordWrap(True)
-            self.note_label.setVisible(bool(note))
-            self.note_label.setToolTip(note or "")
-            outer.addWidget(self.note_label)
 
             row = QHBoxLayout()
             row.setSpacing(PAGE_SPACING)
-            self.key_edit: Any = None
-            self.btn_test: Any = None
             #: 那一行说明的**纯文本**（界面显示的是带 `<a>` 的富文本，测试按这个属性断言文字）
             self.key_notice_text = str(key_notice or "")
             self.key_label = QLabel("")
             self.key_label.setObjectName("statusTag")
             self.key_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
             self.key_label.setWordWrap(True)
-            if self.needs_key:
-                # 需要 Key 的来源 = **输入框 + 【测试连接】**
-                # 2026-09-18（用户澄清）：内置同花顺这一行**也要有输入口** ——
-                # 用户原话"设置里让你不要配 KEY，但是你也要给个 key 的输入口啊"：
-                # 当初那句"只保留 key 的申请地址、不保留自己的 KEY"说的是
-                # **程序里不许预置自己的（开发者的）Key**，不是"界面上不给填"。
-                # 所以现在：输入框照给、默认**空白**（`key_text` 来自用户自己的 config.toml，
-                # 程序从不写死任何 Key），下面再挂一行可点开的申请地址。
-                self.key_label.setVisible(False)
-                row.addWidget(self.key_label)
-                self.key_edit = QLineEdit(key_text)
-                if key_echo_password:
-                    self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-                self.key_edit.setPlaceholderText(key_placeholder)
-                row.addWidget(self.key_edit, 1)
-                self.btn_test = QPushButton("测试连接")
-                row.addWidget(self.btn_test)
-            else:
-                # **免 Key 的来源不给假输入框**：直接说清"不用填"
-                self.key_label.setText("免 Key：这个来源不用申请、不用填（填了也没有用）")
-                self.key_label.setVisible(True)
-                row.addWidget(self.key_label, 1)
+            self.key_edit = QLineEdit(key_text)
+            if key_echo_password:
+                self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self.key_edit.setPlaceholderText(key_placeholder)
+            row.addWidget(self.key_edit, 1)
+            self.btn_test = QPushButton("测试连接")
+            row.addWidget(self.btn_test)
             outer.addLayout(row)
 
             if key_notice:
-                # 申请地址那一行（内置同花顺）：做成**可点开**的链接，
-                # 用户真的需要 Key 时一步就能到申请页，不用手抄地址。
-                # 富文本而不是 HTML 转义拼接：整句是程序里写死的常量，不含用户输入。
+                # 申请地址那一行：做成**可点开**的链接，用户真要 Key 时一步到申请页
+                # （富文本而不是 HTML 转义拼接：整句是程序里写死的常量，不含用户输入）
                 self.key_label.setText(
                     self.key_notice_text.replace(
                         key_notice_url,
@@ -896,15 +785,6 @@ if QT_AVAILABLE:
                 self.key_label.setOpenExternalLinks(True)
                 self.key_label.setVisible(True)
                 outer.addWidget(self.key_label)
-
-            if not implemented:
-                # 用户在 config.toml 里手写了别的来源名：**照实说**，不假装能配
-                if self.key_edit is not None:
-                    self.key_edit.setReadOnly(True)
-                    self.key_edit.setPlaceholderText("（界面还没有这个来源的 Key 输入）")
-                self.key_label.setText("界面还没有这个来源的实现：只如实显示，不会拿它取数")
-                self.key_label.setVisible(True)
-                self.setToolTip("这个来源程序还没有实现，取不到数")
 
     class MarketStatItem(QFrame):
         """一个小条目：标签（**加粗名称**）+ 数值大一号加粗（**横向一条**，不是一张大卡）。
@@ -2318,6 +2198,11 @@ if QT_AVAILABLE:
                 # （"结果直接进「自选标的」；策略的启停在下面的列表里勾"），整行删掉：
                 # 「结果去哪了」写在【开始筛选】自己的 tooltip 与点下去那一刻的状态提示里，
                 # "勾选怎么用"看列表那一列就懂。
+                # ⚠️ 说明文字删掉之后**必须补一个 `addStretch`**：原来是那行灰字吃掉了
+                # 多出来的宽度，删了之后宽度就摊到按钮上（它会撑满整行）——
+                # 这正是「策略筛选」页顶部那三个按钮被拉长的同一类回归，见
+                # `formula_page._build_list_side` 里 `top.addStretch(1)` 的说明。
+                row.addStretch(1)
                 layout.addLayout(row)
             layout.addWidget(self.formula_page, 1)
             return page
@@ -3140,63 +3025,46 @@ if QT_AVAILABLE:
             return body
 
         def _build_settings_source_group(self, layout: Any) -> None:
-            """第 1 组「数据来源」：**来源列表**（**同花顺是主源，公开源是兜底**）。
+            """第 1 组「数据来源」：**只保留同花顺那一行**（名称 + Key 输入框 + 申请地址）。
 
-            用户要求的是"可用的其它源，让用户自主添加，用他自己的 key"，所以这一组的主体
-            是一张**来源列表**：每行是「来源名 + 提供什么 + Key（或"免 Key" / 备用的申请地址）
-            + 启用 + 删除」。**列表顺序 = 取数优先级**，所以 2026-09-17 起
-            **顺序就是优先级**：2026-09-18 起同花顺（要 Key）排第一，公开源紧随其后兜底。
+            2026-10-11 主人："设置中，数据来源那里只保留同花顺那栏，可以填写同花顺KEY，
+            其它都精简掉。" 于是这一组只剩一行 —— 用户要做的唯一一件事就是**填 Key**
+            （或者什么都不填：行情与大盘概览照样能用，只是**筛选**会被数据自检拒绝）。
 
-            规则：
-            - 列表只画**已启用**的来源（`data_sources` 里写着的那些，顺序即优先级），
-              其余已实现的来源进【添加来源】菜单（点了才写回 `data_sources`）；
-              候选来自注册表，界面**不自己维护一份"还有哪些来源"**；
-            - 列表里如果出现注册表里没有的名字，那只可能是用户手改过 `data_sources`：
-              那一行**照实显示**并注明"界面还没有它的实现"，不假装认识它；
-            - 需要 Key 的来源给 Key 输入框（键由注册表的 `key_config` 指出），
-              **免 Key 的来源不给输入框**（公开源那种）—— 画一个填不了东西的框
-              比不画更糟，用户会去找一个根本不存在的 Key；
-            - **内置同花顺那一行没有输入框**（2026-09-17 用户要求）：改成一行说明
-              `主来源：同花顺金融数据服务（需要 Key，申请地址 …）`，地址**可点开**；
-              它的 Key 仍然照旧从 config.toml / 环境变量读（见 `_collect_settings_updates`）。
+            **为什么界面只留同花顺、公开源却还在**（功能没退化的依据，别搞错）：
+            * 公开行情源（腾讯/新浪/东财，免 Key）仍然在 `data/sources.py` 的注册表里，
+              仍然是 `snapshot_map` / `supplement_map` 的**内部兜底** —— 同花顺没配 Key
+              或取不到数时，行情照旧从它那儿来；
+            * `config.data_sources`（默认 `["hithink", "public"]`）**照旧生效**，
+              而界面**一个字都不改它**（`_collect_settings_updates` 里根本没有这个键）；
+            * 界面不再暴露"加来源 / 删来源 / 换顺序"，是因为**它不需要用户配** ——
+              把"免 Key / 要 Key"两套逻辑摆给用户看，只会让他以为这一步必须动手。
             """
             body = self._settings_group(layout, "数据来源")
-            # 配置里的**原值**也写出来："界面说的"与"config.toml 里写的"必须对得上
-            # （认不出的键照实显示，不假装认识）—— 老属性名 `data_source_label` 保留
-            self.data_source_label = QLabel(self._source_text(self.cfg.data_sources))
-            self.data_source_label.setObjectName("statusTag")      # 小号灰字
-            self.data_source_label.setWordWrap(True)
-            body.addWidget(self.data_source_label)
 
-            #: 来源键 → 那一行的控件（测试与"填 Key / 删除"都按这个名字取）
+            # 那一行：名称 + Key 输入框（初值 = 用户 config.toml 里那个）+【测试连接】
+            # + 可点开的申请地址。Key 的入口**只有这一处**（`key_config` 指向
+            # `hithink_api_key`）—— `_collect_settings_updates` 就是按它收集的。
+            #: 来源键 → 那一行的控件（测试与"填 Key / 测试连接"都按这个名字取）。
+            #: 现在**只有 `hithink` 一个键**：别的来源不再展示，所以字典也只有一项。
             self.source_rows: dict[str, Any] = {}
-            self.source_list_layout = QVBoxLayout()
-            self.source_list_layout.setContentsMargins(0, 0, 0, 0)
-            self.source_list_layout.setSpacing(PAGE_SPACING)
-            body.addLayout(self.source_list_layout)
-
-            add_row = QHBoxLayout()
-            add_row.setSpacing(PAGE_SPACING)
-            self.btn_add_source = QPushButton("添加来源")
-            self.btn_add_source.setToolTip(
-                "把另一个已实现的来源加进来（每个来源用它自己的 Key）"
+            row = SourceRow(
+                BUILTIN_SOURCE,
+                name=DATA_SOURCE_LABELS[BUILTIN_SOURCE],
+                has_key=bool(self.cfg.hithink_api_key),
+                key_text=self._source_key_text("hithink_api_key"),
+                key_placeholder="在 fuyao.aicubes.cn/admin 获取",
+                key_config="hithink_api_key",
+                key_notice=BUILTIN_BACKUP_TEXT.format(url=BUILTIN_KEY_URL),
+                key_notice_url=BUILTIN_KEY_URL,
             )
-            # 有候选时弹一个菜单（选一个加进来），没有候选时给如实说明 ——
-            # 两个来源都加完/注册表读不出来时，绝不画"点了没用的条目"
-            self.btn_add_source.clicked.connect(self.on_add_source_clicked)
-            add_row.addWidget(self.btn_add_source)
-            add_row.addStretch(1)
-            body.addLayout(add_row)
-            self.source_add_hint = QLabel("")
-            self.source_add_hint.setObjectName("statusTag")      # 小号灰字
-            self.source_add_hint.setWordWrap(True)
-            body.addWidget(self.source_add_hint)
+            row.key_edit.setToolTip(
+                "同花顺的 Key（写回 config.toml 的 hithink_api_key）；留空 = 没配"
+            )
+            row.btn_test.clicked.connect(lambda _=False: self.on_test_source_key(BUILTIN_SOURCE))
+            body.addWidget(row)
+            self.source_rows[BUILTIN_SOURCE] = row
 
-            #: 来源列表（一行一个来源）。Key 输入框与【测试连接】**长在行上**
-            #: （`SourceRow.key_edit` / `SourceRow.btn_test`），不是窗口级的
-            #: `self.key_edit` —— 因为"来源可以有多个、各用各的 Key"。
-            #: 谁按窗口级的老属性找控件会立刻 AttributeError，比"悄悄拿不到东西"好查。
-            self._rebuild_source_rows()
             # 「没配 Key」的那句话写在这里（**不弹窗**）：用户点【下载数据】时，
             # 这一行会因为缺 Key 亮起来、焦点也落到输入框上 —— 指路比拦住他更有效
             self.key_hint = QLabel("")
@@ -3204,6 +3072,9 @@ if QT_AVAILABLE:
             self.key_hint.setVisible(False)
             body.addWidget(self.key_hint)
 
+            # ── 数据工具那一排（下载 / 刷新 / 检查盘面 / 暂停提醒）──
+            # 2026-10-11 的精简只动"来源列表"那一块，这一排是**操作**不是"来源配置"，
+            # 原样保留（用户要的"其它都精简掉"指的是来源行的那些说明与开关）。
             data_row = QHBoxLayout()
             data_row.setSpacing(PAGE_SPACING)
             self.btn_download = QPushButton(BTN_DOWNLOAD_TEXT)
@@ -3269,10 +3140,18 @@ if QT_AVAILABLE:
                 setattr(self, attr, edit)
                 path_row.addWidget(edit, 1)
                 body.addLayout(path_row)
+            # ⚠️ 这一行必须**收一个尾巴**（`addStretch`）：单独一个按钮直接挂进竖直布局时，
+            # 它会撑满整行（实测宽 674、自然宽只有 74）—— 与「策略筛选」页那三个按钮被拉长
+            # 是同一类问题（主人 2026-10-11 实报："按钮都拉长铺满了"）。收尾之后按钮
+            # 保持自然宽度、靠左排，与其余各行一致。
             self.btn_copy_paths = QPushButton("复制路径")
             self.btn_copy_paths.setToolTip("把数据目录与日志路径一起复制到剪贴板")
             self.btn_copy_paths.clicked.connect(self.on_copy_paths)
-            body.addWidget(self.btn_copy_paths)
+            copy_row = QHBoxLayout()
+            copy_row.setSpacing(PAGE_SPACING)
+            copy_row.addWidget(self.btn_copy_paths)
+            copy_row.addStretch(1)
+            body.addLayout(copy_row)
 
         def _build_settings_notify_group(self, layout: Any) -> None:
             """第 2 组「通知方式」：四个勾选框 + 各频道的参数。
@@ -6765,68 +6644,12 @@ if QT_AVAILABLE:
 
         # ── 保存设置（写回 config.toml，保留注释与未知键）──
 
-        # ── 「数据来源」的来源列表 ──
+        # ── 「数据来源」那一行（界面上**只剩同花顺**这一行）──
         #
-        # **真相源是 `data/sources.py`**：有哪些来源、各自要什么凭据、能做什么、
-        # 有什么已知风险，全由 `source_states(cfg)` 给（界面不另写一份能力文案 ——
-        # 抄一份出来，第二个来源落地时两边一定会不一致）。
-        # 列表只画**已启用**的来源（`data_sources` 里写着的那些，顺序即优先级），
-        # 其余的实现好的来源进【添加来源】菜单，用户点了才加。
-
-        def _source_states(self) -> tuple[list[dict], str]:
-            """要画的来源行 + "取不到真相源"时的原因（原因非空 = 走了兜底）。
-
-            **防御性导入**：`data.sources` 还没写好、或者它自己抛异常时，
-            退回"只有内置同花顺一行 + 我自己那句如实说明"，窗口照常打开 ——
-            一张设置页绝不该把整个程序拖死（用户报障时连界面都进不去就什么都问不出来）。
-            """
-            try:
-                from laoa_trader.data import sources as sources_mod
-
-                states = list(sources_mod.source_states(self.cfg))
-            except Exception as exc:  # noqa: BLE001 - 注册表读不出来不该拦住界面
-                logger.warning(f"读数据来源注册表失败（退回内置来源那一行）：{exc}")
-                return [self._fallback_source_state()], f"{type(exc).__name__}: {exc}"
-            rows = [state for state in states if state.get("enabled")]
-            # 内置同花顺**永远在列表里**（它提供历史日K 的 dump 与实时快照），但
-            # **排在最后**：列表顺序 = 取数优先级，而 2026-09-17 起
-            # "同花顺是主源、公开源兜底"（用户 2026-09-18 拍板）—— 插在第一位就等于告诉用户
-            # "同花顺最优先"，与 config.py 里 `data_sources = ["public", "hithink"]`
-            # 的默认顺序正好相反。配置里漏写它时也补在这儿（并如实说明"配置里没写它"）。
-            if not any(str(r.get("id")) == BUILTIN_SOURCE for r in rows):
-                rows.append(self._fallback_source_state(
-                    configured=BUILTIN_SOURCE in [
-                        str(x) for x in (self.cfg.data_sources or [])
-                    ]
-                ))
-            # 认不出的名字（用户手改过 `data_sources`）在注册表里根本没有 ——
-            # 照实补一行只读的，别让"我明明写了它"变成"列表里凭空少了一个"
-            known = {str(state.get("id")) for state in states}
-            for name in (self.cfg.data_sources or []):
-                name = str(name)
-                if name and name not in known:
-                    rows.append({
-                        "id": name, "name": name, "enabled": True, "needs_key": False,
-                        "has_key": False, "capabilities_text": "",
-                        "note": "这个来源名是你在 config.toml 的 data_sources 里写的，"
-                                "但程序还没有它的实现 —— 界面只如实显示，不会拿它取数",
-                        "key_config": None, "unknown": True,
-                    })
-            return rows, ""
-
-        def _fallback_source_state(self, *, configured: bool = True) -> dict:
-            """读不到注册表时那一行：内置同花顺（能力文案用本地常量，如实标注原因）。"""
-            note = ("数据来源注册表暂时读不出来（见日志）：这里只显示内置的同花顺。"
-                    "它提供 历史日K · 股票列表 · 实时快照。")
-            if not configured:
-                note = ("config.toml 的 data_sources 里没有写内置的 hithink —— "
-                        "程序不会用它取数，请把它加回去。" + note)
-            return {
-                "id": BUILTIN_SOURCE, "name": DATA_SOURCE_LABELS[BUILTIN_SOURCE],
-                "enabled": True, "needs_key": True, "has_key": bool(self.cfg.hithink_api_key),
-                "capabilities_text": SOURCE_CAPABILITIES.get(BUILTIN_SOURCE, ""),
-                "note": note, "key_config": "hithink_api_key", "fallback": True,
-            }
+        # 2026-10-11 主人："设置中，数据来源那里只保留同花顺那栏，可以填写同花顺KEY，
+        # 其它都精简掉。" 于是【添加来源】/【删除】/能力标签/候选菜单整套都不再进界面
+        # （`data/sources.py` 的注册表、`config.data_sources` 与"取不到数就落到下一个
+        # 来源"的兜底链**一行没动** —— 公开源仍在链子里，只是不再是用户要填的东西）。
 
         def on_test_source_key(self, source: str) -> None:
             """【测试连接】：拿**那个来源输入框里的 Key**真发一次最小请求，结论写回提示行。
@@ -6863,237 +6686,6 @@ if QT_AVAILABLE:
             if not key_field:
                 return ""
             return str(getattr(self.cfg, key_field, "") or "")
-
-        def _addable_sources(self) -> list[dict]:
-            """【添加来源】的候选：**已实现但还没启用**的来源（来自注册表）。"""
-            try:
-                from laoa_trader.data import sources as sources_mod
-
-                states = list(sources_mod.source_states(self.cfg))
-            except Exception as exc:  # noqa: BLE001 - 读不到就没有可加的
-                logger.debug(f"读数据来源注册表失败（添加来源无候选）：{exc}")
-                return []
-            return [state for state in states if not state.get("enabled")]
-
-        def _rebuild_source_rows(self) -> None:
-            """按 `source_states(cfg)` 重画来源列表（一行一个来源）。"""
-            layout = getattr(self, "source_list_layout", None)
-            if layout is None:
-                return
-            while layout.count():
-                item = layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    widget.setParent(None)
-                    widget.deleteLater()
-            self.source_rows = {}
-            rows, fallback_reason = self._source_states()
-            self._source_fallback_reason = fallback_reason
-            #: 配置里写着的来源名（顺序 = 优先级）—— 标记怎么给按**配置**判，
-            #: 不按"这一轮画出来几行"判：注册表读不出来时只画得出同花顺一行，
-            #: 若按行数判就会给同花顺贴上"主来源"，而配置里明明还有公开源。
-            listed = [str(x).strip() for x in (self.cfg.data_sources or []) if str(x).strip()]
-            #: 配置里的第一个 = 实际优先级最高的那个（标记就按它判，不写死来源名）
-            main_id = listed[0].lower() if listed else ""
-            for index, state in enumerate(rows):
-                source = str(state.get("id") or "")
-                builtin = source == BUILTIN_SOURCE
-                unknown = bool(state.get("unknown"))
-                key_config = str(state.get("key_config") or "")
-                # 标记**完全按配置顺序判定**（列表顺序 = 优先级），不写死任何一个来源名：
-                # 用户手改 `data_sources` 之后，界面说的必须还是配置里的事实。
-                # 2026-09-18 起默认顺序是 ["hithink", "public"]，所以同花顺显示"主来源"；
-                # 公开源**有意不贴"兜底"**，而是让行自己显示"免 Key"（那是用户能据此判断
-                # "能不能用"的状态，比再贴一个角色词有用）；哪天用户把公开源排到第一，
-                # "主来源"会自动跟着挪过去。
-                # 只有**排在第一位**的那个给角色标记（"主来源"）；其余留给行自己按
-                # Key 状态显示（"免 Key" / "已配 Key" / "未配 Key"）—— 那三个状态都是
-                # 用户能动手解决或能据此判断"能不能用"的，比再贴一个"兜底"有用。
-                # "谁是兜底"由**顺序**（列表顺序 = 优先级）与每行的 note 说明表达，
-                # 而 note 里已经写着"没配同花顺 Key 时的兜底源"。
-                if unknown:
-                    tag = "未实现"
-                elif source.lower() == main_id:
-                    tag = "主来源"
-                else:
-                    tag = ""
-                row = SourceRow(
-                    source,
-                    name=str(state.get("name") or source),
-                    # 界面那一行用**短**说法（用户 2026-09-20："压成一句…别换行成墙"）；
-                    # 完整说法进 tooltip（见 SourceRow 的 capability_label）
-                    capability=str(state.get("capabilities_brief")
-                                   or state.get("capabilities_text") or ""),
-                    capability_full=str(state.get("capabilities_text") or ""),
-                    note=str(state.get("note") or ""),
-                    builtin=builtin,
-                    implemented=not unknown,
-                    needs_key=bool(state.get("needs_key", True)),
-                    has_key=bool(state.get("has_key")),
-                    key_text=self._source_key_text(key_config),
-                    key_config=key_config,
-                    key_placeholder=("在 fuyao.aicubes.cn/admin 获取"
-                                     if builtin else "这个来源的 Key / Token"),
-                    tag=tag,
-                    # 内置同花顺那一行：**输入框 + 【测试连接】照给**（2026-09-18 用户澄清），
-                    # 下面再挂一行"申请地址"（`key_notice` 那行文案）。
-                    # 程序里**不预置任何 Key**：输入框的初值就是用户自己 config.toml 里的值。
-                    key_notice=(BUILTIN_BACKUP_TEXT.format(url=BUILTIN_KEY_URL)
-                                if builtin else ""),
-                    key_notice_url=BUILTIN_KEY_URL if builtin else "",
-                )
-                if row.key_edit is not None and key_config:
-                    row.key_edit.setToolTip(
-                        f"「{state.get('name')}」用它自己的 Key（写回 config.toml 的 "
-                        f"{key_config}）；留空 = 没配，就走后面的来源兜底"
-                    )
-                if not builtin:
-                    row.btn_delete.clicked.connect(
-                        lambda _=False, src=source: self.on_remove_source(src)
-                    )
-                if row.btn_test is not None:
-                    row.btn_test.clicked.connect(
-                        lambda _=False, src=source: self.on_test_source_key(src)
-                    )
-                layout.addWidget(row)
-                self.source_rows[source] = row
-            if BUILTIN_SOURCE not in listed:
-                # 配置里没写内置来源：**照实说明**（不静默补上，用户要知道取数会失败）
-                logger.warning(f"data_sources 里没有内置的 {BUILTIN_SOURCE}：{listed}")
-            label = getattr(self, "data_source_label", None)
-            if label is not None:
-                # 列表与「配置里的原值」那一行必须同步：只改一处的话，用户加了来源之后
-                # 上面那行还写着旧的 data_sources，看着像"没生效"
-                label.setText(self._source_text(self.cfg.data_sources))
-            self._refresh_source_hint()
-
-        def _refresh_source_hint(self) -> None:
-            """【添加来源】下面那句说明：还能加什么（或为什么现在没得加）。"""
-            hint = getattr(self, "source_add_hint", None)
-            if hint is None:
-                return
-            candidates = self._addable_sources()
-            if not candidates:
-                # 两个来源都加完了（或者注册表读不出来）→ 如实说明，不画假条目
-                hint.setText(SOURCE_ADD_UNAVAILABLE_TEXT)
-                return
-            parts = []
-            for state in candidates:
-                cap = str(state.get("capabilities_text") or "")
-                extra = (f"（免 Key，提供 {cap}）" if not state.get("needs_key")
-                         else f"（要用你自己的 Key，提供 {cap}）")
-                parts.append(f"{state.get('name')}{extra}")
-            hint.setText("可以添加：" + "；".join(parts) + "（按顺序生效）")
-
-        def _source_add_menu(self) -> Any:
-            """【添加来源】的菜单（候选来自注册表；没有候选就返回 None）。
-
-            抽成一个方法（而不是在点击回调里直接 `exec`）：`exec` 会阻塞在事件循环里，
-            自动化测试点不动它 —— 而"菜单里有哪些项、点了写什么"正是要断言的东西。
-            """
-            candidates = self._addable_sources()
-            if not candidates:
-                return None
-            menu = QMenu(self.settings_page)
-            for state in candidates:
-                action = QAction(str(state.get("name") or state.get("id")), menu)
-                cap = str(state.get("capabilities_text") or "")
-                action.setToolTip(
-                    f"提供 {cap}；" + (str(state.get("note") or ""))
-                )
-                source_id = str(state.get("id") or "")
-                action.triggered.connect(
-                    lambda _=False, sid=source_id: self.on_add_source(sid)
-                )
-                menu.addAction(action)
-            return menu
-
-        def on_add_source_clicked(self) -> None:
-            """【添加来源】按钮：菜单里选一个（没得选就如实说明，不加条目）。"""
-            menu = self._source_add_menu()
-            if menu is None:
-                self._refresh_source_hint()
-                self._toast(SOURCE_ADD_UNAVAILABLE_TEXT)
-                return
-            menu.exec(self.btn_add_source.mapToGlobal(
-                self.btn_add_source.rect().bottomLeft()))
-
-        def on_add_source(self, source: str = "") -> None:
-            """把某个已实现的来源加进 `data_sources`（现有键，走 `save_settings`）。
-
-            为什么只写 `data_sources` 这一个键：启停就是"在不在这个列表里"
-            （见 `data/sources.py` 的模块头）—— 再加一个 `xxx_enabled` 就会出现
-            "列表里有、开关是关"这种自相矛盾、用户看不懂的状态。
-            """
-            source = str(source or "")
-            candidates = {str(s.get("id")): s for s in self._addable_sources()}
-            if source not in candidates:
-                self._refresh_source_hint()
-                self._toast(SOURCE_ADD_UNAVAILABLE_TEXT)
-                return
-            sources = [str(x) for x in (self.cfg.data_sources or []) if str(x).strip()]
-            if source in sources:
-                return
-            sources.append(source)
-            self._save_updates({"data_sources": sources},
-                               f"已添加来源：{candidates[source].get('name') or source}")
-            self._rebuild_source_rows()
-
-        def on_remove_source(self, source: str) -> None:
-            """删掉一个用户添加的来源（内置的那个删不掉）。"""
-            if source == BUILTIN_SOURCE:
-                self._toast("内置主来源不能删除（实时快照只有它提供）")
-                return
-            sources = [str(x) for x in (self.cfg.data_sources or []) if str(x) != source]
-            self._save_updates({"data_sources": sources}, f"已删除来源：{source}")
-            self._rebuild_source_rows()
-
-        def _source_text(self, sources: Any) -> str:
-            """「数据来源 → 取数顺序」那一行：**照 `cfg.data_sources` 如实显示**。
-
-            为什么不写"主来源：同花顺"：主来源取决于 `data_sources` 的**顺序**
-            （2026-09-17 起默认是 `["public", "hithink"]`，公开源在前），写死一个名字，
-            用户改过 `data_sources` 之后界面就在说假话。所以这行给的是**取数顺序**本身。
-
-            认不出的键**原样显示**并注明"界面没有它的实现"，而不是干脆不显示
-            （那用户就不知道程序到底打算用哪个来源）。
-            """
-            names = [str(x) for x in (sources or []) if str(x).strip()]
-            if not names:
-                # 空列表是**真要拦一下**的情况（程序不会取任何行情），所以这条留着，
-                # 但只说人话：点哪里能把来源加回来
-                return "当前没有启用的来源：点下面的【添加来源】加一个（公开源免 Key）。"
-            shown = []
-            for name in names:
-                label = self._source_label(name)
-                shown.append(f"{label}" if label else f"{name}（界面没有它的实现，"
-                                                       f"只如实显示）")
-            # 2026-09-20（用户："只保留当前用哪个来源…纯解释的长句全删"）：
-            # 原来这里还跟着 `· config.toml: data_sources = [...]` 与"前一个不可用就落到
-            # 下一个"的解释 —— 界面不该教用户改配置文件，顺序本身就是优先级，看得见。
-            return f"当前来源（按优先级）：{'、'.join(shown)}"
-
-        @staticmethod
-        def _source_label(name: str) -> str:
-            """来源键 → 中文显示名（**先问注册表**，读不到才退回本地小表）。
-
-            为什么要问注册表：注册表（`data/sources.py`）才是"有哪些来源、各自叫什么"
-            的真相源；本地小表（`DATA_SOURCE_LABELS`）只是**读不到它时的兜底**。
-            原来只查本地小表，于是新增的公开源在"取数顺序"那一行会显示成
-            "public（界面没有它的实现）"—— 明明是主源，却写着"没有实现"，是假话。
-            """
-            key = str(name or "").lower()
-            label = DATA_SOURCE_LABELS.get(key)
-            if label:
-                return label
-            try:
-                from laoa_trader.data import sources as sources_mod
-
-                info = getattr(sources_mod, "REGISTRY", {}).get(key)
-            except Exception as exc:  # noqa: BLE001 - 读不到就用"认不出"的表达
-                logger.debug(f"读数据来源注册表失败（显示名退回本地小表）：{exc}")
-                return ""
-            return str(getattr(info, "name", "") or "") if info is not None else ""
 
         def _history_months_text(self) -> str:
             """`history_years` → `6 个月`（用户看的是"几个月"，配置里存的是"年"）。"""
@@ -7208,9 +6800,14 @@ if QT_AVAILABLE:
                 # 数据来源那一组的**固定键**：数据量（`history_years`）。
                 # ⚠️ `hithink_api_key` **不在这份字典里**，但它**照样会被写回** ——
                 # 它由本函数末尾那段"按界面上真正存在的行收集"的循环收（那一行的 Key 输入框
-                # 就是它的入口）。为什么分两处写：需要 Key 的来源是**可添加的多个**
-                # （`data_sources` + 注册表的 `key_config`），那份名单是活的，
-                # 所以"要不要收这个键"只认**界面上有没有那个输入框**这一条判据。
+                # 就是它的入口）。为什么分两处写：键名由来源行自己的 `key_config` 给
+                # （同花顺 = `hithink_api_key`），"要不要收这个键"只认
+                # **界面上有没有那个输入框**这一条判据。
+                #
+                # ⚠️ **`data_sources` 永远不在这份字典里**（2026-10-11）：
+                # 界面上没有【添加来源】/【删除】了，也就没有任何一处会把它写回配置文件 ——
+                # 用户手改过的顺序/来源名**原样保留**（默认还是 `["hithink", "public"]`）。
+                # 有测试逐字节比对保存前后的 `data_sources` 那一行。
                 "history_years": float(self.history_years_box.value()),
                 # 2) 通知方式（`popup_box` 单独一栏，其余三路来自 channel_boxes）
                 **self._panel_notify_updates(),
@@ -7234,18 +6831,16 @@ if QT_AVAILABLE:
                 "watchlist_max": int(self.watchlist_max_box.value()),
                 "watchlist_in_pool": self.watchlist_in_pool_box.isChecked(),
             }
-            # 每个**需要 Key 的已启用来源**各写各的 Key（`key_config` 由注册表给）：
-            # 将来再加"要 token 的来源"时，它的 Key 会自动进这一份键集合 ——
+            # 每个**界面上存在的来源行**各写各的 Key（`key_config` 由那一行自己带）：
             # 界面上的输入框与写回配置的键**一一对应**，不存在"填了没保存"。
             # 内置同花顺那一行现在**也有输入框**（2026-09-18 用户澄清："要给我一个
-            # key 的输入口"），所以 `hithink_api_key` 也由这一份循环收进来 ——
+            # key 的输入口"），所以 `hithink_api_key` 就由这一份循环收进来 ——
             # "界面上有没有这个框"仍然是"要不要收这个键"的唯一判据，不另写一份名单。
             # ⚠️ 按**界面上真正存在的行**收集，而不是按注册表的来源列表收集：
-            # 输入框长在行上，行才是"界面上有没有这个框"的唯一真相。
-            # 早先按注册表收集时有个隐蔽的漏：注册表读不出来时（`source_states` 抛异常）
-            # 内置同花顺那一行**照样画着输入框**，但收集时被跳过 —— 用户填了 Key、
-            # 点了保存、什么都没写进去（"填了没保存"正是这里最该防的事）。
-            # 这个坑是 `test_source_list_falls_back_when_the_registry_is_unreadable` 抓出来的。
+            # 输入框长在行上，行才是"界面上有没有这个框"的唯一真相（注册表读不出来时
+            # 行照样画着，按注册表收集就会"填了没保存"）。
+            # 现在 `source_rows` 里只有同花顺一行（2026-10-11 精简），但这个写法留着：
+            # 哪天再加一个要 Key 的来源，它的 Key 会自动进这一份键集合。
             for source, row in (self.source_rows or {}).items():
                 field = str(getattr(row, "key_config", "") or "")
                 if not field or field in updates or row.key_edit is None:
@@ -7493,13 +7088,13 @@ if QT_AVAILABLE:
                 # 一眼明白"没 Key 能看什么、不能做什么"，而不是让人以为等几天就行。
                 self._show_key_hint(
                     "❌ 完整历史数据要同花顺 API Key（每个用户自己申请一个）："
-                    "在**上面那一行的 Key 输入框**里填上、点【保存设置】就生效（不用重启）；"
+                    "在上面那一行的 Key 输入框里填上、点【保存设置】就生效（不用重启）；"
                     "也可以手改 config.toml 的 hithink_api_key，"
                     "或设环境变量 HITHINK_FINANCE_API_KEY"
                     f"（申请地址见上面那行的 {BUILTIN_KEY_URL}）。"
                     "没 Key 时能用的：实时行情（自选标的/持仓监控）与大盘概览 —— "
                     "每天也会自动把当天的行情与涨停池写进库；"
-                    "但**筛选要 Key**：数据自检要求「复权事件」与「行业归属」齐备"
+                    "但筛选要 Key：数据自检要求「复权事件」与「行业归属」齐备"
                     "（这两样只有同花顺那条路给得到），缺了就拒绝筛选"
                     "（就是不让程序拿算错的复权价去选票）"
                 )
@@ -7516,17 +7111,20 @@ if QT_AVAILABLE:
             )
 
         def _show_key_hint(self, text: str) -> None:
-            """在「系统设置 → 数据来源」里点亮一句话。
+            """在「系统设置 → 数据来源」里点亮一句话，并把**焦点放到同花顺那一行的 Key 框**上。
 
-            2026-09-17：界面上没有 Key 输入框了，所以这里**不再把焦点给输入框**
-            （原来那句"焦点落到输入框上"是给"填 Key"用的），改为把焦点给来源列表那一行 ——
-            用户顺着看下去就是"主来源：…申请地址 …"那行说明；写 Key 的地方在 config.toml。
+            为什么给输入框：这一组现在只剩那一行，而缺 Key 时用户要做的**唯一一件事**
+            就是在那儿打字 —— 焦点替他省掉一次点击，紧接着就能填。
+            （2026-09-17 那阵子界面上没有输入框，焦点只能给那一行本身；
+            2026-09-18 输入框回来了，2026-10-11 精简之后它更是**唯一**的入口。）
             """
             try:
                 self.key_hint.setText(text)
                 self.key_hint.setVisible(True)
                 row = (self.source_rows or {}).get(BUILTIN_SOURCE)
-                if row is not None:
+                if row is not None and row.key_edit is not None:
+                    row.key_edit.setFocus()      # 缺 Key = 用户下一步就是在这儿打字
+                elif row is not None:
                     row.setFocus()
             except Exception as exc:  # noqa: BLE001 - 提示失败不影响"拒绝下载"本身
                 logger.debug(f"显示 Key 提示失败：{exc}")

@@ -469,6 +469,51 @@ def test_snapshot_map_uses_the_public_source_without_any_key(
     assert len(opener.calls) == 1 and "qt.gtimg.cn" in opener.calls[0]
 
 
+def test_default_order_falls_back_to_the_public_source_without_a_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**默认配置**（`["hithink", "public"]`）且一个 Key 都没配 → 公开源接管。
+
+    这条是 2026-10-11 界面精简（"数据来源那里只保留同花顺那栏，其它都精简掉"）的
+    **功能护栏**：界面上不再画公开源，但它必须仍然是那条"没配 Key 也有行情"的兜底 ——
+    这条链子写在 `config.data_sources` 的默认顺序 + `snapshot_map` 的降级里，
+    **与界面无关**。真被谁顺手删掉的话，没配 Key 的用户就一点行情都取不到。
+
+    离线跑：公开源的 HTTP 层换成真实抓下来的响应（绝不出网）。
+    """
+    assert Config().data_sources == ["hithink", "public"]      # 默认顺序没被动过
+    monkeypatch.setattr(hx, "available", lambda: False)
+    opener = fake_public_opener()
+    monkeypatch.setattr(pq, "_urllib_get", opener)
+
+    out = sources.snapshot_map(cfg_sources("hithink", "public"), ["600519"])
+
+    assert out["600519"]["source"] == "public"                 # 同花顺没 Key → 落到公开源
+    assert out["600519"]["last_price"] == pytest.approx(1266.98)
+    assert len(opener.calls) == 1                              # 只打了公开源那一次
+
+
+def test_the_ui_simplification_never_removed_the_public_source() -> None:
+    """界面精简**只动界面**：注册表里那三个来源一个都没少、公开源照旧免 Key 可用。
+
+    为什么值得单独钉一条：`source_states` / 能力标签这些**给界面渲染**的东西
+    在 2026-10-11 之后没有界面消费者了（界面只剩同花顺那一行），
+    但注册表本身与降级链是**取数的真相源**，不能跟着一起删 ——
+    这条用例就是防"看起来是死代码，顺手清掉"。
+    """
+    assert set(sources.REGISTRY) == {"hithink", "public", "eastmoney"}
+    assert sources.REGISTRY["hithink"].needs_key is True
+    assert sources.REGISTRY["public"].needs_key is False
+    cfg = cfg_sources("hithink", "public")
+    assert [info.id for info in sources.active_sources(cfg)] == ["hithink", "public"]
+    # 没配 Key 的同花顺不算"现在能用"，公开源算 —— 这正是界面不画它也能取数的原因
+    assert [info.id for info in sources.usable_sources(cfg)] == ["public"]
+    # `source_states` 照旧给得出那几行（界面现在不用它，但它是公开 API，测试与文档都指着它）
+    states = {row["id"]: row for row in sources.source_states(cfg)}
+    assert states["public"]["enabled"] is True
+    assert states["public"]["capabilities_text"] == "实时快照"
+
+
 def test_snapshot_map_public_needs_a_symbol_list(monkeypatch: pytest.MonkeyPatch) -> None:
     """`symbols=None`（要全市场）时公开源**不出数**：腾讯没有"给我全部"的开关。
 
