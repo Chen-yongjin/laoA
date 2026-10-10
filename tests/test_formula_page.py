@@ -1360,6 +1360,74 @@ def test_list_shows_runtime_error_from_last_run(page, monkeypatch) -> None:
     assert "涨停池" in page.table.item(row, 1).toolTip()
 
 
+def _click_row(page, key: str, column: int = 0) -> None:
+    """模拟"用鼠标点了某一行的某一列"（走 `cellClicked` 那条路）。
+
+    为什么不再用 `page.select_row(...)`：2026-10-11 起**选中变化不再等于点了那一行**
+    （主人："不要一点就跳到策略编辑"）—— 程序自己选中某一行时不该有任何副作用，
+    所以靠"选中"来模拟点击已经模拟不到真实的交互了。
+    """
+    row = page.row_of(key)                     # `row_of` 给的是 StrategyRow，不是下标
+    assert row is not None, f"列表里找不到 {key}"
+    index = page.rows.index(row)
+    page.table.selectRow(index)
+    page.on_row_clicked(index, column)
+
+
+def test_clicking_checkbox_column_only_toggles_and_never_jumps(page, qapp) -> None:
+    """**主人的原话**（2026-10-11）：策略筛选里"打勾那一栏"点一下只切换勾，
+    "不要一点就跳到策略编辑，用户需要自然会去点策略编辑"。
+
+    这条用例是那个要求的看门人，三半都要成立：
+    ① 点竞价那一行的勾 → **不展开只读详情**（这就是用户遇到的"无意触发"）；
+    ② 点公式行的勾 → **不把编辑器顶出来**；
+    ③ 勾选框本身照常能用（那是 Qt 自己的行为，直接点控件验一遍）。
+    """
+    page.on_open_editor()
+    page.editor.setPlainText("C>MA(C,5)")                 # 用户正在写的草稿
+    page.on_close_panel()
+
+    # ① 竞价行：点勾那一列不许展开详情
+    _click_row(page, fp.AUCTION_KEY, fp.SELECT_COLUMN)
+    assert page.bottom_stack.isVisible() is False, "点勾那一列不该展开任何面板"
+
+    # ② 公式行：点勾那一列不许跳编辑器
+    page.name_edit.setText("甲公式")
+    page.note_edit.clear()
+    page.editor.setPlainText("C>MA(C,5)")
+    page.btn_save.click()
+    page.on_close_panel()
+    assert page.bottom_stack.isVisible() is False
+    _click_row(page, "甲公式", fp.SELECT_COLUMN)
+    assert page.bottom_stack.isVisible() is False, "点勾那一列不该把编辑器顶出来"
+
+    # ③ 勾选框本身照常能点（勾上/取消是它自己的事，与"跳转"无关）
+    box = page._row_boxes["甲公式"]
+    before = box.isChecked()
+    QTest.mouseClick(box, Qt.MouseButton.LeftButton)
+    assert box.isChecked() != before
+
+
+def test_clicking_a_formula_row_only_selects_then_the_button_loads_it(page, qapp) -> None:
+    """点公式行**只选中**；要改就点【策略编辑】—— 那时才把选中的那条装进编辑器。"""
+    page.name_edit.setText("甲公式")
+    page.note_edit.setText("甲的备注")
+    page.editor.setPlainText("C>MA(C,5)")
+    page.btn_save.click()
+    page.on_close_panel()
+    assert page.bottom_stack.isVisible() is False
+
+    _click_row(page, "甲公式")
+    assert page.bottom_stack.isVisible() is False, "单击公式行不该自己跳进编辑器"
+    assert page.selected_row() is not None and page.selected_row().key == "甲公式"
+
+    page.btn_edit.click()                                  # 用户"需要自然会去点"
+    assert page.bottom_stack.currentWidget() is page.editor_page
+    assert page.name_edit.text() == "甲公式"
+    assert page.note_edit.text() == "甲的备注"
+    assert page.editor.toPlainText() == "C>MA(C,5)"
+
+
 def test_clicking_readonly_row_shows_detail_and_copy_works(page, qapp) -> None:
     """单击**只读行**（现在只有「竞价策略」）→ 详情页可复制，且不碰编辑器的草稿。
 
@@ -1371,7 +1439,7 @@ def test_clicking_readonly_row_shows_detail_and_copy_works(page, qapp) -> None:
     """
     page.on_open_editor()                                  # 先把编辑器打开
     page.editor.setPlainText("C>MA(C,5)")                  # 用户正在写的草稿
-    page.select_row(fp.AUCTION_KEY)
+    _click_row(page, fp.AUCTION_KEY)
     qapp.processEvents()
 
     assert page.bottom_stack.currentWidget() is page.detail_page
@@ -1393,7 +1461,7 @@ def test_readonly_detail_state_follows_the_checkbox(page, qapp) -> None:
     同一条规矩落在竞价那一行上：勾上写 `intraday_auction`，详情里那句
     "当前状态"必须同步 —— 否则用户勾完去看详情，会以为没生效。
     """
-    page.select_row(fp.AUCTION_KEY)
+    _click_row(page, fp.AUCTION_KEY)
     qapp.processEvents()
     assert "当前状态：☐ 未开启" in page.detail_text
 
@@ -1404,8 +1472,12 @@ def test_readonly_detail_state_follows_the_checkbox(page, qapp) -> None:
     assert "intraday_auction" in page.detail_text
 
 
-def test_selecting_row_loads_formula_into_editor(page, qapp) -> None:
-    """点公式行 → 展开编辑器并载入（名称 + 备注 + 正文），可以直接改再保存。"""
+def test_editor_button_loads_the_selected_row(page, qapp) -> None:
+    """【策略编辑】把**列表里选中那条**装进编辑器（名称 + 备注 + 正文）。
+
+    2026-10-11 之前这条用例叫 `test_selecting_row_loads_formula_into_editor`：
+    那时"点一行"就等于"载入编辑器"；现在单击只选中，载入这件事归【策略编辑】。
+    """
     page.name_edit.setText("甲公式")
     page.note_edit.setText("甲的备注")
     page.editor.setPlainText("C>MA(C,5)")
@@ -1416,9 +1488,11 @@ def test_selecting_row_loads_formula_into_editor(page, qapp) -> None:
     page.btn_save.click()
     page.on_close_panel()
 
-    page.select_row("甲公式")
+    _click_row(page, "甲公式")
     qapp.processEvents()
+    assert page.bottom_stack.isVisible() is False      # 单击只选中，不跳编辑器
 
+    page.btn_edit.click()
     assert page.bottom_stack.currentWidget() is page.editor_page
     assert page.name_edit.text() == "甲公式"
     assert page.note_edit.text() == "甲的备注"        # 备注也跟着载入
@@ -1787,7 +1861,7 @@ def test_clicking_auction_row_opens_readonly_detail_not_editor(page, qapp) -> No
     page.on_open_editor()
     page.editor.setPlainText("C>MA(C,5)")          # 用户正在写的草稿
 
-    page.select_row(fp.AUCTION_KEY)
+    _click_row(page, fp.AUCTION_KEY)
 
     assert page.bottom_stack.currentWidget() is page.detail_page
     assert "竞价扫描开关" in page.detail_title.text()
@@ -2182,8 +2256,10 @@ def test_note_is_written_into_the_file_comment_header(page) -> None:
     assert page.table.item(FIXED_ROWS, 1).text() == "站上5日线并且放量"    # 列表备注列
     # 重新载入界面 → 备注从文件读回（两处不会各说各话）
     page.note_edit.clear()
-    page.table.clearSelection()          # 同一行再点一次不会触发"选中变化"（Qt 语义）
-    page.select_row("放量上攻")
+    page.table.clearSelection()
+    # 2026-10-11 起载入靠【策略编辑】（单击行只选中）
+    _click_row(page, "放量上攻")
+    page.btn_edit.click()
     assert page.note_edit.text() == "站上5日线并且放量"
 
 

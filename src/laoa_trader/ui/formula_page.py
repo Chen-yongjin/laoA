@@ -207,6 +207,8 @@ AUCTION_NAME = "竞价策略"
 #: 2026-09-18 用户改过一次字：`名称 | 备注 | 状态` → `策略名称 | 说明 | 策略选取`
 #: （"策略选取"这一列就是那个勾：勾上 = 这条策略参与筛选）。
 LIST_COLUMNS: tuple[str, ...] = ("策略名称", "说明", "策略选取")
+#: 「策略选取」那一列的下标（= 打勾那一列）。**不写字面量**：列顺序改了也不会错位。
+SELECT_COLUMN = LIST_COLUMNS.index("策略选取")
 
 #: 右键菜单项文案
 MENU_ENABLE = "启用"
@@ -285,6 +287,8 @@ LIST_HINT = (
     "策略列表：最上面那条「竞价策略」开关的是盘中竞价扫描（只做提示、不参与筛选）；"
     "下面全是策略 —— 随包预置的那几条与你自己写的一条待遇相同（都能改、能删、能勾选），"
     "「说明」列来自策略文件里的「# 说明:」。"
+    "点一下某条只是选中它（不会跳到编辑器）；要改就点【策略编辑】，"
+    "右边「策略选取」那一列点一下就是勾上/取消。"
 )
 
 #: 编辑器里那行灰字说明（小白第一眼看的就是它）
@@ -881,7 +885,8 @@ if QT_AVAILABLE:
             top = QHBoxLayout()
             self.btn_edit = QPushButton("策略编辑")
             self.btn_edit.setToolTip(
-                "打开策略编辑器：左边写策略、右边点按钮插入（点列表里的策略行也会打开它）"
+                "打开策略编辑器：左边写策略、右边点按钮插入。"
+                "会载入**列表里选中的那条**（想改哪条就在列表里点一下它，再点这里）"
             )
             # 用 lambda 吞掉 `clicked` 带来的 checked 参数：直接接 `on_open_editor`
             # 的话那个 `False` 会被当成 spec 传进去（Qt 的经典坑，本文件里所有
@@ -994,7 +999,10 @@ if QT_AVAILABLE:
             self._set_header_tooltip(1, "说明：来自策略文件里的「# 说明:」，或者在编辑器里填的备注")
             self._set_header_tooltip(2, "勾上 = 参与筛选（写回 config.toml 的 enabled_formulas）；"
                                         "竞价策略那一行例外：它开关的是盘中竞价扫描")
-            self.table.itemSelectionChanged.connect(self.on_row_selected)
+            # ⚠️ 是 `cellClicked` **不是** `itemSelectionChanged`（主人 2026-10-11）：
+            # 选中变化在"程序自己选中某一行"时也会触发（保存后定位那一行、
+            # 键盘上下移动…），用它的结果是"到处乱跳"。改成"真的点了鼠标"才处理。
+            self.table.cellClicked.connect(self.on_row_clicked)
             layout.addWidget(self.table, 1)
 
             return side
@@ -1585,19 +1593,26 @@ if QT_AVAILABLE:
                         self._loading = False
                     return
 
-        def on_row_selected(self) -> None:
-            """单击一行：内置策略 → **只读详情**；公式 → 载入编辑器（可改可存）。"""
+        def on_row_clicked(self, row_index: int, column: int) -> None:
+            """单击一行：**只选中，不跳编辑器**（主人 2026-10-11 的原话）：
+            "把策略筛选打勾的栏里跳转去掉，不要一点就跳到策略编辑，
+            用户需要自然会去点策略编辑"。
+
+            两半判据：
+            * **打勾那一列**（`SELECT_COLUMN`）点一下**只切换勾**，别的什么都不做 ——
+              这正是用户报的那个"无意触发"；
+            * 其余列：只读行（竞价策略）仍然展开它的**只读详情**（它不是编辑器，
+              而且是看到那些参数的唯一入口）；公式行**只选中**，要看要改就点【策略编辑】。
+            """
             if self._loading:
                 return
+            if column == SELECT_COLUMN:
+                return                    # 打勾那一列：勾已经切了（`on_item_changed`），到此为止
             row = self.selected_row()
             if row is None:
                 return
             if row.read_only:
-                # 内置策略与竞价策略都是**只读**的：单击展开详情，绝不载入编辑器
-                # （竞价那一行没有公式可编辑 —— 它的"参数"在设置页）
                 self.show_auction_detail(row)
-            else:
-                self.on_open_editor(row.spec)
 
         def show_auction_detail(self, row: StrategyRow) -> None:
             """展开**只读行**的详情 —— 现在只有「竞价策略」那一行会走到这里。
@@ -1827,7 +1842,11 @@ if QT_AVAILABLE:
         # ── 编译器 / 校验 / 运行 ──────────────────────────────────────
 
         def on_open_editor(self, spec: Any = None) -> None:
-            """打开公式编辑器（点【策略编辑】按钮，或点列表里的公式行）。
+            """打开公式编辑器（点【策略编辑】按钮；不传 spec 时载入**列表里选中的那条**）。
+
+            为什么"不传 spec 就载入选中行"：2026-10-11 起单击列表行**不再自动跳编辑器**
+            （主人要求），所以【策略编辑】必须自己把当前选中那条装进去 ——
+            否则它只会打开一个空编辑器，用户找不到"改已有策略"的路。
 
             未授权时**不开编辑器**：交给主窗口挂上来的 `open_editor_guard`（它会弹授权
             对话框），这里只把那句原因写进提示区 —— 用户点了按钮必须有反应。
@@ -1842,6 +1861,10 @@ if QT_AVAILABLE:
                 if reason:
                     self._set_hint("🔒 " + str(reason))
                     return
+            if spec is None:
+                # 没点名要哪条 → 就用列表里选中的那条（选不中就什么都不载，见下面的提示）
+                selected = self.selected_row()
+                spec = None if selected is None or selected.read_only else selected.spec
             if spec is not None:
                 self._load_spec(spec)
             elif not self.editor.toPlainText().strip() and not self.name_edit.text().strip():
