@@ -702,6 +702,113 @@ def snapshot_extra(
                 "而且没有历史、不能回测。）")
 
 
+#: 需要**集合竞价**（同花顺 `a-share/auction/snapshot`）的公式字段。
+#:
+#: 与 `SNAPSHOT_FIELDS` 是**两条不同的路**：那一组是"实时行情快照"（交易时段也有值），
+#: 这一组只在**集合竞价时段（9:15–9:30）**拿得到 —— 竞价撮合出来的量额，收盘后/开盘前
+#: 之外的时间接口都不给。所以它们单独一组、单独一次取数、单独一句"取不到"的说明。
+#:
+#: 单位（**写死在这里，别在别处再换算一次**，见 `EXTRA_FIELDS` 与 `docs/兼容性.md`）：
+#:   `竞价匹配额` = 万元（接口给元，÷1e4）；`竞价匹配量` = 手；`竞价未匹配量` = 手（带符号）
+AUCTION_FIELDS: tuple[str, ...] = ("竞价匹配额", "竞价匹配量", "竞价未匹配量")
+
+#: 竞价取数的**时段**（本地时间，含首尾半小时）：集合竞价 9:15–9:25 撮合，
+#: 9:25–9:30 接口给的还是当天的终态（`phase=closed` + `data_status=final`），
+#: 两者都算"拿得到竞价数据"。其余时刻接口是 `closed/not_ready`（正常状态，不是错误）。
+AUCTION_WINDOW: tuple[tuple[int, int], tuple[int, int]] = ((9, 15), (9, 30))
+
+#: 竞价接口单位换算：接口给的是**元**，公式里用**万元**。
+#: 单独一个常量是为了让测试能直接钉住这个数（项目踩过"单位差 100 倍"的坑）。
+AUCTION_AMOUNT_TO_WAN = 1e4
+
+
+def in_auction_window(moment: datetime | None = None) -> bool:
+    """现在是不是"**能拿到竞价数据**"的时段（9:15–9:30）。"""
+    now = caliber_now() if moment is None else moment
+    start, end = AUCTION_WINDOW
+    return start <= (now.hour, now.minute) < end
+
+
+def auction_extra(
+    cfg: Any, symbols: Sequence[str], *, now: datetime | None = None, client: Any = None
+) -> tuple[dict[str, dict[str, float]], str]:
+    """集合竞价那三个字段 → `({代码: {"竞价匹配额": 万元, ...}}, 取不到的原因)`。
+
+    与 `snapshot_extra()` **同一套纪律**（公式用到才取、取不到给一句人话、单位在这里换）：
+
+    * **只在竞价时段取**（`in_auction_window`）：不在时段里连请求都不发 —— 接口那时
+      只会回 `closed/not_ready`，白花一个请求；
+    * 一次**批量**问（端点按 100 个代码一批，`hithink.auction_snapshot` 自己分批）；
+    * ⚠️ 单位只在这里换一次：`竞价匹配额 = auction_amount ÷ 1e4`（**万元**）；
+      `竞价匹配量 = auction_volume`（手）；`竞价未匹配量 = auction_unmatched`（手，
+      **-1 当缺值**：接口用它表示"未提供"，绝不能读成"卖压 1 手"）；
+    * 这个端点**只有同花顺给**（要配 Key）：没配 Key / 接口失败 / 不在时段 → 三个字段
+      一律缺值 → 用到它们的条件不成立（0 只），并且下面那句 `note` 会把原因与"去哪儿看"说清。
+
+    Returns:
+        `(extra, note)`：`note` 是**取不到时给用户看的一句人话**（拿到了就是空串）。
+    """
+    from laoa_trader.data import hithink as hx
+
+    codes = [str(c) for c in dict.fromkeys(symbols) if str(c)]
+    if not codes:
+        return {}, ""
+    moment = caliber_now() if now is None else now
+    if not in_auction_window(moment):
+        return {}, ("⚠️ 需要集合竞价的字段（竞价匹配额 / 竞价匹配量 / 竞价未匹配量）现在取不到："
+                    f"它们只有 **9:15–9:30**（集合竞价）才有 —— 现在是 {moment:%H:%M}。"
+                    "用到它们的条件一律不成立，所以可能一只都选不出来。")
+    if client is None:
+        if not str(getattr(cfg, "hithink_api_key", "") or "").strip():
+            # 没配 Key 是最常见的一种：那句话要直接指向"去哪儿配"
+            return {}, ("⚠️ 竞价字段只有**同花顺**接口给（需要 Key），而当前没配 Key —— "
+                        "竞价匹配额 / 竞价匹配量 / 竞价未匹配量一律取不到，用到它们的条件不成立。"
+                        "去「系统设置 → 数据来源」把同花顺那一行的 Key 填上（或用环境变量 "
+                        "HITHINK_FINANCE_API_KEY）。")
+        client = hx.HithinkClient(api_key=cfg.hithink_api_key or None, pace=0.05)
+    try:
+        data = client.auction_snapshot([hx.to_thscode(code) for code in codes])
+    except Exception as exc:  # noqa: BLE001 - 取不到就是"没有值"，绝不让它带崩筛选
+        logger.info(f"竞价快照取不到（用到竞价字段的策略这次没有值）：{exc}")
+        return {}, ("⚠️ 竞价快照没取到：" + str(exc).splitlines()[0] +
+                    " —— 用到竞价字段（竞价匹配额 / 竞价匹配量 / 竞价未匹配量）的条件不成立。"
+                    "可在「系统设置 → 数据来源」确认同花顺那一行可用，然后在 9:15–9:30 之间再跑一次。")
+    extra: dict[str, dict[str, float]] = {}
+    for row in data.get("item") or []:
+        try:
+            symbol = hx.to_local_symbol(str(row.get("thscode") or ""))
+        except ValueError:
+            continue
+        values: dict[str, float] = {}
+        amount = _num_or_none(row.get("auction_amount"))
+        if amount is not None:
+            values["竞价匹配额"] = amount / AUCTION_AMOUNT_TO_WAN     # 元 → 万元（唯一一处换算）
+        volume = _num_or_none(row.get("auction_volume"))
+        if volume is not None:
+            values["竞价匹配量"] = volume
+        unmatched = _num_or_none(row.get("auction_unmatched"))
+        if unmatched is not None and unmatched != -1.0:
+            # -1 = 接口表示"未提供"（茅台实测就是 -1）：当缺值，不然会读成"卖压 1 手"
+            values["竞价未匹配量"] = unmatched
+        if values:
+            extra[symbol] = values
+    if extra:
+        return extra, ""
+    return {}, (f"⚠️ 竞价快照取回了 {len(data.get('item') or [])} 条，但里面没有可用的竞价量额"
+                "（接口在非竞价时段会回 closed/not_ready）—— 用到竞价字段的条件不成立。"
+                "请在 9:15–9:30 之间再跑一次。")
+
+
+def _num_or_none(value: Any) -> float | None:
+    """宽松转 float（空/停牌/字段缺失一律 None）—— 竞价行里字段可能整个不给。"""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def fund_flow_extra(
     db_path: str | Path,
     symbols: Sequence[str] | None = None,
@@ -979,12 +1086,14 @@ def prepare_inputs(
     # 也**不必**因为"这次要走盘中口径"就去读它。与快照同一条纪律：**没用到就不读**
     # （用到才读，读的是一次小查询；一条都没用到时 `extra` 与改动前逐字一致）。
     want_fund_flow = any(set(f.fields) & set(FUND_FLOW_FIELDS) for f in (formulas or ()))
+    # 集合竞价那三个字段：与"实时快照"同一条纪律 —— **公式用到才取**（见下面的取数块）
+    want_auction = any(set(f.fields) & set(AUCTION_FIELDS) for f in (formulas or ()))
     live, why = _live_decision(cfg, db_path, kline_day, today, moment)
 
     prepared = Prepared(kline_day=kline_day)
     quotes: dict[str, dict] = {}
     targets: list[str] = []
-    if cfg is not None and (live or want_snapshot):
+    if cfg is not None and (live or want_snapshot or want_auction):
         # 取快照必须先知道"要哪些票"：库里给了代码就用它，没给就是全市场
         # （`load_series` 是逐只 yield 的生成器，拿不到代码表，见 `all_symbols`）
         targets = list(symbols) if symbols is not None else all_symbols(db_path)
@@ -1016,6 +1125,15 @@ def prepare_inputs(
         prepared.extra = extra
         if note:
             prepared.notes.append(note)
+
+    if want_auction and cfg is not None:
+        # 竞价那三个字段：**与快照同一套纪律**（用到才取、取不到给一句人话）。
+        # 不在竞价时段（9:15–9:30）时连请求都不发 —— 那时接口只会回 closed/not_ready。
+        # 合并（不是赋值）：同一轮里既用到 `现价` 又用到 `竞价匹配额` 时，两份都要留下。
+        auction_values, auction_note = auction_extra(cfg, list(targets), now=moment)
+        prepared.extra = {**prepared.extra, **auction_values}
+        if auction_note:
+            prepared.notes.append(auction_note)
 
     if want_fund_flow:
         # 合并（不是赋值）：同一轮里既用到 `流通市值` 又用到 `主力净额` 时，两份都要留下。
@@ -1392,7 +1510,12 @@ __all__ = [
     "FUND_FLOW_FIELDS",
     "FUND_FLOW_WINDOW",
     "FUND_FLOW_YI",
+    "AUCTION_AMOUNT_TO_WAN",
+    "AUCTION_FIELDS",
+    "AUCTION_WINDOW",
     "SNAPSHOT_FIELDS",
+    "auction_extra",
+    "in_auction_window",
     "SNAPSHOT_FIELD_KEYS",
     "Prepared",
     "caliber_now",

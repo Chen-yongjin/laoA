@@ -133,7 +133,7 @@ def _render(app, cfg, theme_name: str, page: str, size: tuple[int, int],
     # 顺序与 `tests/test_ui_smoke.py` 的收尾一致：**先停定时器、再停线程、等线程落地**，
     # 最后才 shutdown —— 少一步就会在解释器退出时 "QThread: Destroyed while thread
     # is still running" 直接 abort（实测过：图已经存好了，但进程退出码 134）。
-    for name in ("_timer", "_market_timer", "_auction_timer", "_flash_timer"):
+    for name in ("_timer", "_market_timer", "_flash_timer"):
         timer = getattr(win, name, None)
         if timer is not None:
             timer.stop()

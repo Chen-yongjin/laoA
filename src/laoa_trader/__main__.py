@@ -1,4 +1,4 @@
-"""luweik决策系统（Windows 单机版）。
+"""luweik决策系统（Windows 专业版）。
 
 入口：`python -m laoa_trader`（无参数启动 GUI），或 `--cli` 走命令行：
 

@@ -254,14 +254,24 @@ def test_editor_page_texts_have_no_formula_word(page) -> None:
 
     pairs = _widget_texts(page)
     blob = "\n".join(text for _, text in pairs)
-    assert "策略名称" in blob and "策略编辑器" in blob
+    # canary：确认**这一页的控件真的被扫到了**。别再拿"策略编辑器"当判据 ——
+    # 2026-10-11 界面文字瘦身之后，那几个字只出现在注释与模块 docstring 里，
+    # 控件上没有（换成右侧面板的标题与【校验】这种一定在的按钮字）。
+    assert "策略名称" in blob and "点一下，就插到光标那里" in blob, "没扫到编辑器面板"
+    assert "校验" in blob
     _assert_no_formula_word(pairs)
 
 
 #: 旧说法「匹配」已经统一改成「筛选」（主人 2026-10-08），下面这几处是**允许的例外**：
-#: 只有"策略自己的名字"（`尾盘匹配策略.txt` 这个文件名，用户在列表里看到的就是它）——
-#: 它是**名字**不是功能名，改名要走"退役旧公式"那套簿记，属于另一件事。
-_MATCH_ALLOWED: tuple[str, ...] = ("尾盘匹配策略",)
+#:
+#: 1. `尾盘匹配策略` —— 那是"策略自己的名字"（文件名，用户在列表里看到的就是它），
+#:    改名要走"退役旧公式"那套簿记，属于另一件事；
+#: 2. `竞价匹配额` / `竞价匹配量` / `竞价未匹配量` —— 集合竞价的**术语**（交易所与通达信
+#:    都这么叫：9:15–9:25 撮合出来的那个金额就是"匹配额"），**不是"匹配"这个功能名**。
+#:    2026-10-11 主人点名要求"改成匹配额才对"，所以这三个字段名必须带"匹配"。
+_MATCH_ALLOWED: tuple[str, ...] = (
+    "尾盘匹配策略", "竞价匹配额", "竞价匹配量", "竞价未匹配量",
+)
 
 
 def test_no_match_word_in_user_visible_text(window, qapp) -> None:
@@ -297,7 +307,14 @@ def test_editor_hints_and_module_level_texts_have_no_formula_word() -> None:
         elif isinstance(value, (tuple, list)):
             texts.extend((f"formula_page.{name}", item)
                          for item in value if isinstance(item, str))
-    assert len(texts) > 30, f"扫到的常量太少（{len(texts)}），判据可能失效"
+    # 判据不能"空转"：既钉住**数量下限**，又钉住几个**一定该在**的常量名 ——
+    # 2026-10-11 主人要求删掉三行解释性文案（`PAGE_HINT` / `LIST_HINT` / `EDITOR_HINT`），
+    # 所以总数从 33 变成 30；这里把"扫得到"这件事钉得更结实一点，而不是只放低数字。
+    assert len(texts) >= 25, f"扫到的常量太少（{len(texts)}），判据可能失效"
+    scanned = {where.split(".", 1)[1] for where, _ in texts}
+    for must in ("LIST_COLUMNS", "RESULT_COLUMNS", "RESULT_HEADER_TIPS",
+                 "MENU_ENABLE", "MENU_DISABLE", "MENU_DELETE", "SAMPLE_BUTTON_TEXT"):
+        assert must in scanned, f"{must} 没被扫到，这条判据就不可信了"
     _assert_no_formula_word(texts)
 
     # 表头（「来源」列等）与来源列文本也在内：表头是 `RESULT_COLUMNS`，上面已覆盖；

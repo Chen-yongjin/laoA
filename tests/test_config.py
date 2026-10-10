@@ -526,118 +526,76 @@ def test_example_config_documents_notify_popup() -> None:
     assert "消息列表" in text               # 默认那条路是什么（点托盘图标看列表）
 
 
-# ── 竞价扫描（全市场扫描 + 过滤规则）的那一组 ──
+# ── 竞价那一组**已经删掉**（2026-10-11 主人拍板：竞价改成一条普通随包策略）──
 
 
-def test_auction_scan_defaults() -> None:
-    """默认：关；9:20/9:25 各扫一次；涨幅 2%~9%；四板块全选；500 万；2 分；推 10 只。"""
-    cfg = load_config(use_env=False)
-    assert cfg.intraday_auction is False            # 口径确认之前**保持关闭**
-    assert cfg.auction_scan_at == ["09:20", "09:25"]
-    assert cfg.auction_min_pct == 2.0
-    assert cfg.auction_max_pct == 9.0
-    assert cfg.auction_boards == ["main", "chinext", "star", "bj"]
-    assert cfg.auction_min_amount == 5e6
-    assert cfg.auction_min_score == 2
-    assert cfg.auction_min_volume_ratio == 2.0
-    assert cfg.auction_alert_max_items == 10
+def test_auction_fields_are_gone_but_old_config_still_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """老的 config.toml 里还留着 `auction_*` 键时，**程序照常启动**（未知键被忽略）。
 
-
-def test_auction_scan_invalid_values_fall_back(tmp_path: Path) -> None:
-    """写错就收拾干净：涨幅倒挂、板块写错、时刻写错、分数/条数越界。"""
-    path = _write(tmp_path, """
-auction_min_pct = 6.0
-auction_max_pct = 5.0
-auction_boards = ["chinext", "zzz"]
-auction_scan_at = ["9:5", "25:00", "09:05"]
-auction_min_score = 99
-auction_alert_max_items = 999
+    这是一次"删功能"最要紧的一条验收：用户手里的 config.toml 是上一版程序写的，
+    里面那九个键（连同更早的 `auction_alert_min_*` 旧名）**不会因为这次升级就消失** ——
+    读配置时只认 `Config` 上真有的字段，多出来的键连读都不读、更不会报错。
+    （`save_settings` 回写时也原样保留它们，见 `test_config_writeback.py` 的"注释与未知键"用例。）
+    """
+    old = _write(tmp_path, """\
+# 用户手写的注释也要原样留着
+intraday_auction = true
+auction_scan_at = ["09:20", "09:25"]
+auction_min_pct = 3.0
+auction_max_pct = 8.0
+auction_boards = ["main", "chinext"]
+auction_min_amount = 3000000.0
+auction_min_volume_ratio = 2.5
+auction_min_score = 3
+auction_alert_max_items = 7
+# 更早那一版的旧名（`_LEGACY_FIELD_ALIASES` 里原来指向 auction_min_*）
+auction_alert_min_pct = 4.0
+auction_alert_min_volume_ratio = 3.0
 """)
-    cfg = load_config(path, use_env=False)
-    assert cfg.auction_max_pct == 9.0               # 上限 ≤ 下限 → 回默认
-    assert cfg.auction_min_pct == 6.0               # 下限本身合法，保留
-    assert cfg.auction_boards == ["chinext"]        # 认不出的板块丢掉
-    assert cfg.auction_scan_at == ["09:05"]         # 补零 + 去重 + 丢掉 25:00
-    assert cfg.auction_min_score == 6               # 夹到满分（6）
-    assert cfg.auction_alert_max_items == 50        # 夹到上限 50
+    cfg = load_config(old, use_env=False)
+    assert cfg.config_error == ""                    # 读得进去、没有任何报错
+    # 那些键一个都不再是字段（连名字都不该留着 —— 留着就等于"还在用"）
+    for gone in ("intraday_auction", "auction_scan_at", "auction_min_pct", "auction_max_pct",
+                 "auction_boards", "auction_min_amount", "auction_min_volume_ratio",
+                 "auction_min_score", "auction_alert_max_items"):
+        assert not hasattr(cfg, gone), f"{gone} 应该已经随竞价扫描一起删掉"
+    # 同一份文件里的**别**的键照常生效（不是"整份配置被跳过"）
+    fresh = Config()
+    assert cfg.intraday_interval == fresh.intraday_interval
 
-
-def test_auction_scan_zero_or_negative_falls_back(tmp_path: Path) -> None:
-    """阈值 0/负数会让"过滤"失真（什么都过）→ 回默认；板块空列表 = 不限制（全选）。"""
-    path = _write(tmp_path, """
-auction_min_pct = 0
-auction_min_amount = -1
-auction_max_pct = 0
-auction_boards = []
-auction_scan_at = "abc"
-auction_min_score = 0
-""")
-    cfg = load_config(path, use_env=False)
-    assert cfg.auction_min_pct == 2.0
-    assert cfg.auction_min_amount == 5e6
-    assert cfg.auction_max_pct == 9.0
-    assert cfg.auction_boards == ["main", "chinext", "star", "bj"]
-    assert cfg.auction_scan_at == ["09:20", "09:25"]
-    assert cfg.auction_min_score == 1               # 0 → 夹到下限 1
-
-
-def test_auction_scan_legacy_key_names_still_work(tmp_path: Path) -> None:
-    """上一版的键名（`auction_alert_min_*`）继续认，但**新名优先**。"""
-    path = _write(tmp_path, "auction_alert_min_pct = 3.5\nauction_alert_max_items = 7\n")
-    cfg = load_config(path, use_env=False)
-    assert cfg.auction_min_pct == 3.5
-    assert cfg.auction_alert_max_items == 7
-
-    both = _write(tmp_path, "auction_alert_min_pct = 3.5\nauction_min_pct = 4.5\n")
-    assert load_config(both, use_env=False).auction_min_pct == 4.5
-
-
-def test_auction_scan_env_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """环境变量：新名字都要能覆盖（含板块与扫描时刻这两个列表）。"""
-    monkeypatch.setenv("AUCTION_MIN_PCT", "3.0")
-    monkeypatch.setenv("AUCTION_MAX_PCT", "7.5")
-    monkeypatch.setenv("AUCTION_MIN_AMOUNT", "3000000")
-    monkeypatch.setenv("AUCTION_MIN_SCORE", "4")
-    monkeypatch.setenv("AUCTION_ALERT_MAX_ITEMS", "20")
+    # 环境变量里的旧名字也一样：不报错、不生效
+    monkeypatch.setenv("INTRADAY_AUCTION", "true")
+    monkeypatch.setenv("AUCTION_MIN_PCT", "4.5")
+    monkeypatch.setenv("AUCTION_SCAN_AT", "09:18, 09:24")
     monkeypatch.setenv("AUCTION_BOARDS", "chinext,star")
-    monkeypatch.setenv("AUCTION_SCAN_AT", "09:19,09:26")
-    cfg = load_config(tmp_path / "none.toml")
-    assert cfg.auction_min_pct == 3.0 and cfg.auction_max_pct == 7.5
-    assert cfg.auction_min_amount == 3e6
-    assert cfg.auction_min_score == 4
-    assert cfg.auction_alert_max_items == 20
-    assert cfg.auction_boards == ["chinext", "star"]
-    assert cfg.auction_scan_at == ["09:19", "09:26"]
-
-    # 环境变量写错也一样回默认（0 秒那种写法不该让过滤失效）
-    monkeypatch.setenv("AUCTION_MIN_PCT", "0")
-    monkeypatch.setenv("AUCTION_SCAN_AT", "乱写")
-    monkeypatch.setenv("AUCTION_BOARDS", "zzz")
-    cfg2 = load_config(tmp_path / "none.toml")
-    assert cfg2.auction_min_pct == 2.0
-    assert cfg2.auction_scan_at == ["09:20", "09:25"]
-    assert cfg2.auction_boards == ["main", "chinext", "star", "bj"]
+    from_env = load_config(old)
+    assert from_env.config_error == ""
+    assert not hasattr(from_env, "auction_min_pct")
 
 
-def test_example_config_documents_auction_scan() -> None:
-    """config.example.toml 里要能看到这一组，并写清"为什么只扫两次"和涨跌幅上下限的理由。"""
+def test_example_config_no_longer_documents_auction_scan() -> None:
+    """`config.example.toml` 里也不该再有那一组（它现在是"未知键"了，留着只会误导用户）。
+
+    这条同时钉住"文档与代码一起改"：示例配置是用户照抄的模板，
+    模板里留着一组程序根本不认的键，比不写更糟 —— 他会以为改那里能生效。
+    """
     import tomllib
     from pathlib import Path as P
 
     example = P(__file__).resolve().parents[1] / "config.example.toml"
     text = example.read_text(encoding="utf-8")
     data = tomllib.loads(text)
-    assert data["intraday_auction"] is False
-    assert data["auction_scan_at"] == ["09:20", "09:25"]
-    assert data["auction_min_pct"] == 2.0
-    assert data["auction_max_pct"] == 9.0
-    assert data["auction_boards"] == ["main", "chinext", "star", "bj"]
-    assert data["auction_min_amount"] == 5000000.0
-    assert data["auction_min_score"] == 2
-    assert data["auction_alert_max_items"] == 10
-    assert "全市场" in text                          # 扫的是全市场，不是只看自己的票
-    assert "配额" in text                            # 为什么不每分钟扫
-    assert "买不进" in text                          # 涨幅上限的理由
+    assert not [k for k in data if k.startswith("auction")], data.keys()
+    # 注释里**可以**提到那几个键名（用来告诉用户"它们已经删了"），
+    # 但**不许有一行是真正的键** —— 模板里留一个程序不认的键比不写更糟：
+    # 用户照抄之后会以为改那里能生效。
+    written = [line.split("=", 1)[0].strip() for line in text.splitlines()
+               if "=" in line and not line.lstrip().startswith("#")]
+    assert not [k for k in written if k.startswith("auction")], written
+    # 但"竞价怎么做"这件事要留下说明：它现在是一条随包策略
+    assert "竞价策略" in text and "9:25" in text
 
 
 # ── 持仓做T 的近似提示（开关 + 四个阈值）──

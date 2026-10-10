@@ -86,7 +86,6 @@ def window(cfg, qapp, tmp_path):
     # 收尾：定时器/线程/窗口都要收干净，否则跨用例累积（见 test_ui_smoke 的同一段注释）
     win._timer.stop()
     win._market_timer.stop()
-    win._auction_timer.stop()
     win._flash_timer.stop()
     win.scheduler.stop()
     win.quotes.stop()
@@ -157,7 +156,6 @@ def test_pet_is_not_created_when_switched_off(cfg, qapp, monkeypatch) -> None:
     finally:
         win._timer.stop()
         win._market_timer.stop()
-        win._auction_timer.stop()
         win._flash_timer.stop()
         win.scheduler.stop()
         win.quotes.stop()
@@ -630,7 +628,7 @@ def test_a_fresh_install_shows_rate_1_0_and_the_pet_on(qapp, tmp_path) -> None:
         assert win.pet_box.isChecked() is True, "全新安装桌宠应当默认勾上"
         assert win.pet is not None and win.pet.isVisible() is True, "全新安装桌宠就该在桌面上"
     finally:
-        for name in ("_timer", "_market_timer", "_auction_timer", "_flash_timer"):
+        for name in ("_timer", "_market_timer", "_flash_timer"):
             timer = getattr(win, name, None)
             if timer is not None:
                 timer.stop()

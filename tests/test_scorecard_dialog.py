@@ -660,11 +660,17 @@ def page(page_cfg: Config, tmp_path: Path, qapp):
 
 
 def test_the_page_has_a_scorecard_entry_with_an_honest_tooltip(page) -> None:
-    """页面上有【成绩单】按钮，tooltip 把代价说在前面（要扫全库、数据不足 1 年没用）。"""
+    """页面上有【成绩单】按钮，tooltip **一句短话**把代价说清（要扫全库、几十秒）。
+
+    2026-10-11 主人要求界面文字瘦身：tooltip 只留一句短的（原来那句"数据不足 1 年
+    （250 个交易日）时结论不可用 —— 打开后会先告诉你库里的数据够不够、不够怎么补"
+    整段删掉了）。"数据够不够、结论不可用"这件事并没有丢：它由**对话框自己**在
+    打开时如实写出来（`ui/scorecard_dialog.py`，下面那几条用例守着）。
+    """
     assert page.btn_scorecard.text() == "成绩单"
     tip = page.btn_scorecard.toolTip()
     assert "全库" in tip and "几十秒" in tip
-    assert "1 年" in tip and "不可用" in tip
+    assert len(tip) <= 20, tip          # 一句短的（主人要求）
     # 它只是个入口：这一页不自己跑成绩单（口径与线程都在对话框那个模块里）
     assert not hasattr(page, "scorecard_worker")
     assert callable(lib.run_scorecard)
@@ -699,7 +705,7 @@ def test_clicking_the_entry_opens_the_dialog_with_the_checked_strategies(
     # 勾上一条（与界面上的勾选框走同一条路）：清单里就该有它
     page.cfg.enabled_formulas = ["收盘在5日线上"]
     page.reload()
-    box = page._row_box(fp.ROW_FORMULA, "收盘在5日线上")
+    box = page._row_boxes["收盘在5日线上"]
     assert box is not None and box.isChecked()
 
     page.btn_scorecard.click()

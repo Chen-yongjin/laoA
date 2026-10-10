@@ -748,8 +748,7 @@ if QT_AVAILABLE:
                     self._set_cell(row, column, DASH)
             if not self.targets:
                 self.note_label.setText(
-                    "没有勾选任何策略：回到「策略筛选」列表，把要评估的策略勾上"
-                    "（「竞价策略」那一行不是策略，不参与成绩单）。"
+                    "没有勾选任何策略：回到「策略筛选」列表，把要评估的策略勾上。"
                 )
 
         def _set_cell(self, row: int, column: str, text: str) -> None:

@@ -25,7 +25,8 @@
     position          持仓台账
     signal            筛选信号落库
     intraday_alert    盘中提醒去重表
-    auction_scan      竞价扫描结果（全市场扫描的全部命中）
+    auction_scan      **已废弃**：竞价扫描（2026-10-11 整块下线）当年存命中用的表，
+                      表与索引留着不删（老库里还有数据，删了要写迁移，见 `_SCHEMA`）
     fund_flow         资金流日线（**只对自选标的采集**，见 `scheduler.sync_watchlist_fund_flow`）
 """
 
@@ -228,9 +229,9 @@ SCHEMA: tuple[str, ...] = (
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_alert_date ON intraday_alert (date);",
-    # ── 竞价扫描结果（**全市场扫描的全部命中**，供界面"看全部"与复盘）──
-    # 为什么不复用 intraday_alert：那张表只存"推给用户的前 N 只"，
-    # 而用户要能在详情里看**全部命中**（含没推送的那几十只），还要看原始数值与分数。
+    # ── **已废弃**：竞价扫描结果（2026-10-11 竞价扫描整块下线，读写函数一并删了）──
+    # 表与索引留着不删：老库里已经有这张表与数据，删它就得写迁移，而"没人用的空表"
+    # 留在那儿没有任何代价（新装的库也会照这份建表语句建出来，同样是空表）。
     """
     CREATE TABLE IF NOT EXISTS auction_scan (
         day          TEXT NOT NULL,
@@ -906,88 +907,11 @@ def load_alerts_of_day(
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
-# ── 竞价扫描结果（全市场扫描；界面"看全部"用）──
-
-
-def write_auction_scan(
-    conn: sqlite3.Connection,
-    day: str,
-    slot: str,
-    rows: Iterable[dict],
-    *,
-    total: int = 0,
-    scanned_at: str = "",
-) -> int:
-    """写入一次竞价扫描的**全部命中**（同一天同一时刻重扫 → 覆盖）。
-
-    为什么覆盖而不是追加：同一时刻重扫（用户手点、或补跑）拿到的是同一份事实，
-    追加只会让"命中 37 只"变成"命中 74 只"，界面上的数字就没法信了。
-    """
-    rows = list(rows)
-    total = int(total or len(rows))
-    payload = []
-    for index, row in enumerate(rows, start=1):
-        payload.append((
-            day, slot, int(row.get("rank") or index), str(row.get("symbol") or ""),
-            str(row.get("name") or ""), str(row.get("board") or ""),
-            row.get("pct"), row.get("volume_ratio"), row.get("amount"),
-            row.get("unmatched"), row.get("score"),
-            1 if row.get("pushed") else 0, total, scanned_at or _now(),
-        ))
-    conn.execute("DELETE FROM auction_scan WHERE day = ? AND slot = ?", (day, slot))
-    conn.executemany(
-        "INSERT OR REPLACE INTO auction_scan (day, slot, rank, symbol, name, board, "
-        "pct, volume_ratio, amount, unmatched, score, pushed, total, scanned_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        payload,
-    )
-    conn.commit()
-    return len(payload)
-
-
-def load_auction_scan(
-    conn: sqlite3.Connection, day: str | None = None, slot: str | None = None,
-) -> list[dict]:
-    """读竞价扫描结果（按名次）。
-
-    Args:
-        day: 哪一天；`None` = 库里最近一个有扫描结果的日子。
-        slot: 哪个时刻；`None` = 那一天**最后一次**扫描（9:25 那次是终态，用户看的也是它）。
-    """
-    if day is None:
-        row = conn.execute("SELECT day FROM auction_scan ORDER BY day DESC LIMIT 1").fetchone()
-        if row is None:
-            return []
-        day = str(row["day"])
-    if slot is None:
-        row = conn.execute(
-            "SELECT slot FROM auction_scan WHERE day = ? ORDER BY slot DESC LIMIT 1", (day,)
-        ).fetchone()
-        if row is None:
-            return []
-        slot = str(row["slot"])
-    rows = conn.execute(
-        "SELECT day, slot, rank, symbol, name, board, pct, volume_ratio, amount, "
-        "unmatched, score, pushed, total, scanned_at FROM auction_scan "
-        "WHERE day = ? AND slot = ? ORDER BY rank",
-        (day, slot),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def auction_scan_slots(conn: sqlite3.Connection, day: str) -> list[str]:
-    """某天已经扫过的时刻（升序）—— `intraday.auction_scan_due` 靠它判断"这一档扫过了"。"""
-    rows = conn.execute(
-        "SELECT DISTINCT slot FROM auction_scan WHERE day = ? ORDER BY slot", (day,)
-    ).fetchall()
-    return [str(r["slot"]) for r in rows]
-
-
 def load_stock_basic(conn: sqlite3.Connection) -> dict[str, str]:
-    """全市场 `{symbol: 名称}`（竞价扫描的代码来源；空字典 = 库还没下数据）。
+    """全市场 `{symbol: 名称}`（空字典 = 库还没下数据）。
 
-    `stock_basic` 是**本地已有**的（下载/同步的收尾步骤会写），所以全市场扫描
-    不需要为了"拿到代码表"再打一次接口 —— 库还空时才退回接口（见 `intraday.market_symbols`）。
+    `stock_basic` 是**本地已有**的（下载/同步的收尾步骤会写），所以凡是"要全市场代码表"
+    的地方都该先用它，不该为了拿到代码表再打一次接口。
     """
     return {
         str(row["symbol"]): str(row["name"] or "")

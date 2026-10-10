@@ -229,7 +229,6 @@ def test_main_window_installs_the_guard(ready_cfg, qapp) -> None:
     finally:
         window._timer.stop()
         window._market_timer.stop()
-        window._auction_timer.stop()
         window._flash_timer.stop()
         window.scheduler.stop()
         window.quotes.stop()

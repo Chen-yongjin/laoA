@@ -191,8 +191,10 @@ def test_capability_brief_is_the_one_line_version_for_the_ui() -> None:
         )
     hx = sources.REGISTRY["hithink"]
     assert sources.capabilities_brief(hx) == "实时快照、日线、股票列表"
-    # 一行放得下（界面那行还带"提供："与"（换来源会影响这些）"两个前后缀）
-    assert len("提供：" + sources.capabilities_brief(hx) + "（换来源会影响这些）") <= 40
+    # 一行放得下（界面那行还带着"提供："这个前缀）。
+    # 2026-10-11：原来还缀着"（换来源会影响这些）"—— 主人要求"宁可删干净"，
+    # 那半句解释删掉了（同一层意思在界面的短 tooltip 里），所以这里也不再算它。
+    assert len("提供：" + sources.capabilities_brief(hx)) <= 40
 
 
 # ── active_sources：顺序、未知 id、各种写法 ──

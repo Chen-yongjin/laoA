@@ -70,12 +70,12 @@ def test_window_frame_reads_env_var(monkeypatch, tmp_path) -> None:
 
 def test_titlebar_shows_brand_and_three_window_buttons(qapp) -> None:
     """软件名 + 版本小字 + 三个按钮，且是**固定高度**（高度由布局之外的常量说了算）。"""
-    bar = tb.TitleBar("luweik决策系统", tag="单机版 · v9.9.9")
+    bar = tb.TitleBar("luweik决策系统", tag="专业版 · v9.9.9")
     assert bar.objectName() == "titleBar"
     assert bar.height() == tb.TITLEBAR_HEIGHT
     assert bar.title_label.text() == "luweik决策系统"
     assert bar.title_label.objectName() == "titleBarTitle"
-    assert bar.tag_label.text() == "单机版 · v9.9.9"
+    assert bar.tag_label.text() == "专业版 · v9.9.9"
     assert bar.tag_label.objectName() == "titleBarTag"
     assert bar.title_label.font().bold() is True          # 软件名加粗（层级里最高那级）
     names = [button.objectName() for button in bar.window_buttons()]
@@ -278,7 +278,6 @@ def frame_window(ready_cfg, qapp):
     finally:
         window._timer.stop()
         window._market_timer.stop()
-        window._auction_timer.stop()
         window._flash_timer.stop()
         window.scheduler.stop()
         window.quotes.stop()
@@ -298,7 +297,7 @@ def test_main_window_has_the_custom_titlebar(frame_window) -> None:
     assert window.titlebar.objectName() == "titleBar"
     assert window.titlebar.isHidden() is False          # 自绘模式下它是显示着的
     assert window.titlebar.title_label.text() == window.app_title_label.text()
-    assert window.titlebar.tag_label.text().startswith("单机版")
+    assert window.titlebar.tag_label.text().startswith("专业版")
     # 状态区里那个软件名被收起来了（同一件事不说两遍）；它**还在**（切回系统标题栏要用）
     assert window.app_title_label.isHidden() is True
     assert window.centralWidget().objectName() == "windowBody"
@@ -340,9 +339,10 @@ def test_window_frame_choice_is_saved_with_the_other_settings(frame_window) -> N
     window.frame_box.setCurrentIndex(window.frame_box.findData("system"))
     updates = window._collect_settings_updates()
     assert updates["window_frame"] == "system"
-    # 界面上的提示要说清"重启才生效"——不然用户会以为点了没反应
-    texts = [child.text() for child in window.settings_page.findChildren(QLabel)]
-    assert any("重启" in text for text in texts)
+    # 界面上的提示要说清"重启才生效"——不然用户会以为点了没反应。
+    # 2026-10-11 主人要求删掉设置页那些解释性小字（原来这里有一行 `frame_hint` 说明），
+    # 所以这条提示现在落在**下拉框自己的短 tooltip** 上。
+    assert "重启" in window.frame_box.toolTip()
 
 
 def test_falls_back_to_the_system_frame_when_takeover_fails(frame_window, qapp) -> None:

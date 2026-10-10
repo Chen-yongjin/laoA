@@ -296,7 +296,7 @@ def data_gate(
 
 #: 资金流采集的**逐只间隔**（秒）。这是公开接口（东方财富），而采集只有自选那几十只
 #: —— 20 只 × 0.25 秒 ≈ 5 秒，既不至于连着打几十个请求被风控盯上，也不会让日更多等很久。
-#: 与 `eastmoney.PAGE_PAUSE`（0.2）/ `intraday.AUCTION_SCAN_PACE`（0.3）同一个量级。
+#: 与 `eastmoney.PAGE_PAUSE`（0.2）同一个量级。
 FUND_FLOW_PACE = 0.25
 
 
@@ -1075,31 +1075,18 @@ class Scheduler:
         return True
 
     def _maybe_intraday(self, now: datetime) -> None:
-        """交易时段内按间隔跑盘中提醒；**竞价扫描时刻即使还没开盘也要跑一轮**。
+        """交易时段内按间隔跑盘中提醒。
 
-        为什么把"竞价扫描到点"单独放行：9:20 / 9:25 都还没到 09:30（不在交易时段里），
-        只按 `in_session` 判断的话**竞价扫描永远不会触发** —— 而它恰恰是开盘前最有用的那一步。
-        代价是每分钟只多一次"到没到点"的本地判断（查一次 `auction_scan` 表），零请求。
+        2026-10-11：原来这里还有一条"竞价扫描时刻即使还没开盘也要跑一轮"的旁路
+        （9:20 / 9:25 都不在 09:30–15:00 里，不单独放行的话那套全市场扫描永远不会触发）。
+        竞价扫描整块下线之后它没有用户了，一并删掉 —— 盘中提醒只认交易时段。
         """
         if self._intraday_paused:
             return
-        scan_due = False
-        if bool(getattr(self.cfg, "intraday_auction", False)):
-            try:
-                with storage.connect(self.engine.db_path) as conn:
-                    scanned = storage.auction_scan_slots(
-                        conn, intraday.now_shanghai(now).strftime("%Y-%m-%d")
-                    )
-                scan_due = bool(intraday.auction_scan_due(now, self.cfg, scanned))
-            except Exception as exc:  # noqa: BLE001 - 到点判断失败就当没到点
-                logger.debug(f"竞价扫描到点判断失败：{exc}")
-        if not intraday.in_session(now) and not scan_due:
+        if not intraday.in_session(now):
             return
         interval = max(int(self.cfg.intraday_interval), 5)
-        # 到点的竞价扫描**不受轮询间隔限制**：09:20/09:25 是硬时刻，
-        # 而"每分钟一拍 + 宽限 3 分钟"两条叠加起来有可能正好错过（例如上一拍在 09:22:30、
-        # 下一拍就到 09:23:30，那一档已经作废）—— 宁可这一刻多跑一轮常规提醒，也别漏扫。
-        if time.time() - self._last_intraday_ts < interval and not scan_due:
+        if time.time() - self._last_intraday_ts < interval:
             return
         self._last_intraday_ts = time.time()
         report = intraday.run_once(self.engine, self.cfg, now=now)

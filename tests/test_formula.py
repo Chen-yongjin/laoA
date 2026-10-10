@@ -1355,6 +1355,11 @@ def test_shipped_formula_files_all_compile_and_evaluate() -> None:
     # "均线多头排列"需要 60 根 K 线 —— 元信息要如实反映
     by_name = {s.name: s for s in specs}
     assert by_name["均线多头排列"].formula.min_history == 60
+    # 「竞价策略」（2026-10-11 主人要求"直接加入"的那一条）也在这一批里：
+    # 它是随包分发的策略文件，所以必须跟别的随包公式一样能编译、能求值、
+    # 有 `# 名称:`/`# 说明:` 注释头（列表里的「说明」列就是它）
+    assert "竞价策略" in by_name, sorted(by_name)
+    assert "9:25-9:30" in by_name["竞价策略"].description
 
 
 # ══════════════════════════════════════════════════════════════════════════

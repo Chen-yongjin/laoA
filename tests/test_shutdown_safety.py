@@ -88,7 +88,7 @@ def test_voice_never_spawns_powershell_in_tests() -> None:
 def test_worker_wait_all_covers_threads_not_held_by_the_window(qapp) -> None:
     """**没挂到窗口属性上**的工作线程也要被 `wait_all()` 等到 —— 这就是它存在的理由。
 
-    历史上漏的正是这种：竞价取数线程（`_auction_worker`）当时不在 `shutdown()` 的
+    历史上漏的正是这种：竞价取数那个线程当年不在 `shutdown()` 的
     等待名单里，于是它可能活过用例。登记册让"漏一个属性名"不再等于"漏一条线程"。
     """
     from laoa_trader.ui import app as ui_app

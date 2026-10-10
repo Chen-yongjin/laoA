@@ -122,7 +122,6 @@ def win(cfg, qapp, monkeypatch):
     # 收尾：定时器/调度/顶层窗口都要收干净，否则会跨用例累积（与界面冒烟测试同一套做法）
     window._timer.stop()
     window._market_timer.stop()
-    window._auction_timer.stop()
     window._flash_timer.stop()
     window.scheduler.stop()
     window.quotes.stop()               # 实时快照的工作线程也要收（不然后台还在飞）
@@ -428,7 +427,6 @@ def test_alerts_already_in_db_do_not_popup_on_startup(cfg, qapp, monkeypatch, tr
     assert window.alert_popup is None
     window._timer.stop()
     window._market_timer.stop()
-    window._auction_timer.stop()
     window.scheduler.stop()
     window.tray.hide()
     window.close()

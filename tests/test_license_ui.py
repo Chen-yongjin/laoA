@@ -70,7 +70,7 @@ def _teardown_window(win, qapp) -> None:
     """
     from PySide6.QtCore import QEvent
 
-    for timer_name in ("_timer", "_market_timer", "_auction_timer", "_flash_timer"):
+    for timer_name in ("_timer", "_market_timer", "_flash_timer"):
         timer = getattr(win, timer_name, None)
         if timer is not None:
             timer.stop()

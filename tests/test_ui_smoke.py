@@ -153,7 +153,6 @@ def window(seeded, qapp):
     # DeferredDelete**（`deleteLater()` 只是排队，不跑 `sendPostedEvents` 就不会真删）。
     win._timer.stop()
     win._market_timer.stop()
-    win._auction_timer.stop()
     win._flash_timer.stop()
     win.scheduler.stop()
     win.quotes.stop()               # 实时快照的工作线程也要收（不然后台还在飞）
@@ -870,22 +869,34 @@ def test_doctor_command_prints_report(cfg, capsys, tmp_path) -> None:
 
 
 def test_settings_tab_widgets_reflect_config(window) -> None:
-    """「系统设置」= **五组**（顺序固定），每组控件如实反映配置的当前值。
+    """「系统设置」= **四组**（顺序固定），每组控件如实反映配置的当前值。
 
-    五组由用户给定（`SETTINGS_GROUPS`）：数据来源 → 通知方式 → 竞价扫描 →
-    **T策略** → 其他。T策略那一组是用户拍板的名字（原来叫「持仓风险」，用户要求把
+    四组由用户给定（`SETTINGS_GROUPS`）：数据来源 → 通知方式 → **T策略** → 其他。
+    原来是五组，第 3 组是「竞价扫描」（开关 + 8 个阈值）—— 2026-10-11 主人
+    "把设置里面的去掉"，整组删除（竞价改成一条可编辑的随包策略，见 `formulas/竞价策略.txt`）。
+    T策略那一组是用户拍板的名字（原来叫「持仓风险」，用户要求把
     止损/止盈合并进来，原话：止盈止损比例给客户自己设置，在 T策略 中编辑）。
     策略组/成员策略的启停**不在这一页**（按规格移到「策略筛选」的列表里）。
     「盘中使用实时数据」也**不在这一页、且全程序没有这个开关**：那是内置规则，
     主人 2026-09-23 明确划掉（"不需要加开关，按照我说的规则来"）——
     见 `test_no_switch_can_disable_the_intraday_caliber`（`tests/test_formula_lib.py`）。
     """
-    from laoa_trader import config as config_mod
     from laoa_trader.ui import app as ui_app
 
     assert list(window.settings_sections) == list(ui_app.SETTINGS_GROUPS) == [
-        "数据来源", "通知方式", "竞价扫描", "T策略", "其他",
+        "数据来源", "通知方式", "T策略", "其他",
     ]
+    # 「竞价扫描」那一组**整组没了**：控件、常量、说明行都不许剩下
+    assert "竞价扫描" not in ui_app.SETTINGS_GROUPS
+    for gone in ("auction_on_box", "auction_min_pct_box", "auction_max_pct_box",
+                 "auction_amount_box", "auction_ratio_box", "auction_score_box",
+                 "auction_items_box", "auction_board_boxes", "auction_scan_at_edit",
+                 "auction_hint", "_panel_auction_updates", "on_save_auction",
+                 "_build_settings_auction_group", "_refresh_auction_hint",
+                 "_auction_timer", "_auction_worker", "request_auction", "_auction_tick",
+                 "auction_snapshot"):
+        assert not hasattr(window, gone), f"{gone} 应该已经随「竞价扫描」那一组删掉"
+    assert not hasattr(ui_app, "AUCTION_REFRESH_MS")
     for title, box in window.settings_sections.items():
         assert box.title_label.text() == title
         assert _tab_page(window, ui_app.TAB_SETTINGS).isAncestorOf(box) is True
@@ -919,12 +930,14 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     public = window.source_rows["public"]
     assert public.tag_label.text() == "免 Key"
     # 能力说明写在界面上（换来源会丢掉什么，用户必须看得见）——**文案来自真相源**。
-    # 2026-09-20（用户："压成一句…把罗列压缩到一行内、别换行成墙"）：正文用**短**标签 +
-    # 一句后果，完整说法进 tooltip（信息没丢，只是不再占满屏幕）。
-    assert builtin.capability_label.text() == \
-        "提供：" + state["hithink"]["capabilities_brief"] + "（换来源会影响这些）"
-    assert builtin.capability_label.text() == "提供：实时快照、日线、股票列表（换来源会影响这些）"
-    assert state["hithink"]["capabilities_text"] in builtin.capability_label.toolTip()
+    # 2026-09-20（用户："压成一句…把罗列压缩到一行内、别换行成墙"）：正文只留**短标签**。
+    # 2026-10-11 主人："宁可删干净" —— 连"（换来源会影响这些）"这半句解释也去掉了，
+    # 同一层意思挪进了下面那句**短 tooltip**（"换来源会丢掉这些能力"）。
+    assert builtin.capability_label.text() == "提供：" + state["hithink"]["capabilities_brief"]
+    assert builtin.capability_label.text() == "提供：实时快照、日线、股票列表"
+    # 2026-10-11 主人要求界面文字瘦身：tooltip 只留**一句短的**，
+    # 完整说法（`capabilities_text`）不再塞进界面（它还在数据源注册表里，报障/写文档用）
+    assert builtin.capability_label.toolTip() == "换来源会丢掉这些能力"
     assert builtin.enabled_box.isChecked() is True
     assert builtin.enabled_box.isEnabled() is False            # 内置来源不能在界面上关
     # 非当前页签里的控件 `isVisible()` 恒为 False，所以这里看的是「有没有被显式藏起来」
@@ -980,19 +993,6 @@ def test_settings_tab_widgets_reflect_config(window) -> None:
     assert window.tray_duration.value() == int(window.cfg.notify_tray_duration_ms)
     assert window.feishu_on_box.isChecked() == bool(window.cfg.feishu_on)
     assert window.feishu_app_id.text() == window.cfg.feishu_app_id
-
-    # 竞价扫描：开关 + 8 个参数（沿用现有控件）
-    assert window.auction_on_box.isChecked() == bool(window.cfg.intraday_auction)
-    assert window.auction_min_pct_box.value() == pytest.approx(window.cfg.auction_min_pct)
-    assert window.auction_max_pct_box.value() == pytest.approx(window.cfg.auction_max_pct)
-    assert window.auction_amount_box.value() == pytest.approx(
-        window.cfg.auction_min_amount / 1e4)
-    assert window.auction_ratio_box.value() == pytest.approx(
-        window.cfg.auction_min_volume_ratio)
-    assert window.auction_score_box.value() == int(window.cfg.auction_min_score)
-    assert window.auction_items_box.value() == int(window.cfg.auction_alert_max_items)
-    assert set(window.auction_board_boxes) == set(config_mod.AUCTION_BOARDS)
-    assert window.auction_scan_at_edit.text() == ", ".join(window.cfg.auction_scan_at)
 
     # T策略组：止损/止盈 + **T策略（默认关）+ 四个做T阈值**（这四个原来完全没有界面入口）
     assert window.stop_loss_box.value() == pytest.approx(abs(window.cfg.stop_loss) * 100)
@@ -1674,7 +1674,7 @@ def test_yield_gui_keeps_the_main_thread_responsive(qapp) -> None:
     assert alive > starved, f"让出版的定时器次数（{alive}）没有优于不让出的（{starved}）"
 
 
-# ── 需求 1/2/3 的界面部分：提醒标的文案、涨停原因、竞价那一行 ──
+# ── 需求 1/2/3 的界面部分：提醒标的文案、涨停原因、涨停那一行 ──
 
 
 def test_pool_source_column_shows_primary_strategy_and_tooltip_the_rest(
@@ -1715,12 +1715,12 @@ def test_pool_source_column_shows_primary_strategy_and_tooltip_the_rest(
     assert "T+3" not in window.pool_table.item(0, source_column).text()
 
 
-def test_pool_row_tooltip_shows_limit_up_and_auction(pool_window, qapp,
-                                                      monkeypatch) -> None:
-    """今日涨停（连板 + 原因）与竞价那一行都在**行的 tooltip** 里。
+def test_pool_row_tooltip_shows_limit_up(pool_window, qapp, monkeypatch) -> None:
+    """今日涨停（连板 + 原因）在**行的 tooltip** 里（原来占表的一列 + 卡片一行）。
 
-    这两块原来占「股票池」表的一列和卡片上的一行；新表的列数被用户定死成 6 列，
-    所以它们的去处是 tooltip —— 信息不能因为去掉一列就丢掉。
+    新表的列数被用户定死成 6 列，所以它的去处是 tooltip —— 信息不能因为去掉一列就丢掉。
+    （同一行里原来还有"竞价 +3.2% 量比2.8"那一句；2026-10-11 竞价扫描整块下线、
+    竞价改成一条普通策略之后，那一句也跟着删了 —— 下面顺带钉住它不会再冒出来。）
     """
     from laoa_trader import pool as pool_mod
 
@@ -1737,11 +1737,6 @@ def test_pool_row_tooltip_shows_limit_up_and_auction(pool_window, qapp,
     ]
     monkeypatch.setattr(pool_mod, "pool_page_rows", lambda db_path, day=None: rows)
     window = pool_window
-    window.auction_snapshot = {
-        "600002": {"symbol": "600002", "name": "半导体甲", "pct": 3.2, "volume_ratio": 2.8,
-                   "turnover_pct": 0.13, "yesterday_ratio": 0.95, "unmatched": None,
-                   "price": 12.5, "pre_close": 12.2},
-    }
     window._pool_signature = None          # 强制重画
     window._refresh_pool_table()
     qapp.processEvents()
@@ -1750,16 +1745,16 @@ def test_pool_row_tooltip_shows_limit_up_and_auction(pool_window, qapp,
                  for i in range(window.pool_table.rowCount())}
     tip = window.pool_table.item(by_symbol["600002"], 0).toolTip()
     assert "涨停：2 连板 · 半导体设备+业绩预增" in tip
-    assert "竞价：+3.2% 量比2.8" in tip
     # 不是涨停票 → tooltip 里没有那一行（不留空壳）
     assert "涨停" not in window.pool_table.item(by_symbol["600003"], 0).toolTip()
     # 文案本身的实现仍由 pool 层提供（界面不自己拼一套）
     assert pool_mod.limit_up_text(rows[0]) == "2 连板 · 半导体设备+业绩预增"
     assert pool_mod.limit_up_text(rows[1]) == ""
-    # "看全部竞价"的位置：详情弹窗里列**全市场扫描结果**（没有扫描结果时说明去哪儿开）
+    # 竞价那一行**整条不再出现**（它当年也是画在 tooltip 里的）
+    assert "竞价" not in tip and "量比" not in tip
+    # 状态详情里也不再提"竞价扫描"（原来那里会写"还没有结果 → 去设置页开"）
     details = window._status_details()
-    assert "竞价扫描" in details
-    assert "设置页" in details
+    assert "竞价" not in details
 
 
 def test_status_points_to_refresh_when_only_light_data_missing(window, qapp) -> None:
@@ -2209,25 +2204,21 @@ SETTINGS_KEYS: frozenset[str] = frozenset({
     # 语音播报内容（2026-10-05 主人："语音播报有点乱，可以自由选择要提醒的内容"）：
     # 念哪些类型 / 一句里念哪几样 / 一次来多条怎么念
     "voice_kinds", "voice_fields", "voice_multi",
-    # 3) 竞价扫描
-    "intraday_auction", "auction_min_pct", "auction_max_pct", "auction_min_amount",
-    "auction_min_volume_ratio", "auction_min_score", "auction_alert_max_items",
-    "auction_boards", "auction_scan_at",
-    # 4) T策略
+    # 3) T策略（原来这里是"3) 竞价扫描"那 9 个键 —— 2026-10-11 整组删掉了）
     "stop_loss", "take_profit", "intraday_t", "t_high_min_gain_pct",
     "t_high_pullback_pct", "t_low_min_drop_pct", "t_low_rebound_pct",
-    # 6) 其他
+    # 4) 其他
     "ui_theme", "window_frame", "intraday_anomaly", "watchlist_max",
     "watchlist_in_pool",
-    # 7) 数据来源那一行里**用户自己填的** Key（2026-09-18 起内置同花顺也有输入框了）
+    # 5) 数据来源那一行里**用户自己填的** Key（2026-09-18 起内置同花顺也有输入框了）
     "hithink_api_key",
 })
 
 
-def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None:
-    """收集函数的键集合 = 五组控件的**全部**键（一键保存的"写哪些"就是它决定的）。
+def test_collect_settings_updates_covers_exactly_the_four_groups(window) -> None:
+    """收集函数的键集合 = 四组控件的**全部**键（一键保存的"写哪些"就是它决定的）。
 
-    **37 是现在的个数**（含 `hithink_api_key` —— 用户澄清"不要配 KEY"指的是
+    **32 是现在的个数**（含 `hithink_api_key` —— 用户澄清"不要配 KEY"指的是
     **程序里不许预置自己的 Key**，不是不给填，
     所以内置同花顺那一行重新有了输入框，一键保存也就该把它写回去；
     出厂包里这个值始终是空串，程序从不写死它）。
@@ -2259,14 +2250,20 @@ def test_collect_settings_updates_covers_exactly_the_five_groups(window) -> None
     # ——"不需要加开关，按照我说的规则来"，所以个数回到 37；
     # 37 → 40：2026-10-05 加上语音播报内容那三项（`voice_kinds` / `voice_fields` /
     # `voice_multi`）—— 主人："语音播报有点乱，可以自由选择要提醒的内容"；
-    # 40 → 41：2026-10-10 加上窗口外观 `window_frame`（自绘标题栏 / 系统标题栏））
-    assert len(updates) == 41
+    # 40 → 41：2026-10-10 加上窗口外观 `window_frame`（自绘标题栏 / 系统标题栏）；
+    # 41 → 32：2026-10-11 删掉「竞价扫描」那一组（`intraday_auction` / `auction_scan_at` /
+    # `auction_min_pct` / `auction_max_pct` / `auction_boards` / `auction_min_amount` /
+    # `auction_min_volume_ratio` / `auction_min_score` / `auction_alert_max_items`
+    # 一共 9 个键）—— 主人："把设置里面的去掉"）
+    assert len(updates) == 32
     # 2026-09-18 起**必须收**它：内置同花顺那一行有输入框，一键保存就该把它写回去
     # （出厂值是空串，程序从不预置；"填了没保存"才是要防的那件事）
     assert "hithink_api_key" in updates
     # 「盘中匹配用实时数据」**不在键集合里**：内置规则没有开关，一键保存写不出去它
     assert "intraday_pick_live" not in updates
-    assert "_bad_scan_at" not in updates           # 内部提示字段不许进配置文件
+    # 竞价那 9 个键**一个都不在**（它们在 `Config` 上连字段都没了）
+    assert not [k for k in updates if k.startswith("auction")], sorted(updates)
+    assert "intraday_auction" not in updates
 
 
 def _change_every_settings_control(window) -> None:
@@ -2291,18 +2288,7 @@ def _change_every_settings_control(window) -> None:
     window.feishu_app_id.setText("cli_test")
     window.feishu_secret.setText("secret_test")
     window.feishu_chat_id.setText("oc_test")
-    # 3) 竞价扫描
-    window.auction_on_box.setChecked(True)
-    window.auction_min_pct_box.setValue(3.0)
-    window.auction_max_pct_box.setValue(8.0)
-    window.auction_amount_box.setValue(250.0)
-    window.auction_ratio_box.setValue(2.5)
-    window.auction_score_box.setValue(3)
-    window.auction_items_box.setValue(7)
-    for key, box in window.auction_board_boxes.items():
-        box.setChecked(key in ("main", "star"))
-    window.auction_scan_at_edit.setText("09:21, 09:24")
-    # 4) T策略（开关 + 四个做T阈值 + 止损/止盈）
+    # 3) T策略（开关 + 四个做T阈值 + 止损/止盈）
     window.stop_loss_box.setValue(6.0)
     window.take_profit_box.setValue(12.0)
     window.intraday_t_box.setChecked(True)
@@ -2321,7 +2307,7 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
     """**一键保存的验收**：改遍每个控件 → 点一次【保存设置】→ 逐键断言落盘 + 回显。
 
     同时验证"保留用户自己的注释与未知键"（`config.update_config_file` 是**就地改写**，
-    不是重写整个文件）—— 这是这一页敢一次写回 30 多个键的前提。
+    不是重写整个文件）—— 这是这一页敢一次写回 32 个键的前提。
     """
     _change_every_settings_control(window)
     qapp.processEvents()
@@ -2347,15 +2333,6 @@ def test_save_settings_button_writes_every_control_in_one_click(window, seeded, 
         'feishu_app_id = "cli_test"',
         'feishu_app_secret = "secret_test"',
         'feishu_chat_id = "oc_test"',
-        "intraday_auction = true",
-        "auction_min_pct = 3.0",
-        "auction_max_pct = 8.0",
-        "auction_min_amount = 2500000.0",
-        "auction_min_volume_ratio = 2.5",
-        "auction_min_score = 3",
-        "auction_alert_max_items = 7",
-        'auction_boards = ["main", "star"]',
-        'auction_scan_at = ["09:21", "09:24"]',
         "stop_loss = 0.06",
         "take_profit = 0.12",
         "intraday_t = true",
@@ -2396,7 +2373,8 @@ def test_save_settings_refuses_and_names_the_offending_item(window, seeded, qapp
     """任何一项校验不过 → **明确拒绝 + 点名哪一项**，而且**一个字都不写**。
 
     用户看到"保存失败"却不知道是哪一项，等于让他自己一项项试 ——
-    这正是"不能静默丢弃"要防的那件事。这里把三种典型填错都走一遍。
+    这正是"不能静默丢弃"要防的那件事。这里把两种典型填错都走一遍。
+    （原来还有第三种"竞价涨幅上下限倒挂"；竞价那一组删掉之后，那条校验也不存在了。）
     """
     config_file = seeded.data_dir / "config.toml"
     before = config_file.read_text(encoding="utf-8")
@@ -2419,18 +2397,8 @@ def test_save_settings_refuses_and_names_the_offending_item(window, seeded, qapp
     assert "做T·反弹幅度" in window.save_settings_hint.text()
     assert "t_low_rebound_pct" in window.save_settings_hint.text()
 
-    # ③ 竞价涨幅上下限倒挂
+    # ③ 改回合法值 → 这一次真的写进去了（拒绝不是"卡住不动"）
     window.t_low_rebound_box.setValue(1.0)
-    window.auction_min_pct_box.setValue(6.0)
-    window.auction_max_pct_box.setValue(5.0)
-    window.save_settings_button.click()
-    qapp.processEvents()
-    assert config_file.read_text(encoding="utf-8") == before
-    assert "涨幅上限" in window.save_settings_hint.text()
-
-    # 改回合法值 → 这一次真的写进去了（拒绝不是"卡住不动"）
-    window.auction_min_pct_box.setValue(2.0)
-    window.auction_max_pct_box.setValue(9.0)
     window.save_settings_button.click()
     qapp.processEvents()
     assert window.save_settings_hint.text().startswith("✅ 已保存")
@@ -2480,7 +2448,6 @@ def test_formula_page_button_runs_the_pipeline_through_its_signal(
     finally:
         win._timer.stop()
         win._market_timer.stop()
-        win._auction_timer.stop()
         win.scheduler.stop()
         win.quotes.stop()
         win.tray.hide()
@@ -2909,7 +2876,11 @@ def test_pool_count_label_and_details_show_watchlist_count(window, seeded, qapp)
 
 @pytest.fixture()
 def hint_window(cfg, qapp, monkeypatch):
-    """一个**空库**的主窗口：启动自检必然判 needs_full → 标题区出现那一行提示。"""
+    """一个**空库**的主窗口：启动自检必然判 needs_full → **弹一次**"数据不能用"的窗。
+
+    2026-10-11 之前这里断言的是标题区那一行常驻提示；主人要求"提示错误时直接弹窗说明"、
+    常驻的首启引导行删掉之后，它改成断言那个弹窗（见 `test_startup_preflight_pops_once`）。
+    """
     from laoa_trader.ui import app as ui_app
 
     cfg.min_history_years = 9          # 空库无论如何都不可用
@@ -2926,7 +2897,6 @@ def hint_window(cfg, qapp, monkeypatch):
     yield win
     win._timer.stop()
     win._market_timer.stop()
-    win._auction_timer.stop()
     win.scheduler.stop()
     win.quotes.stop()
     win.tray.hide()
@@ -2934,80 +2904,206 @@ def hint_window(cfg, qapp, monkeypatch):
     qapp.processEvents()
 
 
-def test_first_run_hint_replaces_the_wizard_dialog(hint_window, qapp) -> None:
-    """空库启动 → 标题区**一行提示**（指路到「系统设置」），而不是弹一个向导窗口。"""
-    from laoa_trader.data import preflight
-    from PySide6.QtWidgets import QDialog
-
-    win = hint_window
-    assert win.preflight_result["status"] == preflight.NEEDS_FULL
-    assert win.first_run_hint.isVisible() is True
-    text = win.first_run_hint.fullText()
-    assert "本地还没有行情数据" in text
-    assert "系统设置" in text                       # 指路要指到**真的那一页**
-    assert "下载数据" in text                       # 与按钮文字一字不差
-    # 向导那一堆控件与属性都不在了（用户明确要求"不再弹模态向导"）
-    assert not hasattr(win, "wizard")
-    assert not hasattr(win, "wizard_start")
-    # 而且没有**任何**新开的对话框（这一条要真的看窗口，不能只看属性）
-    assert [w for w in qapp.topLevelWidgets()
-            if isinstance(w, QDialog) and w.isVisible()] == []
-    # 提示是**一行**（`ElidedLabel`：太长的原因省略掉，不换行顶高标题区）
-    assert "\n" not in win.first_run_hint.text()
-    assert "正在检查本地数据" not in win.status_label.fullText()   # 已给出结论
+#: 删掉的那些"常驻解释性小字"里出现过的**原话**（一个都不许再出现在界面上）。
+#: 逐条对着主人 2026-10-11 的要求来："宁可删干净，别改写成短句留在那儿"。
+_DELETED_EXPLANATION_PHRASES: tuple[str, ...] = (
+    "本地还没有行情数据",                                  # 首启引导行 first_run_hint
+    "market_breadth 关着，不取全市场快照",                 # 概览页 market_hint（口径解释）
+    "本地还没有涨停池数据，在【系统设置】里点【刷新数据】补齐",
+    "列表顺序 = 取数优先级",                               # 四组标题下的说明
+    "都不勾 = 只入库不推送",
+    "零碎的偏好，改完点下面的",
+    "这四个阈值只管做T提示",
+    "换主题立即生效（不用重启）",
+    "它管的是窗口本身，不是一层皮肤",
+    "默认：提醒来时闪托盘",
+    "结果直接进「自选标的」；策略的启停",
+    "策略列表：全是策略",                                  # LIST_HINT
+    "点右边的按钮就能插入；最后一行是筛选条件",            # EDITOR_HINT
+    "勾「策略选取」列 = 这条策略参与筛选",                 # PAGE_HINT
+    "口径：面积 = 行业流通市值合计",                       # 热力图那行小字里的口径段
+)
 
 
-def test_first_run_hint_points_to_incremental_refresh(hint_window, qapp) -> None:
-    """只缺轻量项（行业归属/日历/指数）时，提示指路【刷新数据】**而不是**【下载数据】。
+def test_no_resident_explanation_labels_left(window, qapp) -> None:
+    """**常驻的解释性小字已经删干净**（主人 2026-10-11："宁可删干净"）。
 
-    实报 bug：行业归属没同步被指路成"重新下载历史"，用户白等十几分钟重下 180MB。
+    这条是"别偷偷长回来"的看门人：把窗口里**所有** `statusTag` 标签的实际文字扫一遍，
+    对照上面那张"删掉的原话"清单 —— 一句都不许出现。留下的那十几个标签只用来说明
+    **状态 / 结果 / 错误与原因 / 指路**（例如"共 12 只（策略 10 · 自选 4）"、
+    "将使用系统语音「X」朗读"、"还没取过热力图数据 —— 点【刷新热力图】…"），
+    主人的保留清单里明确要留着它们。
+    """
+    from PySide6.QtWidgets import QLabel
+
+    tags = [w for w in window.findChildren(QLabel) if w.objectName() == "statusTag"]
+    assert tags, "一个 statusTag 都没扫到，这条判据就没意义了"
+    joined = "\n".join(w.text() for w in tags)
+    for phrase in _DELETED_EXPLANATION_PHRASES:
+        assert phrase not in joined, f"删掉的解释性小字又回来了：{phrase}"
+    # 删掉的那几个"整行/整组"的东西也一起钉住（属性、参数、常量）
+    for gone in ("first_run_hint", "market_hint", "_market_hint_notes",
+                 "_first_run_hint_text", "show_first_run_wizard", "hide_first_run_hint"):
+        assert not hasattr(window, gone), f"{gone} 应该已经删掉"
+    import inspect
+
+    params = inspect.signature(type(window)._settings_group).parameters
+    assert "note" not in params, "四组标题下的那条说明参数应该已经删掉"
+    # QLabel 不解析 markdown：任何标签上都不许留 `**`
+    for w in tags:
+        assert "**" not in w.text(), w.text()[:60]
+
+
+def test_tooltips_are_one_short_sentence(window, qapp) -> None:
+    """tooltip **只留一句短的**：没有多行、也没有超长的（主人 2026-10-11 的硬要求）。
+
+    判据是"长度"而不是"内容像不像解释"：**> 45 字**一律算超长（那条规矩落地时是把
+    多行/超长的整段删掉、只留一句）。想加内容就加进日志或【显示详情】，别塞进 tooltip。
+    """
+    from PySide6.QtWidgets import QAbstractSpinBox, QCheckBox, QComboBox, QLabel, QPushButton
+
+    widgets = (window.findChildren(QLabel) + window.findChildren(QPushButton)
+               + window.findChildren(QCheckBox) + window.findChildren(QComboBox)
+               + window.findChildren(QAbstractSpinBox))
+    def allowed(tip: str) -> bool:
+        """允许"比一句短话长"的三类 —— 主人的保留清单里就是它们（逐条写清理由）。"""
+        # ① 状态标签上的 tooltip = 【显示详情】的**全文**（主人："完整原因照旧进日志与【显示详情】"）
+        if tip.startswith("状态详情"):
+            return True
+        # ② 公式面板按钮 = 字段说明（单位 + 例子）：主人明确要求这些单位写在按钮上，
+        #    有测试钉着（`test_formula_page.py` 断言"亿元 / 百分数 / 例：REF(C,1)"）
+        if tip.startswith("插入 "):
+            return True
+        # ③ 概览页脚 = "数据从哪来"，一句状态（页面上没有第二处写它）
+        if "非交易所授权行情" in tip:
+            return True
+        # ④ 涨跌家数那一格 = "为什么显示 —"的**原因**（主人：错误与原因要保留）
+        if "market_breadth 关着" in tip:
+            return True
+        # ⑤ 同花顺那一行的 Key 说明 = **指路**（"去哪申请、填哪儿"），主人保留清单里点名要留；
+        #    有测试钉着申请地址必须写在界面上
+        if "fuyao.aicubes.cn" in tip:
+            return True
+        return False
+
+    offenders = []
+    for w in widgets:
+        tip = w.toolTip() or ""
+        if not tip or allowed(tip):
+            continue
+        if "\n" in tip or len(tip) > 45:
+            offenders.append((type(w).__name__, (getattr(w, "text", lambda: "")() or "")[:16], tip[:60]))
+    assert not offenders, offenders[:6]
+
+
+def test_startup_preflight_pops_once(hint_window, qapp, modal_calls) -> None:
+
+    """**启动自检失败 → 弹一次窗**（主人 2026-10-11："提示错误时直接弹窗说明"）。
+
+    这一条替代了原来那行常驻提示（"本地还没有行情数据 · 在【系统设置】里点【下载数据】"）：
+    正文里必须同时有**出了什么事**（本地还没有行情数据）与**下一步做什么**
+    （在【系统设置】里点【下载数据】）；再次自检**不再弹**（`once_key` 去重）。
     """
     from laoa_trader.data import preflight
 
     win = hint_window
-    win.show_first_run_wizard({
-        "status": preflight.NEEDS_FULL,
-        "needs_download": preflight.DOWNLOAD_SYNC_LIGHT,
-        "light_only": True,
-        "reason": "行业归属未同步",
-    })
-    text = win.first_run_hint.fullText()
-    assert "刷新数据" in text
-    assert "下载数据" not in text
-    assert "系统设置" in text
+    assert win.preflight_result["status"] == preflight.NEEDS_FULL
+    # 只看"启动自检"这一类（空库启动时热力图也会失败一次，那是另一类后台错误）
+    shots = [c for c in modal_calls if c["once_key"] == "startup-preflight"]
+    assert len(shots) == 1, [(c["once_key"], c["title"]) for c in modal_calls]
+    assert shots[0]["shown"] is True
+    assert "本地" in shots[0]["title"]
+    # 正文必须同时有"出了什么事"与"下一步做什么"（口径细节不进弹窗）
+    assert "本地" in shots[0]["shown_text"] and "还没" in shots[0]["shown_text"]
+    assert "系统设置" in shots[0]["shown_text"]
+    assert "下载数据" in shots[0]["shown_text"]
+    assert len(shots[0]["shown_text"].splitlines()) <= 3    # 不堆段落
 
-    # 落后几个交易日 → 也是"刷新"那条路
-    win.show_first_run_wizard({"status": preflight.NEEDS_INCREMENTAL,
-                               "stale_trading_days": 3})
-    assert "落后 3 个交易日" in win.first_run_hint.fullText()
-    assert "刷新数据" in win.first_run_hint.fullText()
-
-
-def test_no_first_run_hint_when_data_ready(seeded, qapp) -> None:
-    """数据就绪时：不显示那一行提示，运行状态打结论。"""
-    from laoa_trader.data import preflight
-    from laoa_trader.ui import app as ui_app
-
-    seeded.min_history_years = 0.0
-    seeded.min_symbols = 1
-    win = ui_app.MainWindow(seeded)
-    win.show()
+    # 再跑一次自检：同一类错误**不再弹**（否则每点一次【刷新数据】就糊一个框）。
+    # ⚠️ 要 `force=True`：`run_preflight` 是**幂等**的（已经查过就直接返回），
+    # 不带 force 时它压根不会再走到弹窗那一行 —— 那测的就不是"去重"而是"没执行"。
+    win.run_preflight(force=True)
     qapp.processEvents()
-    win.run_preflight()
+    again = [c for c in modal_calls if c["once_key"] == "startup-preflight"]
+    assert len(again) == 2 and again[1]["shown"] is False, modal_calls
+
+
+def test_user_action_failure_pops_every_time(window, qapp, modal_calls,
+                                             monkeypatch) -> None:
+    """**用户主动操作失败 → 每次都弹**：保存设置写盘失败、加自选失败各一条。
+
+    判据是"不带 `once_key`"（`shown` 一直是 True）—— 他刚按下的那一下必须得到回应，
+    哪怕同一类错误这一轮已经报过一次。
+    """
+    from laoa_trader import config as config_mod
+
+    # ① 【保存设置】写盘失败（只读盘 / 权限）
+    def boom(*_a, **_k):
+        raise OSError("只读文件系统")
+
+    monkeypatch.setattr(config_mod, "save_settings", boom)
+    window.save_settings_button.click()
     qapp.processEvents()
-    assert win.preflight_result["status"] == preflight.READY
-    assert win.first_run_hint.isVisible() is False
-    # 运行状态那句就是"数据就绪"（不再把 summary_line 的"…行 / 最新 …"塞进去）
-    assert win.status_label.fullText().startswith("✅ 数据就绪 · ")
-    assert "行" not in win.status_label.fullText()
-    win._timer.stop()
-    win._market_timer.stop()
-    win._auction_timer.stop()
-    win.scheduler.stop()
-    win.quotes.stop()
-    win.tray.hide()
-    win.deleteLater()
+    saves = [c for c in modal_calls if "保存" in c["title"]]
+    assert saves and saves[-1]["shown"] is True, modal_calls
+    assert saves[-1]["once_key"] == ""                       # 用户操作：不去重
+    assert "下一步" in saves[-1]["shown_text"]
+
+    # 再点一次 → **又弹一个**（用户操作与后台任务的区别就在这里）
+    before = len(saves)
+    window.save_settings_button.click()
     qapp.processEvents()
+    saves = [c for c in modal_calls if "保存" in c["title"]]
+    assert len(saves) == before + 1 and saves[-1]["shown"] is True
+
+    # ② 【添加自选】失败
+    from laoa_trader.data import storage
+
+    def boom2(*_a, **_k):
+        raise RuntimeError("库被占用")
+
+    monkeypatch.setattr(storage, "upsert_watchlist", boom2)
+    window.watch_symbol.setText("600519")
+    window.on_watch_add()
+    qapp.processEvents()
+    added = [c for c in modal_calls if "加自选" in c["title"]]
+    assert added and added[-1]["shown"] is True and added[-1]["once_key"] == ""
+    assert "下一步" in added[-1]["shown_text"]
+    # 状态栏仍然只写一句短的（弹窗只补充原因与下一步）
+    assert "加自选失败" in window.status_label.fullText()
+
+
+def test_background_failure_pops_only_once_per_run(window, qapp, modal_calls) -> None:
+    """**同一类后台错误每次运行只弹一次**（`once_key` 去重）：网线一断不会每 5 秒一个框。
+
+    走真实路径：`_on_worker_failed`（下载/刷新/筛选那些后台任务都用它）。
+    """
+    window._on_worker_failed("下载数据", "网络断开了")
+    qapp.processEvents()
+    window._on_worker_failed("下载数据", "网络断开了")
+    qapp.processEvents()
+
+    pops = [c for c in modal_calls if c["once_key"] == "worker:下载数据"]
+    assert len(pops) == 2, modal_calls
+    assert pops[0]["shown"] is True and pops[1]["shown"] is False
+    assert "下一步" in pops[0]["shown_text"]
+    assert len(pops[0]["shown_text"].splitlines()) <= 3
+    # 另一类后台任务**照旧能弹**（去重是按"这一类"，不是"弹过一次就再也不弹"）
+    window._on_worker_failed("刷新数据", "同花顺没响应")
+    qapp.processEvents()
+    other = [c for c in modal_calls if c["once_key"] == "worker:刷新数据"]
+    assert other and other[0]["shown"] is True
+
+
+def test_popup_texts_are_short_and_say_the_next_step(window, qapp, modal_calls) -> None:
+    """弹窗正文的硬约束：**≤3 行、且必须带"下一步"**（主人："不要在弹窗里堆段落"）。"""
+    from laoa_trader.ui import error_popup
+
+    window._show_error("测试", "第一行\n第二行\n第三行\n第四行")
+    qapp.processEvents()
+    last = modal_calls[-1]
+    assert len(last["shown_text"].splitlines()) <= error_popup.MAX_LINES
+    assert last["shown_text"].endswith("…（其余原因见日志）")   # 多的丢掉，不堆段落
 
 
 def test_download_without_api_key_shows_inline_hint_not_dialog(window, qapp,
@@ -3232,10 +3328,12 @@ def test_market_page_is_a_tab_of_its_own(window) -> None:
     # 情绪块**只剩指数条目**（用户要求：情绪指数块不再有小条目）
     assert window.market_sections[ui_app.MARKET_SECTION_SENTIMENT].stats == {}
 
-    # 页脚 / 提示 / 【立即刷新】都在这一页里
+    # 页脚 / 【立即刷新】都在这一页里
+    # （2026-10-11 主人："常驻的'数据不足/去设置里下载'那种提示行…也删掉" ——
+    #  原来夹在滚动区与页脚之间的 `market_hint` 已整行删除，取数失败改由弹窗说）
+    assert not hasattr(window, "market_hint"), "那一行常驻提示应该已经删掉"
     assert page.isAncestorOf(window.market_footer) is True
     assert page.isAncestorOf(window.market_as_of_label) is True
-    assert page.isAncestorOf(window.market_hint) is True
     assert page.isAncestorOf(window.btn_market_refresh) is True
     assert window.btn_market_refresh.text() == "立即刷新"
 
@@ -3245,8 +3343,7 @@ def test_market_page_is_a_tab_of_its_own(window) -> None:
     assert not hasattr(window, "market_title"), "那行大字标题应该已经删掉"
     layout = page.layout()
     assert layout.itemAt(0).widget() is window.market_scroll
-    assert layout.itemAt(1).widget() is window.market_hint
-    assert layout.itemAt(2).widget() is window.market_footer
+    assert layout.itemAt(1).widget() is window.market_footer
     assert layout.itemAt(layout.count() - 1).widget() is window.market_footer
 
     # 内容区可滚动：窗口变矮时它自己吸收高度变化，页脚不会被顶出窗口
@@ -3301,8 +3398,7 @@ def test_source_list_adds_eastmoney_without_a_fake_key_box(
     assert "**" not in row.note_label.text()             # markdown 星号不上界面
     # 能力文案来自真相源（短的那份），且**不许**出现它没有的能力（涨停池/复权因子这类）
     assert row.capability_label.text() == "提供：" + \
-        sources_mod.capabilities_brief(sources_mod.REGISTRY["eastmoney"]) + \
-        "（换来源会影响这些）"
+        sources_mod.capabilities_brief(sources_mod.REGISTRY["eastmoney"])
     assert "涨停" not in row.capability_label.text()
     assert row.btn_delete.isHidden() is False             # 用户加的可以删
     assert window._source_add_menu() is None              # 没有别的可加了
@@ -3357,7 +3453,7 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     qapp.processEvents()
     text = (seeded.data_dir / "config.toml").read_text(encoding="utf-8")
     assert f'{fake_key} = "token-abc"' in text
-    # 37 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 38 项
+    # 32 个固定键（含 `hithink_api_key`）+ 这个测试替身来源的 Key = 33 项
     # （35 + 1 → 33 + 1：2026-09-18 删掉 Windows 通知那一路少了两个键；
     #  33 + 1 → 37 + 1：加上桌宠与中文朗读的四个键；
     #  37 + 1 → 38 + 1：用户要求"桌宠声音可以自由改"，加上 `notify_voice_name`；
@@ -3365,8 +3461,9 @@ def test_source_list_key_field_enters_the_one_click_save(window, seeded, qapp,
     #  38 + 1 → 37 + 1：同一天删掉语速键（语速锁定 1.0）
     #  —— 2026-09-23 加过又划掉的 `intraday_pick_live` 让个数回到 37 + 1；
     #  37 + 1 → 40 + 1：2026-10-05 加上语音播报内容那三项；
-    #  40 + 1 → 41 + 1：2026-10-10 加上窗口外观 `window_frame`）
-    assert window.save_settings_hint.text().startswith("✅ 已保存 42 项")
+    #  40 + 1 → 41 + 1：2026-10-10 加上窗口外观 `window_frame`；
+    #  41 + 1 → 32 + 1：2026-10-11 删掉「竞价扫描」那一组的 9 个键）
+    assert window.save_settings_hint.text().startswith("✅ 已保存 33 项")
     # 内置同花顺的 Key 也在这份键集合里（它的输入框和替身来源的走同一条规则）
     assert "hithink_api_key" in window._collect_settings_updates()
 
@@ -3428,7 +3525,7 @@ def test_source_list_shows_unknown_names_truthfully(window, seeded, qapp) -> Non
 def test_settings_tab_is_scrollable_so_the_window_can_shrink(window, qapp) -> None:
     """设置页控件最多，**整页套了滚动区**，否则它会把"窗口最小高度"顶到屏幕外面去。
 
-    为什么这条值得测：五组控件的"最小高度"合起来 1000+，而页签的最小高度取
+    为什么这条值得测：四组控件的"最小高度"合起来 1000+，而页签的最小高度取
     所有页的最大值 —— 不套滚动区时窗口最小高度会顶到屏幕外（1366×768 的笔记本上
     根本放不下，表现就是"一打开最下边看不见"）。这条盯的是那个根因别再加回来。
     """
@@ -3438,7 +3535,7 @@ def test_settings_tab_is_scrollable_so_the_window_can_shrink(window, qapp) -> No
     scrolls = page.findChildren(QScrollArea)
     assert scrolls, "设置页需要一层滚动区（小屏才缩得下来）"
     assert scrolls[0].widgetResizable() is True
-    # 五组都在滚动区里面（顺序 = 用户给定的顺序，滚动区只是外套）
+    # 四组都在滚动区里面（顺序 = 用户给定的顺序，滚动区只是外套）
     for title in ui_app.SETTINGS_GROUPS:
         assert scrolls[0].isAncestorOf(window.settings_sections[title]) is True, title
     assert scrolls[0].isAncestorOf(window.save_settings_button) is True
@@ -3496,7 +3593,6 @@ def test_market_page_refreshes_right_after_startup(seeded, qapp, monkeypatch) ->
     finally:
         win._timer.stop()
         win._market_timer.stop()
-        win._auction_timer.stop()
         win.scheduler.stop()
         win.quotes.stop()
         win.tray.hide()
@@ -3669,7 +3765,7 @@ def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp
         assert [_entry_colors(e) for e in sentiment] == (
             [(down, down)] + [(up, up)] * 3 + [(up, up), (down, down)]
         )
-        assert market_window.market_hint.isVisible() is False       # 一切正常不留提示
+        assert not hasattr(market_window, "market_hint")            # 那行提示已删
 
         # 「板块热力图」：没有表头了，它把"每一列/每一档是什么意思"写进了 block 的 tooltip。
         # 原来那四列（板块名称 / 涨停数量 / 涨幅 / 主力净额）现在各有对应的说法，
@@ -3716,8 +3812,11 @@ def test_market_page_renders_stats_entries_colors_and_footer(market_window, qapp
         hot_note = hot.note_label
         assert hot_note.isVisible() is True
         note_text = hot_note.fullText()
-        assert "口径：面积 = 行业流通市值合计" in note_text
-        assert "颜色 = 市值加权涨跌幅（红涨绿跌，±10% 饱和）" in note_text
+        # 2026-10-11 主人："把繁琐的说明文字删掉" —— 原来这句开头还有一段口径
+        # （"面积 = 行业流通市值合计，颜色 = 市值加权涨跌幅（红涨绿跌，±10% 饱和）"），
+        # 整段删掉：标题与图例里已经写着，这里只留**状态与原因**
+        assert "面积 = 行业流通市值合计" not in note_text
+        assert "颜色 = 市值加权涨跌幅" not in note_text
         assert re.search(r"快照 \d{2}-\d{2} \d{2}:\d{2}", note_text), note_text
         assert "3 个行业：涨 1 · 跌 1 · 平 1" in note_text
         assert "板块榜这一轮没取到：tooltip 里没有主力净额" in note_text
@@ -3823,8 +3922,8 @@ def test_market_footer_is_exactly_one_row(market_window, qapp) -> None:
         # 左标签、右按钮，且都在页脚里（按钮没被挤出去）
         assert button.x() >= label.x() + label.width() - 1
         assert button.geometry().right() <= footer.width() + 1
-        # 正常状态页面上只有这一行页脚（提示不占位）
-        assert win.market_hint.isVisible() is False
+        # 正常状态页面上只有这一行页脚（那行常驻提示已经删掉）
+        assert not hasattr(win, "market_hint")
     finally:
         market.clear_cache()
 
@@ -3893,7 +3992,8 @@ def test_market_page_drops_only_the_bad_code(market_window, qapp) -> None:
                 market_window.market_sections[ui_app.MARKET_SECTION_WIDE].entries] \
             == MARKET_EXPECTED_ENTRIES[ui_app.MARKET_SECTION_WIDE]
         assert market_window.market_overview["failed"] == ["932000.TI"]
-        assert "932000.TI" in market_window.market_hint.text()
+        # 掉的那只不再写进常驻提示行（那一行已删）；它由状态详情的概览那句如实带出
+        assert "932000.TI" not in market_window._status_details()
     finally:
         market.clear_cache()
 
@@ -3944,10 +4044,9 @@ def test_market_page_shows_dash_and_reason_without_data(market_window, qapp) -> 
         # 有数据时那行小字说的是口径与快照时间，不再说"还没取过"（热力图没有 `—` 占位那套：
         # 空态是画布上的一句话，见 `HeatmapWidget.paintEvent`）
         assert "还没取过热力图数据" not in hot.note_label.fullText()
-        assert "口径：面积 = 行业流通市值合计" in hot.note_label.fullText()
+        assert "个行业：涨" in hot.note_label.fullText()        # 状态（块数与涨跌家数）还在
         assert not hasattr(hot, "placeholder_label")
-        assert market_window.market_hint.isVisible() is True
-        assert "同花顺 Key" in market_window.market_hint.text()
+        # 常驻提示行已删；"没配 Key、现在走公开源"这条指路仍在页面 tooltip 里
         assert "同花顺 Key" in market_window.market_page.toolTip()
         # 页脚那行小字照样有（时间是 —）
         assert "更新于 —" in market_window.market_as_of_label.fullText()
@@ -3977,12 +4076,8 @@ def test_market_breadth_off_shows_dash_and_says_why(market_window, qapp) -> None
         assert _stat_texts(market_window)[ui_app.MARKET_STAT_FLAT] == market.DASH
         # 成交额与全市场快照无关（沪深两市来自两只宽基指数）→ 这一格照样有数
         assert _stat_texts(market_window)[ui_app.MARKET_STAT_AMOUNT] == "16291亿"
-        # 光看一个 `—` 用户猜不出为什么 —— 必须在页面上说清是"这个开关关着"
-        assert market_window.market_hint.isVisible() is True
-        assert "market_breadth" in market_window.market_hint.text()
-        # 说的是具体哪几条（改版后是三个独立小条目：上涨/下跌/平盘）
-        for title in ("上涨", "下跌", "平盘"):
-            assert title in market_window.market_hint.text()
+        # 光看一个 `—` 用户猜不出为什么 —— 原因写在**数值格自己的 tooltip** 里
+        # （常驻的那行解释文字已按主人要求删除，所以这里改从 tooltip 断言）
         assert "market_breadth" in market_window.market_sections[
             ui_app.MARKET_SECTION_FLOW
         ].stats[ui_app.MARKET_STAT_UP].value_label.toolTip()
@@ -4173,7 +4268,7 @@ def test_market_overview_off_shows_hint_and_makes_no_request(market_window, qapp
         assert _stat_texts(market_window)[ui_app.MARKET_STAT_LIMIT_UP] \
             .startswith(market.DASH)
         assert _stat_texts(market_window)[ui_app.MARKET_STAT_AMOUNT] == market.DASH
-        assert "market_overview" in market_window.market_hint.text()
+        assert "market_overview" in market_window.market_page.toolTip()
     finally:
         market.clear_cache()
 
@@ -4270,7 +4365,6 @@ def screen_window(seeded, qapp, monkeypatch):
     for win in opened:
         win._timer.stop()
         win._market_timer.stop()
-        win._auction_timer.stop()
         win.scheduler.stop()
         win.quotes.stop()
         _wait_market(win, qapp)
@@ -4359,8 +4453,7 @@ def test_window_fits_the_screen_and_keeps_the_bottom_row(
     assert abs(win.x() - (width - win.width()) // 2) <= 2
     assert abs(win.y() - (height - win.height()) // 2) <= 2
     # 4) 最下面的东西（页脚 / 进度条 / 页签区 / 出错提示）都在窗口里
-    for widget in (win.status_label, win.progress, win.tabs, win.market_hint,
-                   win.market_footer):
+    for widget in (win.status_label, win.progress, win.tabs, win.market_footer):
         assert _bottom_of(widget, win) <= win.height(), widget
     # 5) 横向不溢出：内容最小宽度放得进视口，也不出现横向滚动条
     assert win.market_scroll.horizontalScrollBar().isVisible() is False
@@ -4736,14 +4829,12 @@ def test_market_hot_block_explains_itself_when_the_sector_rank_is_missing(
         note = section.note_label.fullText()
         assert "板块榜这一轮没取到" in note
         assert "主力净额" in note
-        assert "口径：面积 = 行业流通市值合计" in note
+        assert "个行业：涨" in note                              # 状态照旧，口径那几句已删
         assert tip.rstrip().endswith("（面积 = 流通市值合计；颜色 = 涨跌幅，红涨绿跌）")
-        # 页内提示仍然指路到【刷新数据】（本地还没有涨停池数据 → 热力图 tooltip 里
-        # 就没有涨停家数；原来这句话是围绕"热门板块两张表"说的，2026-10-08 跟着改了措辞）
-        assert market_window.market_hint.isVisible() is True
-        assert "板块热力图" in market_window.market_hint.text()
-        assert "涨停家数" in market_window.market_hint.text()
-        assert "刷新数据" in market_window.market_hint.text()
+        # 那行常驻提示（"本地还没有涨停池数据，点【刷新数据】补齐"）已按主人要求删除；
+        # "为什么没有涨停家数"仍写在热力图下面那行小字里（状态与原因，主人要求保留）
+        assert not hasattr(market_window, "market_hint")
+        assert "板块榜这一轮没取到" in market_window._heatmap_note()
     finally:
         market.clear_cache()
 
@@ -4775,9 +4866,9 @@ def test_heatmap_note_states_its_caliber_and_the_snapshot_time(market_window, qa
         at = time.time() - 60
         blocks = _feed_heatmap(win, at=at)
         note = win._heatmap_note()
-        assert "口径：面积 = 行业流通市值合计" in note
-        assert "颜色 = 市值加权涨跌幅（红涨绿跌，±10% 饱和）" in note
         assert "3 个行业：涨 1 · 跌 1 · 平 1" in note
+        # 口径那两句已按主人要求删除（"本地口径"那几个字是另一回事，别误伤）
+        assert "面积 = 行业流通市值合计" not in note and "颜色 = 市值加权涨跌幅" not in note
         assert re.search(r"快照 \d{2}-\d{2} \d{2}:\d{2}", note), note
         assert "已过期" not in note                      # 一分钟前的快照还不算旧
         # 快照时间取的是**真实时间**（相差一分钟 → 显示的分钟数就该是那个）
@@ -4867,7 +4958,7 @@ def test_heatmap_zoom_opens_a_window_with_its_own_chart(market_window, qapp) -> 
         assert window._chart.minimumHeight() > 0
         assert [b["name"] for b in window._chart.blocks] == [b["name"] for b in blocks]
         assert window._chart.extras                          # 涨停家数等 extras 一起带过来
-        assert "面积 = 行业流通市值合计" in window._note.text()
+        assert "个行业：涨" in window._note.text()
         assert "板块热力图" in window.windowTitle()
         # 同一个窗口不重复建（连点两次不该堆出一摞）
         assert win.show_heatmap_window() is window
@@ -5147,7 +5238,9 @@ def test_tables_show_circ_mktcap_and_turnover_rate(window, seeded, qapp) -> None
     # 表头写了口径（"亿"/"%"），tooltip 还点明"是流通市值，不是总市值"
     assert "流通市值" in window.pool_table.horizontalHeaderItem(cap_col).toolTip()
     assert "换手率" in window.pool_table.horizontalHeaderItem(turn_col).toolTip()
-    assert "不是总市值" in window.position_table.item(0, p_cap).toolTip()
+    # 单元格 tooltip 现在是**一句短的**（值 + 快照时间）；"不是总市值"那句解释已按主人要求删除，
+    # 表头 tooltip 里仍旧写着这一列是**流通市值**（口径没丢，只是不再啰嗦）
+    assert window.position_table.item(0, p_cap).toolTip().startswith("流通市值 456.78 亿")
 
 
 def test_tables_snapshot_columns_are_dash_not_zero_when_only_one_is_missing(

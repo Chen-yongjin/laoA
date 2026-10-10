@@ -122,8 +122,11 @@ def test_formula_dir_frozen_uses_exe_sibling(
 
     assert folder == exe.parent / "formulas"
     assert folder.is_dir()          # 不存在就创建
-    # 随包公式被复制进来了（否则新用户打开是空列表，第一步就走不下去）
-    assert {spec.name for spec in lib.formula_files(folder)} >= {"放量上攻", "尾盘匹配策略"}
+    # 随包公式被复制进来了（否则新用户打开是空列表，第一步就走不下去）——
+    # 点名的这几条里包含「竞价策略」：它是 2026-10-11 主人要求"直接加入"的那一条，
+    # 走的正是这条播种链路（缺它 = 用户列表里根本看不到竞价）
+    assert {spec.name for spec in lib.formula_files(folder)} >= {
+        "放量上攻", "尾盘匹配策略", "竞价策略"}
     # 而且**复制**的是随包那份，不是把用户目录指到解包目录里（只读盘上存不了公式）
     assert lib.bundled_formula_dir() == meipass / "formulas"
 
@@ -161,7 +164,7 @@ def test_formula_dir_nuitka_layout_is_its_own_user_dir(
 
     assert folder == bundled                      # 用户目录就是随包目录
     names = {spec.name for spec in lib.formula_files(folder)}
-    assert {"放量上攻", "尾盘匹配策略", "我的策略"} <= names
+    assert {"放量上攻", "尾盘匹配策略", "竞价策略", "我的策略"} <= names
     assert mine.read_text(encoding="utf-8") == "# 名称: 我的策略\nC>MA(C,5)\n"   # 没被覆盖
 
 
@@ -191,9 +194,10 @@ def test_formula_dir_does_not_overwrite_user_files(tmp_path: Path, monkeypatch: 
 
     # 用户的文件**一个字都没被动过**
     assert mine.read_text(encoding="utf-8") == "# 名称: 放量上攻\nC>MA(C,999)\n"
-    # 其它随包公式补进来了（内置那几条）
+    # 其它随包公式补进来了（内置那几条 + 新版本多带的）
     names = {p.name for p in target.iterdir()}
     assert "均线多头排列.tvf" in names and "尾盘匹配策略.txt" in names
+    assert "竞价策略.txt" in names, "新版本多带的随包策略必须补进老用户的目录"
 
 
 def test_formula_dir_never_resurrects_a_deleted_bundled_formula(
@@ -908,58 +912,152 @@ def test_builtin_row_helpers_are_gone() -> None:
                  "builtin_strategy_tip", "builtin_strategy_detail",
                  "ROW_BUILTIN", "MENU_DELETE_BUILTIN", "OFF_GROUP_KEY"):
         assert not hasattr(fp, name), f"{name} 应该已经随内置策略行一起删掉"
-    # 行类型只剩两种
-    assert fp.ROW_FORMULA and fp.ROW_AUCTION
 
 
-def test_build_strategy_rows_marks_auction_and_formula_rows(formulas_cfg: Config,
-                                                           tmp_path: Path) -> None:
-    """一次建表：**竞价策略那一行在最前面**，公式在后（说明来自文件）。
+def test_strategy_list_has_only_real_formula_rows(formulas_cfg: Config,
+                                                  tmp_path: Path) -> None:
+    """**列表里没有"不是策略"的行**：一行一个策略文件，勾/改/删的行为完全一致。
 
-    2026-09-18（用户要求）：内置策略改成了随包公式，所以列表里不再有那种
-    "只读的内置策略行"—— 固定行只剩竞价策略一条，其余全是公式（随包的几条也在里面）。
+    2026-10-11 主人："竞价策略按照我的想法也是改成可编辑，把设置里面的去掉。" ——
+    原来列表第一行是那条只读的「竞价策略」（开关盘中竞价扫描、不可删、点它是看详情），
+    现在那一行没了，取而代之的是随包策略 `竞价策略.txt`。这条用例钉三件事：
+    ① 行数 = 公式文件数（不多出任何固定行）；② 每行都有真实的 `FormulaSpec`
+    （= 都对应一个文件，能载入编辑器、能删）；③ `ui/formula_page` 里那条只读行的
+    整套东西（常量/函数/只读列表/详情页）**整条删干净了**，谁加回来这里立刻红。
     """
     from laoa_trader.ui import formula_page as fp
 
     _write_formula(tmp_path, "放量上攻", "C>MA(C,5)", "站上5日线")
+    _write_formula(tmp_path, "我自己写的", "C<MA(C,5)", "我的")
     formulas_cfg.enabled_formulas = ["放量上攻"]
+    specs = lib.formula_files(tmp_path)
 
-    rows = fp.build_strategy_rows(formulas_cfg, lib.formula_files(tmp_path), {})
+    rows = fp.build_strategy_rows(formulas_cfg, specs, {})
 
-    assert [row.kind for row in rows] == [fp.ROW_AUCTION, fp.ROW_FORMULA]
-    auction = rows[0]
-    assert auction.is_auction and auction.read_only
-    assert auction.key == fp.AUCTION_KEY and auction.name == fp.AUCTION_NAME
-    assert auction.enabled is False                    # 竞价默认关（intraday_auction=false）
-    assert "不参与筛选" in auction.note_tip and "无法回测" in auction.note_tip
-    formula = rows[-1]
-    assert formula.key == "放量上攻" and formula.note == "站上5日线"
-    assert formula.enabled is True                     # 勾了才为真（写回 enabled_formulas）
-    assert formula.spec is not None and formula.detail == ""
+    assert len(rows) == len(specs) == 2                       # 没有多出来的固定行
+    # 顺序 = 文件名顺序（与 `formula_files()` 一致，不额外排序）
+    assert [row.key for row in rows] == [spec.name for spec in specs]
+    for row in rows:
+        assert row.spec is not None                           # 每一行都对应一个策略文件
+        assert str(getattr(row.spec, "path", "")).endswith(".txt")
+    enabled = {row.key: row.enabled for row in rows}
+    assert enabled == {"放量上攻": True, "我自己写的": False}
+
+    # 那一行只读的「竞价策略」连同它的整套机制都删掉了（不是"留着不用"）
+    for name in ("ROW_AUCTION", "AUCTION_KEY", "AUCTION_NAME", "MENU_DELETE_AUCTION",
+                 "auction_row", "auction_note", "auction_note_tip", "auction_detail",
+                 "auction_enabled"):
+        assert not hasattr(fp, name), f"{name} 应该已经随「竞价策略」那一行一起删掉"
+    assert not hasattr(fp.StrategyRow, "is_auction")
+    assert not hasattr(fp.StrategyRow, "read_only")
 
 
-def test_build_strategy_rows_keeps_bundled_formulas_in_the_same_list(
-        formulas_cfg: Config, tmp_path: Path) -> None:
-    """随包公式与用户自己写的公式**同一条待遇**（都在公式那一段里，可改可删）。
+def test_bundled_auction_strategy_is_an_editable_file(
+        formulas_cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """随包策略「竞价策略」：**就在 `formulas/` 目录里**，与别的策略同一条待遇。
 
-    这是"内置策略改成随包公式"这件事的验收点：用户在列表里看到的随包公式
-    （例如 `短期反转`）与他自己存的公式没有区别 —— 都是 `ROW_FORMULA`、
-    都能载入编辑器、都能删。所以这条用例把两类公式放一起建表，断言行类型完全一致。
+    它是这次删掉"竞价扫描"之后竞价这件事的**唯一落点**（主人："直接加入竞价策略，
+    策略里 # 号文字说明一下"），所以这几件事必须钉死：
+    ① 文件在仓库的 `formulas/` 里（随包分发的那份就是它），名字叫「竞价策略」；
+    ② 能编译，而且**只用到引擎真认的字段**（不带任何已经删掉的竞价内部字段）；
+    ③ `# 说明:` 只有**一句短话**（≤40 字）且含"9:25-9:30" —— 列表「说明」列显示的就是它，
+       长了在列表里就是一堵墙（主人 2026-10-11："界面保持简洁才显得专业"）；
+    ④ 正文里那些 `#` 行把该讲的讲清了（什么时候跑 / 竞价匹配额是什么 / 每条判据 /
+       两条硬限制 / 依赖 Key 与时段 / 改哪里就行）—— 主人明确要求"策略里 # 号文字说明一下"，
+       而且这些行是【策略编辑】里**看得见**的（编辑器载入的就是 `spec.source`）；
+       说明短了**不等于**解释丢了，两头都要在；
+    ⑤ **它真的会出现在用户的策略列表里**：走一遍真实的播种链路（这里模拟
+       "源码/打包运行时用户目录不是随包目录"那种形态），它必须被复制进用户目录、
+       能被 `formula_files()` 读到，而且**不在退役名单里**（升级时不会被当废弃公式删掉）。
     """
     from laoa_trader.ui import formula_page as fp
 
-    _write_formula(tmp_path, "短期反转", "C>MA(C,5)", "随包的那条")
-    _write_formula(tmp_path, "我的公式", "C<MA(C,5)", "我自己写的")
+    bundled = Path(__file__).resolve().parents[1] / lib.FORMULA_DIR_NAME
+    path = bundled / "竞价策略.txt"
+    assert path.is_file(), f"随包策略应该在 {bundled} 里"
 
-    rows = fp.build_strategy_rows(formulas_cfg, lib.formula_files(tmp_path), {})
+    text = path.read_text(encoding="utf-8")
+    specs = {spec.name: spec for spec in lib.formula_files(bundled)}
+    assert "竞价策略" in specs, sorted(specs)
+    spec = specs["竞价策略"]
+    assert spec.ok, spec.error_text
+    assert spec.description, "策略文件必须带 `# 说明:` 注释头"
+    # `# 说明:` 那一行**必须很短**（列表「说明」列显示的就是它 —— 长了在列表里就是一堵墙，
+    # 与主人"界面保持简洁才显得专业"冲突）；"9:25-9:30" 这几个字是主人点名要留的。
+    assert len(spec.description) <= 40, spec.description
+    assert "9:25-9:30" in spec.description, spec.description
+    # 反过来：字段单位、Key 依赖、9:15–9:30 才取得到、不能回测这些**都在正文的 `#` 注释里**
+    # （说明短了不等于解释丢了 —— 这一条与下一条用例一起把两头都钉住）
+    for detail in ("一只都不出", "无法回测", "不是全天成交额", "Key"):
+        assert detail in spec.source, f"正文的 # 说明里应该有 {detail}"
 
-    assert [row.kind for row in rows] == [fp.ROW_AUCTION, fp.ROW_FORMULA, fp.ROW_FORMULA]
-    bundled, mine = rows[1], rows[2]
-    assert {bundled.kind, mine.kind} == {fp.ROW_FORMULA}
-    assert bundled.spec is not None and mine.spec is not None
-    for row in (bundled, mine):
-        assert row.read_only is False                  # 不是只读行 → 可删可改
-        assert not row.is_auction
+    # ④ 正文里的 `#` 说明（【策略编辑】里能直接看到这几段）
+    #    2026-10-11 主人："改成匹配额才对" —— 判据从 `AMOUNT` 换成了 `竞价匹配额`，
+    #    正文那几段说明也跟着重写（还多了一段"依赖：只有同花顺给 + 只有 9:15–9:30"）。
+    for heading in ("【什么时候跑】", "【竞价匹配额是什么】", "【每一条判据】",
+                    "【两条硬限制】", "【依赖】"):
+        assert heading in spec.source, f"正文里应该有 {heading} 这一段说明"
+    assert "适合在 9:25-9:30 之间运行" in spec.source
+    assert spec.source.count("改这里就行") >= 4, "每条判据行都该标着「改这里就行」"
+    # 单位与"它到底是什么"必须写在正文里（这个项目踩过"单位差 100 倍"的坑）
+    assert "万元" in spec.source and "不是全天成交额" in spec.source
+    # 拿不到竞价数据时的两条边界（没配 Key / 不在 9:15–9:30）也要写清，
+    # 不然用户只会以为"策略写错了"或"今天没有强势股"
+    assert "9:15–9:30" in spec.source and "Key" in spec.source
+    # 判据里**不许再出现 `AMOUNT`**（那一版读的是前一天全天成交额，口径不对，主人要求改掉）
+    assert "AMOUNT" not in spec.source, "竞价策略不该再用 AMOUNT（那是全天成交额）"
+    assert "竞价匹配额" in spec.source
+
+    # 正文只引用引擎认的字段（`SNAPSHOT_FIELDS` + 日线/排除类字段），
+    # 竞价扫描当年那批内部字段（未匹配量那一类）一个都不许出现
+    known = set(fm.FIELD_KINDS) | set(fm.EXTRA_FIELDS) | set(fm.FIELD_ALIASES)
+    assert set(spec.formula.fields) <= known, set(spec.formula.fields) - known
+    # 判据里（= 去掉注释之后剩下的代码）不许出现那批内部字段名 ——
+    # 注释里提到"竞价未匹配比"是在解释"为什么要有成交额这道门槛"，那是说明，不是判据
+    code_only = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+    for gone in ("auction_", "auction", "未匹配", "竞价强度"):
+        assert gone not in code_only, f"{gone} 不该出现在这条随包策略的判据里"
+
+    # 它进列表后就是普通一行：可勾、可改（`spec` 在、没有只读行那一套）
+    rows = fp.build_strategy_rows(formulas_cfg, [spec], {})
+    assert len(rows) == 1 and rows[0].spec is spec
+    assert rows[0].note == spec.description
+
+    # ⑤ 播种链路：用户目录里本来什么都没有 → 跑一次 `formula_dir()` 就该有它
+    assert "竞价策略.txt" not in lib.RETIRED_BUNDLED_FORMULAS   # 不会被当废弃公式清掉
+    user_dir = tmp_path / "用户策略目录"
+    monkeypatch.setenv(lib.FORMULA_DIR_ENV, str(user_dir))
+    folder = lib.formula_dir()
+    assert folder == user_dir
+    assert (folder / "竞价策略.txt").is_file(), "随包策略没有播种到用户目录（列表里就看不到它）"
+    assert "竞价策略" in {s.name for s in lib.formula_files(folder)}
+    # 播种进来的那份与仓库里那份**逐字节一致**（没被截断/转码）
+    assert (folder / "竞价策略.txt").read_bytes() == path.read_bytes()
+
+
+def test_bundled_auction_strategy_header_line_is_short() -> None:
+    """「竞价策略」的 `# 说明:` 只有**一句短话**（列表那一列显示的就是它）。
+
+    主人 2026-10-11："`# 说明:` 头部要短 —— 437 字在列表里就是一堵墙，与'界面保持简洁'冲突"。
+    所以这一条钉两件事：① 说明行很短（≤40 字）且含「9:25-9:30」（主人点名要留的那几个字）；
+    ② 详细的四段 `#` 说明**仍在正文里**（那块不动，主人要的就是"策略里 # 号文字说明一下"）。
+    """
+    bundled = Path(__file__).resolve().parents[1] / lib.FORMULA_DIR_NAME
+    spec = {s.name: s for s in lib.formula_files(bundled)}["竞价策略"]
+
+    assert len(spec.description) <= 40, spec.description
+    assert "9:25-9:30" in spec.description, spec.description
+    # 说明是一句：没有换行、也没有第二句（用句号/分号收尾的句子只该有一句）
+    assert "\n" not in spec.description
+    assert spec.description.count("。") <= 1, spec.description
+
+    # 正文里那四段 `#` 说明原样都在（解释不许因为"头部变短"就丢了）
+    for heading in ("【什么时候跑】", "【竞价匹配额是什么】", "【每一条判据】",
+                    "【两条硬限制】", "【依赖】"):
+        assert heading in spec.source, heading
+    # 单位、口径、Key 依赖、不能回测这些关键句也都在正文里
+    for phrase in ("万元", "不是全天成交额", "9:15–9:30", "同花顺", "Key", "无法回测"):
+        assert phrase in spec.source, phrase
 
 
 def test_build_strategy_rows_shows_broken_and_runtime_errors(formulas_cfg: Config,
@@ -1140,6 +1238,161 @@ def test_preview_hits_says_so_when_the_snapshot_is_missing(
     assert "实时快照" in joined and "取不到" in joined, result["notes"]
     assert "现量比" in joined and "不能回测" in joined, result["notes"]
     assert result["errors"] == []
+
+
+def _fake_auction(monkeypatch: pytest.MonkeyPatch, rows: list[dict],
+                  *, phase: str = "closed", status: str = "final") -> list[list[str]]:
+    """把 `hithink.HithinkClient.auction_snapshot` 换成假的，并记录每次问了哪些代码。"""
+    from laoa_trader.data import hithink as hx
+
+    calls: list[list[str]] = []
+    real_init = hx.HithinkClient.__init__
+
+    def fake_init(self, *a, **k):                      # 不去连真接口（测试里也封了网）
+        k.setdefault("api_key", "k")
+        k.setdefault("pace", 0)
+        k.setdefault("retries", 0)
+        real_init(self, *a, **k)
+
+    def fake_snapshot(self, thscodes, stage="live", chunk=100):
+        codes = [str(c) for c in thscodes]
+        calls.append(codes)
+        wanted = set(codes)
+        return {"item": [r for r in rows if r.get("thscode") in wanted],
+                "failed": [], "phase": phase, "status": status, "timestamp": 0}
+
+    monkeypatch.setattr(hx.HithinkClient, "__init__", fake_init)
+    monkeypatch.setattr(hx.HithinkClient, "auction_snapshot", fake_snapshot)
+    return calls
+
+
+def _auction_row_row(symbol: str, *, amount: float | None = 2.02e7,
+                     volume: float | None = 158.0, unmatched: float | None = 1200.0) -> dict:
+    """一条竞价快照行（字段名照抄同花顺接口：金额是**元**、量是**手**）。"""
+    from laoa_trader.data import hithink as hx
+
+    return {"thscode": hx.to_thscode(symbol), "symbol": symbol,
+            "auction_amount": amount, "auction_volume": volume,
+            "auction_unmatched": unmatched}
+
+
+def test_auction_extra_converts_units_and_keeps_the_sign(
+        formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`auction_extra`：**元 → 万元**只换一次；未匹配量带符号；-1 当缺值。"""
+    import datetime as dt
+
+    from laoa_trader.data import hithink as hx
+
+    rows = [
+        _auction_row_row("600001"),                                   # 2020 万元 / 158 手 / +1200
+        _auction_row_row("600002", unmatched=-800.0),                 # 卖盘剩余
+        _auction_row_row("600003", unmatched=-1.0),                   # -1 = 未提供 → 缺值
+        _auction_row_row("600004", amount=None, volume=None, unmatched=None),   # 全缺
+    ]
+    calls = _fake_auction(monkeypatch, rows)
+    moment = dt.datetime(2026, 9, 15, 9, 20)
+
+    extra, note = lib.auction_extra(formulas_cfg, ["600001", "600002", "600003", "600004"],
+                                    now=moment)
+
+    assert note == ""                                                  # 取到了就不啰嗦
+    assert len(calls) == 1                                             # 一次批量问完
+    # 单位：接口给元（2.02e7）→ 字段给万元（2020）；量是手，原样
+    assert extra["600001"]["竞价匹配额"] == pytest.approx(2.02e7 / lib.AUCTION_AMOUNT_TO_WAN)
+    assert extra["600001"]["竞价匹配额"] == pytest.approx(2020.0)
+    assert extra["600001"]["竞价匹配量"] == pytest.approx(158.0)
+    assert extra["600001"]["竞价未匹配量"] == pytest.approx(1200.0)
+    # 符号约定：正 = 买盘剩余、负 = 卖盘剩余（原样带符号）
+    assert extra["600002"]["竞价未匹配量"] == pytest.approx(-800.0)
+    # -1 = 接口"未提供" → 当缺值，**不能**读成"卖压 1 手"
+    assert "竞价未匹配量" not in extra["600003"]
+    # 字段全缺的那只不进 extra（= 用到它的条件不成立）
+    assert "600004" not in extra
+
+
+def test_auction_extra_says_why_outside_the_auction_window(
+        formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """不在 9:15–9:30：**一个请求都不发**，并且给一句人话（含"只有 9:15–9:30"）。"""
+    import datetime as dt
+
+    calls = _fake_auction(monkeypatch, [_auction_row_row("600001")])
+    for moment in (dt.datetime(2026, 9, 15, 9, 14), dt.datetime(2026, 9, 15, 9, 30),
+                   dt.datetime(2026, 9, 15, 14, 20)):
+        extra, note = lib.auction_extra(formulas_cfg, ["600001"], now=moment)
+        assert extra == {}
+        assert "9:15–9:30" in note and "取不到" in note, note
+    assert calls == []                       # 不在时段里连请求都不发
+
+
+def test_auction_extra_points_at_the_data_source_without_a_key(
+        formulas_cfg: Config) -> None:
+    """没配 Key：**不发任何请求**，并直接指路到【系统设置 → 数据来源】。"""
+    import datetime as dt
+
+    formulas_cfg.hithink_api_key = ""
+    extra, note = lib.auction_extra(formulas_cfg, ["600001"],
+                                    now=dt.datetime(2026, 9, 15, 9, 20))
+
+    assert extra == {}
+    assert "同花顺" in note and "Key" in note
+    assert "系统设置 → 数据来源" in note, note
+
+
+def test_preview_hits_uses_the_auction_fields(formula_db: str, formulas_cfg: Config,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """用到竞价字段时：`竞价匹配额` 真的参与判断（万元口径），并且**只取一趟**。"""
+    import datetime as dt
+
+    calls = _fake_auction(monkeypatch, [
+        _auction_row_row("600001", amount=1.5e7),     # 1500 万 → 过 1000 万门槛
+        _auction_row_row("600002", amount=3.0e6),     # 300 万 → 不够
+        _auction_row_row("600003", amount=2.0e7),     # 2000 万 → 过
+    ])
+    formula = fm.compile_formula("竞价匹配额>=1000")
+
+    result = lib.preview_hits(formula, formula_db, cfg=formulas_cfg,
+                              now=dt.datetime(2026, 9, 15, 9, 20))
+
+    hit_symbols = sorted(hit["symbol"] for hit in result["hits"])
+    assert hit_symbols == ["600001", "600003"], result
+    assert len(calls) == 1, calls
+    assert result["notes"] == []
+
+
+def test_auction_fields_are_not_fetched_when_unused(formula_db: str, formulas_cfg: Config,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """**不用竞价字段的公式：一个竞价请求都不发**（与"没这个功能"完全一样）。"""
+    import datetime as dt
+
+    calls = _fake_auction(monkeypatch, [_auction_row_row("600001")])
+    formula = fm.compile_formula("C>MA(C,5)")
+
+    lib.preview_hits(formula, formula_db, cfg=formulas_cfg,
+                     now=dt.datetime(2026, 9, 15, 9, 20))
+
+    assert calls == []
+
+
+def test_auction_fields_only_have_a_value_on_the_last_bar(
+        formula_db: str, formulas_cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """端到端：值铺在**最后一根** K 线上，前面是缺值（与快照/资金流字段同一套写法）。
+
+    前面填 NaN 而不是"拿竞价那个数倒推"，是为了让"历史上根本没有这个数"在序列里如实体现 ——
+    谁写了 `MA(竞价匹配额,5)` 会得到全 NaN，而不是一条看着很合理的假均线。
+    """
+    import datetime as dt
+
+    _fake_auction(monkeypatch, [_auction_row_row("600001", amount=2.02e7)])
+    formula = fm.compile_formula("竞价匹配额>=1000")
+
+    prepared = lib.prepare_inputs(formulas_cfg, formula_db, [formula],
+                                 now=dt.datetime(2026, 9, 15, 9, 20))
+    series = next(iter(fm.load_series(formula_db, extra=prepared.extra)))
+
+    values = series.extra["竞价匹配额"]
+    assert len(values) == len(series.date)
+    assert values[-1] == pytest.approx(2020.0)               # 最后一格 = 竞价那一刻的万元值
+    assert all(value != value for value in values[:-1])
 
 
 def test_snapshot_extra_skips_symbols_without_values(formula_db: str,

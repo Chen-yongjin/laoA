@@ -78,7 +78,10 @@ DOWNLOAD_CHUNK = 1 << 20
 #: 重试退避上限（秒）
 _MAX_BACKOFF = 30.0
 
-#: 集合竞价快照每批最多多少个代码（接口上限 100）
+#: **一次请求最多几个代码**（同花顺各快照接口的上限都是 100），分页切批共用这一个数：
+#: 竞价那个端点（2026-10-11 随竞价扫描一起下线了）与现在的全市场快照
+#: （`ui/quotes.py` / `data/sources.py` 拿实时行情时按它切批）用的是同一个上限。
+#: 名字里的 AUCTION 是历史遗留：它最早只为集合竞价端点写的。
 AUCTION_BATCH = 100
 
 
@@ -873,7 +876,7 @@ class HithinkClient:
           auction_unmatched / auction_turnover_pct / auction_yesterday_ratio_pct /
           auction_volume_ratio / pre_close_price / open_price / last_price`。
           ⚠️ `auction_unmatched` 实测会出现 **-1**（茅台就是 -1）= "未提供"，
-          调用方（`intraday.auction_fields`）必须把负数当"没有"，绝不能读成"卖压 1 手"。
+          调用方（`formulas.auction_extra`）必须把负数当"没有"，绝不能读成"卖压 1 手"。
 
         Args:
             thscodes: 同花顺代码（也接受 `sh.600519` / 裸 6 位），**自动按 100 分批**。
@@ -923,6 +926,8 @@ class HithinkClient:
             timestamp = int(data.get("timestamp") or timestamp or 0)
         return {"item": items, "failed": failed, "phase": phase,
                 "status": status, "timestamp": timestamp}
+
+    # -- 异动 --
 
     def anomaly_list(self, tag_codes: list[str] | None = None) -> list[dict]:
         """当日全市场异动（涨停/跌停/大幅上涨下跌/快速反弹跳水）—— **一条请求**。

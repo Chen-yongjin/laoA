@@ -263,7 +263,7 @@ class QuoteService(QObject):
     """快照缓存 + 轮询节奏（**没有自己的 QTimer**，由主窗口的 5 秒拍子驱动）。
 
     为什么不自己起一个 QTimer：主窗口已经有一个 5 秒定时器（测试的 teardown
-    逐个盯着 `_timer` / `_market_timer` / `_auction_timer` / `_flash_timer`），
+    逐个盯着 `_timer` / `_market_timer` / `_flash_timer`），
     再加一个就要在每个用例的收尾里多停一个 —— 让 `tick()` 自己按
     `REFRESH_SECONDS` 限流，定时器的数量不变，收尾也不用改。
 

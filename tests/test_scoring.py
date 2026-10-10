@@ -214,7 +214,7 @@ def score_window(ready_cfg, qapp):
     try:
         yield window
     finally:
-        for name in ("_timer", "_market_timer", "_auction_timer", "_flash_timer"):
+        for name in ("_timer", "_market_timer", "_flash_timer"):
             timer = getattr(window, name, None)
             if timer is not None:
                 timer.stop()

@@ -360,7 +360,7 @@ def test_monitor_off_position_leaves_the_whole_observation_set(wl_db) -> None:
     assert "600100" not in pool_symbols
     # 做T那条路（持仓专属）也一起关掉
     assert intraday.held_positions(wl_db.db_path) == {}
-    # 竞价与异动共用的"标的宇宙"同样剔掉它（这两路也属于"这只票的提醒"）
+    # 异动共用的"标的宇宙"同样剔掉它（这一路也属于"这只票的提醒"）
     assert "600100" not in intraday.alert_universe(wl_db.db_path, wl_db)
 
     # 打开监控 → 一切都回来（开关是双向的，不是一次性）

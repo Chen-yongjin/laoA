@@ -57,6 +57,7 @@ from laoa_trader.notify import KINDS, sound, summarize
 # 语音模块在设置页构建控件/说明行时要用（音色、能不能念、锁定语速），模块级导入一次，别在构造函数里再 import
 from laoa_trader.notify import voice as voice_mod
 from laoa_trader.scheduler import Scheduler, data_gate, refresh_data, run_daily
+from laoa_trader.ui import error_popup as error_popup_mod
 from laoa_trader.ui import quotes as quotes_mod
 from laoa_trader.ui import theme as theme_mod
 
@@ -139,10 +140,6 @@ MONITOR_OFF_TEXT = "关闭"
 
 #: 关于页里图标的显示边长（资源只有 256/128/48/32/16 这几档，这里由 QPixmap 平滑缩放）
 ABOUT_ICON_SIZE = 64
-
-#: 竞价强度的界面刷新周期（毫秒）：竞价窗口只有 9:15–9:30 这十几分钟，
-#: 每分钟一次就够（卡片上那一行要新鲜，但不能每 5 秒打一次接口）。
-AUCTION_REFRESH_MS = 60_000
 
 #: 「大盘概览」页自己的刷新周期（毫秒）—— 每分钟一次，与 5 秒的界面刷新解耦。
 #: 取数另有 55 秒 TTL（`market_overview_ttl`），所以这一分钟里最多真打一次接口。
@@ -288,9 +285,13 @@ MARKET_HEATMAP_SITE = "https://52etf.site/"
 #: 热力图的刷新间隔（秒）：全市场快照 ≈28 个请求，绝不能跟 60 秒那套节拍走
 HEATMAP_TTL_SECONDS = 180
 
-# ── 「系统设置」的五组（顺序 = 页面上下顺序）──
+# ── 「系统设置」的四组（顺序 = 页面上下顺序）──
 #: 每组一个带标题的块。**顺序**是用户给定的：先"数据从哪来"，
-#: 再"消息怎么发"，然后是两个具体功能（竞价扫描 / T策略），最后是零碎的偏好。
+#: 再"消息怎么发"，然后是一个具体功能（T策略），最后是零碎的偏好。
+#:
+#: 2026-10-11 主人："竞价策略按照我的想法也是改成可编辑，把设置里面的去掉" ——
+#: 原来第 3 组是「竞价扫描」（开关 + 8 个阈值），**整组删除**，五组变四组；
+#: 竞价从此只是策略列表里一条普通的随包策略（`formulas/竞价策略.txt`），到点自己跑。
 #:
 #: ⚠️ 这里**没有**"盘中匹配用不用实时数据"的勾选框，而且不许加：2026-09-23 我加过一组
 #: 「筛选口径」，主人当场划掉 —— "不需要加开关，按照我说的规则来"。那条规则是内置的、
@@ -302,7 +303,7 @@ HEATMAP_TTL_SECONDS = 180
 #: 为什么合并合理：这四个阈值与那两个比例全是"这只票该怎么买卖"的数字，
 #: 分散在两组里，用户改做T阈值时看不到止损比例、反之亦然，而它们经常要一起调。
 SETTINGS_GROUPS: tuple[str, ...] = (
-    "数据来源", "通知方式", "竞价扫描", "T策略", "其他",
+    "数据来源", "通知方式", "T策略", "其他",
 )
 # ── 「数据来源」：来源列表（**同花顺是主源，公开源是兜底**）──
 #: 内置来源的键（它仍然读 `cfg.data_sources` 决定启停与优先级）。
@@ -803,19 +804,16 @@ if QT_AVAILABLE:
             # 想停用它就用【删除】。画一个能点、点了却不改变任何东西的开关，
             # 就是在骗用户（他会以为关掉了）
             self.enabled_box.setEnabled(False)
+            # 2026-10-11 主人："tooltip 只留一句短的" —— 原来这里各写了 2~3 句
+            # （含"为什么不能关""为什么不做一个开关"这类讲理由的话），删成一句
             self.enabled_box.setToolTip(
-                "内置的同花顺：在列表里 = 在 config.toml 的 data_sources 里 = 会用；"
-                "列表顺序就是取数优先级（前一个不可用就落到下一个）。"
-                "这里不能直接关 —— 想停用它就从 data_sources 里去掉"
+                "内置来源不能关；想停用它就删除这一行"
                 if builtin else
-                "列表里出现 = 已启用（写在 config.toml 的 data_sources 里）；"
-                "不想用它就点【删除】—— 这里不做第二个开关，免得两处说法不一致"
+                "列表里出现 = 已启用；停用请点【删除】"
             )
             head.addWidget(self.enabled_box)
             self.btn_delete = QPushButton("删除")
-            self.btn_delete.setToolTip(
-                "把这个来源从列表里去掉（写回 config.toml 的 data_sources 的列表就是这个列表）"
-            )
+            self.btn_delete.setToolTip("从列表里去掉这个来源")
             self.btn_delete.setVisible(not builtin)
             head.addWidget(self.btn_delete)
             outer.addLayout(head)
@@ -826,13 +824,12 @@ if QT_AVAILABLE:
             # 需要抠细节的人鼠标一停就能看到 —— 信息没丢，只是不再占满屏幕。
             brief = plain_text("提供：" + capability) if capability else (
                 "提供：—" if not implemented else "提供：（未知）")
-            if capability:
-                brief += "（换来源会影响这些）"
+            # 2026-10-11：原来这里还缀着"（换来源会影响这些）"—— 那是**讲理由**，
+            # 按主人"宁可删干净"的要求去掉；同一句意思留在下面的**短 tooltip** 里
             self.capability_label = QLabel(brief)
-            self.capability_label.setToolTip(
-                "这个来源能提供的东西。换来源 / 删来源会影响到它们。"
-                + (f"\n完整说法：{capability_full or capability}" if capability else "")
-            )
+            # 2026-10-11：这里原来塞了两行（"这个来源能提供的东西…" + 完整说法），
+            # 现在只留一句短的
+            self.capability_label.setToolTip("换来源会丢掉这些能力")
             self.capability_label.setObjectName("statusTag")
             self.capability_label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
             self.capability_label.setWordWrap(True)
@@ -907,10 +904,7 @@ if QT_AVAILABLE:
                     self.key_edit.setPlaceholderText("（界面还没有这个来源的 Key 输入）")
                 self.key_label.setText("界面还没有这个来源的实现：只如实显示，不会拿它取数")
                 self.key_label.setVisible(True)
-                self.setToolTip(
-                    "这个来源名是你在 config.toml 的 data_sources 里写的，"
-                    "但程序还没有它的实现 —— 界面只如实显示，不会拿它取数"
-                )
+                self.setToolTip("这个来源程序还没有实现，取不到数")
 
     class MarketStatItem(QFrame):
         """一个小条目：标签（**加粗名称**）+ 数值大一号加粗（**横向一条**，不是一张大卡）。
@@ -1062,19 +1056,13 @@ if QT_AVAILABLE:
             head.addWidget(self.title_label)
             head.addStretch(1)
             self.btn_refresh = QPushButton("刷新热力图")
-            self.btn_refresh.setToolTip(
-                "取一轮全市场快照重画（约 28 个请求，通常十几秒）。\n"
-                "平时不用点：交易时段每 3 分钟自己刷一次，页面在别处时不拉"
-            )
+            self.btn_refresh.setToolTip("重新拉一轮全市场快照")
             head.addWidget(self.btn_refresh)
             self.btn_zoom = QPushButton("放大")
             self.btn_zoom.setToolTip("打开独立窗口看大图（面积/颜色同一套口径）")
             head.addWidget(self.btn_zoom)
             self.btn_site = QPushButton("打开大盘云图")
-            self.btn_site.setToolTip(
-                f"用系统浏览器打开 {MARKET_HEATMAP_SITE}（对照用；\n"
-                "本程序不内嵌、不抓它的数据，热力图是我们自己按公开源算的）"
-            )
+            self.btn_site.setToolTip("用系统浏览器打开大盘云图")
             head.addWidget(self.btn_site)
             box.addLayout(head)
             HeatmapWidget = heatmap_mod.build_heatmap_widget()
@@ -1342,7 +1330,7 @@ if QT_AVAILABLE:
             if not str(name):
                 continue
             mom = _sector_number((record or {}).get("mom"))
-            # `mom` 是**比例**（0.0321 = 3.21%），而 `pct` 这一列全项目统一是**百分数**
+            # `mom` 是**比例**（0.0321 = 3.21%），而 `pct` 这一列全项目统一是百分数
             # （板块榜给的就是百分数）—— 这里 ×100 换成同一口径，否则本地模式下
             # 涨幅会显示成 `+0.03%`（差 100 倍）。
             rows.append({
@@ -1425,7 +1413,7 @@ if QT_AVAILABLE:
 
     # 原来的 `percent_text()` / `signed_percent_text()`（"比例 → 百分数"）随
     # `IndustryEntry`（旧的热门板块条目控件）一起删掉了：2026-09-17 起那一块是带 `pct` 的表、
-    # 2026-10-08 起是热力图，两种形态里 `pct` 都是**百分数**（板块榜给的口径），只有一个格式化函数
+    # 2026-10-08 起是热力图，两种形态里 `pct` 都是百分数（板块榜给的口径），只有一个格式化函数
     # （`percent_value_text`）。留着那两个没人调的转换函数，迟早有人拿它去格式化
     # "已经是百分数"的值 —— 那正好是 ×100 的那个量级错误。
 
@@ -1433,7 +1421,7 @@ if QT_AVAILABLE:
         """**已经是百分数**的值（3.21）→ `+3.21%`；取不到是 `—`。
 
         为什么不能直接用"比例 → 百分数"那种转换（原来那个 `signed_percent_text` 会 ×100）：
-        板块榜里的 `pct` 本来就是**百分数**（腾讯原文 `zdf=0.29` 就是 0.29%），
+        板块榜里的 `pct` 本来就是百分数（腾讯原文 `zdf=0.29` 就是 0.29%），
         再乘一次 100 会显示成 `+29.00%` —— 量级差 100 倍，而且**看起来还是个像样的数**，
         是最危险的一类错（`data/sectors.py` 的模块头专门讲过同一件事）。
         所以两种口径各有一个函数，名字里就写着差在哪。
@@ -1499,7 +1487,7 @@ if QT_AVAILABLE:
         直接在按钮回调里跑会"窗口未响应"（Windows 还会弹"程序无响应"）。
 
         **所有实例都登记在 `_live` 里**：收尾时不可能"逐个数着属性收" ——
-        实测漏一条（当时漏了竞价取数 `_auction_worker`）就会在 CI 的随机顺序下
+        实测漏一条（当时漏了竞价取数那个 worker，它已随竞价扫描下线删掉了）就会在 CI 的随机顺序下
         变成"某条线程活过整个用例、在解释器收尾时踩到已关闭的流或已析构的对象"，
         表现是跑到半路 `Fatal Python error: Aborted`、没有任何用例失败记录。
         有了登记册，`wait_all()` 就是一条兜底网：**不依赖谁记得把线程挂到哪个属性上**。
@@ -1624,9 +1612,6 @@ if QT_AVAILABLE:
             self._position_signature: tuple | None = None
             #: 启动自检结果（三态）与"数据不足"那一行提示（**不再是模态向导**）
             self.preflight_result: dict | None = None
-            #: 竞价强度快照：`{symbol: 展示字段}`（见 `request_auction` / `_auction_tick`）
-            self.auction_snapshot: dict[str, dict] = {}
-            self._auction_worker: Worker | None = None
             #: 数据概况的缓存与时间戳（见 `_summary_cached`）
             self._summary: dict | None = None
             self._summary_at = 0.0
@@ -1736,10 +1721,6 @@ if QT_AVAILABLE:
             self._market_timer = QTimer(self)
             self._market_timer.timeout.connect(self._market_tick)
             self._market_timer.start(MARKET_REFRESH_MS)
-            # 竞价强度自己的定时器：每分钟一次；真正去取的前提是"在竞价窗口内"
-            self._auction_timer = QTimer(self)
-            self._auction_timer.timeout.connect(self._auction_tick)
-            self._auction_timer.start(AUCTION_REFRESH_MS)
             # 提醒的"图标闪烁"定时器：有新提醒时开始交替托盘图标，到点（或用户点开
             # 浮窗/主窗口）立刻停 —— 见 `_start_alert_flash` / `_stop_alert_flash`
             self._flash_timer = QTimer(self)
@@ -1845,6 +1826,9 @@ if QT_AVAILABLE:
             # 4) 策略筛选：**顶部一行【开始筛选】+ 原来的公式编辑器**（编辑器原样挂过来，
             #    这一阶段只换"挂法"）
             self.formula_page = FormulaPage(self.cfg, status_cb=self._toast)
+            # 错误弹窗的**唯一出口**：这一页的操作失败（校验/运行/保存/删除/导出…）
+            # 也走主窗口的 `_show_error`（主人 2026-10-11："提示错误时直接弹窗说明"）
+            self.formula_page.error_cb = self._show_error
             # 未授权/试用到期时锁住「策略编辑」（用户原话："策略编辑锁住，点击提醒需要授权"）：
             # 这里只挂一个**回调**给页面，页面自己不判断授权（授权逻辑只有 licensing 一处）
             self.formula_page.open_editor_guard = self._editor_guard
@@ -1939,10 +1923,10 @@ if QT_AVAILABLE:
             # 「本地还没有行情数据 · 在【系统设置】里下载」这一类**一行提示**。
             # 为什么不做成弹窗：用户要的是"下一步点哪里"，不是被一个模态窗口拦住；
             # 提示挂在标题区会一直留着，直到数据下好（比弹一次就消失的对话框可靠）
-            self.first_run_hint = ElidedLabel("")
-            self.first_run_hint.setObjectName("firstRunHint")
-            self.first_run_hint.setVisible(False)
-            outer.addWidget(self.first_run_hint)
+            # 2026-10-11 主人："常驻的'数据不足/去设置里下载'那种提示行、首启引导行，也删掉
+            # （它要表达的事改由弹窗承担）。" —— 原来这里挂着 `first_run_hint`
+            # （"本地还没有行情数据 · 在【系统设置】里点【下载数据】"），
+            # 现在那句由启动自检失败时的**弹窗**说（见 `_show_error`），标题区不再常驻提示行。
 
             # 细进度条：**只在任务运行时可见**。不显示文字（百分比在运行状态那句话里）
             self.progress = QProgressBar()
@@ -1972,9 +1956,14 @@ if QT_AVAILABLE:
             return value if value in config.WINDOW_FRAMES else config.DEFAULT_WINDOW_FRAME
 
         def _window_tag(self) -> str:
-            """标题栏上软件名后面那行小字（版本号）。拿不到版本就不写，绝不显示 `vNone`。"""
+            """标题栏上软件名后面那行小字（版本号）。
+
+            写「专业版」不写「单机版」（2026-10-11 主人要求）：这个软件本来就是 Windows
+            单机运行的，把"单机"挂在标题上容易被读成"功能缩水版"。拿不到版本号就不写版本，
+            绝不显示 `vNone`。
+            """
             version = str(getattr(laoa_trader, "__version__", "") or "").strip()
-            return f"单机版 · v{version}" if version else "单机版"
+            return f"专业版 · v{version}" if version else "专业版"
 
         # ── 窗口外观（自绘标题栏 / 无边框）──
 
@@ -2187,11 +2176,7 @@ if QT_AVAILABLE:
             self.watch_note.returnPressed.connect(self.on_watch_add)
             self.btn_watch_add = QPushButton("添加自选")
             self.btn_watch_add.setObjectName("primaryAction")   # 主操作按钮（见 theme.py）
-            self.btn_watch_add.setToolTip(
-                "加入自选并立刻出现在下面的表里（回车即加）。\n"
-                "加进来**默认不提醒**：要盯哪一只，点它那一行的「监控开关」"
-                "（2026-10-05 主人的口径：默认只监控持仓股票）"
-            )
+            self.btn_watch_add.setToolTip("加进自选（回车即加）")
             self.btn_watch_add.clicked.connect(self.on_watch_add)
             row.addWidget(self.watch_symbol, 1)
             row.addWidget(self.watch_note, 2)
@@ -2199,10 +2184,7 @@ if QT_AVAILABLE:
             # 两张"整表开关"：默认只盯持仓之后，用户手里往往已经有一串开着的自选，
             # 逐只点太慢 —— 一次全关 / 一次全开（只看**自选**，持仓的开关不在这里动）
             self.btn_watch_mute_all = QPushButton("全部关闭提醒")
-            self.btn_watch_mute_all.setToolTip(
-                "把「自选标的」里所有票的监控开关一次关掉（**持仓不受影响**）。\n"
-                "关掉 = 这只票不再产生任何盘中提醒；它仍然留在表里，随时能再打开"
-            )
+            self.btn_watch_mute_all.setToolTip("全部关闭提醒（不动持仓）")
             self.btn_watch_mute_all.clicked.connect(lambda: self.on_watch_bulk(False))
             row.addWidget(self.btn_watch_mute_all)
             self.btn_watch_unmute_all = QPushButton("全部打开提醒")
@@ -2273,9 +2255,9 @@ if QT_AVAILABLE:
                 self.position_table, POSITION_MONITOR_COLUMN,
                 "监控开关：`开启` / `关闭`（**点这一格就能切换**，与右键【关闭监控】/"
                 "【打开监控】是同一件事）。\n"
-                "关闭 = 这只票不再产生任何盘中提醒（止损/止盈/做T/竞价/异动）。\n"
+                "关闭 = 这只票不再产生任何盘中提醒（止损/止盈/做T/异动）。\n"
                 "鼠标停在这一格上可以看到**今天最新一条提醒**的完整内容"
-                "（止损/止盈/涨停打开/跌破 5 日线/放量突破/回踩买点/做T/竞价/异动）。"
+                "（止损/止盈/涨停打开/跌破 5 日线/放量突破/回踩买点/做T/异动）。"
             )
             layout.addWidget(self.position_table, 1)
             return page
@@ -2324,10 +2306,7 @@ if QT_AVAILABLE:
                 # 【开始筛选】：跑所有**启用**的策略 + 公式 → 结果直接进自选标的 → 发一条消息
                 self.btn_run = QPushButton(BTN_START_TEXT)
                 self.btn_run.setObjectName("primaryAction")
-                self.btn_run.setToolTip(
-                    "开始筛选：增量数据 → 跑启用的策略 → 结果直接进「自选标的」"
-                    " → 按「系统设置」里的通知方式推送一条"
-                )
+                self.btn_run.setToolTip("跑一轮筛选：结果进「自选标的」")
                 # **走信号**（有的话）：与页面自己的按钮同一条路 —— 一处逻辑、两个入口，
                 # 就不会出现"两个按钮各连一套流程"这种迟早对不上的写法
                 if signal is not None:
@@ -2335,12 +2314,10 @@ if QT_AVAILABLE:
                 else:
                     self.btn_run.clicked.connect(self.on_run_pipeline)
                 row.addWidget(self.btn_run)
-                # `ElidedLabel` 而不是 QLabel：这行说明很长，普通 QLabel 的**最小宽度**
-                # 就是整句话的宽度 —— 它会一路把整窗的最小宽度顶上去（同上）
-                hint = ElidedLabel("结果直接进「自选标的」；策略的启停在下面的列表里勾")
-                hint.setObjectName("statusTag")
-                hint.setForegroundRole(QPalette.ColorRole.PlaceholderText)
-                row.addWidget(hint, 1)
+                # 2026-10-11 主人："把繁琐的说明文字删掉" —— 这里原来还有一行灰字
+                # （"结果直接进「自选标的」；策略的启停在下面的列表里勾"），整行删掉：
+                # 「结果去哪了」写在【开始筛选】自己的 tooltip 与点下去那一刻的状态提示里，
+                # "勾选怎么用"看列表那一列就懂。
                 layout.addLayout(row)
             layout.addWidget(self.formula_page, 1)
             return page
@@ -2400,11 +2377,7 @@ if QT_AVAILABLE:
             # 默认关（用户拍板）。放在添加按钮右边 = "这一页的开关"，与录持仓同一行不碍事
             self.t_strategy_box = QCheckBox("T策略")
             self.t_strategy_box.setChecked(bool(getattr(self.cfg, "intraday_t", False)))
-            self.t_strategy_box.setToolTip(
-                "持仓做T的**近似**提示（默认关）：\n"
-                "只有 60 秒一张的行情快照算出的「高抛/低吸」提醒，无法回测；\n"
-                "开关写在 config.toml 的 intraday_t，与「系统设置 → T策略」里的是同一个"
-            )
+            self.t_strategy_box.setToolTip("持仓做T提示（近似，默认关）")
             self.t_strategy_box.toggled.connect(self.on_toggle_t_strategy)
             row.addWidget(self.t_strategy_box)
             row.addStretch(1)
@@ -2435,8 +2408,11 @@ if QT_AVAILABLE:
                 page ─┬─ 标题行（页面标题，按钮在页脚）
                       ├─ market_scroll（可伸缩：窗口变矮时它自己滚动，页面底部那行不会被挤出去）
                       │    └─ 成交与情绪块 + 宽基指数块 + 情绪指数块 + 板块热力图块
-                      ├─ market_hint（**只在有话说时出现**：取数失败 / 涨跌家数关掉 / 板块没数据）
                       └─ market_footer（一行：数据来源小字 + 右对齐【立即刷新】）
+
+                （原来滚动区与页脚之间还有一行 `market_hint`：取数失败原因 / "涨跌家数为什么是 —" /
+                 "本地还没有涨停池" —— 2026-10-11 主人要求"不需要那么多解释，提示错误时直接弹窗说明"，
+                 **整行删掉**：取数失败改由弹窗说，口径解释直接删。）
 
             为什么内容区套滚动区：概览的条目数由配置与行情决定（可能十几项），
             如果不给滚动区，窗口一矮就是"页面被切掉"；给滚动区之后，
@@ -2495,10 +2471,10 @@ if QT_AVAILABLE:
             layout.addWidget(scroll, 1)
 
             # 取不到数据时的原因写在这里（正常时**隐藏**）：光看一排 `—` 用户猜不出为什么
-            self.market_hint = QLabel("")
-            self.market_hint.setWordWrap(True)
-            self.market_hint.setVisible(False)
-            layout.addWidget(self.market_hint)
+            # 2026-10-11 主人："常驻的'数据不足/去设置里下载'那种提示行…也删掉" ——
+            # 概览页那行 `market_hint`（取数失败原因 / 涨跌家数为什么是 — / 本地还没涨停池）
+            # 整行删除：取数失败改由弹窗说（`_on_market_overview_failed`，同类每次运行弹一次），
+            # 口径解释（"market_breadth 关着所以显示 —"）按"删掉解释"处理。
 
             # 页脚：**一行**（左边数据来源小字、右边【立即刷新】），按钮不另起一行。
             # 做成独立控件（`market_footer`）是为了让"只有一行"这件事可断言：
@@ -2663,7 +2639,15 @@ if QT_AVAILABLE:
             )
 
         def _heatmap_note(self) -> str:
-            """那行小字：口径 + 快照时间 + 缺数据的块数（**取不到就要说清**）。"""
+            """那行小字：**快照时间 + 块数 + 缺什么**（"取不到、缺哪一项"要说清）。
+
+            2026-10-11 主人："把繁琐的说明文字删掉，界面简洁才显得专业。" ——
+            原来这行开头还有一段"口径：面积 = 行业流通市值合计（x 万亿），颜色 = 市值加权涨跌幅
+            （红涨绿跌，±10% 饱和）"，**删掉**：窗口标题与放大窗口的标题里已经写着
+            "面积 = 流通市值合计，颜色 = 涨跌幅"，图例也在图上，不必再念一遍。
+            保留的是状态与原因（块数、快照时间、来源、取数失败、哪一项没取到）——
+            那些是用户排查要用的，主人明确要求留着。
+            """
             from laoa_trader.data import market_map
 
             if not self.market_heatmap:
@@ -2673,9 +2657,7 @@ if QT_AVAILABLE:
                         "（约 28 个请求）")
             stat = market_map.summarize(self.market_heatmap)
             stamp, stale = market_map.age_text(self.market_heatmap_at)
-            bits = [f"口径：面积 = 行业流通市值合计（{stat['mktcap'] / 1e4:.2f} 万亿），"
-                    f"颜色 = 市值加权涨跌幅（红涨绿跌，±10% 饱和）",
-                    f"{stat['blocks']} 个行业：涨 {stat['up']} · 跌 {stat['down']}"
+            bits = [f"{stat['blocks']} 个行业：涨 {stat['up']} · 跌 {stat['down']}"
                     + (f" · 平 {stat['flat']}" if stat["flat"] else "")
                     + (f" · 无数据 {stat['unknown']}" if stat["unknown"] else ""),
                     f"快照 {stamp}" + ("（已过期，点【刷新热力图】更新）" if stale else "")]
@@ -2769,6 +2751,11 @@ if QT_AVAILABLE:
             first = str(message).splitlines()[0] if message else "未知错误"
             self.market_heatmap_error = first
             logger.warning(f"热力图取数失败：{first}")
+            self._show_error(
+                "板块热力图取数失败",
+                f"{first}\n下一步：点【刷新热力图】重试；这只影响热力图，其余功能照常。",
+                once_key="heatmap",
+            )
             self._render_market_overview()
 
         def on_refresh_heatmap(self) -> None:
@@ -2912,9 +2899,14 @@ if QT_AVAILABLE:
             """后台取数抛异常（`market` 层已"绝不抛"，这里是双保险）：原因写在页面上。"""
             first = str(message).splitlines()[0] if message else "未知错误"
             logger.warning(f"大盘概览取数失败：{first}")
-            self.market_hint.setText(f"⚠️ 大盘概览取数失败：{first}")
-            self.market_hint.setToolTip(str(message))
-            self.market_hint.setVisible(True)
+            self._show_error(
+                "大盘概览取数失败",
+                f"{first}\n下一步：检查网络；没配同花顺 Key 时走公开源，可能被限流，稍后会自动重试。",
+                once_key="market-overview",
+            )
+            # 原来这里把它写进页内提示行（`market_hint`，2026-10-11 已整行删除）；
+            # 原因照旧进 tooltip 之外的【显示详情】：`_on_market_overview_failed` 里
+            # 那句 `_set_status`/弹窗已经说清"出了什么事 + 下一步"，完整 message 在日志里
 
         def refresh_market_overview(
             self, force: bool = False, client: Any = None
@@ -2952,8 +2944,7 @@ if QT_AVAILABLE:
             - **空块**：`market_indices` 没配 → 宽基块**连标题一起隐藏**（不留空标题）；
               配了但取不到数 → 一个 `—` 占位；热力图没数据 → 画布上写一句"还没有数据" +
               小字说明为什么（取数失败时把原因原样贴出来）；
-            - **页内提示**（`market_hint`）：取数失败的原因、以及"涨跌家数为什么是 `—`"
-              （`market_breadth` 关着就不取全市场快照，`_market_hint_notes` 负责说清）。
+            - **错误**：取数失败由弹窗说（`_on_market_overview_failed`，同类每次运行只弹一次）。
 
             用 `setStyleSheet("color:…")` 上色而不是富文本 HTML：`text()` 里带标签会让断言
             变脆，而这里只改前景色，样式表是最直接的一层。
@@ -3008,15 +2999,7 @@ if QT_AVAILABLE:
                 self.market_sections[title].setToolTip(tooltip)
             self.market_page.setToolTip(tooltip)
 
-            notes = self._market_hint_notes(overview)
-            if notes:
-                text = "；".join(notes[:2]) + ("…" if len(notes) > 2 else "")
-                self.market_hint.setText("⚠️ " + text)
-                self.market_hint.setToolTip("；".join(notes))
-            else:
-                self.market_hint.setText("")
-            self.market_hint.setVisible(bool(notes))
-
+            # 2026-10-11：口径解释与"数据不足"那几句随 `market_hint` 一起删除
             # 数据到位之后按当前宽度再排一次列数（首屏宽度可能与建好时不同）
             self._apply_market_columns()
 
@@ -3032,15 +3015,12 @@ if QT_AVAILABLE:
             所以这里不自己算数、只排版。
             """
             breadth_on = bool((overview or {}).get("breadth_enabled"))
-            amount_tip = (
-                "成交额 = **沪市 + 深市**（两个数相加，一个数）："
-                "取自上证指数与深证成指的成交额（单位元，显示成「亿」）。"
-                "与指数同一个节拍（每分钟刷新）。\n"
-                "北交所成交额**不再显示**（2026-09-17 用户要求删掉这一格）"
-            )
+            # 2026-10-11 主人："tooltip 只留一句短的" —— 原来这里是两句口径
+            # （"沪市+深市…与指数同一个节拍…"）+ 一句历史（"北交所成交额不再显示"），
+            # 只留"这个数是什么、单位是什么"。
+            amount_tip = "沪市 + 深市成交额（单位显示成「亿」）"
             limits_tip = "当日涨停 / 跌停 / 炸板家数（同花顺涨停池、跌停池、炸板池）"
-            breadth_tip = ("全市场上涨 / 下跌 / 平盘家数"
-                           "（翻 6 页全市场快照算出来的，每 5 分钟更新一次）")
+            breadth_tip = "全市场上涨 / 下跌 / 平盘家数（每 5 分钟更新）"
             if not breadth_on:
                 breadth_tip = ("现在是 `—`：market_breadth 关着，程序不去翻全市场快照"
                                "（省配额）。想看到它就在 config.toml 里把 "
@@ -3057,37 +3037,10 @@ if QT_AVAILABLE:
                 (MARKET_STAT_FLAT, values["平盘"], breadth_tip),
             ]
 
-        def _market_hint_notes(self, overview: Any) -> list[str]:
-            """页内提示要说的每一句（空列表 = 一切正常，提示区隐藏）。
-
-            几件事各有各的说法，**不能只把 errors 贴出来**：
-            - 取数失败/关闭：`market` 层已经给了中文原因（含"market_overview 已关闭"）；
-            - `market_breadth` 关着 → 涨跌家数必然是一排 `—`，不说清用户会以为坏了；
-            - 本地涨停池为空 → 热力图 tooltip 里就没有涨跌停家数，要说清是"本地还没有
-               涨停池数据"（点【刷新数据】能补），而不是让他以为这个块本来就不显示东西
-               （"板块榜这一轮有没有取到"由 `_heatmap_note()` 写在图下面那行小字里）。
-
-            后两条**只在"真的取过一轮"之后才说**（`as_of` 是那一轮的取数时间）：
-            窗口刚起来、后台那一路还没回来时，任何"为什么没有数"的说法都是猜的 ——
-            那一秒页面上的 `—` 只是"还没取"，不是缺陷。
-            """
-            data = overview or {}
-            notes = [str(e) for e in (data.get("errors") or [])]
-            fetched = bool(data.get("as_of"))
-            if fetched and bool(getattr(self.cfg, "market_overview", True)):
-                if not data.get("breadth_enabled"):
-                    notes.append(f"{MARKET_STAT_UP} / {MARKET_STAT_DOWN} / "
-                                 f"{MARKET_STAT_FLAT} 显示 {market.DASH}：market_breadth "
-                                 "关着，不取全市场快照（打开就能看到）")
-                if not (self.market_industries or {}):
-                    notes.append("板块热力图暂无涨停家数：本地还没有涨停池数据，"
-                                 f"在【{TAB_SETTINGS}】里点【{BTN_REFRESH_TEXT}】补齐")
-            return notes
-
         def _build_settings_tab(self) -> Any:
-            """「系统设置」页：**五组 + 底部一个【保存设置】**（一键写回本页所有设置）。
+            """「系统设置」页：**四组 + 底部一个【保存设置】**（一键写回本页所有设置）。
 
-            组与顺序见 `SETTINGS_GROUPS`：数据来源 → 通知方式 → 竞价扫描 → T策略 → 其他
+            组与顺序见 `SETTINGS_GROUPS`：数据来源 → 通知方式 → T策略 → 其他
             （「T策略」这一组是用户拍板的名字：做T开关 + 四个阈值 + 止损/止盈比例）。
             **没有**"盘中使用实时数据"的开关：那是内置规则，主人 2026-09-23 明确划掉
             （"不需要加开关，按照我说的规则来"），界面上只显示本次用的是哪套口径。
@@ -3098,7 +3051,7 @@ if QT_AVAILABLE:
             现在**页面底部一个【保存设置】把本页所有设置一次写回**，
             校验失败时明确拒绝并点名哪一项（见 `_collect_settings_updates`）。
 
-            为什么整页套一层滚动区：这一页控件最多（五组、三十多个控件），
+            为什么整页套一层滚动区：这一页控件最多（四组、二十多个控件），
             它们的"最小高度"合起来有 1000 像素以上；页签的最小高度取所有页的最大值，
             于是**整窗的最小高度**被这一页顶到屏幕外 —— 1366×768 的笔记本
             （可用高约 680）上窗口缩不小，底边直接被屏幕切掉（用户反馈的"最下边看不见"）。
@@ -3117,7 +3070,6 @@ if QT_AVAILABLE:
 
             self._build_settings_source_group(layout)
             self._build_settings_notify_group(layout)
-            self._build_settings_auction_group(layout)
             self._build_settings_risk_group(layout)
             self._build_settings_misc_group(layout)
 
@@ -3126,10 +3078,7 @@ if QT_AVAILABLE:
             save_row.setSpacing(PAGE_SPACING)
             self.save_settings_button = QPushButton("保存设置")
             self.save_settings_button.setObjectName("primaryAction")
-            self.save_settings_button.setToolTip(
-                "把本页五组设置**一次**写回 config.toml（你写的注释与未知键都会保留）；"
-                "任何一项填得不对会明确拒绝并指出是哪一项"
-            )
+            self.save_settings_button.setToolTip("一次写回本页所有设置")
             self.save_settings_button.clicked.connect(self.on_save_settings)
             save_row.addWidget(self.save_settings_button)
             save_row.addStretch(1)
@@ -3141,7 +3090,6 @@ if QT_AVAILABLE:
 
             layout.addStretch(1)
             self._refresh_channel_hints()
-            self._refresh_auction_hint()
 
             # 滚动区只是"外套"：里层控件、顺序、层级都在各组里
             scroll = QScrollArea()
@@ -3157,10 +3105,10 @@ if QT_AVAILABLE:
             outer.addWidget(scroll, 1)
             return page
 
-        def _settings_group(self, layout: Any, title: str, note: str = "") -> Any:
+        def _settings_group(self, layout: Any, title: str) -> Any:
             """建一组（带标题的块）并挂到页面上 → 返回**给调用方填控件的布局**。
 
-            做成一个方法而不是五处各写一遍：五组的标题字号、边距、说明行的样式与
+            做成一个方法而不是四处各写一遍：四组的标题字号、边距与
             "块要能被整块取到"（`settings_sections`）这几件事必须处处一致 ——
             抄五遍必然抄歪一处，而歪掉的那一组看起来就像"没做完"。
             """
@@ -3176,11 +3124,11 @@ if QT_AVAILABLE:
                 _scaled_font(title_label.font(), FONT_VALUE_DELTA, bold=True)
             )
             outer.addWidget(title_label)
-            if note:
-                note_label = QLabel(note)
-                note_label.setObjectName("statusTag")      # 小号灰字
-                note_label.setWordWrap(True)
-                outer.addWidget(note_label)
+            # 2026-10-11 主人："把繁琐的说明文字删掉，界面简洁才显得专业。" ——
+            # 组标题下面原来各有一句解释（数据来源那组讲"列表顺序 = 取数优先级"、
+            # 通知方式那组讲"都不勾 = 只入库不推送"、T策略那组讲止盈止损怎么算、
+            # 其他那组讲"改完点【保存设置】"），**四条全删**：控件自己的短 tooltip、
+            # 勾选框文案与底部【保存设置】已经把该说的说完，不需要在标题下再讲一遍。
             body = QVBoxLayout()
             body.setContentsMargins(0, 0, 0, 0)
             body.setSpacing(4)
@@ -3212,17 +3160,7 @@ if QT_AVAILABLE:
               `主来源：同花顺金融数据服务（需要 Key，申请地址 …）`，地址**可点开**；
               它的 Key 仍然照旧从 config.toml / 环境变量读（见 `_collect_settings_updates`）。
             """
-            body = self._settings_group(
-                layout, "数据来源",
-                # ⚠️ 这一行是**用户可见**的小字（QLabel 不解析 markdown），别写 `**加粗**`
-                # —— 那会原样显示成两个星号（用户明确说过不喜欢这种星号）。
-                #
-                # 2026-09-20（用户："把数据来源下面的灰色说明小字都去掉，只保留有用的。
-                # 做到简洁明了。"）：原来这里写了三句解释（主源/兜底/四个按钮在哪），
-                # 现在只留**看完知道下一步做什么**的那一句 —— 主次关系由下面那行
-                # 「当前来源」如实显示，申请地址在同花顺那一行，都不必在这儿再说一遍。
-                "列表顺序 = 取数优先级；需要 Key 的来源，在它那一行填。",
-            )
+            body = self._settings_group(layout, "数据来源")
             # 配置里的**原值**也写出来："界面说的"与"config.toml 里写的"必须对得上
             # （认不出的键照实显示，不假装认识）—— 老属性名 `data_source_label` 保留
             self.data_source_label = QLabel(self._source_text(self.cfg.data_sources))
@@ -3241,7 +3179,7 @@ if QT_AVAILABLE:
             add_row.setSpacing(PAGE_SPACING)
             self.btn_add_source = QPushButton("添加来源")
             self.btn_add_source.setToolTip(
-                "把另一个**已实现**的来源加进来（每个来源用它自己的 Key）"
+                "把另一个已实现的来源加进来（每个来源用它自己的 Key）"
             )
             # 有候选时弹一个菜单（选一个加进来），没有候选时给如实说明 ——
             # 两个来源都加完/注册表读不出来时，绝不画"点了没用的条目"
@@ -3280,7 +3218,8 @@ if QT_AVAILABLE:
             self.btn_refresh.setToolTip(
                 "只刷新数据：补行情 / 涨停池 / 交易日历 / 行业 / 指数，不筛选、不推送"
             )
-            self.btn_refresh.clicked.connect(self.on_refresh_data)
+            # 用 lambda：`clicked` 会带一个 `checked` 参数，直接连会把 `user_action` 顶成 False
+            self.btn_refresh.clicked.connect(lambda: self.on_refresh_data(user_action=True))
             data_row.addWidget(self.btn_refresh)
             # 【检查盘面】：立刻按池子/持仓/自选跑一轮盘中提醒
             self.btn_check = QPushButton(BTN_CHECK_TEXT)
@@ -3310,11 +3249,7 @@ if QT_AVAILABLE:
             self.history_years_box.setDecimals(1)
             self.history_years_box.setSuffix(" 年")
             self.history_years_box.setValue(float(self.cfg.history_years))
-            self.history_years_box.setToolTip(
-                "下载多久的历史行情（超短线用不到长历史，默认 0.5 年 = 6 个月）。\n"
-                "改它只影响**下一次下载**的范围；必须大于 0，也要大于自检门槛 "
-                f"min_history_years（{float(self.cfg.min_history_years):g}）"
-            )
+            self.history_years_box.setToolTip("下载的历史行情长度（年）")
             self.history_years_box.valueChanged.connect(self._sync_data_amount_label)
             amount_row.addWidget(self.history_years_box)
             amount_row.addStretch(1)
@@ -3351,29 +3286,14 @@ if QT_AVAILABLE:
             参数都摆在勾选框下面：提示音、托盘图标闪烁秒数、浮窗停留秒数、浮窗条数上限。
             这四项以前**只有配置文件里能改**，而它们正是"太吵/听不见/看不到"时先要动的东西。
             """
-            body = self._settings_group(
-                layout, "通知方式",
-                "四个勾选框可任选；都不勾 = 只入库不推送（消息照样进两张表的「提醒」列）。"
-                "飞书需先填凭证",
-            )
-            # 默认路径（2026-09-18 用户拍板）：**图标闪烁 + 「消息」列表** ——
-            # 闪一下让你知道有事，点托盘图标打开列表自己看。这一行说明它：
-            msg_hint = QLabel(
-                "默认：提醒来时闪托盘/任务栏图标，点托盘图标打开「消息」窗口看列表"
-                "（盘中提醒 + 筛选完成都在里面，未读带圆点、打开即已读）。"
-                "下面那个浮窗是**另一种**呈现方式，默认不弹。"
-            )
-            msg_hint.setObjectName("statusTag")
-            msg_hint.setWordWrap(True)
-            body.addWidget(msg_hint)
+            body = self._settings_group(layout, "通知方式")
+            # 2026-10-11 主人："把繁琐的说明文字删掉" —— 这里原来有三句解释
+            # （默认怎么提醒、消息列表里有什么、浮窗是另一种方式），整段删掉：
+            # 每个勾选框自己的短 tooltip 已经说清了勾上会怎样。
 
             self.popup_box = QCheckBox("右下角滑出浮窗（默认关）")
             self.popup_box.setChecked(bool(getattr(self.cfg, "notify_popup", False)))
-            self.popup_box.setToolTip(
-                "勾上：收到提醒时在右下角滑出一扇浮窗（可点开看详情、可拖走、鼠标停着不消失）。\n"
-                "不勾（默认）：只闪图标 + 消息列表 —— 消息自己蹦出来容易打断别的事。\n"
-                "两种方式下的响声与图标闪烁都一样，消息始终会进「消息」列表"
-            )
+            self.popup_box.setToolTip("提醒时滑出一扇浮窗")
             body.addWidget(self.popup_box)
 
             chosen = {str(c).lower() for c in (self.cfg.notify_channels or [])}
@@ -3431,19 +3351,12 @@ if QT_AVAILABLE:
             pet_row = QHBoxLayout()
             self.pet_box = QCheckBox("桌宠（常驻桌面，有消息冒气泡 + 蹦两下）")
             self.pet_box.setChecked(bool(getattr(self.cfg, "notify_pet", True)))
-            self.pet_box.setToolTip(
-                "一张置顶的小卡片，主窗口最小化/隐藏时它还在桌面上；双击它打开「消息」列表，\n"
-                "右键有【消息】【试喊一条】【静音一小时】【藏起来】；拖动它换位置会被记住"
-            )
+            self.pet_box.setToolTip("桌面上的小卡片，双击打开消息")
             pet_row.addWidget(self.pet_box)
 
             self.voice_box = QCheckBox("中文语音朗读")
             self.voice_box.setChecked(bool(getattr(self.cfg, "notify_voice", True)))
-            self.voice_box.setToolTip(
-                "用 Windows 自带的中文语音把消息念出来（不联网、不装东西）。\n"
-                "这台机器没有中文语音时**自动不念**（英文音色念中文是怪腔怪调），"
-                "其余提醒照常。"
-            )
+            self.voice_box.setToolTip("用系统中文语音念出消息")
             pet_row.addWidget(self.voice_box)
             pet_row.addWidget(QLabel("　音量："))
             self.voice_volume_box = QSpinBox()
@@ -3470,18 +3383,11 @@ if QT_AVAILABLE:
             voice_row = QHBoxLayout()
             voice_row.addWidget(QLabel("音色："))
             self.voice_name_box = QComboBox()
-            self.voice_name_box.setToolTip(
-                "用哪种声音念：自动 = 挑这台机器上最合适的中文音色（推荐）；\n"
-                "女声 / 男声 = 在该性别的中文音色里挑（这台机器没有那个性别时\n"
-                "自动回落到「自动」，下面的说明会写清楚）"
-            )
+            self.voice_name_box.setToolTip("选音色：自动 / 女声 / 男声")
             self._fill_voice_names()
             voice_row.addWidget(self.voice_name_box, 1)
             self.btn_voice_try = QPushButton("试听")
-            self.btn_voice_try.setToolTip(
-                "用**当前**选中的音色与音量念一句样本（不用先保存）——\n"
-                "听一下就知道合不合适。语速固定正常（不给调，见主人 2026-09-21 的口径）"
-            )
+            self.btn_voice_try.setToolTip("用当前音色试听一句")
             self.btn_voice_try.clicked.connect(self.on_try_voice)
             voice_row.addWidget(self.btn_voice_try)
             body.addLayout(voice_row)
@@ -3530,133 +3436,12 @@ if QT_AVAILABLE:
             # "通知到底通不通"是这一页唯一必须马上验证的事，去掉它用户就只能等下次匹配
             self.btn_test = QPushButton("发送测试提醒")
             self.btn_test.setToolTip(
-                "按上面**当前**的勾选与参数立刻发一条测试消息（配置文件不会被它改动）"
+                "按上面当前的勾选与参数立刻发一条测试消息（配置文件不会被它改动）"
             )
             self.btn_test.clicked.connect(self.on_test_notify)
             row.addWidget(self.btn_test)
             row.addStretch(1)
             body.addLayout(row)
-
-        def _build_settings_auction_group(self, layout: Any) -> None:
-            """第 3 组「竞价扫描」：开关 + 8 个参数（沿用现有控件与 handler）。"""
-            # 为什么把这一组放在界面上：这一版竞价是"**全市场扫一遍再按规则过滤**"，
-            # 规则就是用户手里那几个数字（涨幅区间、板块、成交额、分数、条数、扫描时刻）——
-            # 让他为了改一个 2.0% 去手改 TOML 是不合理的。
-            body = self._settings_group(
-                layout, "竞价扫描",
-                "全市场 9:15–9:25 的真实买卖盘；默认关，勾上才取数",
-            )
-            self.auction_on_box = QCheckBox("启用竞价扫描（勾上后默认 09:20 / 09:25 各扫一次）")
-            self.auction_on_box.setChecked(bool(getattr(self.cfg, "intraday_auction", False)))
-            self.auction_on_box.setToolTip(
-                "全市场约 5600 只、按 100 只一批 → 约 56 个请求/次（20~30 秒，后台线程跑）；\n"
-                "所以只在下面两个时刻各扫一次，不是每分钟扫。"
-            )
-            body.addWidget(self.auction_on_box)
-
-
-            pct_row = QHBoxLayout()
-            pct_row.addWidget(QLabel("竞价涨幅："))
-            self.auction_min_pct_box = QDoubleSpinBox()
-            self.auction_min_pct_box.setRange(0.0, 20.0)
-            self.auction_min_pct_box.setSingleStep(0.5)
-            self.auction_min_pct_box.setDecimals(1)
-            self.auction_min_pct_box.setSuffix(" %")
-            self.auction_min_pct_box.setValue(float(getattr(self.cfg, "auction_min_pct", 2.0)))
-            self.auction_min_pct_box.setToolTip("低于它的直接过滤（默认 +2.0%）")
-            pct_row.addWidget(self.auction_min_pct_box)
-            pct_row.addWidget(QLabel("~"))
-            self.auction_max_pct_box = QDoubleSpinBox()
-            self.auction_max_pct_box.setRange(0.0, 21.0)
-            self.auction_max_pct_box.setSingleStep(0.5)
-            self.auction_max_pct_box.setDecimals(1)
-            self.auction_max_pct_box.setSuffix(" %")
-            self.auction_max_pct_box.setValue(float(getattr(self.cfg, "auction_max_pct", 9.0)))
-            self.auction_max_pct_box.setToolTip(
-                "≥ 它的直接过滤：一字板/接近涨停**买不进**，推了也没用（默认 9.0%）"
-            )
-            pct_row.addWidget(self.auction_max_pct_box)
-            pct_row.addWidget(QLabel("　成交额 ≥"))
-            self.auction_amount_box = QDoubleSpinBox()
-            self.auction_amount_box.setRange(0.0, 100000.0)
-            self.auction_amount_box.setSingleStep(100.0)
-            self.auction_amount_box.setDecimals(0)
-            self.auction_amount_box.setSuffix(" 万")
-            self.auction_amount_box.setValue(
-                float(getattr(self.cfg, "auction_min_amount", 5e6)) / 1e4
-            )
-            self.auction_amount_box.setToolTip(
-                "竞价成交额不到这个数不参与（挡掉小盘爆表噪声）。\n"
-                "默认 500 万 —— 全市场只有 8.7% 的股票过线；嫌严可以调到 300 万"
-            )
-            pct_row.addWidget(self.auction_amount_box)
-            # 量比门槛（`auction_min_volume_ratio`）：原来只有 config.toml 能改的
-            # **第 8 个参数** —— 它决定打分里「放量」那 2 分给不给（满分 6），
-            # 界面上却看不到，用户想放松一档只能去手改 TOML
-            pct_row.addWidget(QLabel("　量比 ≥"))
-            self.auction_ratio_box = QDoubleSpinBox()
-            self.auction_ratio_box.setRange(0.0, 20.0)
-            self.auction_ratio_box.setSingleStep(0.5)
-            self.auction_ratio_box.setDecimals(1)
-            self.auction_ratio_box.setSuffix(" 倍")
-            self.auction_ratio_box.setValue(
-                float(getattr(self.cfg, "auction_min_volume_ratio", 2.0))
-            )
-            self.auction_ratio_box.setToolTip(
-                "竞价量比到不了这个数，打分里「放量」那 2 分就拿不到（默认 2.0 倍）"
-            )
-            pct_row.addWidget(self.auction_ratio_box)
-            pct_row.addStretch(1)
-            body.addLayout(pct_row)
-
-            board_row = QHBoxLayout()
-            board_row.addWidget(QLabel("板块（多选）："))
-            self.auction_board_boxes: dict[str, Any] = {}
-            chosen_boards = set(getattr(self.cfg, "auction_boards", None)
-                                or config.AUCTION_BOARDS)
-            for key in config.AUCTION_BOARDS:
-                box = QCheckBox(config.AUCTION_BOARD_LABELS[key])
-                box.setChecked(key in chosen_boards)
-                box.setToolTip("一个都不勾 = 不限制（等于全选）")
-                self.auction_board_boxes[key] = box
-                board_row.addWidget(box)
-            board_row.addStretch(1)
-            body.addLayout(board_row)
-
-            score_row = QHBoxLayout()
-            score_row.addWidget(QLabel("打分 ≥"))
-            self.auction_score_box = QSpinBox()
-            self.auction_score_box.setRange(*config.AUCTION_SCORE_RANGE)
-            self.auction_score_box.setValue(int(getattr(self.cfg, "auction_min_score", 2)))
-            self.auction_score_box.setToolTip(
-                "竞价强度打分（满分 6）：涨幅 2 + 量比 2 + 买盘剩余 1 + 成交额 1。\n"
-                "默认 2 —— 真实数据上命中面（覆盖当日后期涨停 24% vs 20%）比 3 划算"
-            )
-            score_row.addWidget(self.auction_score_box)
-            score_row.addWidget(QLabel("　推送条数 ≤"))
-            self.auction_items_box = QSpinBox()
-            self.auction_items_box.setRange(*config.AUCTION_ITEMS_RANGE)
-            self.auction_items_box.setValue(
-                int(getattr(self.cfg, "auction_alert_max_items", 10))
-            )
-            self.auction_items_box.setToolTip("按分数排序取前 N 只（1~50）")
-            score_row.addWidget(self.auction_items_box)
-            score_row.addWidget(QLabel("　扫描时刻："))
-            self.auction_scan_at_edit = QLineEdit(
-                ", ".join(getattr(self.cfg, "auction_scan_at", None) or ["09:20", "09:25"])
-            )
-            self.auction_scan_at_edit.setPlaceholderText("09:20, 09:25")
-            self.auction_scan_at_edit.setToolTip(
-                "逗号分隔的时刻（HH:MM）。9:25 那次拿到的是**竞价终态**。\n"
-                "为什么不填就每分钟扫：56 个请求 × 10 分钟会把配额打光"
-            )
-            score_row.addWidget(self.auction_scan_at_edit)
-            score_row.addStretch(1)
-            body.addLayout(score_row)
-
-            self.auction_hint = QLabel("")
-            self.auction_hint.setWordWrap(True)
-            body.addWidget(self.auction_hint)
 
         def _build_settings_risk_group(self, layout: Any) -> None:
             """第 4 组「T策略」：T策略总开关 + **四个做T阈值** + **止盈/止损比例**。
@@ -3670,11 +3455,7 @@ if QT_AVAILABLE:
             而它们决定"什么算冲高回落、什么算跌深反弹"，也就是提示多不多、灵不灵。
             现在摆在 T策略开关下面，并各自写清"跟谁比、比多少"。
             """
-            body = self._settings_group(
-                layout, "T策略",
-                "做T提示的开关与四个阈值；止盈/止损比例也在这里设（用户拍板：在 T策略 里编辑）"
-                "—— 止损位/止盈位 = 成本价 ×（1 ∓ 比例）",
-            )
+            body = self._settings_group(layout, "T策略")
             risk_row = QHBoxLayout()
             risk_row.addWidget(QLabel("止损比例："))
             self.stop_loss_box = QDoubleSpinBox()
@@ -3701,10 +3482,7 @@ if QT_AVAILABLE:
             # T策略：与「持仓监控」页那一行的复选框是**同一个配置键**（`intraday_t`）
             self.intraday_t_box = QCheckBox("T策略（持仓做T的近似提示，默认关）")
             self.intraday_t_box.setChecked(bool(getattr(self.cfg, "intraday_t", False)))
-            self.intraday_t_box.setToolTip(
-                "只有 60 秒一张的行情快照算出的「高抛/低吸」提示，**无法回测**；"
-                "四个阈值就是下面这四个数字（config.toml 的 t_* 项）"
-            )
+            self.intraday_t_box.setToolTip("做T提示（近似，无法回测）")
             body.addWidget(self.intraday_t_box)
 
             # ── 四个做T阈值（各有各的"跟谁比"）──
@@ -3718,9 +3496,7 @@ if QT_AVAILABLE:
             self.t_high_min_gain_box.setDecimals(1)
             self.t_high_min_gain_box.setSuffix(" %")
             self.t_high_min_gain_box.setValue(float(self.cfg.t_high_min_gain_pct))
-            self.t_high_min_gain_box.setToolTip(
-                "t_high_min_gain_pct：现价相对**昨收**至少涨这么多才算「冲高」（默认 2.0%）"
-            )
+            self.t_high_min_gain_box.setToolTip("相对昨收涨这么多算「冲高」")
             t_box.addWidget(self.t_high_min_gain_box)
             t_row.addLayout(t_box)
             t_box2 = QHBoxLayout()
@@ -3731,9 +3507,7 @@ if QT_AVAILABLE:
             self.t_high_pullback_box.setDecimals(1)
             self.t_high_pullback_box.setSuffix(" %")
             self.t_high_pullback_box.setValue(float(self.cfg.t_high_pullback_pct))
-            self.t_high_pullback_box.setToolTip(
-                "t_high_pullback_pct：从**今日最高**回落这么多才算「见顶回落」（默认 1.5%）"
-            )
+            self.t_high_pullback_box.setToolTip("从今日最高回落这么多算「见顶」")
             t_box2.addWidget(self.t_high_pullback_box)
             t_row.addLayout(t_box2)
             t_row.addStretch(1)
@@ -3749,9 +3523,7 @@ if QT_AVAILABLE:
             self.t_low_min_drop_box.setDecimals(1)
             self.t_low_min_drop_box.setSuffix(" %")
             self.t_low_min_drop_box.setValue(float(self.cfg.t_low_min_drop_pct))
-            self.t_low_min_drop_box.setToolTip(
-                "t_low_min_drop_pct：现价相对**昨收**至少跌这么多才算「杀跌」（默认 2.0%）"
-            )
+            self.t_low_min_drop_box.setToolTip("相对昨收跌这么多算「杀跌」")
             t_box3.addWidget(self.t_low_min_drop_box)
             t_row2.addLayout(t_box3)
             t_box4 = QHBoxLayout()
@@ -3762,20 +3534,14 @@ if QT_AVAILABLE:
             self.t_low_rebound_box.setDecimals(1)
             self.t_low_rebound_box.setSuffix(" %")
             self.t_low_rebound_box.setValue(float(self.cfg.t_low_rebound_pct))
-            self.t_low_rebound_box.setToolTip(
-                "t_low_rebound_pct：从**今日最低**反弹这么多才算「止跌回稳」（默认 1.0%）"
-            )
+            self.t_low_rebound_box.setToolTip("从今日最低反弹这么多算「止跌」")
             t_box4.addWidget(self.t_low_rebound_box)
             t_row2.addLayout(t_box4)
             t_row2.addStretch(1)
             body.addLayout(t_row2)
-            t_note = QLabel(
-                "　这四个阈值只管做T提示（默认关）；填 0 会被【保存设置】拒绝 ——"
-                "0 等于「任何一点波动都算」，那种提示只会刷屏"
-            )
-            t_note.setObjectName("statusTag")
-            t_note.setWordWrap(True)
-            body.addWidget(t_note)
+            # 2026-10-11 主人："把繁琐的说明文字删掉" —— 原来这行小字解释"这四个阈值
+            # 只管做T提示、填 0 会被拒绝"，删掉：填 0 点保存时**错误信息本身**会点名
+            # 是哪一项、为什么不行（见 `_validate_updates`），不需要提前再讲一遍。
 
         def _build_settings_misc_group(self, layout: Any) -> None:
             """第 5 组「其他」：界面主题 + 当日异动提醒 + 自选标的上限与是否进池。
@@ -3784,8 +3550,7 @@ if QT_AVAILABLE:
             （全市场异动里挑自己的票），默认关（用户拍板：减少无用消息）——
             想开的人得找得到开关，不想开的人不该被它吵。
             """
-            body = self._settings_group(
-                layout, "其他", "零碎的偏好，改完点下面的【保存设置】")
+            body = self._settings_group(layout, "其他")
             theme_row = QHBoxLayout()
             theme_row.addWidget(QLabel("界面主题："))
             self.theme_box = QComboBox()
@@ -3803,9 +3568,8 @@ if QT_AVAILABLE:
             theme_row.addWidget(self.theme_box)
             theme_row.addStretch(1)
             body.addLayout(theme_row)
-            theme_hint = QLabel("换主题立即生效（不用重启），选择也会写回 config.toml")
-            theme_hint.setObjectName("statusTag")     # 小号灰字（与状态区同一个样式）
-            body.addWidget(theme_hint)
+            # 2026-10-11 主人："把繁琐的说明文字删掉" —— 原来这行小字写着"换主题立即生效
+            # （不用重启），选择也会写回 config.toml"，删掉：换完当场就能看见，不用先说。
 
             # 窗口外观（自绘标题栏 / 系统标题栏）：**与皮肤分开**的一个开关 ——
             # 皮肤是"画出来的颜色"，窗口外观管的是窗口自己（有没有系统标题栏、谁处理拖动），
@@ -3813,10 +3577,7 @@ if QT_AVAILABLE:
             frame_row = QHBoxLayout()
             frame_row.addWidget(QLabel("窗口外观："))
             self.frame_box = QComboBox()
-            self.frame_box.setToolTip(
-                "自绘标题栏 = 与皮肤同色的标题栏（默认）；系统标题栏 = Windows 自带那一条。"
-                "自绘那一档的拖动/缩放/贴边仍由系统处理，**重启软件后生效**"
-            )
+            self.frame_box.setToolTip("自绘标题栏 / Windows 自带，重启后生效")
             self.frame_box.addItem("自绘标题栏（与皮肤同色）", titlebar_mod.FRAME_CUSTOM)
             self.frame_box.addItem("系统标题栏（Windows 自带）", titlebar_mod.FRAME_SYSTEM)
             self.frame_box.setCurrentIndex(
@@ -3824,16 +3585,12 @@ if QT_AVAILABLE:
             frame_row.addWidget(self.frame_box)
             frame_row.addStretch(1)
             body.addLayout(frame_row)
-            frame_hint = QLabel("窗口外观**重启软件后生效**（它管的是窗口本身，不是一层皮肤）")
-            frame_hint.setObjectName("statusTag")
-            body.addWidget(frame_hint)
+            # 2026-10-11：原来这行小字解释"窗口外观重启后生效、它管的是窗口本身"，
+            # 删掉 —— "重启后生效"已经写在上面那个下拉框自己的短 tooltip 里。
 
             self.anomaly_box = QCheckBox("当日异动提醒（涨停/跌停/大幅波动…，默认关）")
             self.anomaly_box.setChecked(bool(getattr(self.cfg, "intraday_anomaly", False)))
-            self.anomaly_box.setToolTip(
-                "全市场异动里**只挑自己的票**（池子/自选/持仓）提醒，一次请求；"
-                "默认关（减少无用消息）。右键【关闭监控】的持仓不参与"
-            )
+            self.anomaly_box.setToolTip("异动提醒：只挑自己的票")
             body.addWidget(self.anomaly_box)
 
             watch_row = QHBoxLayout()
@@ -3844,7 +3601,7 @@ if QT_AVAILABLE:
             self.watchlist_max_box.setSuffix(" 只")
             self.watchlist_max_box.setValue(int(getattr(self.cfg, "watchlist_max", 20)))
             self.watchlist_max_box.setToolTip(
-                "超过上限时**明确提示**（不静默丢弃）：盘中只监控前 N 只自选"
+                "超过上限时明确提示（不静默丢弃）：盘中只监控前 N 只自选"
             )
             watch_row.addWidget(self.watchlist_max_box)
             self.watchlist_in_pool_box = QCheckBox("自选标的进池（一起盯、一起算盈亏提示）")
@@ -3996,7 +3753,9 @@ if QT_AVAILABLE:
 
             - `ready` → 状态栏打结论，**一次请求都不发**；
             - `needs_incremental` → 提示落后几天；`auto_download_on_start=true` 时后台自动补；
-            - `needs_full` → 标题区挂一行提示（填 Key → 点【下载数据】；改版后**不再弹向导**）。
+            - `needs_full` → **弹一次窗**说清"填 Key → 点【下载数据】"（`once_key="startup-preflight"`；
+              2026-10-11 之前是标题区常驻一行提示，主人要求"提示错误时直接弹窗说明"之后改成弹窗，
+              而且**不再弹向导窗口**）。
 
             Args:
                 auto: 是否由启动定时器触发（仅用于日志语义）。
@@ -4015,6 +3774,13 @@ if QT_AVAILABLE:
                 result = preflight.check(self.cfg.db_path, self.cfg)
             except Exception as exc:  # noqa: BLE001 - 自检失败不该让界面起不来
                 self._set_status(f"⚠️ 数据自检失败：{type(exc).__name__}: {exc}")
+                self._show_error(
+                    "本地数据自检失败",
+                    f"{type(exc).__name__}: {exc}\n"
+                    f"下一步：在【{TAB_SETTINGS}】里点【{BTN_DOWNLOAD_TEXT}】重新下载数据；"
+                    "若仍失败请看日志。",
+                    once_key="startup-preflight",
+                )
                 return
             self.preflight_result = result
             status = result.get("status")
@@ -4044,71 +3810,28 @@ if QT_AVAILABLE:
                 self._refresh_status()
                 if self.cfg.auto_download_on_start:
                     self._toast(f"⚠️ {preflight.summary_line(result)}；正在后台增量更新…")
-                    self.on_refresh_data()
+                    # 开机自动增量：不是用户按的 → 失败时同类只弹一次
+                    self.on_refresh_data(user_action=False)
                 else:
                     self._toast(f"⚠️ {preflight.summary_line(result)}；"
                                 "点【刷新数据】可立即增量更新")
                 return
-            # needs_full：弹首次向导。状态栏**不贴那句原始原因**（"行情表是空的…"），
-            # 而是给一句"点哪个按钮"的话（`_data_problem_text`）；原因在向导窗口与详情里 ——
-            # 用户要的是"我该做什么"，不是"内部为什么"（原话：很多词看不懂）
+            # needs_full（本地没数据 / 数据不够）：**弹一次窗**说清"下一步点哪个按钮"。
+            # 2026-10-11 主人："提示错误时直接弹窗说明" —— 原来这里是在标题区常驻一行提示
+            # （数据下好之前一直挂着），现在那一行删掉了，改由这个弹窗承担；
+            # 状态栏不贴原始原因（"行情表是空的…"），原因仍在【显示详情】与日志里。
             self._clear_status_message()
             self._refresh_status()
-            self.show_first_run_wizard(result)
-
-        def show_first_run_wizard(self, result: dict) -> None:
-            """数据不够用时**只写一行提示**（原来是弹一个模态向导，用户要求改成提示）。
-
-            为什么取消那个窗口（用户拍板）：它问的是"填 Key / 选目录 / 开始下载"，
-            而这三件事在「系统设置」里都有（Key 输入框、【下载数据】按钮）——
-            再弹一个窗口只是把同一件事说第二遍，还会挡住主界面。
-            现在标题区常年挂着这一行（数据下好之前一直在），用户随时看得到"该做什么"，
-            也不会被拦在外面。
-
-            `self.first_run_hint` 是**单行**控件（`ElidedLabel`）：太长的原因会被省略号截断，
-            全文仍在 tooltip 与【显示详情】里。
-            """
-            if self.first_run_hint is None:
-                return
-            self.first_run_hint.setFullText(self._first_run_hint_text(result))
-            self.first_run_hint.setVisible(True)
-
-        def _first_run_hint_text(self, result: dict) -> str:
-            """「本地还没有行情数据 · 在【系统设置】里点【下载数据】」这一句。
-
-            指路必须指到**真的按钮**上（按钮文字取自 `BTN_*` 常量，与界面上的一字不差）：
-            改版后【下载数据】搬进了「系统设置」，提示里就得写"在【系统设置】里"，
-            否则用户会满窗找一个不存在的按钮（这正是 `hints.py` 存在的理由）。
-            """
-            from laoa_trader.data import preflight
-
-            result = result or {}
-            reason = str(result.get("reason") or "").strip()
-            if result.get("status") == preflight.NEEDS_INCREMENTAL:
-                days = int(result.get("stale_trading_days") or 0)
-                return (f"本地数据落后 {days} 个交易日 · 在【{TAB_SETTINGS}】里点"
-                        f"【{BTN_REFRESH_TEXT}】补齐")
-            if preflight.needs_download(result) == preflight.DOWNLOAD_SYNC_LIGHT:
-                # 只缺轻量项（交易日历/行业归属/指数）：指路"刷新"而不是"重下历史"，
-                # 否则用户会白等十几分钟重下 180MB（实报过的 bug）
-                return (f"本地数据还差 {hints.LIGHT_ITEM_NAMES} · 在【{TAB_SETTINGS}】里点"
-                        f"【{BTN_REFRESH_TEXT}】补齐（几秒就好）")
-            tail = f"（{reason}）" if reason else ""
-            return (f"本地还没有行情数据{tail} · 在【{TAB_SETTINGS}】里填好 API Key，"
-                    f"再点【{BTN_DOWNLOAD_TEXT}】下载（可中断，下次接着传）")
-
-        def hide_first_run_hint(self) -> None:
-            """数据就绪之后把那一行提示收掉（它说的是一件**已经不存在**的事）。"""
-            if self.first_run_hint is not None:
-                self.first_run_hint.setFullText("")
-                self.first_run_hint.setVisible(False)
+            problem = self._data_problem_text().lstrip("⚠️ ").strip()
+            self._show_error(
+                "本地数据还不能用（筛选需要它）",
+                (problem or str(result.get("reason") or "本地还没有行情数据"))
+                + "\n（完整原因与自检阈值在【显示详情】里）",
+                once_key="startup-preflight",
+            )
 
         def _on_download_done(self, result: Any) -> None:
-            """下载完成（成功/取消）后：收掉"数据不足"提示 + 数据够了就自动跑一次筛选。
-
-            下载过程中，标题区那一行提示（`first_run_hint`）一直说着"还没有行情数据"；
-            下完之后它就该消失（否则用户会看着一句过期的话以为没下成功）。
-            """
+            """下载完成（成功/取消）后：数据够了就自动跑一次筛选。"""
             if getattr(result, "ok", False):
                 # 数据变了 → 之前缓存的"needs_full"结论立刻作废，重算一次。
                 # 这里**不**走 run_preflight()：那会在"还是不够用"时再摆一次提示，
@@ -4123,12 +3846,13 @@ if QT_AVAILABLE:
                 if not gate["ok"]:
                     # 下完了还不够（例如跨度/主体缺失）：说清原因，别硬跑
                     self._toast(f"⚠️ 数据仍不可用：{gate['reason']}")
-                    # 提示行留着（数据确实还不能用），但要说清**还差什么**
-                    self.show_first_run_wizard(
-                        gate.get("result") or {"reason": gate.get("reason") or ""}
+                    self._show_error(
+                        "数据还是不够用（这次下载没补齐）",
+                        f"{gate['reason']}\n"
+                        f"下一步：看【显示详情】里的自检阈值，必要时在【{TAB_SETTINGS}】里"
+                        f"重新点【{BTN_DOWNLOAD_TEXT}】。",
                     )
                     return
-                self.hide_first_run_hint()
                 self._toast(f"下载完成，正在跑一次【{BTN_START_TEXT}】…")
                 self.on_run_pipeline()
 
@@ -4227,6 +3951,38 @@ if QT_AVAILABLE:
             details = self._status_details(facts)
             self.status_label.setToolTip(details)
             self.status_details_cache = details      # 【详情】弹窗打开时直接用这一份
+            self._report_background_errors(facts.get("st") or {})
+
+        def _report_background_errors(self, st: dict) -> None:
+            """把**后台**那一轮的错误弹一次（同一类错误每次运行只弹一次）。
+
+            为什么放在这里：调度器那一轮的结果只由状态刷新来轮询（它活在自己的线程里），
+            状态栏那句只写得下"失败：xxx"几个字，原因与"下一步做什么"要弹窗才说得清。
+            `once_key` 保证"每 5 秒一拍"不会每拍弹一个框。
+
+            日更/筛选那一趟失败走的是 `_on_pipeline_done`（它自己有 report），不在这里重复。
+            """
+            report = st.get("last_intraday") or {}
+            err = str(report.get("error") or "").strip()
+            if err:
+                self._show_error(
+                    "盘中提醒没跑成",
+                    f"{err}\n"
+                    "下一步：检查网络与【系统设置 → 数据来源】里的 Key；"
+                    "每 5 分钟会自动重试（完整原因在【显示详情】与日志里）。",
+                    once_key="intraday-run",
+                )
+            # 日更 / 调度循环那一趟的失败（`scheduler` 把它记在 `last_error`）。
+            # 盘中那一轮失败时 `last_error` 会被写成**同一句话**，所以这里比一下、不重复弹。
+            daily_err = str(st.get("last_error") or "").strip()
+            if daily_err and daily_err != err:
+                self._show_error(
+                    "定时任务没跑成",
+                    f"{daily_err}\n"
+                    "下一步：点【开始筛选】手动跑一次看具体报错；"
+                    "完整原因在【显示详情】与日志里。",
+                    once_key="scheduler",
+                )
 
         def _invalidate_summary(self) -> None:
             """让"数据概况"缓存作废（数据刚被改过 → 下一次刷新取新值）。
@@ -4420,52 +4176,6 @@ if QT_AVAILABLE:
             return "，".join(bits)
 
 
-        def _auction_detail_lines(self) -> list[str]:
-            """状态详情里的**竞价扫描结果**（全市场扫描的**全部命中**，按分排序）。
-
-            为什么要单独存一张表（`auction_scan`）而不是只靠推送文本：
-            推送只列前 N 只，而用户要能"看全部竞价" —— 详情弹窗就是那个地方
-            （可滚动、可复制）。每行给**原始数值 + 板块 + 分**（只给一个分没法核对），
-            ★ = 已经在推送里发过的那几只，`（池内）` = 这只同时在自己的池子/自选/持仓里。
-            """
-            from laoa_trader.data import storage as storage_mod
-
-            try:
-                with storage_mod.connect(self.cfg.db_path) as conn:
-                    rows = storage_mod.load_auction_scan(conn)
-            except Exception as exc:  # noqa: BLE001 - 读不到就不显示这一节
-                logger.debug(f"读竞价扫描结果失败：{exc}")
-                return []
-            if not rows:
-                return ["竞价扫描：还没有结果（默认 09:20 / 09:25 各扫一次全市场；"
-                        "开关与阈值在设置页「竞价扫描」那一组）"]
-            slot = str(rows[0].get("slot") or "")
-            day = str(rows[0].get("day") or "")
-            total = int(rows[0].get("total") or len(rows))
-            top = int(sum(1 for row in rows if row.get("pushed")))
-            in_pool = set(self._pool_symbols())
-            shown = f"，这里列前 {len(rows)} 只" if total > len(rows) else ""
-            lines = [f"竞价扫描（{day} {slot}）共命中 {total} 只{shown}，"
-                     f"★ = 已推送前 {top} 只"]
-            for row in rows:
-                mark = "★" if row.get("pushed") else "·"
-                inside = "（池内）" if str(row.get("symbol")) in in_pool else ""
-                # 直接复用汇总推送那一行的写法（名称(代码) + 板块 + 数值 + 分），
-                # 只在行尾补一个「（池内）」—— 自己再拼一遍格式，迟早和推送里的不一致
-                lines.append(f"  {mark} {intraday.auction_scan_line(row)}{inside}")
-            return lines
-
-        def _pool_symbols(self) -> list[str]:
-            """当前盯的代码（池子 + 自选）：竞价结果里标"池内"用。
-
-            取不到就返回空列表（这只是锦上添花，绝不能因为它让详情打不开）。
-            """
-            try:
-                return list(intraday.watch_targets(self.cfg.db_path)[0])
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"取池子代码失败（竞价结果不标池内）：{exc}")
-                return []
-
         def _status_details(self, facts: dict | None = None) -> str:
             """状态详情：多行中文说明，tooltip 与【详情】弹窗**共用这一份**。
 
@@ -4510,7 +4220,6 @@ if QT_AVAILABLE:
                    and self_check.get("reason") else ""),
                 f"自检阈值：历史 ≥{self.cfg.min_history_years:g} 年 / "
                 f"股票 ≥{self.cfg.min_symbols} 只 / 行业覆盖 ≥90% / 交易日历齐全",
-                *self._auction_detail_lines(),
                 f"数据目录：{self.cfg.data_dir}",
                 f"日志文件：{log_path}",
             ]
@@ -4769,10 +4478,7 @@ if QT_AVAILABLE:
                 cap_item.setToolTip("流通市值：" + missing)
             else:
                 cap_item = QTableWidgetItem(f"{float(cap):.2f}亿")
-                cap_item.setToolTip(
-                    f"流通市值 {float(cap):,.2f} 亿{when}"
-                    "\n（单位亿；取的是快照里的流通市值，不是总市值）"
-                )
+                cap_item.setToolTip(f"流通市值 {float(cap):,.2f} 亿{when}")
             turn = quote.get("turnover_rate")
             if turn is None:
                 turn_item = QTableWidgetItem(market.DASH)
@@ -4813,7 +4519,7 @@ if QT_AVAILABLE:
             # 整句话（含时间）**一律**用 `intraday.alert_cell_tooltip`：没有提醒时它给的是
             # "今天还没有这只票的盘中提醒" —— 自己再写一句近义的话，两处说法迟早不一致
             bits.append(intraday.alert_cell_tooltip(alert))
-            # 整行的 tooltip（备注 / 来源明细 / 涨停原因 / 竞价）由调用方用
+            # 整行的 tooltip（备注 / 来源明细 / 涨停原因 / 资金流）由调用方用
             # `_attach_row_tooltip` 并进来 —— 这里不自己拼，否则同一段会写两遍
             item.setToolTip("\n".join(bits))
             if not on:
@@ -4837,14 +4543,11 @@ if QT_AVAILABLE:
 
         def _row_tooltip(self, row: dict, monitor_off: bool = False,
                          fund_line: str = "") -> str:
-            """整行通用的 tooltip：**备注 + 监控状态 + 竞价那一行**。
+            """整行通用的 tooltip：**备注 + 监控状态 + 涨停/来源明细/资金流**。
 
             备注是用户自己写的（"龙头""消息面"），它是"为什么盯这只票"的答案；
             监控状态必须写进来，是因为表里**没有**「状态」列了（列数被用户定死成 6/8 列），
             而"这只票到底还在不在监控"是必须能看出来的事实；
-            竞价那一行（`竞价 +3.2% 量比 2.8`）原来画在卡片上，卡片视图取消后
-            它的去处就是这里 —— 竞价只在 9:15–9:25 有数据，为它单开一列等于
-            95% 的时间空着。
 
             Args:
                 monitor_off: 这只票的**持仓**被右键关掉了监控（`position.monitor = 0`）。
@@ -4868,9 +4571,8 @@ if QT_AVAILABLE:
                 state = ""
             if monitor_off:
                 state = ("已关闭监控（持仓上右键关的）：这只票不再产生任何盘中提醒"
-                         "（止损/止盈/做T/竞价/异动），也不进观察面 —— "
+                         "（止损/止盈/做T/异动），也不进观察面 —— "
                          "它在池子/自选里的身份不影响这条（持仓的开关优先）")
-            auction = self._auction_text(str(row.get("symbol") or ""))
             # 今日涨停池的信息（连板数 + 涨停原因）：原来占「股票池」表的一列 + 卡片一行，
             # 而新表的列数被用户定死成 6 列 —— 它的去处是这一行的 tooltip
             # （"为什么涨停"是超短最有用的那句话，不能因为去掉一列就丢掉）
@@ -4884,7 +4586,6 @@ if QT_AVAILABLE:
                 state,
                 *pool_mod.source_detail_lines(row),
                 f"涨停：{limit_up}" if limit_up else "",
-                f"竞价：{auction[3:]}" if auction else "",
                 # 资金流（2026-10-08）：**只对自选标的采集**，所以只有自选行才给这一行
                 # （策略标的加进来只会写"还没采集"，而它永远等不到采集）
                 fund_line,
@@ -4965,6 +4666,12 @@ if QT_AVAILABLE:
                 self.scores.request(self._score_symbols())
             except Exception as exc:  # noqa: BLE001 - 评分是锦上添花，不许影响刷新
                 logger.debug(f"请求评分失败：{exc}")
+                self._show_error(
+                    "评分失败",
+                    f"{type(exc).__name__}: {exc}\n"
+                    "下一步：稍后自动重试；评分只影响「评分」那一列，不影响选股与提醒。",
+                    once_key="scores",
+                )
 
         def _on_scores_updated(self, results: dict) -> None:
             """一批评分回来了 → 重画那两张表（不弹任何提示：用户看得到数字变了）。"""
@@ -5207,7 +4914,7 @@ if QT_AVAILABLE:
             2026-09-17（用户要求）：监控开关"点一下就能切换"。两种情况：
             - **持仓表**：`position.monitor` 取反（与右键【关闭监控】调的是同一个方法
               `on_toggle_position_monitor`，两处不会各说各话）；
-            - **自选标的**：只有**自选**行能切（`watchlist.enabled`）；策略/公式选中的票
+            - 自选标的：只有**自选**行能切（`watchlist.enabled`）；策略/公式选中的票
               不是自选，没有"停用"这一说 —— 点它不静默失败，而是给一句指路的话
               （与右键菜单里那一项灰掉 + tooltip 说明是同一个判据）。
             """
@@ -5275,10 +4982,7 @@ if QT_AVAILABLE:
                     # 这一项可用的【打开监控】就是"收下它、开始盯"（2026-10-05 起；
                     # 在那之前池子里的每一行都自动盯着，所以这里曾经是灰掉的【关闭监控】）
                     act_toggle = QAction("打开监控", menu)
-                    act_toggle.setToolTip(
-                        "收进「自选标的」并开始盯它：止损、止盈、跌破 5 日线等触发就提醒你。\n"
-                        "默认只监控持仓股票 —— 筛选选出来的票要盯哪只，由你在这里点"
-                    )
+                    act_toggle.setToolTip("收进自选并开始盯它")
                     act_toggle.triggered.connect(
                         lambda _=False, s=symbol: self.on_watch_follow(s)
                     )
@@ -5293,10 +4997,7 @@ if QT_AVAILABLE:
                 )
                 monitored = self._position_monitored(symbol)
                 act_toggle = QAction("关闭监控" if monitored else "打开监控", menu)
-                act_toggle.setToolTip(
-                    "关闭监控 = 这只票**不再产生任何盘中提醒**（止损/止盈/做T/竞价/异动），"
-                    "在池子/自选那一侧也不再进观察面；它仍然留在表里，随时可以打开"
-                )
+                act_toggle.setToolTip("关闭监控 = 不再盘中提醒")
                 act_toggle.triggered.connect(
                     lambda _=False, s=symbol, m=monitored:
                     self.on_toggle_position_monitor(s, not m)
@@ -5363,6 +5064,9 @@ if QT_AVAILABLE:
                 outcome = pool_mod.remove_watch_symbol(self.cfg.db_path, symbol)
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"删除失败：{type(exc).__name__}: {exc}")
+                self._show_error("删除失败",
+                                 f"{type(exc).__name__}: {exc}\n"
+                                 "下一步：稍后重试；仍不行请看【显示详情】里的日志。")
                 return
             if not (outcome["watchlist"] or outcome["pool"]):
                 # 删除成功**不弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）；
@@ -5415,7 +5119,7 @@ if QT_AVAILABLE:
                 row_tip = "\n".join(p for p in (
                     f"备注：{note}" if note else "",
                     "监控中（盘中提醒会盯它）" if monitored
-                    else "已关闭监控：不再产生任何盘中提醒（止损/止盈/做T/竞价/异动），"
+                    else "已关闭监控：不再产生任何盘中提醒（止损/止盈/做T/异动），"
                          "也不进池子/自选的观察面（右键或点这一格可打开）",
                 ) if p)
                 name_item = self._tag_item(
@@ -5496,7 +5200,7 @@ if QT_AVAILABLE:
             "关闭监控"的真实作用（用户要求"名副其实"）：这只票
             - **不再产生任何盘中提醒** —— 止损/止盈/涨停打开/跌破 5 日线/放量突破/回踩买点
               （`intraday.watch_targets` 的观察面）、做T（`intraday.held_positions`）、
-              竞价（`intraday.alert_universe` / 全市场扫描）、当日异动（`alert_universe`）
+              当日异动（`intraday.alert_universe`）
               四个入口都按同一个判据排除；
             - **在池子/自选那一侧也不进观察面**。
 
@@ -5514,6 +5218,7 @@ if QT_AVAILABLE:
                     changed = storage.set_position_monitor(conn, symbol, enabled)
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"开关监控失败：{exc}")
+                self._show_error("开关监控失败", f"{exc}\n下一步：稍后重试。")
                 return
             if not changed:
                 self._toast(f"没找到持仓 {symbol}")
@@ -5561,6 +5266,11 @@ if QT_AVAILABLE:
                 self._select_watch_row(symbol)
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"加自选失败：{type(exc).__name__}: {exc}")
+                self._show_error(
+                    "加自选失败",
+                    f"{type(exc).__name__}: {exc}\n"
+                    "下一步：确认这只票代码没错；库被占用时先关掉别的窗口再试。",
+                )
 
         def _selected_watch_symbol(self) -> str:
             """当前操作对象：表格选中的行优先，其次输入框里的代码。
@@ -5631,6 +5341,8 @@ if QT_AVAILABLE:
                             ) or 0)
             except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，别把界面带走
                 self._toast(f"❌ 批量切换失败：{type(exc).__name__}: {exc}")
+                self._show_error("批量切换失败",
+                                 f"{type(exc).__name__}: {exc}\n下一步：稍后重试。")
                 return
             self._pool_signature = None
             verb = "打开" if enabled else "关闭"
@@ -5670,6 +5382,9 @@ if QT_AVAILABLE:
                                              source_strategy=source or None)
             except Exception as exc:  # noqa: BLE001 - 库坏了要说人话，别让点击把界面带走
                 self._toast(f"❌ 收下这只票失败：{type(exc).__name__}: {exc}")
+                self._show_error("收下这只票失败",
+                                 f"{type(exc).__name__}: {exc}\n"
+                                 "下一步：在「自选标的」页手工添加这只票。")
                 return
             self._pool_signature = None
             self._toast(f"✅ 已收下并开始盯「{name or symbol}」（止损/止盈/跌破5日线等会提醒你）")
@@ -5691,42 +5406,6 @@ if QT_AVAILABLE:
                 return
             self._pool_signature = None
             self._tick()
-
-        def _auction_text(self, symbol: str) -> str:
-            """这只票的竞价强度那一行：`竞价 +3.2% 量比 2.8`（没有数据/不在窗口 → 空串）。
-
-            原来它画在股票池卡片上；卡片视图按用户要求取消之后，它进了行的 tooltip
-            （见 `_row_tooltip`）—— 竞价只在 9:15–9:25 有数据，为它单开一列
-            等于 95% 的时间空着一格。
-            """
-            fields = self.auction_snapshot.get(symbol)
-            return intraday.auction_card_text(fields) if fields else ""
-
-
-        def _auction_tick(self) -> None:
-            """竞价窗口内每分钟取一次（不在窗口里、或没开这个功能时一次请求都不发）。"""
-            if not bool(getattr(self.cfg, "intraday_auction", True)):
-                return
-            if not intraday.auction_fetch_window():
-                return
-            self.request_auction()
-
-        def request_auction(self) -> None:
-            """后台取一次竞价快照 → 刷新卡片上那一行（失败只记日志，界面照常）。"""
-            if self._auction_worker is not None and self._auction_worker.isRunning():
-                return
-            worker = Worker(intraday.fetch_auction, self.cfg.db_path, self.cfg)
-            self._auction_worker = worker
-            worker.finished_ok.connect(self._on_auction_ready)
-            worker.failed.connect(
-                lambda msg: logger.info(f"竞价取数失败（卡片不显示竞价行）：{msg.splitlines()[0]}")
-            )
-            worker.start()
-
-        def _on_auction_ready(self, snapshot: Any) -> None:
-            """竞价数据回来了（主线程）：换成新数据并按最新内容重建卡片。"""
-            self.auction_snapshot = snapshot if isinstance(snapshot, dict) else {}
-            self._refresh_pool()
 
         def _stock_names(self, symbols: list[str]) -> dict[str, str]:
             """`{symbol: 名称}`（一次查询）：代码 → 名字，供界面拼 `名称(代码)`。"""
@@ -6347,7 +6026,7 @@ if QT_AVAILABLE:
             self._mark_missing_genders(box)
 
         def on_try_voice(self) -> None:
-            """【试听】：按**当前**面板上的音色与音量念一句样本（**语速固定 1.0，没有控件**）。
+            """【试听】：按当前面板上的音色与音量念一句样本（**语速固定 1.0，没有控件**）。
 
             为什么用面板上的值而不是已保存的配置：这一行就是给"调参数"用的 ——
             调了听一下、不满意再调，不该逼用户先保存再听（那样每次试都要写一次盘）。
@@ -6421,7 +6100,7 @@ if QT_AVAILABLE:
             三组控件对应 `Config` 的三个键（`voice_kinds` / `voice_fields` / `voice_multi`）：
 
             * **念哪些类型**：勾的是"类型族"（见 `intraday.VOICE_KIND_GROUPS`），
-              竞价/做T/异动各自合成一项，用户勾的是他脑子里的分类，不是程序的 kind 代号；
+              做T/异动各自合成一项，用户勾的是他脑子里的分类，不是程序的 kind 代号；
             * **一句里念哪几样**：勾的是"这一样念不念"，**顺序不给调**（先说谁、再说发生了
               什么、最后才是数字，这条顺序是听感的地基）；默认不念「说明」—— 那是
               `现价 12.34 ≤ 参考价 20.00 × 0.95` 这种带公式的原文，念出来最乱；
@@ -6443,11 +6122,7 @@ if QT_AVAILABLE:
             for index, (code, label, _members) in enumerate(intraday.VOICE_KIND_GROUPS):
                 box = QCheckBox(label)
                 box.setChecked(code in chosen_kinds)
-                box.setToolTip(
-                    f"勾上：这类提醒会**念出来**（写回 config.toml 的 voice_kinds）。\n"
-                    f"不勾只是不念，提醒照样进「消息」列表、照样闪图标。\n"
-                    f"（程序内部代号：{code}）"
-                )
+                box.setToolTip("勾上 = 这类提醒会念出来")
                 self.voice_kind_boxes[code] = box
                 kind_grid.addWidget(box, index // 3, index % 3)
             body.addWidget(kind_box)
@@ -6459,10 +6134,7 @@ if QT_AVAILABLE:
             for index, (code, label) in enumerate(voice_mod.VOICE_FIELDS):
                 box = QCheckBox(label)
                 box.setChecked(code in chosen_fields)
-                box.setToolTip(
-                    "勾上：这一样会出现在念的那句话里（写回 config.toml 的 voice_fields）。\n"
-                    "一个都不勾 = 回到默认那四项，不会真的念空。"
-                )
+                box.setToolTip("勾上 = 这一样会念出来")
                 self.voice_field_boxes[code] = box
                 field_grid.addWidget(box, index // 3, index % 3)
             body.addWidget(field_box)
@@ -6474,10 +6146,7 @@ if QT_AVAILABLE:
             self.voice_multi_box.addItem("每条都念（排队念完，声音不重叠）", "all")
             current = str(getattr(self.cfg, "voice_multi", "newest") or "newest")
             self.voice_multi_box.setCurrentIndex(1 if current == "all" else 0)
-            self.voice_multi_box.setToolTip(
-                "写回 config.toml 的 voice_multi。\n"
-                "连着来五条时，「每条都念」会把正在做事的人烦到关掉语音 —— 默认只念最新那条。"
-            )
+            self.voice_multi_box.setToolTip("一次来多条时怎么念")
             multi_row.addWidget(self.voice_multi_box, 1)
             body.addLayout(multi_row)
 
@@ -6870,6 +6539,22 @@ if QT_AVAILABLE:
                 return True
             return False
 
+        def _show_error(self, title: str, text: str, *, once_key: str = "") -> bool:
+            """**全窗口唯一的错误弹窗出口**（主人 2026-10-11："提示错误时直接弹窗说明"）。
+
+            三类用法（见 `ui/error_popup.py` 的模块头）：
+
+            * 用户主动操作失败（保存设置 / 加自选 / 记持仓 / 开始筛选 / 导出…）→ **不带**
+              `once_key`，每次点、每次失败都弹 —— 他刚按下的那一下必须得到回应；
+            * 后台与定时任务失败（下载 / 日更 / 盘中取数 / 快照 / 评分…）→ 带 `once_key`，
+              同一类错误**每次运行只弹一次**（否则网线一拔就是每 5 秒一个框）；
+            * 启动自检失败 → 带 `once_key`，启动后弹一次。
+
+            正文自己拼好"出了什么事 + 下一步做什么"（最多三行）：弹窗只负责呈现，
+            不在里面堆段落。运行状态那一行照旧写一句短状态，完整原因进日志与【显示详情】。
+            """
+            return error_popup_mod.show_error(self, title, text, once_key=once_key)
+
         def _set_progress_visible(self, visible: bool) -> None:
             """显示/隐藏标题区那条**细进度条**（只有任务在跑时才显示）。
 
@@ -6889,7 +6574,16 @@ if QT_AVAILABLE:
                     logger.debug(f"切桌宠情绪失败：{exc}")
 
         def _run_worker(self, fn, label: str, with_progress: bool = False,
-                        with_stage: bool = False, with_note: bool = False) -> None:
+                        with_stage: bool = False, with_note: bool = False,
+                        user_action: bool = False) -> None:
+            """跑一个后台任务。
+
+            Args:
+                user_action: 这一趟是不是**用户刚按下的那一下**（下载/刷新/开始筛选/检查盘面…）。
+                    两类失败的说法不同（主人 2026-10-11 的两条要求）：
+                    用户按的那一下失败 → **每次都弹**；自动/定时跑的那一趟失败 → **同类每次运行只弹一次**
+                    （不带这个标记就是后者，见 `_on_worker_failed`）。
+            """
             # 明确设成"确定进度"的 0%（range=0..100）：下载最初几秒在取签名/建连，
             # 这期间进度条必须显示 0% 而不是"未开始/不确定"的样子
             self.progress.setRange(0, 100)
@@ -6904,7 +6598,9 @@ if QT_AVAILABLE:
             worker.stage.connect(lambda name: self._set_status(f"{label}：{name}…"))
             worker.note.connect(lambda text: self._on_worker_note(label, text))
             worker.finished_ok.connect(lambda result: self._on_worker_done(label, result))
-            worker.failed.connect(lambda msg: self._on_worker_failed(label, msg))
+            worker.failed.connect(
+                lambda msg, ua=user_action: self._on_worker_failed(label, msg, user_action=ua)
+            )
             worker.start()
 
         def _on_worker_note(self, label: str, text: str) -> None:
@@ -7026,6 +6722,17 @@ if QT_AVAILABLE:
                 warnings = formulas.get("warnings") or []
                 if warnings:
                     text += "；⚠️ " + str(warnings[0])
+            # "某类数据取不到"（例如竞价字段没配 Key / 不在 9:15–9:30）要说清下一步 ——
+            # 【开始筛选】是用户按的那一下 → 每次都弹（`once_key=""`）。
+            missing = [str(n) for n in (formulas.get("notes") or []) + (formulas.get("warnings") or [])
+                       if str(n).startswith("⚠️ 需要")]
+            if missing:
+                self._show_error(
+                    "这次筛选有数据取不到",
+                    f"{missing[0]}\n"
+                    "下一步：在【系统设置 → 数据来源】里确认同花顺可用（竞价字段要 Key），"
+                    "并在对应时段再跑一次；也可点【显示详情】看完整原因。",
+                )
             if not pool_count and not errors:
                 # 2026-09-18 起候选只来自勾选的公式（内置策略已改成随包公式），
                 # 所以"没候选"最常见的原因就是"一条公式都没勾" —— 把它写在第一位
@@ -7033,11 +6740,28 @@ if QT_AVAILABLE:
                          "在「策略筛选」页勾上策略即可参与筛选）")
             self._toast(text)
 
-        def _on_worker_failed(self, label: str, msg: str) -> None:
+        def _on_worker_failed(self, label: str, msg: str, *, user_action: bool = False) -> None:
+            """后台任务失败：状态栏一句短的 + **弹窗把原因与下一步说清**。
+
+            去重规则按"是谁触发的"分两档（主人 2026-10-11 的两条要求）：
+            * `user_action=True`（用户按了【下载数据】【刷新数据】【开始筛选】【检查盘面】…）
+              → **不带 once_key，每次都弹** —— 他刚按下的那一下必须得到回应；
+            * 自动/定时那一趟（开机自动增量、下载完自动补数据…）→ `worker:<任务名>`
+              **同一类每次运行只弹一次**，免得网线一断就每 5 秒一个框。
+
+            完整原因照旧进日志与【显示详情】（`_status_details` 里的"上次出错"）。
+            """
             logger.error(f"{label}失败：{msg}")
             self.progress.setValue(0)
             self._set_progress_visible(False)    # 失败也算"任务结束"：进度条收起来
             self._set_status(f"❌ {label}失败：{msg.splitlines()[0]}")
+            self._show_error(
+                f"{label}失败",
+                f"{msg.splitlines()[0] if msg else '未知原因'}\n"
+                "下一步：检查网络与【系统设置 → 数据来源】里的 Key，再重试一次"
+                "（完整原因在【显示详情】与日志里）。",
+                once_key="" if user_action else f"worker:{label}",
+            )
 
         # ── 保存设置（写回 config.toml，保留注释与未知键）──
 
@@ -7295,7 +7019,7 @@ if QT_AVAILABLE:
                 self.btn_add_source.rect().bottomLeft()))
 
         def on_add_source(self, source: str = "") -> None:
-            """把某个**已实现**的来源加进 `data_sources`（现有键，走 `save_settings`）。
+            """把某个已实现的来源加进 `data_sources`（现有键，走 `save_settings`）。
 
             为什么只写 `data_sources` 这一个键：启停就是"在不在这个列表里"
             （见 `data/sources.py` 的模块头）—— 再加一个 `xxx_enabled` 就会出现
@@ -7413,13 +7137,21 @@ if QT_AVAILABLE:
             except OSError as exc:
                 # 只读盘/权限问题：给中文原因，不弹 traceback
                 self._toast(f"保存失败：{exc}（可手改 config.toml）")
+                self._show_error(
+                    "保存失败（写不进配置文件）",
+                    f"{exc}\n"
+                    f"下一步：确认 {getattr(self.cfg, 'source_path', 'config.toml')} 所在目录可写，"
+                    "或手工改 config.toml。",
+                )
                 return None
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"保存失败：{type(exc).__name__}: {exc}")
+                self._show_error("保存失败",
+                                 f"{type(exc).__name__}: {exc}\n"
+                                 "下一步：看【显示详情】里的日志路径，或手工改 config.toml。")
                 return None
             self._refresh_status()
             self._refresh_channel_hints()
-            self._refresh_auction_hint()
             return path
 
         # 2026-09-18：`save_group_selection()` / `on_save_groups()` **删掉了** ——
@@ -7429,7 +7161,7 @@ if QT_AVAILABLE:
         # 不会报错也不会丢内容（见 config.py 里那段注释）。
 
         def _panel_notify_updates(self) -> dict:
-            """把通知设置面板的**当前**状态收集成 {键: 值}（一键保存与测试提醒共用）。"""
+            """把通知设置面板的当前状态收集成 {键: 值}（一键保存与测试提醒共用）。"""
             return {
                 "notify_popup": self.popup_box.isChecked(),
                 "notify_channels": [
@@ -7463,63 +7195,10 @@ if QT_AVAILABLE:
                 self._panel_notify_updates(), extra="；" + self._settings_effect_text()
             ))
 
-        # ── 竞价扫描设置（全市场扫描 + 过滤规则）──
-
-        def _panel_auction_updates(self) -> dict:
-            """把"竞价扫描"面板的当前状态收集成 {键: 值}（保存用）。"""
-            boards = [key for key, box in self.auction_board_boxes.items() if box.isChecked()]
-            if not boards:
-                # 一个都不勾 = 不限制：显式写成全部，别让用户看到"保存了空列表 = 什么都不扫"
-                boards = list(config.AUCTION_BOARDS)
-            good, bad = config.split_scan_at(self.auction_scan_at_edit.text())
-            return {
-                "intraday_auction": self.auction_on_box.isChecked(),
-                "auction_min_pct": float(self.auction_min_pct_box.value()),
-                "auction_max_pct": float(self.auction_max_pct_box.value()),
-                "auction_min_amount": float(self.auction_amount_box.value()) * 1e4,
-                "auction_min_volume_ratio": float(self.auction_ratio_box.value()),
-                "auction_min_score": int(self.auction_score_box.value()),
-                "auction_alert_max_items": int(self.auction_items_box.value()),
-                "auction_boards": boards,
-                "auction_scan_at": good or ["09:20", "09:25"],
-                "_bad_scan_at": bad,          # 只给提示用，不写进配置文件
-            }
-
-        def on_save_auction(self) -> None:
-            """只保存竞价那一组：**先校验**（涨幅上下限不能倒挂），再写文件。
-
-            回显里把这一组的几个关键参数再念一遍（与一键保存的通用回显不同）：
-            竞价参数之间是**互相牵制**的（涨幅区间、成交额、分数、条数），
-            用户改完最想知道的是"现在这套规则到底是什么"。
-            """
-            updates = self._panel_auction_updates()
-            bad = updates.pop("_bad_scan_at", [])
-            errors = self._validate_updates(updates)
-            if errors:
-                message = "❌ 未保存：" + "；".join(errors)
-                self._toast(message)
-                self._set_settings_hint(message)
-                self._refresh_auction_hint(message)
-                return
-            extra = (
-                f"；竞价设置已保存：{'开' if updates['intraday_auction'] else '关'}；"
-                f"涨幅 {updates['auction_min_pct']:g}%~{updates['auction_max_pct']:g}%、"
-                f"成交额 ≥ {updates['auction_min_amount'] / 1e4:,.0f} 万、"
-                f"量比 ≥ {updates['auction_min_volume_ratio']:g}、"
-                f"打分 ≥ {updates['auction_min_score']}、"
-                f"推前 {updates['auction_alert_max_items']} 只、"
-                f"扫描 {', '.join(updates['auction_scan_at'])}"
-                + (f"；⚠️ 认不出的时刻已忽略：{'、'.join(bad)}" if bad else "")
-            )
-            message = self._save_settings(updates, extra=extra)
-            self._toast_save_result(message)          # 成功不弹，失败才弹
-            self._refresh_auction_hint(extra)
-            self._refresh_status()
-
         def _collect_settings_updates(self) -> dict:
             """本页**所有**控件的当前值 → `{配置键: 值}`（一键保存的唯一收集入口）。
 
-            为什么要"一个收集函数"而不是五组各弹一个 dict：一键保存必须写**同一个键集合** ——
+            为什么要"一个收集函数"而不是四组各弹一个 dict：一键保存必须写**同一个键集合** ——
             测试直接断言这个集合（多一个键、少一个键都是 bug：少一个键就是"改了没生效"，
             多一个键就是把不属于本页的东西悄悄改了）。
             """
@@ -7535,9 +7214,6 @@ if QT_AVAILABLE:
                 "history_years": float(self.history_years_box.value()),
                 # 2) 通知方式（`popup_box` 单独一栏，其余三路来自 channel_boxes）
                 **self._panel_notify_updates(),
-                # 3) 竞价扫描（`_bad_scan_at` 只给提示用，不进配置文件）
-                **{k: v for k, v in self._panel_auction_updates().items()
-                   if k != "_bad_scan_at"},
                 # ⚠️ 这里**没有**"盘中匹配用不用实时数据"这个键，而且不许加：
                 # 口径是内置规则（见 `formulas.prepare_inputs`），主人 2026-09-23 划掉了开关
                 # ——"不需要加开关，按照我说的规则来"。有测试钉着键集合里没有它。
@@ -7587,7 +7263,7 @@ if QT_AVAILABLE:
             `stop_loss` / `take_profit` 已经是小数 —— 所以这里按小数比 0。
 
             只校验**这一批里真的有**的键：各组自己的保存按钮只写本组那几个键，
-            不做这个判断的话，"只保存竞价设置"会被"止损为 0"这种**并不存在**的问题拒掉。
+            不做这个判断的话，只想改主题的那一次会被"止损为 0"这种**并不存在**的问题拒掉。
             """
             errors: list[str] = []
 
@@ -7608,11 +7284,6 @@ if QT_AVAILABLE:
                     hint = ("大于 0（0 年等于不下任何历史数据）" if key == "history_years"
                             else "大于 0%（填 0 等于「任何一点波动都算」，那种提示只会刷屏）")
                     errors.append(f"{label}（{key}）必须{hint}")
-            lo = float(updates.get("auction_min_pct") or 0)
-            hi = float(updates.get("auction_max_pct") or 0)
-            if "auction_min_pct" in updates and "auction_max_pct" in updates \
-                    and hi > 0 and hi <= lo:
-                errors.append(f"竞价涨幅上限（{hi:g}%）必须大于下限（{lo:g}%）")
             return errors
 
         def _save_settings(self, updates: dict, *, extra: str = "") -> str:
@@ -7624,18 +7295,20 @@ if QT_AVAILABLE:
             if errors:
                 message = "❌ 未保存：" + "；".join(errors)
                 self._set_settings_hint(message)
+                self._show_error("设置没保存（有项目填得不对）",
+                                 "；".join(errors) + "\n下一步：改好这几项再点【保存设置】。")
                 return message
             path = self._save_updates(updates, f"已保存 {len(updates)} 项")
             if path is None:
                 message = "❌ 保存失败（原因见运行状态那一行；也可手改 config.toml）"
                 self._set_settings_hint(message)
+                # 写盘那一步已经在 `_save_updates` 里弹过一次（带更具体的原因），这里不再叠一个
                 return message
             message = f"✅ 已保存 {len(updates)} 项（已写入 {path.name}）{extra}"
             self._set_settings_hint(message)
-            # 「策略筛选」页里也有一行「竞价策略」（它开关的就是设置里那个
-            # `intraday_auction`）：这里是**所有保存路径的唯一出口**，所以顺手把那张表
-            # 刷一次 —— 两个界面管同一个键时，最忌讳"这边改了、那边还显示旧状态"，
-            # 而用户没法从任何一句提示里看出这一点。
+            # 「策略筛选」页的列表也在这里刷一次：设置里改了任何与公式有关的东西
+            # （主题、策略目录相关项），那边不该还显示旧状态 —— 两个界面共用一份配置时，
+            # 最忌讳"这边改了、那边没动"，而用户没法从任何一句提示里看出这一点。
             self._reload_formula_list()
             # 桌宠与语音同理：设置里刚勾/刚取消，界面上要**立刻**生效 ——
             # 勾上要马上出现桌宠、取消要马上消失；语音那一行的说明也要跟着刷新
@@ -7693,10 +7366,9 @@ if QT_AVAILABLE:
             updates = self._collect_settings_updates()
             message = self._save_settings(updates, extra="；" + self._settings_effect_text())
             self._toast_save_result(message)          # 成功不弹，失败才弹
-            # 保存后按新值立刻重算界面：止损位/止盈位两列、竞价说明行、通知提示
+            # 保存后按新值立刻重算界面：止损位/止盈位两列、通知提示
             self._position_signature = None
             self._refresh_positions()
-            self._refresh_auction_hint()
             self._refresh_channel_hints()
             self._refresh_status()
 
@@ -7715,7 +7387,6 @@ if QT_AVAILABLE:
             return (
                 f"生效：主题 {theme_mod.theme_label(str(self.theme_box.currentData()))}；"
                 f"通知 {notify}；"
-                f"竞价扫描 {'开' if self.auction_on_box.isChecked() else '关'}；"
                 # ⚠️ 回显里**不说**"筛选口径"：那是内置规则、没有开关可点，
                 # 写在这里只会让用户去找一个不存在的控件（本轮口径显示在结果那一侧）
                 # 止损/止盈就在「T策略」组里（用户拍板），回显时一并念出来
@@ -7725,42 +7396,6 @@ if QT_AVAILABLE:
                 f"当日异动 {'开' if self.anomaly_box.isChecked() else '关'}；"
                 f"自选上限 {int(self.watchlist_max_box.value())} 只"
             )
-
-        def _refresh_auction_hint(self, extra: str = "") -> None:
-            """竞价那一组的说明行：把"开关 + 上次扫描 + 请求量级"写清楚（看得出设定生效了）。"""
-            if not hasattr(self, "auction_hint"):
-                return
-            lines = []
-            if not bool(getattr(self.cfg, "intraday_auction", False)):
-                lines.append("竞价扫描当前关着：一次请求都不发（勾上「启用竞价扫描」并保存即可开）")
-            else:
-                slots = ", ".join(getattr(self.cfg, "auction_scan_at", None) or [])
-                lines.append(f"已启用：每个交易日 {slots} 各扫一次全市场"
-                             "（约 56 个请求/次，后台线程跑，界面不会卡）")
-            last = self._last_auction_scan_text()
-            if last:
-                lines.append(last)
-            if extra:
-                lines.append(extra)
-            self.auction_hint.setText("　｜　".join(lines))
-
-        def _last_auction_scan_text(self) -> str:
-            """上一次扫描的结论（读 `auction_scan` 表）：`上次扫描 09:25：命中 37 只`。"""
-            from laoa_trader.data import storage as storage_mod
-
-            try:
-                with storage_mod.connect(self.cfg.db_path) as conn:
-                    rows = storage_mod.load_auction_scan(conn)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"读上次竞价扫描失败：{exc}")
-                return ""
-            if not rows:
-                return "还没有扫描结果"
-            day = str(rows[0].get("day") or "")
-            slot = str(rows[0].get("slot") or "")
-            total = int(rows[0].get("total") or len(rows))
-            pushed = sum(1 for row in rows if row.get("pushed"))
-            return f"上次扫描 {day} {slot}：命中 {total} 只（推送 {pushed} 只）"
 
         # ── 手动跑（与定时任务共用同一套流程，保证幂等）──
 
@@ -7792,8 +7427,9 @@ if QT_AVAILABLE:
                 self.scheduler.mark_daily_ran(report)
                 return report
 
+            # 【开始筛选】是用户按的那一下 → 失败每次都弹
             self._run_worker(_job, "立即筛选并建池",
-                             with_progress=True, with_stage=True)
+                             with_progress=True, with_stage=True, user_action=True)
 
         def _refuse_pipeline(self, message: str) -> None:
             """数据不可用时拒绝匹配：中文提示 + 把注意力引到「系统设置」里的下载按钮。
@@ -7815,8 +7451,12 @@ if QT_AVAILABLE:
             except Exception:  # noqa: BLE001 - 界面细节失败不影响"拒绝"本身
                 pass
 
-        def on_refresh_data(self) -> None:
-            """【{BTN_REFRESH_TEXT}】：只跑增量同步，不筛选、不推送。"""
+        def on_refresh_data(self, *, user_action: bool = True) -> None:
+            """【{BTN_REFRESH_TEXT}】：只跑增量同步，不筛选、不推送。
+
+            `user_action`：按钮按的（默认 True → 失败每次都弹）与**开机自动补增量**
+            调的那一次（False → 同类每次运行只弹一次）在弹窗上去重规则不同。
+            """
             if self._busy():
                 return
             self._run_worker(
@@ -7824,6 +7464,7 @@ if QT_AVAILABLE:
                                                  progress_cb=progress_cb),
                 "刷新数据",
                 with_progress=True,
+                user_action=user_action,
             )
 
         def on_download(self) -> None:
@@ -7865,12 +7506,13 @@ if QT_AVAILABLE:
                 self._toast("❌ 筛选要同花顺 Key · 没 Key 时行情与大盘概览可用 · 见【系统设置】")
                 return
             self._hide_key_hint()
+            # 【下载数据】是用户按的那一下 → 失败每次都弹（`user_action=True`）
             self._run_worker(
                 lambda progress_cb, note_cb: sync.download_history(
                     self.cfg, progress_cb=progress_cb, note_cb=note_cb
                 ),
                 "下载/更新历史数据",
-                with_progress=True, with_note=True,
+                with_progress=True, with_note=True, user_action=True,
             )
 
         def _show_key_hint(self, text: str) -> None:
@@ -7928,6 +7570,7 @@ if QT_AVAILABLE:
             self._run_worker(
                 lambda: notify_all(f"🧪 {APP_NAME} · 测试提醒", lines, cfg=test_cfg),
                 "测试通知",
+                user_action=True,      # 【发送测试提醒】是用户按的那一下
             )
 
         def on_intraday_once(self) -> None:
@@ -7936,6 +7579,7 @@ if QT_AVAILABLE:
             self._run_worker(
                 lambda: self.scheduler.run_intraday_now(ignore_session=True),
                 "盘中检查",
+                user_action=True,      # 【检查盘面】是用户按的那一下
             )
 
         def on_toggle_intraday(self) -> None:
@@ -7966,11 +7610,11 @@ if QT_AVAILABLE:
         def on_save_t_strategy(self) -> None:
             """只保存「T策略」那一组：开关 + 四个做T阈值 + 止损/止盈比例。
 
-            界面上填的是**百分数**（5 = 5%），配置里存的是**小数**（0.05）——
+            界面上填的是百分数（5 = 5%），配置里存的是**小数**（0.05）——
             与 `intraday.stop_loss()` 的口径一致；这里与 `_collect_settings_updates`
             是同一套换算，别处不许再换一次。
             一键保存走的是同一个收集函数（`_collect_settings_updates`），所以两条路的键
-            与口径**必然一致**（这也是一键保存敢一次写回 30 多个键的前提）。
+            与口径**必然一致**（这也是一键保存敢一次写回 32 个键的前提）。
             """
             updates = {
                 key: self._collect_settings_updates()[key]
@@ -8040,6 +7684,11 @@ if QT_AVAILABLE:
                 self._tick()
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"写入持仓失败：{exc}")
+                self._show_error(
+                    "记持仓失败",
+                    f"{type(exc).__name__}: {exc}\n"
+                    "下一步：确认成本价是数字、代码是 6 位；仍不行就看【显示详情】里的日志路径。",
+                )
 
         def on_delete_position(self, symbol: str = "") -> None:
             """删持仓：右键菜单传代码；手动调用时不传，用表格里选中的那一行。
@@ -8197,9 +7846,7 @@ if QT_AVAILABLE:
             licensed = licensing.is_licensed(self.cfg)
             if button is not None:
                 if licensed:
-                    button.setToolTip(
-                        "打开策略编辑器：左边写策略、右边点按钮插入（点列表里的策略行也会打开它）"
-                    )
+                    button.setToolTip("打开编辑器，载入列表里选中的那条")
                 else:
                     button.setToolTip(
                         "🔒 需要授权后才能编辑策略：" + licensing.status_text(self.cfg)
@@ -8373,9 +8020,10 @@ if QT_AVAILABLE:
                     stop(target)
                 except Exception:  # noqa: BLE001 - 收尾失败不该挡住退出
                     logger.debug(f"收 {name} 失败", exc_info=True)
-            for attr in ("_market_worker", "_auction_worker", "_worker"):
-                # 竞价取数（`_auction_worker`）是 2026-09-21 补上的：它当时漏在这份名单外，
-                # 而它跑的是真的网络请求 —— 收尾时它还在飞，就会成为"活过用例的那条线程"。
+            for attr in ("_market_worker", "_worker"):
+                # 注意：这份名单**只管"收尾时主动停止还没跑完的线程"**，
+                # 新增后台线程时别忘了同步加到这里 —— 它跑的是真的网络请求，
+                # 收尾时还在飞就会成为"活过用例的那条线程"（后果见 `Worker` 的说明）。
                 thread = getattr(self, attr, None)
                 if thread is None:
                     continue

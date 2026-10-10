@@ -605,15 +605,21 @@ def test_voice_kind_groups_cover_every_kind_the_program_emits() -> None:
 
     families = {code for code, _label, _members in intraday.VOICE_KIND_GROUPS}
     assert families == {"stop_loss", "take_profit", "break_ma5", "limit_up_open",
-                        "break_high", "pullback_ma5_buy", "auction", "t", "anomaly", "pool"}
-    # 竞价与做T 各两个 kind，异动按标签生成 —— 都要能归到族里
-    assert intraday.voice_kind_group("auction_strong") == "auction"
+                        "break_high", "pullback_ma5_buy", "t", "anomaly", "pool"}
+    # 做T 有两个 kind，异动按标签生成 —— 都要能归到族里
     assert intraday.voice_kind_group("t_low") == "t"
     assert intraday.voice_kind_group("anomaly_rapid_rally") == "anomaly"
     assert intraday.voice_kind_group("pool") == "pool"
     # 库里真出现过的 kind 全都有族（直接用 KIND_LABELS 当清单）
     for kind in intraday.KIND_LABELS:
         assert intraday.voice_kind_group(kind) in families, kind
+    # **竞价那一族没有了**（2026-10-11 随竞价扫描一起删）：老库里还留着的
+    # `auction_strong` 行不再归到任何族，而是按"认不出的 kind"走自己 ——
+    # 于是它既不会被误念、也不会让 `voice_allowed` 抛异常（老库不崩）
+    assert "auction" not in families
+    assert "auction_strong" not in intraday.KIND_LABELS
+    assert intraday.voice_kind_group("auction_strong") == "auction_strong"
+    assert intraday.voice_allowed("auction_strong", Config(voice_kinds=[])) is True
 
 
 def test_voice_allowed_filters_by_the_chosen_kinds() -> None:
@@ -643,8 +649,10 @@ def test_voice_content_config_is_normalized() -> None:
     cfg = Config(voice_kinds=["STOP_LOSS", "胡说", "auction", "t"],
                  voice_fields=["extra", "PRICE", "name", "胡说"],
                  voice_multi="ALL")
-    # 类型族按界面顺序归一（不是按用户写的顺序）
-    assert cfg.voice_kinds == ["stop_loss", "auction", "t"]
+    # 类型族按界面顺序归一（不是按用户写的顺序）；认不出的**连同老配置里存过的
+    # 「auction」一起丢掉**（那一族已随竞价扫描删除，留着只会让设置页显示一个
+    # 永远勾不上的项）
+    assert cfg.voice_kinds == ["stop_loss", "t"]
     # 字段按**念的顺序**归一（名称 → 代码 → 类型 → 现价 → 说明 → 条数）
     assert cfg.voice_fields == ["name", "price", "extra"]
     assert cfg.voice_multi == "all"

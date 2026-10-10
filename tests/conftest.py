@@ -7,7 +7,9 @@
 - `cfg`：临时数据目录的配置（不碰用户真实目录）；
 - `db`：**合成行情库** —— 造出"能过策略条件"的数据，覆盖后复权、行业、涨停池、交易日历；
 - `FakeClient` / `FakeSession`：假的同花顺客户端与假 HTTP 会话（记录调用、可编程返回/报错），
-  用来测"网络失败也要返回结构化结果"这条硬性要求。
+  用来测"网络失败也要返回结构化结果"这条硬性要求；
+- `modal_calls`（+ autouse 的 `_never_block_on_modals`）：**把一切模态框变成"记一笔就返回"**
+  —— 见下面的说明，这是"整套测试不会卡在弹窗上"的唯一保证。
 
 为什么必须在 socket 层封：只靠"记得注入假 client"是不够的 —— 一次疏忽就会让
 测试套件联网。封死之后，这个疏忽会变成一条**失败**，而不是一次静默的真实请求。
@@ -138,7 +140,7 @@ def _drain_threads_at_session_end():
     为什么要有这一条（2026-09-21）：CI（Windows）三次死在"跑到 89~93% 就没声音了、
     没有任何失败用例"，症状是后台线程在 `sys.stderr` 已关之后还在写日志 ——
     也就是**线程活过了整场测试**。线程漏收的根因已分别修掉（`MainWindow.shutdown()`
-    现在会等 `_auction_worker`、走 `Worker.wait_all()` 兜底、并给朗读线程送哨兵），
+    现在会走 `Worker.wait_all()` 兜底、并给朗读线程送哨兵），
     这里再兜最后一道：如果还有线程没落地，**把它的名字打出来**，下次一眼就能定位是谁
     （上一次就是靠"日志里只剩 I/O operation on closed file"猜了好几轮）。
     """
@@ -222,6 +224,98 @@ def _block_network(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(socket, "create_connection", create_connection)
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     yield
+
+
+#: 一次测试里"本该弹出来的模态框"被记在这里（`modal_calls` 夹具暴露给用例断言）。
+_MODAL_CALLS: list[dict] = []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _install_modal_guard():
+    """**整场**把模态框变成"记一笔就返回"：这是"测试不会卡在弹窗上"的唯一保证。
+
+    为什么必须是 **session 作用域**（这一点踩过坑）：一开始写成 function 作用域的
+    autouse 夹具，结果 `window` 这类用例自己的夹具**收尾时**（`qapp.processEvents()`
+    里投递的后台失败信号 → `_show_error`）补丁已经被撤掉了 —— 真的弹出一个模态框，
+    整套用例就卡在 teardown 上直到超时（实测：卡在 `QMessageBox.exec()`）。
+    session 作用域 + 手动 `MonkeyPatch` 之后，补丁从头到尾都在。
+
+    两层：
+    1. `ui.error_popup._exec`（唯一真正 `exec()` 的地方）换成"记一笔就返回" ——
+       `show_error` 自己的逻辑（`once_key` 去重、正文收敛）照常执行；
+    2. `QMessageBox` 的四个静态入口与 `exec` 也换掉，作为**最后一道网**：
+       哪天有人新写了别处的弹窗、或者用例忘了打桩，也只会多一条记录，不会卡死
+       （`question` 返回 Yes：子标题里的二次确认默认"确认"）。
+    """
+    from laoa_trader.ui import error_popup as error_popup_mod
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(error_popup_mod, "_exec", lambda box: 0)
+    try:
+        from PySide6.QtWidgets import QMessageBox
+    except Exception:  # noqa: BLE001 - 没装 Qt 的用例本来也不会弹
+        QMessageBox = None
+    if QMessageBox is not None:
+        mp.setattr(QMessageBox, "exec", lambda self: 0, raising=False)
+        for name in ("warning", "critical", "information"):
+            mp.setattr(QMessageBox, name, staticmethod(lambda *a, **k: 0), raising=False)
+        mp.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+            raising=False,
+        )
+    yield
+    mp.undo()
+
+
+def pytest_runtest_setup(item) -> None:      # noqa: ARG001 - pytest 钩子签名
+    """每个用例**开始之前**清空弹窗记录 + 清 `once_key` 去重。
+
+    为什么是钩子而不是 autouse 夹具（这一处踩过坑）：pytest 里 autouse 夹具**排在
+    用例自己要的夹具之后**建立 —— 写成夹具时，"建窗口的夹具在 setup 阶段弹的那一次"
+    会被随后的清零抹掉（实测：断言"启动自检弹了一次"永远看到空记录）。钩子在**任何夹具
+    之前**跑，正好是"这条用例从头开始记"的位置。
+
+    不清去重的话，第二条用例会因为"这类错误已经报过"而一条都弹不出来 ——
+    表现是"用例时而红时而绿"，最难查。
+    """
+    from laoa_trader.ui import error_popup as error_popup_mod
+
+    _MODAL_CALLS.clear()
+    error_popup_mod.reset_once_keys()
+
+
+@pytest.fixture(autouse=True)
+def _record_modal_calls(monkeypatch: pytest.MonkeyPatch):
+    """把 `ui.error_popup.show_error` 包一层：照常执行，只多记一笔"本该弹什么"。
+
+    记录字段（`modal_calls` 夹具给用例）：
+        `{"title", "text", "once_key", "shown"}` —— `shown=False` 表示被 `once_key`
+        去重挡掉了（"同一类后台错误第二次不再弹"就断言这个）。
+    """
+    from laoa_trader.ui import error_popup as error_popup_mod
+
+    real = error_popup_mod.show_error
+
+    def _spy(parent, title, text, *, once_key="", **kw):
+        shown = real(parent, title, text, once_key=once_key, **kw)
+        _MODAL_CALLS.append({
+            "title": str(title),
+            "text": str(text),                              # 传进去的原文
+            "shown_text": error_popup_mod._clip(text),      # **真正显示的那份**（≤3 行）
+            "once_key": str(once_key),
+            "shown": bool(shown),
+        })
+        return shown
+
+    monkeypatch.setattr(error_popup_mod, "show_error", _spy)
+    yield
+
+
+@pytest.fixture()
+def modal_calls():
+    """本次测试里"本该弹出的模态框"记录：`[{title, text, once_key, shown}, …]`。"""
+    return _MODAL_CALLS
 
 
 @pytest.fixture()
