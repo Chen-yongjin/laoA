@@ -1,0 +1,145 @@
+===== 冒烟：编译产物自检 =====
+run=38037199514  sha=1fb8485a78cdadbd1fdef671b23772b5ccfc88f8
+配置文件：D:\a\laoA\laoA\ci-smoke-config.toml → data_dir = "D:/a/laoA/laoA/ci-smoke-data"
+
+exe 存在：True  大小：59431936 字节
+----- dist/LuweikDecision 前 25 项 -----
+  certifi
+  charset_normalizer
+  formulas
+  laoa_trader
+  numpy
+  numpy.libs
+  pandas
+  pandas.libs
+  pyarrow
+  pyarrow.libs
+  PySide6
+  shiboken6
+  tzdata
+  _bz2.pyd
+  _ctypes.pyd
+  _decimal.pyd
+  _elementtree.pyd
+  _hashlib.pyd
+  _lzma.pyd
+  _multiprocessing.pyd
+  _queue.pyd
+  _socket.pyd
+  _sqlite3.pyd
+  _ssl.pyd
+  _uuid.pyd
+===== version 退出码：0 =====
+----- version version.out.txt（前 40 行）-----
+  luweik 1.9.1
+  构建形态：Nuitka 编译版（原生 exe）
+  程序位置：D:\a\laoA\laoA\dist\LuweikDecision
+  策略引擎：支持 80 个函数
+----- version version.err.txt（前 40 行）-----
+  2026-10-10 08:50:39,894 [INFO] laoa_trader.cli: 数据目录：D:\a\laoA\laoA\ci-smoke-data（配置来源：D:\a\laoA\laoA\ci-smoke-config.toml）
+===== doctor 退出码：0 =====
+----- doctor doctor.out.txt（前 40 行）-----
+  luweik —— 自检
+  ========================================================
+  程序版本    : 1.9.1
+  运行形态    : Nuitka 编译版（原生 exe）
+  程序位置    : D:\a\laoA\laoA\dist\LuweikDecision
+  随包资源    : D:\a\laoA\laoA\dist\LuweikDecision
+  资源目录    : D:\a\laoA\laoA\dist\LuweikDecision\laoa_trader\assets
+  随包策略    : D:\a\laoA\laoA\dist\LuweikDecision\formulas
+  Python      : 3.11.9（Windows 10）
+  配置来源    : D:\a\laoA\laoA\ci-smoke-config.toml
+  数据目录    : D:\a\laoA\laoA\ci-smoke-data
+  数据库      : D:\a\laoA\laoA\ci-smoke-data\trader.db（尚未创建）
+  dump 目录   : D:\a\laoA\laoA\ci-smoke-data\dumps（已存在）
+  日志文件    : D:\a\laoA\laoA\ci-smoke-data\logs\luweik.log
+  --------------------------------------------------------
+  同花顺 Key  : （未配置）
+  数据来源    : 同花顺金融数据服务（内置）（要 Key）、公开行情源（腾讯为主，免 Key）（免 Key）
+  飞书凭证    : AppID （未配置） / Secret （未配置） / 会话 （自动发现）
+  通知开关    : 飞书 True、托盘 True
+  通知频道    : notify_channels = []；实际发送 无（只走自绘浮窗 notify_popup=False）
+  交易参数    : 资金 100000 元、单票 20%、最多 5 只、止损 5%、止盈 10%
+  定时        : 每天 16:00（主跑）；补跑 19:15；自动运行 **关闭**；盘中间隔 60s
+  下次自动运行: 已关闭（每天自动运行）
+  --------------------------------------------------------
+  ✅ pandas     行情计算
+  ✅ numpy      行情计算
+  ✅ pyarrow    读同花顺 Parquet
+  ✅ requests   调用接口
+  ✅ PySide6    图形界面
+  ✅ winotify   Windows 原生通知（仅 Windows）
+  --------------------------------------------------------
+  数据自检    : ❌ needs_full —— 本地还没有数据库（首次运行）
+    行情行数  : 0；股票数 0（阈值 4000）
+    历史跨度  : 0 年（阈值 0.4）；最新 None
+    已导入区间: — → —；0 行；覆盖 0 年
+    history_years: 0.5（导入年限，dump 固定 10 年、按这个值过滤；改成 10 可导满 10 年）
+    落后交易日: 0（ready 允许 ≤0）
+    复权事件  : **缺失**；行业覆盖 0%；交易日历 **缺失**
+    需要下载  : full（auto_download_on_start=True）
+    缺表      : adjust_event、auction_scan、fund_flow、index_daily、intraday_alert、limit_up_pool、position、push_log、signal、stock_basic、stock_daily_raw、stock_pool、trading_calendar、watchlist
+----- doctor doctor.err.txt（前 40 行）-----
+  2026-10-10 08:50:40,165 [INFO] laoa_trader.cli: 数据目录：D:\a\laoA\laoA\ci-smoke-data（配置来源：D:\a\laoA\laoA\ci-smoke-config.toml）
+----- 数据目录 ci-smoke-data -----
+  D:\a\laoA\laoA\ci-smoke-data\dumps
+  D:\a\laoA\laoA\ci-smoke-data\logs
+  D:\a\laoA\laoA\ci-smoke-data\trader.db
+  D:\a\laoA\laoA\ci-smoke-data\logs\自检报告.txt
+----- 默认数据目录（%LOCALAPPDATA%）-----
+  C:\Users\runneradmin\AppData\Local\LuweikDecision\data\dumps
+  C:\Users\runneradmin\AppData\Local\LuweikDecision\data\logs
+  C:\Users\runneradmin\AppData\Local\LuweikDecision\data\trader.db
+  C:\Users\runneradmin\AppData\Local\LuweikDecision\data\logs\luweik.log
+自检报告：D:\a\laoA\laoA\ci-smoke-data\logs\自检报告.txt
+----- 自检报告全文 -----
+  luweik —— 自检
+  ========================================================
+  程序版本    : 1.9.1
+  运行形态    : Nuitka 编译版（原生 exe）
+  程序位置    : D:\a\laoA\laoA\dist\LuweikDecision
+  随包资源    : D:\a\laoA\laoA\dist\LuweikDecision
+  资源目录    : D:\a\laoA\laoA\dist\LuweikDecision\laoa_trader\assets
+  随包策略    : D:\a\laoA\laoA\dist\LuweikDecision\formulas
+  Python      : 3.11.9（Windows 10）
+  配置来源    : D:\a\laoA\laoA\ci-smoke-config.toml
+  数据目录    : D:\a\laoA\laoA\ci-smoke-data
+  数据库      : D:\a\laoA\laoA\ci-smoke-data\trader.db（尚未创建）
+  dump 目录   : D:\a\laoA\laoA\ci-smoke-data\dumps（已存在）
+  日志文件    : D:\a\laoA\laoA\ci-smoke-data\logs\luweik.log
+  --------------------------------------------------------
+  同花顺 Key  : （未配置）
+  数据来源    : 同花顺金融数据服务（内置）（要 Key）、公开行情源（腾讯为主，免 Key）（免 Key）
+  飞书凭证    : AppID （未配置） / Secret （未配置） / 会话 （自动发现）
+  通知开关    : 飞书 True、托盘 True
+  通知频道    : notify_channels = []；实际发送 无（只走自绘浮窗 notify_popup=False）
+  交易参数    : 资金 100000 元、单票 20%、最多 5 只、止损 5%、止盈 10%
+  定时        : 每天 16:00（主跑）；补跑 19:15；自动运行 **关闭**；盘中间隔 60s
+  下次自动运行: 已关闭（每天自动运行）
+  --------------------------------------------------------
+  ✅ pandas     行情计算
+  ✅ numpy      行情计算
+  ✅ pyarrow    读同花顺 Parquet
+  ✅ requests   调用接口
+  ✅ PySide6    图形界面
+  ✅ winotify   Windows 原生通知（仅 Windows）
+  --------------------------------------------------------
+  数据自检    : ❌ needs_full —— 本地还没有数据库（首次运行）
+    行情行数  : 0；股票数 0（阈值 4000）
+    历史跨度  : 0 年（阈值 0.4）；最新 None
+    已导入区间: — → —；0 行；覆盖 0 年
+    history_years: 0.5（导入年限，dump 固定 10 年、按这个值过滤；改成 10 可导满 10 年）
+    落后交易日: 0（ready 允许 ≤0）
+    复权事件  : **缺失**；行业覆盖 0%；交易日历 **缺失**
+    需要下载  : full（auto_download_on_start=True）
+    缺表      : adjust_event、auction_scan、fund_flow、index_daily、intraday_alert、limit_up_pool、position、push_log、signal、stock_basic、stock_daily_raw、stock_pool、trading_calendar、watchlist
+  --------------------------------------------------------
+  行情行数    : 0（0 只股票）
+  最新数据日期: 无（还没下载过历史数据）
+  行业 / 日历 : 0 个行业、0 个交易日
+  涨停池天数  : 0
+  股票池行数  : 0；当前持仓 0 只
+  最新日覆盖率: 0.0%（0/0）
+  
+  提示：先跑 `python -m laoa_trader --cli --download` 建库。
+✅ 冒烟通过：形态 Nuitka、随包策略与资源目录都解析正常

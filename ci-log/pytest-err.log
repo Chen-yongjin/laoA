@@ -1,0 +1,22 @@
+Message: "指数 881155.TI 取数失败（已跳过）：测试不允许做域名解析，但检测到 'fuyao.aicubes.cn'"
+Arguments: ()
+--- Logging error ---
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+Message: '没有可用来源取到快照（表格退回本地收盘价并标注）'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+Call stack:
+  File "D:\a\laoA\laoA\src\laoa_trader\ui\app.py", line 1410, in run
+    result = self._fn(*self._args, **kwargs)
+Call stack:
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+--- Logging error ---

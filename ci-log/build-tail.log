@@ -1,0 +1,43 @@
+Nuitka-Options: Used command line options:
+Nuitka-Options:   D:\a\laoA\laoA\build\launcher.py --standalone --assume-yes-for-downloads --enable-plugin=pyside6 --include-package=laoa_trader --output-dir=D:\a\laoA\laoA\build\nuitka-out --product-name=luweik决策系统 --product-version=1.9.1 --file-description=luweik决策系统（行情软件辅助工具） --python-flag=-O --include-data-files=D:\a\laoA\laoA\config.example.toml=config.example.toml --include-data-dir=D:\a\laoA\laoA\src\laoa_trader\assets=laoa_trader/assets --include-data-dir=D:\a\laoA\laoA\formulas=formulas --nofollow-import-to=pytest --nofollow-import-to=PyInstaller --nofollow-import-to=matplotlib --nofollow-import-to=scipy --nofollow-import-to=IPython --nofollow-import-to=notebook --nofollow-import-to=tkinter --nofollow-import-to=test --nofollow-import-to=unittest --nofollow-import-to=PySide6.Qt3DCore --nofollow-import-to=PySide6.QtMultimedia --nofollow-import-to=PySide6.QtWebEngineCore --nofollow-import-to=PySide6.QtWebEngineWidgets --nofollow-import-to=PySide6.QtQml --nofollow-import-to=PySide6.QtQuick --nofollow-import-to=pandas.tests --nofollow-import-to=numpy.tests --nofollow-import-to=pyarrow.tests --nofollow-import-to=PySide6.examples --nofollow-import-to=PySide6.scripts --windows-console-mode=disable --windows-icon-from-ico=D:\a\laoA\laoA\src\laoa_trader\assets\icon.ico --output-filename=luweik决策系统.exe
+Nuitka: Starting Python compilation with:
+Nuitka:   Version '4.2.2' on Python 3.11 (flavor 'CPython Official') commercial grade 'not installed'.
+Nuitka-Plugins:anti-bloat: Not including 'pandas.core._numba.extensions' automatically in order to avoid bloat, but this may cause: no numba acceleration.
+Nuitka-Plugins:anti-bloat: Not including 'pandas.plotting._matplotlib' automatically in order to avoid bloat, but this may cause: plotting will not be available.
+Nuitka-Plugins:pyside6: Including Qt plugins 'iconengines,imageformats,platforms,styles,tls' below 'PySide6\qt-plugins'.
+Nuitka-Plugins:dll-files: Found 4 files DLLs from shiboken6 installation.
+Nuitka: Downloading 'https://dependencywalker.com/depends22_x64.zip'.
+Nuitka: Extracting to 'C:\Users\runneradmin\AppData\Local\Nuitka\Nuitka\Cache\downloads\depends\x86_64\depends.exe'
+Nuitka-Inclusion: Including Windows Runtime DLLs, which increases distribution size. Use '--include-windows-runtime-dlls=no' to disable, or make explicit with '--include-windows-runtime-dlls=yes'.
+Nuitka: Completed Python level compilation and optimization.
+Nuitka: Generating source code for C backend compiler.
+Nuitka: Running data composer tool for optimal constant value handling.
+Nuitka: Running C compilation via Scons.
+Nuitka-Scons: Backend C compiler: cl (cl 14.5).
+Nuitka-Scons: Backend C linking with 571 files (no progress information available for this stage).
+Nuitka-Scons: Compiled 571 C files using clcache with 0 cache hits and 571 cache misses.
+Nuitka-Postprocessing: Adding 7 icon(s) from icon file 'D:\a\laoA\laoA\src\laoa_trader\assets\icon.ico'.
+Nuitka-Options: Included data file 'config.example.toml' due to specified data file 'D:\a\laoA\laoA\config.example.toml=config.example.toml' on command line.
+Nuitka-Options: Included 23 data files due to specified data dir 'D:\a\laoA\laoA\src\laoa_trader\assets' on command line.
+Nuitka-Options: Included 12 data files due to specified data dir 'D:\a\laoA\laoA\formulas' on command line.
+Nuitka-Plugins:data-files: Included data file 'certifi\cacert.pem' due to package data for 'certifi'.
+Nuitka-Plugins:data-files: Included data file 'pandas\io\formats\templates\html.tpl' due to package data directory 'templates' for 'pandas.io.formats'.
+Nuitka-Plugins:data-files: Included data file 'pandas\io\formats\templates\html_style.tpl' due to package data directory 'templates' for 'pandas.io.formats'.
+Nuitka-Plugins:data-files: Included data file 'pandas\io\formats\templates\html_table.tpl' due to package data directory 'templates' for 'pandas.io.formats'.
+Nuitka-Plugins:data-files: Included data file 'pandas\io\formats\templates\latex.tpl' due to package data directory 'templates' for 'pandas.io.formats'.
+Nuitka-Plugins:data-files: Included data file 'pandas\io\formats\templates\latex_longtable.tpl' due to package data directory 'templates' for 'pandas.io.formats'.
+Nuitka-Plugins:data-files: Included data file 'pandas\io\formats\templates\latex_table.tpl' due to package data directory 'templates' for 'pandas.io.formats'.
+Nuitka-Plugins:data-files: Included data file 'pandas\io\formats\templates\string.tpl' due to package data directory 'templates' for 'pandas.io.formats'.
+Nuitka-Plugins:data-files: Included data file 'pandas\io\formats\templates\typst.tpl' due to package data directory 'templates' for 'pandas.io.formats'.
+Nuitka-Plugins:data-files: Included 604 data files due to package data directory '.' for 'tzdata.zoneinfo'.
+Nuitka: Keeping build directory 'D:\a\laoA\laoA\build\nuitka-out\launcher.build'.
+Nuitka: Successfully created 'D:\a\laoA\laoA\build\nuitka-out\launcher.dist\luweik决策系统.exe'.
+======================================================================
+用 Nuitka 构建（编译成原生 exe；比 PyInstaller 慢很多，属正常）
+======================================================================
+----------------------------------------------------------------------
+✅ 构建完成，用时 23.3 分钟
+   可执行文件：D:\a\laoA\laoA\dist\LuweikDecision\luweik决策系统.exe
+   产物目录  ：D:\a\laoA\laoA\dist\LuweikDecision（226 MB）
+   下一步：跑一次自检确认编译版路径都对 ——
+     "D:\a\laoA\laoA\dist\LuweikDecision\luweik决策系统.exe" --doctor     # 报告同时写进 <数据目录>/logs/自检报告.txt

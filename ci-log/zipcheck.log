@@ -1,0 +1,21 @@
+===== 包内容自检 =====
+文件：LuweikDecision.zip  字节：86014170  sha256：55f05619afad52023895c8b981ef524338196672f9d8456e501286ea2ccb89a1
+----- 包内前 15 项 -----
+  LuweikDecision/laoa_trader/
+  LuweikDecision/numpy/
+  LuweikDecision/pandas/
+  LuweikDecision/tzdata/
+  LuweikDecision/_bz2.pyd
+  LuweikDecision/_ctypes.pyd
+  LuweikDecision/_decimal.pyd
+  LuweikDecision/_elementtree.pyd
+  LuweikDecision/_hashlib.pyd
+  LuweikDecision/_lzma.pyd
+  LuweikDecision/_multiprocessing.pyd
+  LuweikDecision/_queue.pyd
+  LuweikDecision/_socket.pyd
+  LuweikDecision/_sqlite3.pyd
+  LuweikDecision/_ssl.pyd
+✅ 主程序在：LuweikDecision/luweik决策系统.exe
+✅ 包里没有注册机
+✅ 包内文件数：808
