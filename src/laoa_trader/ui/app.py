@@ -382,6 +382,11 @@ BTN_START_TEXT = BTN_RUN_TEXT
 #: 托盘右键菜单里那一项【显示桌宠】的两种文案（用户 2026-09-20 要求加这一项）。
 #: 桌宠已经在桌面上时用第二句并**置灰**：让用户一眼看出"它已经在那儿了"，
 #: 而不是点了没反应、以为程序坏了。两个字符串放在这里，测试与将来改字都只碰一处。
+#: 桌宠右键【试喊一条】念的那句话（主人 2026-10-11 指定）：
+#: "你好，我是鲁威克，你的决策小助理。" —— 这句话同时进气泡与朗读，
+#: 所以点一下就能看出"桌宠会不会说话、声音对不对"（而不是只看它有没有冒泡）。
+PET_TEST_LINE = "你好，我是鲁威克，你的决策小助理。"
+
 TRAY_SHOW_PET_TEXT = "显示桌宠"
 TRAY_PET_SHOWN_TEXT = "桌宠已显示"
 
@@ -5738,7 +5743,11 @@ if QT_AVAILABLE:
             self._refresh_message_badge()
             if bool(getattr(self.cfg, "notify_sound", True)):
                 sound.play()
-            text = self._announce_text(item)
+            # ⚠️ 这里**不用** `_announce_text(item)`（那句是提醒样句）：主人要的是桌宠
+            # "报个家门" —— 气泡与朗读都用 `PET_TEST_LINE` 这一句，点一下就知道
+            # 桌宠会不会说话、声音对不对。整条链路（响声 / 气泡 / 朗读 / 进消息列表 /
+            # 闪图标）照旧一件不少，消息列表里那条仍然标着"测试"。
+            text = PET_TEST_LINE
             pet = self._ensure_pet()
             if pet is not None:
                 pet.notify(text, kind=str(item.get("kind") or ""))

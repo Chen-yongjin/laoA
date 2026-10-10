@@ -287,6 +287,8 @@ def test_pet_unread_count_follows_the_message_list(window, qapp) -> None:
 def test_test_shout_runs_the_whole_chain_without_touching_the_database(
         window, qapp, _quiet_voice, cfg) -> None:
     """【试喊一条】= 气泡 + 响声 + 朗读 + 进消息列表；**库里一条提醒都不许留**。"""
+    from laoa_trader.ui import app as ui_app
+
     before = _alert_rows(cfg)
 
     window.on_pet_test()
@@ -299,15 +301,23 @@ def test_test_shout_runs_the_whole_chain_without_touching_the_database(
 
         _time.sleep(0.01)
 
+    # **念的是哪一句**：主人 2026-10-11 指定"你好，我是鲁威克，你的决策小助理。"
+    # （气泡与朗读同一句；消息列表那条仍然是提醒样句，标着"测试"）
+    spoken = [call for call in _quiet_voice if call]
+    assert spoken, "【试喊一条】应当真的去念了一句"
+    # 这一层记的是**整条 PowerShell 命令**（真跑时不发声），所以按"包含"断言
+    assert any(ui_app.PET_TEST_LINE in call for call in spoken), spoken[-1]
+    assert window.pet.bubble_text() == ui_app.PET_TEST_LINE
+
     # 进列表了（标成"测试"，所以用户一眼知道这是他自己点出来的）
     items = window.message_center.messages()
     assert any(str(item.get("kind")) == "test" for item in items)
     assert "测试" in str(items[0].get("kind_label") or items[0].get("label") or "")
     # 冒泡了
     assert window.pet.bubble.isVisible() is True
-    # 念了
+    # 念了 —— 而且念的是**桌宠那句自我介绍**（2026-10-11 主人指定），不是提醒样句
     assert _quiet_voice, "试喊一条没有朗读"
-    assert "测试" in _quiet_voice[0]
+    assert any(ui_app.PET_TEST_LINE in call for call in _quiet_voice)
     # **不写库**：真实提醒数据一个字都没变
     assert _alert_rows(cfg) == before
 
