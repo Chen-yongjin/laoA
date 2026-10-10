@@ -204,13 +204,13 @@ def test_double_click_emits_activated(pet) -> None:
 
 
 def test_menu_has_the_four_actions(pet) -> None:
-    """右键菜单四件事：消息（N）/ 试喊一条 / 静音一小时 / 藏起来。"""
+    """右键菜单四件事：消息（N）/ 测试语音 / 静音一小时 / 隐藏桌宠。"""
     texts = [action.text() for action in pet.menu_actions()]
 
     assert texts[0] == "消息（0）"
-    assert texts[1] == "试喊一条"
+    assert texts[1] == "测试语音"
     assert texts[2] == "静音一小时"
-    assert texts[3] == "藏起来"
+    assert texts[3] == "隐藏桌宠"
 
 
 def test_menu_shows_unread_count_and_cancel_mute(pet) -> None:

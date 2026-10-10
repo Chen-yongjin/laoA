@@ -382,7 +382,7 @@ BTN_START_TEXT = BTN_RUN_TEXT
 #: 托盘右键菜单里那一项【显示桌宠】的两种文案（用户 2026-09-20 要求加这一项）。
 #: 桌宠已经在桌面上时用第二句并**置灰**：让用户一眼看出"它已经在那儿了"，
 #: 而不是点了没反应、以为程序坏了。两个字符串放在这里，测试与将来改字都只碰一处。
-#: 桌宠右键【试喊一条】念的那句话（主人 2026-10-11 指定）：
+#: 桌宠右键【测试语音】念的那句话（主人 2026-10-11 指定）：
 #: "你好，我是鲁威克，你的决策小助理。" —— 这句话同时进气泡与朗读，
 #: 所以点一下就能看出"桌宠会不会说话、声音对不对"（而不是只看它有没有冒泡）。
 PET_TEST_LINE = "你好，我是鲁威克，你的决策小助理。"
@@ -3593,7 +3593,7 @@ if QT_AVAILABLE:
             act_pause.triggered.connect(self.on_toggle_intraday)
             self.act_pause = act_pause
             # 【显示桌宠】（用户 2026-09-20 要求："加上显示桌宠"）：
-            # 桌宠右键那个【藏起来】**不是临时隐藏** —— 它写 `notify_pet=false`（能扛过重启）
+            # 桌宠右键那个【隐藏桌宠】**不是临时隐藏** —— 它写 `notify_pet=false`（能扛过重启）
             # 并把设置页的勾选框取消勾选（见 `on_pet_hide`）。所以这一项是它的**反向操作**：
             # 写回 `notify_pet=true` + 同步设置页勾选框 + 把桌宠叫回桌面。
             # 文案与可用状态在菜单弹出前实时刷新（`aboutToShow` → `_refresh_tray_pet_action`）：
@@ -5713,7 +5713,7 @@ if QT_AVAILABLE:
 
         @staticmethod
         def _test_alert_item() -> dict:
-            """【试喊一条】用的那条消息（**纯内存，不落库**）。
+            """【测试语音】用的那条消息（**纯内存，不落库**）。
 
             为什么要有它：用户原话"不是实盘时间，无法测试消息模式" —— 盘中提醒只在
             交易时段产生，收盘后想验"桌宠会不会冒泡、会不会念"就没有样本。所以给一条
@@ -5731,7 +5731,7 @@ if QT_AVAILABLE:
             }
 
         def on_pet_test(self) -> None:
-            """桌宠右键【试喊一条】：走一遍**真实链路**（用户点名说非交易时段没法测）。
+            """桌宠右键【测试语音】：走一遍**真实链路**（用户点名说非交易时段没法测）。
 
             顺序与 `_notify_alerts()` 刻意保持一致（进列表 → 响声 → 冒泡 + 朗读 → 闪图标），
             这样"能测"才是真的能测：哪一环坏了，点这里就看得出来。
@@ -5771,13 +5771,13 @@ if QT_AVAILABLE:
             from laoa_trader.notify import voice as voice_mod
 
             if not bool(getattr(self.cfg, "notify_voice", True)):
-                return "已试喊一条：气泡与响声正常；语音朗读在设置里是关着的。"
+                return "已测试语音：气泡与响声正常；语音朗读在设置里是关着的。"
             if not sys.platform.startswith("win"):
-                return "已试喊一条：气泡与响声正常；当前系统不是 Windows，语音朗读不可用。"
+                return "已测试语音：气泡与响声正常；当前系统不是 Windows，语音朗读不可用。"
             if voice_mod.voice_name() is None:
-                return ("已试喊一条：气泡与响声正常；这台机器没有中文语音，所以没有念出来"
+                return ("已测试语音：气泡与响声正常；这台机器没有中文语音，所以没有念出来"
                         "（装一个中文语音包即可：设置 → 时间和语言 → 语音）。")
-            return "已试喊一条：气泡与响声正常；语音那一步没能出声（详见日志）。"
+            return "已测试语音：气泡与响声正常；语音那一步没能出声（详见日志）。"
 
         def on_pet_mute(self, seconds: int) -> None:
             """桌宠右键【静音一小时】/【取消静音】：只影响朗读（气泡与列表照常）。
@@ -5805,7 +5805,7 @@ if QT_AVAILABLE:
             """把托盘那一项【显示桌宠】的文案与可用状态刷成**当前事实**。
 
             为什么每次弹菜单都要刷（而不是建菜单时定一次）：用户可能刚在设置页取消勾选、
-            或者刚右键桌宠【藏起来】—— 菜单要反映"弹出来那一刻"的事实，
+            或者刚右键桌宠【隐藏桌宠】—— 菜单要反映"弹出来那一刻"的事实，
             不刷就会出现"桌宠明明在桌面上，菜单却让你去显示它"。
             """
             action = getattr(self, "act_pet", None)
@@ -5815,7 +5815,7 @@ if QT_AVAILABLE:
             if shown:
                 action.setText(TRAY_PET_SHOWN_TEXT)
                 action.setEnabled(False)
-                action.setToolTip("桌宠已经在桌面上了（想让它消失：右键桌宠 →【藏起来】）")
+                action.setToolTip("桌宠已经在桌面上了（想让它消失：右键桌宠 →【隐藏桌宠】）")
             else:
                 action.setText(TRAY_SHOW_PET_TEXT)
                 action.setEnabled(True)
@@ -5824,9 +5824,9 @@ if QT_AVAILABLE:
                 )
 
         def on_show_pet(self) -> None:
-            """托盘右键【显示桌宠】：把藏起来的桌宠叫回桌面（`on_pet_hide` 的反向操作）。
+            """托盘右键【显示桌宠】：把隐藏的桌宠叫回桌面（`on_pet_hide` 的反向操作）。
 
-            语义与【藏起来】**严格对齐**：那边写 `notify_pet=false` 并取消设置页勾选，
+            语义与【隐藏桌宠】**严格对齐**：那边写 `notify_pet=false` 并取消设置页勾选，
             所以这边写 `notify_pet=true` 并勾上 —— 否则会出现"桌宠回来了、设置页却显示没勾"
             这种两处对不上的状态（用户没法判断下次启动它到底会不会出来）。
 
@@ -5850,7 +5850,7 @@ if QT_AVAILABLE:
             self._ensure_pet()
             self._refresh_tray_pet_action()
             if wrote:
-                # 反馈用设置页那行**被动提示**（与【藏起来】同一处）：用户 2026-09-18 定的口径是
+                # 反馈用设置页那行**被动提示**（与【隐藏桌宠】同一处）：用户 2026-09-18 定的口径是
                 # "操作的确认类提示不再弹"，但"桌宠去哪了/怎么找回来"必须有地方写着
                 self._set_settings_hint(
                     "桌宠已回到桌面（想再藏起来：右键桌宠 →【藏起来】，"

@@ -12,8 +12,8 @@
    构造时收一个 parent，**只是为了"主窗口销毁时跟着销毁"**，不是为了显示。
 2. **有消息时冒气泡**：`名称(代码) + 类型 + 一句话`（过长截断、tooltip 给全文），
    同时**上下蹦两下**（QTimer 改 y 偏移，不做复杂动画 —— 桌宠只是提醒，不是玩具）。
-3. **能点**：双击 = 打开「消息」列表；右键 = 【消息（N）】【试喊一条】
-   【静音一小时/取消静音】【藏起来】。
+3. **能点**：双击 = 打开「消息」列表；右键 = 【消息（N）】【测试语音】
+   【静音一小时/取消静音】【隐藏桌宠】。
 
 形象（**支持动态**，2026-10-10 主人问"宠物形象可以换成动态吗"）
 ------------------------------------------------------------
@@ -135,11 +135,11 @@ if QT_AVAILABLE:
 
         #: 双击 → 打开「消息」列表
         activated = Signal()
-        #: 右键【试喊一条】→ 走一遍真实链路（响声 + 气泡 + 朗读 + 进消息列表）
+        #: 右键【测试语音】→ 走一遍真实链路（响声 + 气泡 + 朗读 + 进消息列表）
         test_requested = Signal()
         #: 右键【静音一小时】/【取消静音】→ 参数是秒数（0 = 取消）
         mute_requested = Signal(int)
-        #: 右键【藏起来】→ 由主窗口决定"藏"这件事（它管配置与设置页那一栏的状态）
+        #: 右键【隐藏桌宠】→ 由主窗口决定"藏"这件事（它管配置与设置页那一栏的状态）
         hide_requested = Signal()
         #: 拖动结束 → (x, y)，主窗口负责写进 config.toml
         moved = Signal(int, int)
@@ -597,8 +597,9 @@ if QT_AVAILABLE:
             messages.triggered.connect(lambda _checked=False: self.activated.emit())
             actions.append(messages)
 
-            test = QAction("试喊一条", self)
-            test.setToolTip("立刻走一遍真实链路：响声 + 气泡 + 朗读 + 进消息列表（随时可测）")
+            # 文案主人 2026-10-11 指定："试喊一条" → "测试语音"、"藏起来" → "隐藏桌宠"
+            test = QAction("测试语音", self)
+            test.setToolTip("念一句：你好，我是鲁威克，你的决策小助理")
             test.triggered.connect(lambda _checked=False: self.test_requested.emit())
             actions.append(test)
 
@@ -614,8 +615,8 @@ if QT_AVAILABLE:
                 quiet.triggered.connect(lambda _checked=False: self.mute_requested.emit(3600))
             actions.append(quiet)
 
-            hide = QAction("藏起来", self)
-            hide.setToolTip("把桌宠藏起来（在「系统设置 → 通知方式」里可以再叫出来）")
+            hide = QAction("隐藏桌宠", self)
+            hide.setToolTip("隐藏桌宠（在「系统设置 → 通知方式」里可以再叫出来）")
             hide.triggered.connect(lambda _checked=False: self.hide_requested.emit())
             actions.append(hide)
             return actions

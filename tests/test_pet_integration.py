@@ -12,7 +12,7 @@
 1. 程序一打开桌宠就在桌面上；**主窗口收进托盘（hide）之后它还在**（原话里的核心要求）；
 2. 来消息时桌宠冒泡、并且**念出来**（朗读那一步在这里被替换掉，CI 上不会真的发声）；
 3. 双击桌宠 = 打开消息列表；未读数会同步到桌宠的菜单/tooltip 上；
-4. 【试喊一条】在**非交易时段**也能把整条链路走一遍（响声 + 气泡 + 朗读 + 进消息列表），
+4. 【测试语音】在**非交易时段**也能把整条链路走一遍（响声 + 气泡 + 朗读 + 进消息列表），
    而且**不写库**（不污染真实提醒数据）；
    另外：静音、藏起来、拖动记位置、设置里刚勾/刚取消就立刻生效。
 """
@@ -286,7 +286,7 @@ def test_pet_unread_count_follows_the_message_list(window, qapp) -> None:
 
 def test_test_shout_runs_the_whole_chain_without_touching_the_database(
         window, qapp, _quiet_voice, cfg) -> None:
-    """【试喊一条】= 气泡 + 响声 + 朗读 + 进消息列表；**库里一条提醒都不许留**。"""
+    """【测试语音】= 气泡 + 响声 + 朗读 + 进消息列表；**库里一条提醒都不许留**。"""
     from laoa_trader.ui import app as ui_app
 
     before = _alert_rows(cfg)

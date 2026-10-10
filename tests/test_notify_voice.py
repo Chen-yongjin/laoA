@@ -204,14 +204,14 @@ def test_mute_blocks_speaking_until_it_expires(monkeypatch, cfg) -> None:
 
 
 def test_forced_speak_ignores_mute(monkeypatch, cfg) -> None:
-    """【试喊一条】是用户主动点的 → 静音期间也照念（静音是"别打扰"，不是"点了也不许响"）。"""
+    """【测试语音】是用户主动点的 → 静音期间也照念（静音是"别打扰"，不是"点了也不许响"）。"""
     monkeypatch.setattr(voice, "available", lambda: True)
     _fake_voices(monkeypatch, [("Chinese Huihui", "zh-CN")])
     spoken = _record(monkeypatch)
     voice.mute_for(3600)
 
     assert voice.can_speak(cfg=cfg, force=True) is True
-    assert voice.speak_now("试喊一条", cfg=cfg, force=True) is True
+    assert voice.speak_now("测试语音", cfg=cfg, force=True) is True
     assert len(spoken) == 1
 
 
