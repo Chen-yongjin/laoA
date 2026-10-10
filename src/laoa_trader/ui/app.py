@@ -109,6 +109,10 @@ WATCH_HEADERS: tuple[str, ...] = (
     # "盈亏"= 从**加入时的价格**算到现在的**比例**（口径见 `_watch_metrics_cells`）。
     # 列头文字用"加入日期"（主人最新口径的原话），不是"添加日期"。
     "加入日期", "盈亏",
+    # 2026-10-11（主人要求）：加「评分」列 —— 个股评分（见 `scoring.py`），
+    # 加入自选/持仓时自动算出来（后台线程，不卡界面）。放在「监控开关」**之前**：
+    # 现有的列下标（加入日期/盈亏/监控开关）因此一个都没动。
+    "评分",
     "监控开关",
 )
 #: 「加入日期」「盈亏」两列的下标（同样按列名取，不写数字）
@@ -119,11 +123,16 @@ WATCH_PNL_COLUMN = WATCH_HEADERS.index("盈亏")
 #: 同样是 2026-09-17 加的两列 + 提醒改监控开关（与上面同一套口径，两张表要一致）。
 POSITION_HEADERS: tuple[str, ...] = (
     "名称(代码)", "成本价", "现价", "涨幅", "市值", "换手",
-    "盈亏比例", "止损位", "止盈位", "监控开关",
+    "盈亏比例", "止损位", "止盈位",
+    "评分",                      # 与自选标的同一列、同一口径（见 `scoring.py`）
+    "监控开关",
 )
 #: 「监控开关」列在两张表里的下标（点这一格切换监控；别处一律用它，不写死数字）。
 WATCH_MONITOR_COLUMN = WATCH_HEADERS.index("监控开关")
 POSITION_MONITOR_COLUMN = POSITION_HEADERS.index("监控开关")
+#: 「评分」列在两张表里的下标（同样按列名取，不写数字）
+WATCH_SCORE_COLUMN = WATCH_HEADERS.index("评分")
+POSITION_SCORE_COLUMN = POSITION_HEADERS.index("评分")
 #: 监控开关那一格的两个文字（用户给定：`开启` / `关闭`）。
 MONITOR_ON_TEXT = "开启"
 MONITOR_OFF_TEXT = "关闭"
@@ -429,6 +438,8 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
     from laoa_trader.ui import titlebar as titlebar_mod
     # 滚轮防误触（主人 2026-10-10：「把设置页的鼠标滚轮功能给限制掉，会无意触发」）
     from laoa_trader.ui import wheel_guard as wheel_guard_mod
+    # 个股评分的界面侧服务（后台算、算完通知；见 ui/scores.py）
+    from laoa_trader.ui import scores as scores_mod
     # 公式编辑器（「公式匹配」页）：单独一个模块 —— 主窗口这边只负责把它挂成页签
     from laoa_trader.ui.formula_page import FormulaPage
 
@@ -1694,6 +1705,11 @@ if QT_AVAILABLE:
             self.quotes = quotes_mod.QuoteService(
                 self.cfg, self._quote_symbols, self
             )
+            # 个股评分：**后台算、算完通知**（见 ui/scores.py）。与实时快照分开：
+            # 快照是 60 秒一趟的网络取数，评分是"本地日线 + 可能取一次快照"，
+            # 两者的节奏与失败口径都不一样，混在一起会让"评分没出来"变得没法解释。
+            self.scores = scores_mod.ScoreService(self.cfg, self.cfg.db_path, self)
+            self.scores.updated.connect(self._on_scores_updated)
             # 快照一到就重画两张表（不然要等下一个 5 秒拍子，用户会觉得"现价没更新"）
             self.quotes.updated.connect(self._on_quotes_updated)
             # 「策略筛选」的结果表要显示「实时股价 / 市值 / 换手率」：把**本窗口这一份**
@@ -1709,6 +1725,9 @@ if QT_AVAILABLE:
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._tick)
             self._timer.start(5000)
+            # 启动就先请一轮评分：**"加入自动给出"**的第一步 —— 界面一出来，
+            # 自选与持仓的分就开始算了（不必等用户点什么）
+            QTimer.singleShot(300, self._request_scores)
 
             # 「大盘概览」页**自己的**定时器：每分钟一次。
             # 为什么不搭上面那个 5 秒的顺风车：概览是 4~6 个接口请求，
@@ -4186,6 +4205,9 @@ if QT_AVAILABLE:
                 # （见 `_market_tick`）—— 5 秒一轮会把配额刷掉
                 # 实时快照同理：这里只是"拍一下"，真正取不取由 `QuoteService` 自己判
                 self.quotes.tick()
+                # 评分：跟快照同一个节拍"拍一下"，但**算过的不会重算**
+                # （缓存键 = 代码 + 行情日 + 模型版本，见 `ScoreService.request`）
+                self._request_scores()
                 # 新提醒的对账（响声 / 闪图标 / 浮窗）**不管轻重都做**：
                 # 它只读最近 20 行，而且提醒不能因为"正在下载"就不响
                 self._check_new_alerts()
@@ -4887,6 +4909,73 @@ if QT_AVAILABLE:
             """刷新「自选标的」表（老名字保留：调度/测试里叫惯了，实现见 `_refresh_pool_table`）。"""
             self._refresh_pool_table()
 
+        def _score_cell(self, symbol: str, row_tip: str = "") -> Any:
+            """「评分」那一格：还没算出来时显示 `—`（**不是 0**），tooltip 说明原因。
+
+            为什么显示 `—` 而不是 0：0 分是"很弱"这个真实结论，与"还没算/算不出来"
+            完全是两回事（与价格那一列同一条口径）。tooltip 里给出全部维度与逐项理由，
+            鼠标停上去就知道这个分是怎么来的。
+            """
+            # 这一格的 tooltip = 评分明细 + 整行那一份（备注/资金流…）——
+            # "悬浮任何一格都能看到备注"是这张表的老约定，评分列不能把它吃掉
+            result = self.scores.result(symbol) if self.scores is not None else None
+            if result is None:
+                own = "评分还没算出来（正在后台计算）"
+            elif not result.ok:
+                own = result.note
+            else:
+                own = result.tip()
+            tip = f"{own}\n\n{row_tip}" if row_tip else own
+            if result is None or not result.ok:
+                return self._tag_item(market.DASH, symbol, tip)
+            item = self._tag_item(f"{result.total:.0f}", symbol, tip)
+            # 数值存进 UserRole+1：将来给这一列开排序时用的是它（不是文本）
+            item.setData(int(Qt.ItemDataRole.UserRole) + 1, float(result.total))
+            return item
+
+        def _score_symbols(self) -> list[str]:
+            """界面现在看得见的那些代码（自选 + 持仓）—— 只给这一批评分。
+
+            为什么不评全市场：5500 只逐只读日线要几分钟，而用户只看得到这几十只
+            （见构架 2.6："按需算"）。
+            """
+            symbols: list[str] = []
+            try:
+                for row in pool.pool_page_rows(self.cfg.db_path):
+                    symbol = str(row.get("symbol") or "")
+                    if symbol:
+                        symbols.append(symbol)
+            except Exception as exc:  # noqa: BLE001 - 读不到池子也要给持仓评分
+                logger.debug(f"取池子代码失败（评分只算持仓）：{exc}")
+            try:
+                from laoa_trader.data import storage
+
+                with storage.connect(self.cfg.db_path) as conn:
+                    symbols.extend(str(s) for s in storage.load_positions(conn))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"取持仓代码失败：{exc}")
+            seen: set[str] = set()
+            return [s for s in symbols if s and not (s in seen or seen.add(s))]
+
+        def _request_scores(self) -> None:
+            """请后台算"还没算过"的那几只（算过的不会重算，见 `ScoreService.request`）。"""
+            if self.scores is None:
+                return
+            try:
+                self.scores.request(self._score_symbols())
+            except Exception as exc:  # noqa: BLE001 - 评分是锦上添花，不许影响刷新
+                logger.debug(f"请求评分失败：{exc}")
+
+        def _on_scores_updated(self, results: dict) -> None:
+            """一批评分回来了 → 重画那两张表（不弹任何提示：用户看得到数字变了）。"""
+            if not results:
+                return
+            try:
+                self._refresh_pool_table()
+                self._refresh_positions()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"评分回来后刷新表格失败：{exc}")
+
         def _refresh_pool_table(self) -> None:
             """填「自选标的」：名称/现价/涨幅/市值/换手/板块/来源/监控开关。
 
@@ -4970,15 +5059,20 @@ if QT_AVAILABLE:
                 for item in (added_item, pnl_item):
                     item.setData(Qt.ItemDataRole.UserRole, symbol)
                     self._attach_row_tooltip(item, row_tip)
+                score_item = self._score_cell(symbol, row_tip)
+                score_item.setData(Qt.ItemDataRole.UserRole, symbol)
                 cells.append((name_item, price_item, pct_item, cap_item, turn_item,
                               industry_item, source_item, added_item, pnl_item,
-                              monitor_item))
+                              score_item, monitor_item))
 
             signature = tuple(
                 (str(r.get("symbol") or ""), r.get("name"), r.get("source_label"),
                  r.get("industry"), r.get("note"), r.get("watchlist_enabled"),
                  c[1].text(), c[2].text(), c[3].text(), c[4].text(),
                  c[WATCH_ADDED_COLUMN].text(), c[WATCH_PNL_COLUMN].text(),
+                 # 评分那一格进指纹：**算完分必须重画这张表**（否则用户看到的是
+                 # 一直挂着的 `—`，而那正是"功能像没做"的观感）
+                 c[WATCH_SCORE_COLUMN].text(), c[WATCH_SCORE_COLUMN].toolTip(),
                  c[WATCH_MONITOR_COLUMN].text(), c[WATCH_MONITOR_COLUMN].toolTip(),
                  # 资金流那一行（box 里没有它，所以直接取拼好的文案）：
                  # 少了它，日更采到资金流之后这张表**不会重画** —— 收盘后价格不再变、
@@ -5357,20 +5451,23 @@ if QT_AVAILABLE:
                 target_item = QTableWidgetItem(
                     _fmt_float(cost * (1 + self.cfg.take_profit)) if cost else market.DASH
                 )
+                score_item = self._score_cell(symbol, row_tip)
                 for item in (cost_item := self._tag_item(
                         _fmt_float(cost) if cost else market.DASH, symbol),
                         price_item, pct_item, cap_item, turn_item, profit_item,
-                        stop_item, target_item, monitor_item):
+                        stop_item, target_item, score_item, monitor_item):
                     item.setData(Qt.ItemDataRole.UserRole, symbol)
                     self._attach_row_tooltip(item, row_tip)
                 cells.append((name_item, cost_item, price_item, pct_item, cap_item,
                               turn_item, profit_item, stop_item, target_item,
-                              monitor_item))
+                              score_item, monitor_item))
 
             signature = tuple(
                 (str(r.get("symbol") or ""), r.get("name"), r.get("avg_cost"), r.get("note"),
                  r.get("monitor"), c[2].text(), c[3].text(), c[4].text(), c[5].text(),
                  c[6].text(),
+                 # 评分那一格进指纹（算完分要重画，理由同自选表）
+                 c[POSITION_SCORE_COLUMN].text(), c[POSITION_SCORE_COLUMN].toolTip(),
                  c[POSITION_MONITOR_COLUMN].text(),
                  c[POSITION_MONITOR_COLUMN].toolTip())
                 for r, c in zip(rows, cells)
@@ -5457,6 +5554,9 @@ if QT_AVAILABLE:
                 self.watch_symbol.clear()
                 self.watch_note.clear()
                 self._pool_signature = None
+                # **加入自动给出**：刚加的这只立刻排队算分（不等下一个 5 秒拍子，
+                # 用户点完就能看到数字出来）
+                self._request_scores()
                 self._tick()
                 self._select_watch_row(symbol)
             except Exception as exc:  # noqa: BLE001
@@ -7935,6 +8035,8 @@ if QT_AVAILABLE:
                 self.pos_cost.clear()
                 self.pos_note.clear()
                 self._position_signature = None
+                # 同样"加入自动给出"：记一笔持仓就把它的分排队算出来
+                self._request_scores()
                 self._tick()
             except Exception as exc:  # noqa: BLE001
                 self._toast(f"写入持仓失败：{exc}")
@@ -8262,6 +8364,7 @@ if QT_AVAILABLE:
             # 概览取数（`_market_worker`）、实时快照（`quotes`）、调度器、以及下载/匹配
             # 那种通用任务线程（`_worker`）。
             for name, stop in (("quotes", lambda obj: obj.stop()),
+                               ("scores", lambda obj: obj.stop()),
                                ("scheduler", lambda obj: obj.stop())):
                 target = getattr(self, name, None)
                 if target is None:

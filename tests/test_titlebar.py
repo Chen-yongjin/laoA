@@ -282,6 +282,7 @@ def frame_window(ready_cfg, qapp):
         window._flash_timer.stop()
         window.scheduler.stop()
         window.quotes.stop()
+        window.scores.stop()            # 评分线程要**先停**（见 test_ui_smoke 的同一条注释）
         window.shutdown()
         window.tray.hide()
         window.close()

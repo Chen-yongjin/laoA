@@ -294,6 +294,286 @@ def test_vol_ratio_window_argument() -> None:
     assert got[3] == pytest.approx(1e8 / np.mean([1e8, 1e8, 5e8]))
 
 
+# ── ATR / ±DI / ADX / MFI：Wilder 口径（α = 1/N，**不是** EMA 的 2/(N+1)）──
+#
+# 为什么单独审这三条口径（它们都能"跑通"，但错一点用户就与别的软件对不上）：
+#   ① Wilder 平滑 α = 1/N，且**第一级**（TR、±DM）的第一个值取前 N 根的**简单平均**；
+#   ② ±DI 的分母就是 ATR、DX 的分子是 ±DI 之差 → 三条曲线必须同源；
+#   ③ ADX 是**两级**平滑（DX 已经用掉 N 根，再对 DX 做 N 期平滑），
+#      所以 ±DI 的第一个值落在第 N 根、ADX 的第一个值落在第 2N−1 根（0 基）。
+#
+# 下面这 12 根 K 线是挑过的：TR 与 ±DM 全是整数或 .5，手算过程能完整写进注释。
+DMI_HIGH = [10, 11, 12, 11, 13, 12, 14, 15, 14, 16, 15, 17]
+DMI_LOW = [9, 10, 11, 10, 11, 10, 12, 13, 12, 14, 13, 15]
+DMI_CLOSE = [9.5, 10.5, 11.5, 10.5, 12, 11, 13, 14, 13, 15, 14, 16]
+
+
+def _dmi_series(**kwargs) -> fm.Series:
+    """DMI 家族的手算样本（成交量恒为 100，方便 MFI 里"钱"的加减）。"""
+    return make_series(
+        DMI_CLOSE, high=DMI_HIGH, low=DMI_LOW, vol=[100.0] * len(DMI_CLOSE), **kwargs
+    )
+
+
+def test_atr_is_wilder_not_ema() -> None:
+    """ATR(3)：TR 的 3 期 **Wilder** 均值，首值取前 3 根 TR 的简单平均。
+
+    手算（N=3）：
+      TR   = [—, 1.5, 1.5, 1.5, 2.5, 2, 3, 2, 2, 3, 2, 3]
+             第 1 根 = max(11-10, |11-9.5|, |10-9.5|) = max(1, 1.5, 0.5) = 1.5，其余同法
+      ATR[3] = (1.5+1.5+1.5)/3 = 1.5                    ← 简单平均起手（不是从第一根就递推）
+      ATR[4] = (1.5×2 + 2.5)/3 = 5.5/3     = 1.833333
+      ATR[5] = (1.833333×2 + 2)/3 = 5.666667/3 = 1.888889
+      ATR[6] = (1.888889×2 + 3)/3 = 6.777778/3 = 2.259259
+      ATR[7] = (2.259259×2 + 2)/3 = 6.518519/3 = 2.172840
+      ATR[8] = (2.172840×2 + 2)/3 = 6.345679/3 = 2.115226
+      ATR[9] = (2.115226×2 + 3)/3 = 7.230453/3 = 2.410151
+      ATR[10]= (2.410151×2 + 2)/3 = 6.820302/3 = 2.273434
+      ATR[11]= (2.273434×2 + 3)/3 = 7.546868/3 = 2.515623
+    递推系数是 (N-1)/N = 2/3（Wilder），**不是** EMA 的 (1-2/(N+1)) = 1/2 ——
+    换成 EMA 的话 ATR[4] 会是 0.5×1.5+0.5×2.5 = 2.0，后面每个数都对不上。
+    """
+    s = _dmi_series()
+    got = raw_num("ATR(3)", s)
+    np.testing.assert_allclose(
+        got,
+        [NAN, NAN, NAN, 1.5, 1.833333, 1.888889, 2.259259,
+         2.172840, 2.115226, 2.410151, 2.273434, 2.515623],
+        rtol=1e-5, equal_nan=True,
+    )
+    # 反向确认：真拿 EMA 口径算，第 4 根是 2.0，与上面的 1.833333 不同
+    assert abs(raw_num("ATR(3)", s)[4] - 2.0) > 0.1
+    # 默认窗口 14（14 根以下全缺值 → 公式不产生信号）
+    assert np.isnan(raw_num("ATR()", s)).all()
+    assert sig("ATR()>0", s) == [False] * 12
+
+
+def test_pdi_mdi_and_adx_values() -> None:
+    """±DI 与 ADX(3)：同一份样本，两条 DI 与两级平滑的 ADX 逐位对答案。
+
+    手算（N=3）：
+      +DM  = [—, 1, 1, 0, 2, 0, 2, 1, 0, 2, 0, 2]   ← H 上移且**大于**低点下移那两格
+      -DM  = [—, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0]
+      ATR[3] = 1.5（见上一条）
+      +DM 的 3 期均值[3] = (1+1+0)/3 = 0.666667
+        → +DI[3] = 100 × 0.666667 / 1.5 = 44.444444
+      -DM 的 3 期均值[3] = (0+0+1)/3 = 0.333333
+        → -DI[3] = 100 × 0.333333 / 1.5 = 22.222222
+      DX[3]  = 100 × |44.444444 − 22.222222| / (44.444444 + 22.222222) = 33.333333
+      DX[4]  = 66.666667（照同一条递推算），DX[5] = 21.212121
+      ADX[5] = (33.333333 + 66.666667 + 21.212121)/3 = 40.404040   ← 首值 = 前 3 个 DX 的简单平均
+      ADX[6] = (40.404040×2 + 56.666667)/3 = 45.824916              ← 再 Wilder 递推
+    """
+    s = _dmi_series()
+    pdi, mdi, adx = raw_num("PDI(3)", s), raw_num("MDI(3)", s), raw_num("ADX(3)", s)
+    np.testing.assert_allclose(
+        pdi,
+        [NAN, NAN, NAN, 44.444444, 60.606061, 39.215686, 51.366120,
+         50.946970, 34.889754, 48.074369, 33.976938, 46.971625],
+        rtol=1e-5, equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        mdi,
+        [NAN, NAN, NAN, 22.222222, 12.121212, 25.490196, 14.207650,
+         9.848485, 22.503243, 13.166382, 23.967552, 14.440069],
+        rtol=1e-5, equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        adx,
+        [NAN, NAN, NAN, NAN, NAN, 40.404040, 45.824916,
+         53.083693, 42.583102, 47.389148, 37.350797, 42.558165],
+        rtol=1e-5, equal_nan=True,
+    )
+    # 「两级平滑」的直接证据：±DI 从第 N=3 根起有值，ADX 要到第 2N-1=5 根才有
+    assert not np.isnan(pdi[3]) and not np.isnan(mdi[3])
+    assert np.isnan(adx[3]) and np.isnan(adx[4]) and not np.isnan(adx[5])
+    # 方向语义：这根上涨 → +DI 更大；第 5 根是跌的（-DM=1 进了窗口）→ -DI 必须被抬起来
+    assert pdi[3] > mdi[3], "上行为主的日子 +DI 必须更大"
+    assert mdi[5] > mdi[4], "下跌那根进窗口后 -DI 必须抬起来"
+
+    # 一路等速下跌的干净样本：±DI 的取值可以一眼看完（TR 恒 1、+DM 恒 0、-DM 恒 1）
+    down = make_series([15, 14, 13, 12, 11, 10], high=[16, 15, 14, 13, 12, 11],
+                       low=[15, 14, 13, 12, 11, 10])
+    np.testing.assert_allclose(raw_num("PDI(3)", down), [NAN, NAN, NAN, 0, 0, 0],
+                               equal_nan=True)
+    np.testing.assert_allclose(raw_num("MDI(3)", down), [NAN, NAN, NAN, 100, 100, 100],
+                               equal_nan=True)
+    # 单边下跌 → DX 恒 100 → ADX 也是 100
+    np.testing.assert_allclose(raw_num("ADX(3)", down), [NAN, NAN, NAN, NAN, NAN, 100],
+                               equal_nan=True)
+
+
+def test_dmi_family_warmup_is_nan_not_zero() -> None:
+    """历史不够 → 一律 NaN（**不是 0**）：0 会被条件当"指标算出来是 0"用。
+
+    0 与缺值在筛选里的差别是实打实的：`PDI(14)>0` 在"算不出来"时若给 0 会不成立、
+    若给别的假值就可能成立 —— 而"PDI 是 0"这件事本身要等真的有 14 根 K 线才有意义。
+    """
+    short = _dmi_series()
+    for expr in ("ATR(14)", "PDI(14)", "MDI(14)", "ADX(14)", "MFI(14)"):
+        got = raw_num(expr, short)
+        assert got.shape == (12,), expr
+        assert np.isnan(got).all(), f"{expr} 在 12 根上必须全缺值，实际 {got}"
+    for text in ("ATR(14)>0", "ADX(14)>25", "PDI(14)>MDI(14)", "MFI(14)<20"):
+        assert sig(text, short) == [False] * 12, text
+    # 连"能不能算"的边界也要钉住：ATR(3) 前三根缺值，第 4 根（0 基 3）才有值
+    got = raw_num("ATR(3)", short)
+    assert np.isnan(got[:3]).all() and not np.isnan(got[3])
+    # 空序列 / 单根不能抛异常（新股的第二天就是这么跑的）
+    for series in (make_series([]), make_series([10.0])):
+        for expr in ("ATR(3)", "PDI(3)", "MDI(3)", "ADX(3)", "MFI(3)"):
+            assert np.isnan(raw_num(expr, series)).all(), expr
+
+
+def test_dx_is_zero_when_both_directions_are_zero() -> None:
+    """分母为 0（多空都没力气）时 DX 当 0，而不是缺值。
+
+    构造"内包 K 线"：高点每天降 1、低点每天升 1 —— H 没有上移、L 反而在抬高，
+    于是 +DM = -DM = 0（两个方向都没动力），而 H-L 一直大于 0 → ATR > 0、
+    ±DI 都算得出（都是 0）→ 分母为 0 这件事**是算出来的结论**，DX = 0。
+    """
+    s = make_series(
+        [15.0, 15.0, 15.0, 15.0, 15.0],
+        high=[20, 19, 18, 17, 16],
+        low=[10, 11, 12, 13, 14],
+    )
+    assert raw_num("PDI(2)", s)[2] == pytest.approx(0.0)
+    assert raw_num("MDI(2)", s)[2] == pytest.approx(0.0)
+    assert raw_num("ATR(2)", s)[2] == pytest.approx(7.0), "TR 还在，只是没有方向"
+    np.testing.assert_allclose(
+        raw_num("ADX(2)", s), [NAN, NAN, NAN, 0.0, 0.0], equal_nan=True
+    )
+
+
+def test_flat_series_makes_di_missing_not_zero() -> None:
+    """一字不动的行情（一直停牌/连续一字板）→ ATR = 0，±DI 是 0/0 → 缺值。
+
+    为什么这里选缺值而不是 0：ATR = 0 时"上涨力量占波幅的比例"没有意义，
+    给 0 等于凭空断言"没有上涨动力"，而缺值的意思是"这份数据说明不了什么"
+    （与 `RSV` 在 HHV=LLV 时返回缺值同一条口径）。条件两端都不会成立，不会选错票。
+    """
+    s = make_series([10.0] * 8)
+    np.testing.assert_allclose(raw_num("ATR(3)", s), [NAN, NAN, NAN] + [0.0] * 5,
+                               equal_nan=True)
+    for expr in ("PDI(3)", "MDI(3)", "ADX(3)"):
+        assert np.isnan(raw_num(expr, s)[3:]).all(), expr
+
+
+def test_mfi_values_and_direction_bookkeeping() -> None:
+    """MFI(3)：价量结合的"资金 RSI"，持平那根不计入任何一侧。
+
+    手算（N=3，成交量恒为 100）：
+      TP    = [9.5, 10.5, 11.5, 10.5, 12, 11, 13, 14, 13, 15, 14, 16]   ← (H+L+C)/3，都是整数或 .5
+      正向资金流 = TP×100（TP 比上一根高），负向资金流 = TP×100（比上一根低），持平记 0：
+        +流 = [—, 1050, 1150, 0, 1200, 0, 1300, 1400, 0, 1500, 0, 1600]
+        -流 = [—, 0, 0, 1050, 0, 1100, 0, 0, 1300, 0, 1400, 0]
+      MFI[3]（窗口 = 第 1/2/3 根）：正和 = 1050+1150+0 = 2200，负和 = 0+0+1050 = 1050
+        → 100 − 100/(1 + 2200/1050) = 100 − 32.307692 = 67.692308
+      MFI[4]：正和 = 1150+0+1200 = 2350，负和 = 0+1050+0 = 1050
+        → 100 − 100/(1 + 2.238095) = 69.117647
+      MFI[5]：正和 = 0+1200+0 = 1200，负和 = 1050+0+1100 = 2150
+        → 100 − 100/(1 + 0.558140) = 35.820896
+    前 3 根凑不满 3 个资金流（第 1 根本身没有可比的前一根）→ 缺值。
+    """
+    s = _dmi_series()
+    got = raw_num("MFI(3)", s)
+    np.testing.assert_allclose(
+        got,
+        [NAN, NAN, NAN, 67.692308, 69.117647, 35.820896, 69.444444,
+         71.052632, 67.5, 69.047619, 35.714286, 68.888889],
+        rtol=1e-5, equal_nan=True,
+    )
+    # 一路只有上涨（负向和为 0）→ 100，也就是"没有卖压"
+    rising = make_series([10, 11, 12, 13], vol=[100.0] * 4)
+    np.testing.assert_allclose(raw_num("MFI(2)", rising), [NAN, NAN, 100.0, 100.0])
+    # 一路只有下跌（正向和为 0）→ 0
+    falling = make_series([13, 12, 11, 10], vol=[100.0] * 4)
+    np.testing.assert_allclose(raw_num("MFI(2)", falling), [NAN, NAN, 0.0, 0.0])
+
+
+def test_mfi_flat_bar_counts_as_neither_and_volume_matters() -> None:
+    """持平的典型价不进任何一侧；成交量**真的**进了分子分母。
+
+    持平那根特意给 10 倍量（1000 手）——若被算进任一侧，结果会差得离谱：
+      算成正向：(1200+12000)/(1100) → MFI ≈ 92.3；算成负向 → MFI ≈ 9.8。
+      正确的 52.173913 说明那一根**两边都不进**。
+    """
+    flat = make_series([10.0, 12.0, 12.0, 11.0], vol=[100.0, 100.0, 1000.0, 100.0])
+    # 窗口是第 1/2/3 根：正和 = 1200（第 1 根涨），负和 = 1100（第 3 根跌）
+    assert raw_num("MFI(3)", flat)[3] == pytest.approx(100 - 100 / (1 + 1200 / 1100))
+    assert raw_num("MFI(3)", flat)[3] == pytest.approx(52.173913, rel=1e-6)
+
+    # 同样一段行情，只把"下跌那根"的量翻倍 → 卖压更重，MFI 必须更低
+    base = make_series([10.0, 11.0, 12.0, 11.0], vol=[100.0] * 4)
+    heavy = make_series([10.0, 11.0, 12.0, 11.0], vol=[100.0, 100.0, 100.0, 200.0])
+    assert raw_num("MFI(2)", heavy)[3] < raw_num("MFI(2)", base)[3]
+    assert raw_num("MFI(2)", base)[3] == pytest.approx(100 - 100 / (1 + 1200 / 1100))
+
+
+def test_adx_formula_text_compiles_and_runs() -> None:
+    """公式文本走完整条路：`ADX(14)>25 AND PDI(14)>MDI(14)`。
+
+    30 根一路上行的行情：ADX(14) 要到第 28 根（2×14）才有值，所以前 27 根
+    一律不成立；后 3 根趋势明确（ADX ≈ 82、+DI 57.9 > -DI 4.4）→ 成立。
+    这条用例同时钉住"公式里能写、界面提示里能报、min_history 能算"。
+    """
+    inc = [0.0, .3, .3, -.1, .3, .3, .3, -.1, .3, .3, .3, -.1, .3, .3, .3, -.1, .3, .3,
+           .3, .3, -.1, .3, .3, .3, .3, -.1, .3, .3, .3, .3]
+    close = np.cumsum(np.asarray(inc, dtype="float64")) + 10.0
+    n = close.size
+    dates = [(date(2026, 1, 1) + timedelta(days=i)).isoformat() for i in range(n)]
+    s = make_series(close, high=close + 0.15, low=close - 0.15, dates=dates)
+
+    text = "ADX(14)>25 AND PDI(14)>MDI(14)"
+    assert sig(text, s) == [False] * 27 + [True] * 3
+    # 三个函数都被记进 `Formula.functions`（界面"这条公式用了什么"直接读它）
+    formula = fm.compile_formula(text)
+    assert formula.functions == ("ADX", "PDI", "MDI")
+    # 最少历史：`hist_extra=1` 的"再多一根"就是 ±DM/TR 都要用的前收。
+    # ⚠️ 这里报的只是**下界**：ADX 真正要 2N = 28 根（DX 一级平滑 + ADX 一级平滑），
+    # 而 `hist_extra` 是常数、没有"按 N 翻倍"这一档（见 FUNCTIONS 表上的注释）。
+    # 少估不会算错 —— 不够长的票算出来就是缺值、条件不成立，只是白算几只。
+    assert formula.min_history == 15
+    # 不写窗口也一样能跑（默认 14）；ADX 的两级平滑在 hist_default 里按 2×14 报
+    assert sig("ADX()>25", s) == [False] * 27 + [True] * 3
+    assert fm.compile_formula("ADX()>25").min_history == 28
+
+
+def test_atr_and_mfi_are_usable_in_plain_formulas() -> None:
+    """ATR / MFI 也要能被普通公式文本调用（不只是在白盒 `raw_num` 里对答案）。"""
+    s = _dmi_series()
+    # ATR(3) 前 3 根缺值 → 条件不成立；第 4 根起 1.5/1.833/1.889… 只有 >1.9 的那些成立
+    assert sig("ATR(3)>1.9", s) == [False] * 6 + [True] * 6
+    assert sig("ATR()>0", s) == [False] * 12, "默认窗口 14 > 12 根 → 全缺值"
+    # MFI(3)<60：只有第 5、第 10 根（那两根前面刚跌过）成立
+    assert sig("MFI(3)<60", s) == [False, False, False, False, False, True,
+                                   False, False, False, False, True, False]
+    # 两条一起用：价量条件 + 价格方向（第 3 根虽然 MFI 高，但当天在跌 → 不成立）
+    assert sig("MFI(3)>50 AND C>REF(C,1)", s) == [
+        False, False, False, False, True, False, True, True, False, True, False, True,
+    ]
+    # ADX 与 ±DI 的组合写法（趋势够强、且多头占优）——第 10 根 ADX 掉到 37 < 40
+    assert sig("ADX(3)>40 AND PDI(3)>MDI(3)", s) == [
+        False, False, False, False, False, True, True, True, True, True, False, True,
+    ]
+
+
+def test_compat_doc_function_count_matches_the_code() -> None:
+    """`docs/兼容性.md` 里的"支持 N 个函数"必须与 `SUPPORTED_FUNCTIONS` 一致。
+
+    为什么值得一条用例：那个数字是**给用户看的**（他能拿它判断自己手上是不是旧包，
+    见第六节），而它只能靠人手同步 —— 加了函数忘了改文档，用户就会以为自己在用旧版。
+    同时确认新增的指标已经写进那份清单（否则文档的"完整清单"是假的）。
+    """
+    text = (ROOT / "docs" / "兼容性.md").read_text(encoding="utf-8")
+    count = len(fm.SUPPORTED_FUNCTIONS)
+    assert f"**{count} 个函数**" in text, "首页那句 `FUNCTIONS`（**N 个函数**）没跟着改"
+    assert f"### 函数（{count} 个）" in text, "第一节小标题里的个数没跟着改"
+    assert f"支持 {count} 个函数" in text, "第六节那句版本信息示例没跟着改"
+    for name in ("ATR", "PDI", "MDI", "ADX", "MFI"):
+        assert f"`{name}" in text or name in text, f"{name} 没写进兼容性清单"
+
+
 def test_industry_equals_and_in() -> None:
     """INDUSTRY 支持 `=` / `!=` / `IN`（字符串只能这么比）。"""
     s = make_series([1, 2, 3], industry="半导体")
@@ -804,6 +1084,12 @@ def test_every_function_survives_missing_values() -> None:
         "MIN(C,O)": [True] * 3,
         "BARSLAST(C>0)": [True] * 3,
         "量比()": [True] * 3,
+        # Wilder 家族（ATR/±DI/ADX/MFI）：缺价的票一律缺值，绝不退化成 0
+        "ATR(2)": [True] * 3,
+        "PDI(2)": [True] * 3,
+        "MDI(2)": [True] * 3,
+        "ADX(2)": [True] * 3,
+        "MFI(2)": [True] * 3,
         # 涨停池两列是 0/1（不是行情价，"缺值"在这里不存在）→ 0 而不是 NaN
         "涨停天数()": [False] * 3,
         "连板()": [False] * 3,
@@ -818,7 +1104,8 @@ def test_every_function_survives_missing_values() -> None:
             assert (value[~np.isnan(value)] == 0).all(), expr
     # 这些条件在全缺值序列上一律不成立（不抛异常、不产生信号）
     for text in ("MA(C,2)>0", "量比()>1", "涨停天数(2)>=1", "ABS(C)>0",
-                 "BARSLAST(C>0)=0", "HHV(H,2)>LLV(L,2)"):
+                 "BARSLAST(C>0)=0", "HHV(H,2)>LLV(L,2)",
+                 "ATR(2)>0", "ADX(2)>25", "PDI(2)>MDI(2)", "MFI(2)>50"):
         assert sig(text, s) == [False] * 3, text
 
 

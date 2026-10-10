@@ -157,6 +157,10 @@ def window(seeded, qapp):
     win._flash_timer.stop()
     win.scheduler.stop()
     win.quotes.stop()               # 实时快照的工作线程也要收（不然后台还在飞）
+    # 评分线程同理，而且它**更慢**（每只票要读日线 + 评估 17 项 × 2 条公式，
+    # 参数里还可能去取一次快照）：收尾时不先停它，窗口已经拆了它还在飞，
+    # 实测会让整个 pytest 进程在 teardown 阶段 `Fatal Python error: Aborted`
+    win.scores.stop()
     _wait_market(win, qapp)
     worker = getattr(win, "_market_worker", None)
     if worker is not None and worker.isRunning():
@@ -1039,10 +1043,10 @@ def test_watch_table_headers_and_source_column(window) -> None:
     2026-09-21（主人要求）：再加「加入日期」「盈亏」两列 → 10 列，
     「监控开关」仍在**最后一列**（点格子就能切换那一列的老位置没动）。
     """
-    assert window.pool_table.columnCount() == 10
+    assert window.pool_table.columnCount() == 11      # 2026-10-11 加「评分」
     assert _header_texts(window.pool_table) == [
         "名称(代码)", "现价", "涨幅", "市值", "换手", "板块", "来源",
-        "加入日期", "盈亏", "监控开关",
+        "加入日期", "盈亏", "评分", "监控开关",
     ]
     assert window.pool_table.columnCount() == len(ui_app.WATCH_HEADERS)
     # seeded 里 600002 是 `低价股` 策略选中的（不是自选）：来源 = **哪条策略**
@@ -1114,7 +1118,7 @@ def test_pool_row_tooltip_carries_fund_flow_only_for_watchlist(window, seeded, q
     # 策略标的（600002）**没有**这一行 —— 它不在采集名单里
     assert "资金流" not in window.pool_table.item(rows["600002"], 0).toolTip()
     # 表还是 10 列（用户嫌挤：不加列）
-    assert window.pool_table.columnCount() == 10
+    assert window.pool_table.columnCount() == 11      # 2026-10-11 加「评分」
 
 
 def test_watchlist_row_without_collected_flow_says_so(window, seeded, qapp) -> None:
@@ -1314,10 +1318,10 @@ def test_position_table_headers(window) -> None:
 
     2026-09-17（用户要求）：加「市值」「换手」，「提醒」列改成「监控开关」。
     """
-    assert window.position_table.columnCount() == 10
+    assert window.position_table.columnCount() == 11  # 2026-10-11 加「评分」
     assert _header_texts(window.position_table) == [
         "名称(代码)", "成本价", "现价", "涨幅", "市值", "换手",
-        "盈亏比例", "止损位", "止盈位", "监控开关",
+        "盈亏比例", "止损位", "止盈位", "评分", "监控开关",
     ]
     assert window.position_table.columnCount() == len(ui_app.POSITION_HEADERS)
     assert "数量" not in "".join(_header_texts(window.position_table))
@@ -1351,7 +1355,7 @@ def test_position_row_shows_pnl_stop_and_target(window, seeded, qapp) -> None:
     assert cells[6] == f"{(close - 3.0) / 3.0 * 100:+.2f}%"  # 与「现价」同一个价
     assert cells[7] == f"{3.0 * (1 - seeded.stop_loss):.2f}"
     assert cells[8] == f"{3.0 * (1 + seeded.take_profit):.2f}"
-    assert cells[9] == ui_app.MONITOR_ON_TEXT               # 默认在监控中
+    assert cells[ui_app.POSITION_MONITOR_COLUMN] == ui_app.MONITOR_ON_TEXT  # 默认在监控中
     # 「现价」的 tooltip 必须点明"这是本地最新收盘价（MM-DD），不是实时价"
     tip = window.position_table.item(0, 2).toolTip()
     assert "不是实时价" in tip
@@ -1799,7 +1803,7 @@ def test_position_table_pnl_colors_and_dash(window, seeded, qapp) -> None:
     from laoa_trader.ui import theme as theme_mod
 
     table = window.position_table
-    assert table.columnCount() == 10
+    assert table.columnCount() == 11
     pnl = ui_app.POSITION_HEADERS.index("盈亏比例")
 
     # seeded 里 600001：成本 3.0、本地最新收盘 3.174 → +5.80%（两位小数，精确断言）
@@ -1879,11 +1883,12 @@ def test_position_pnl_ratio_is_weighted_by_cost(window, seeded, qapp) -> None:
 
 
 def test_position_table_columns_fit_at_960_logical_width(screen_window, qapp) -> None:
-    """≈用户那台（逻辑 960×900 → 窗口 920×760）：**10 列**持仓表铺满、不挤、也不顶大最小宽度。
+    """≈用户那台（逻辑 960×900 → 窗口 920×760）：**11 列**持仓表铺满、不挤、也不顶大最小宽度。
 
     这一条是给"窗口能缩到 760 宽"的成果上保险：多一列如果让表格的最小宽度变大，
     窗口就又被顶出屏幕了（那正是用户最初抱怨的"最下边看不见"）。
-    2026-09-17 加了两列（市值/换手）之后这条更要紧 —— 所以列数跟着断言成 10。
+    2026-09-17 加了两列（市值/换手）、2026-10-11 又加了「评分」—— 每次加列都要回来
+    确认这条：多一列如果让最小宽度变大，窗口就又被顶出屏幕了。
     """
     win = screen_window(960, 900)
     win.tabs.setCurrentWidget(_tab_page(win, ui_app.TAB_POSITION))
@@ -1892,8 +1897,9 @@ def test_position_table_columns_fit_at_960_logical_width(screen_window, qapp) ->
     qapp.processEvents()
 
     table = win.position_table
-    assert table.columnCount() == 10
-    widths = [table.columnWidth(i) for i in range(10)]
+    # 2026-10-11 起 11 列：加了「评分」（窄列，只显示整数）
+    assert table.columnCount() == 11
+    widths = [table.columnWidth(i) for i in range(11)]
     assert all(width > 20 for width in widths), widths          # 每列都还看得清
     assert sum(widths) <= table.viewport().width() + 8          # Stretch：正好铺满
     assert table.horizontalScrollBar().isVisible() is False     # 不需要横向滚动

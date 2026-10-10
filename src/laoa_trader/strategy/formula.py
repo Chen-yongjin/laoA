@@ -1711,6 +1711,188 @@ def _impl_cci(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
         return np.where(dev == 0.0, np.nan, (tp - mean) / (0.015 * dev))
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 趋势 / 波动 / 资金流：ATR、±DI、ADX、MFI
+#
+# 这一组全部建立在 **Wilder 平滑**上，它和上面的 `EMA` **不是一套东西**：
+# EMA 的 α = 2/(N+1)，Wilder 的 α = 1/N。通达信 / 同花顺里的 ATR、±DI、ADX
+# 用的都是 Wilder 的原始口径（他做 DMI 时就是这么定义的）。
+#
+# 为什么不图省事复用 `_ema`：α 一换，同一段行情算出来的 ATR/ADX 数值就不一样
+# （EMA 追得更快），用户拿本程序与别的软件对同一个指标，只会得出"这里算错了"
+# 的结论 —— 而我们的口径本来就是"与通达信一致"（见 docs/兼容性.md）。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _wilder(x: Any, window: int, n: int) -> np.ndarray:
+    """Wilder 平滑：`Y_t = (Y_{t-1} × (N-1) + X_t) / N`（即 α = 1/N）。
+
+    第一个值取**前 N 个有效 X 的简单平均**（Wilder 原文的起手式），在那之前一律
+    NaN：少一根 K 线就没有"N 期平滑值"这回事。这里坚持"不足即缺值"而不是拿更短的
+    窗口凑一个数，理由与 `_roll` 的 min_periods=N 完全相同 —— 缺值只是"今天不选它"，
+    算错却是"今天选错它"。
+
+    缺值（停牌那根算不出 TR/DM）**不更新递归、沿用上一根**，与 `_ema` 同一条约定：
+    一根 NaN 不该让后面整条曲线全废。注意预热期（还没攒够 N 个样本）遇到 NaN 时
+    也只是保持 NaN —— 不会拿"一个样本"当平均值把平滑启动起来。
+    """
+    arr = _broadcast(x, n)
+    out = np.full(n, np.nan, dtype="float64")
+    prev = np.nan
+    total = 0.0     # 预热期已攒下的样本和
+    seen = 0        # 预热期已攒下的样本个数
+    for i in range(n):
+        xi = arr[i]
+        if np.isnan(xi):
+            out[i] = prev
+            continue
+        if np.isnan(prev):
+            total += xi
+            seen += 1
+            if seen < window:
+                continue          # 样本不够 N 个 → 继续缺值
+            prev = total / float(window)
+            total = 0.0
+            seen = 0
+        else:
+            prev = (prev * (window - 1.0) + xi) / float(window)
+        out[i] = prev
+    return out
+
+
+def _true_range(high: Any, low: Any, close: Any, n: int) -> np.ndarray:
+    """TR = max(H-L, |H-C₋₁|, |L-C₋₁|)。
+
+    第一根**没有前收** → NaN，而不是拿 H-L 顶替：TR 的定义里本来就有"上一根收盘"，
+    凑一个 H-L 会在序列开头埋一个偏小的值；而 Wilder 平滑是递推的，开头这个假值
+    会一路带着走到最后（越靠前越不能糊弄）。
+    """
+    h, l, c = _broadcast(high, n), _broadcast(low, n), _broadcast(close, n)
+    out = np.full(n, np.nan, dtype="float64")
+    if n < 2:
+        return out
+    prev_close = c[:-1]
+    with np.errstate(all="ignore"):
+        # np.maximum 遇 NaN 出 NaN，正好就是"缺值即缺值"（不用自己再判一遍）
+        out[1:] = np.maximum(
+            np.maximum(h[1:] - l[1:], np.abs(h[1:] - prev_close)),
+            np.abs(l[1:] - prev_close),
+        )
+    return out
+
+
+def _directional_movement(high: Any, low: Any, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """+DM / -DM：`+DM = (H-H₋₁ > L₋₁-L 且 H-H₋₁ > 0) ? H-H₋₁ : 0`，-DM 对称。
+
+    "两个条件都要"这一点不能省：只写 `H>H₋₁` 的话，一根"高点上移但低点下移更多"
+    的外扩 K 线也会被算成上涨动力，与通达信不一致（那是双方都在发力，方向没定）。
+    第一根没有前值 → 两根 DM 都是 NaN（不是 0：0 的意思是"今天没有方向"）。
+    """
+    h, l = _broadcast(high, n), _broadcast(low, n)
+    plus = np.full(n, np.nan, dtype="float64")
+    minus = np.full(n, np.nan, dtype="float64")
+    if n < 2:
+        return plus, minus
+    up = h[1:] - h[:-1]
+    down = l[:-1] - l[1:]
+    # NaN 与任何数比较都是 False，会**静默**落进 `: 0` 那一支 —— 所以缺值要显式挑出来
+    unknown = np.isnan(up) | np.isnan(down)
+    with np.errstate(all="ignore"):
+        plus[1:] = np.where(unknown, np.nan, np.where((up > down) & (up > 0.0), up, 0.0))
+        minus[1:] = np.where(unknown, np.nan, np.where((down > up) & (down > 0.0), down, 0.0))
+    return plus, minus
+
+
+def _atr(series: Series, window: int, n: int) -> np.ndarray:
+    """ATR(N)：TR 的 N 期 Wilder 均值（第一个值 = 前 N 根 TR 的简单平均）。"""
+    return _wilder(_true_range(series.high, series.low, series.close, n), window, n)
+
+
+def _dmi_core(
+    series: Series, window: int, n: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """DMI 四件套：ATR / +DI / -DI / DX。
+
+    为什么挤在一个函数里：±DI 的分母就是 ATR，而 DX 的分子又由 ±DI 相减得来 ——
+    三条曲线必须出自**同一次**计算。分开写三份，迟早有一份被改歪，症状是
+    "ADX 与 ±DI 不同源、图形自相矛盾"，而不是报错（最难查的那种）。
+    """
+    high, low = series.high, series.low
+    atr = _atr(series, window, n)
+    plus_dm, minus_dm = _directional_movement(high, low, n)
+    plus = _wilder(plus_dm, window, n)
+    minus = _wilder(minus_dm, window, n)
+    with np.errstate(all="ignore"):
+        # ATR = 0（连续一字板 / 一直停牌）时 ±DI 是 0/0，没有"趋向"可言 → 缺值。
+        # 这也让 DX 跟着缺值，而不是给出一条 ADX=0 的"无趋势"信号（假信号比缺值更坏）。
+        pdi = _nanify(np.where(atr == 0.0, np.nan, 100.0 * plus / atr))
+        mdi = _nanify(np.where(atr == 0.0, np.nan, 100.0 * minus / atr))
+        total = pdi + mdi
+        # 分母为 0（两个方向都没力气，例如连续的内包 K 线）→ DX 记 0：
+        # 这时"多空力度相同"是成立的，0 是**算出来的结论**，不是缺值顶替。
+        dx = np.where(total == 0.0, 0.0, 100.0 * np.abs(pdi - mdi) / total)
+    return atr, pdi, mdi, dx
+
+
+def _impl_atr(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """ATR(N)：平均真实波幅（Wilder 平滑），单位与价格一致（元）。"""
+    window = ev.win(vals[0], node.args[0]) if vals else 14
+    return _atr(ev.series, window, ev.n)
+
+
+def _impl_pdi(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """PDI(N)：+DI，上升方向占真实波幅的比例（0~100）。"""
+    window = ev.win(vals[0], node.args[0]) if vals else 14
+    return _dmi_core(ev.series, window, ev.n)[1]
+
+
+def _impl_mdi(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """MDI(N)：-DI，下降方向占真实波幅的比例（0~100）。"""
+    window = ev.win(vals[0], node.args[0]) if vals else 14
+    return _dmi_core(ev.series, window, ev.n)[2]
+
+
+def _impl_adx(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """ADX(N)：平均趋向指数 = DX 的 N 期 Wilder 均值。
+
+    注意它是**两级**平滑：DX 要先有 ±DI（第一级，第一个值落在第 N 根），
+    再对 DX 做 N 期 Wilder 均值（第二级，第一个值落在第 2N-1 根）。
+    所以 ADX 要的历史比 ±DI 长一倍 —— 拿不够长的序列算，前面必然全是缺值。
+    """
+    window = ev.win(vals[0], node.args[0]) if vals else 14
+    dx = _dmi_core(ev.series, window, ev.n)[3]
+    return _wilder(dx, window, ev.n)
+
+
+def _impl_mfi(ev: "_Evaluator", node: "_Call", vals: list) -> Any:
+    """MFI(N)：资金流量指标（Money Flow Index，"带量的 RSI"）。
+
+    口径：TP = (H+L+C)/3，资金流 = TP × V（用**成交量**而不是成交额：
+    MFI 的原始定义就是价×量，用两个都带成交额的口径会把量算两遍）；
+    与上一根比 TP 上升记正向、下降记负向、**持平不计**（不涨不跌没有方向）；
+    `MFI = 100 − 100/(1 + N 期正向和 / N 期负向和)`。
+    负向和为 0（N 期里一次下跌都没有）→ 100，也就是"没有卖压"。
+
+    为什么先比 TP 再求和：直接拿"价×量"的正负相加会把"涨但缩量"和"跌但放量"
+    混成一个数；分开累计才是"买盘的钱 / 卖盘的钱"（这也是它与 RSI 的区别）。
+    """
+    window = ev.win(vals[0], node.args[0]) if vals else 14
+    high, low, close, vol = ev.series.high, ev.series.low, ev.series.close, ev.series.vol
+    tp = (high + low + close) / 3.0
+    flow = tp * vol
+    prev = _ref(tp, 1, ev.n)
+    # 第一根没有前收典型价 → 记不上方向（缺值），与其它函数的"不足即缺值"一致
+    unknown = np.isnan(prev) | np.isnan(tp)
+    with np.errstate(all="ignore"):
+        pos = np.where(unknown, np.nan, np.where(tp > prev, flow, 0.0))
+        neg = np.where(unknown, np.nan, np.where(tp < prev, flow, 0.0))
+        # 窗口里缺一根就是 NaN（_roll_sum 的默认语义）—— 不能拿"能取到的几天"下结论
+        pos_sum = _roll_sum(pos, window, ev.n)
+        neg_sum = _roll_sum(neg, window, ev.n)
+        mfi = 100.0 - 100.0 / (1.0 + pos_sum / neg_sum)
+        return _nanify(np.where(neg_sum == 0.0, 100.0, mfi))
+
+
 def _num1(fn: Callable[[np.ndarray], np.ndarray]) -> Callable[..., Any]:
     """单参数数学函数的包装（POW/SQRT/LOG…）：保持缺值为缺值。"""
 
@@ -1934,6 +2116,25 @@ FUNCTIONS: dict[str, _FuncSpec] = {
     "OBV": _FuncSpec(0, 0, _NUM, (), _impl_obv, hist_default=2),
     "WR": _FuncSpec(0, 1, _NUM, (_W,), _impl_wr, hist_arg=0, hist_default=9),
     "CCI": _FuncSpec(0, 1, _NUM, (_W,), _impl_cci, hist_arg=0, hist_default=14),
+    # ── 趋势 / 波动 / 资金流（Wilder 口径，见 `_wilder` 上面那段）──
+    # `hist_arg=0, hist_extra=1` 的"再多一根"是指：TR 与 ±DM 都要用到**上一根收盘**，
+    # 所以第一根 K 线只能当参照、自己算不出值（照 RSI 的 +1 写法）。
+    # `hist_default=15` = 不写 N 时按默认窗口 14 再多一根。
+    "ATR": _FuncSpec(0, 1, _NUM, (_W,), _impl_atr,
+                     hist_arg=0, hist_extra=1, hist_default=15),
+    "PDI": _FuncSpec(0, 1, _NUM, (_W,), _impl_pdi,
+                     hist_arg=0, hist_extra=1, hist_default=15),
+    "MDI": _FuncSpec(0, 1, _NUM, (_W,), _impl_mdi,
+                     hist_arg=0, hist_extra=1, hist_default=15),
+    # ⚠️ ADX 其实要 **2N** 根（DX 第一级平滑已经吃掉 N 根，ADX 再叠一级 N 期平滑），
+    # 而 `hist_extra` 只能加常数、没有"乘 N"这一档，所以 `ADX(14)` 这里报的 15 是
+    # **下界**（`min_history` 本身的约定就是下界，见 `_note_window`）。
+    # 少估的后果只是多算几只注定全缺值的票，不会算出错的值；`hist_default` 写 28
+    # 是因为"不写参数"这条路能算准（默认窗口 14 → 2×14），就别跟着一起低估。
+    "ADX": _FuncSpec(0, 1, _NUM, (_W,), _impl_adx,
+                     hist_arg=0, hist_extra=1, hist_default=28),
+    "MFI": _FuncSpec(0, 1, _NUM, (_W,), _impl_mfi,
+                     hist_arg=0, hist_extra=1, hist_default=15),
     "IFF": _FuncSpec(3, 3, "same", ("cond", _NUM, _NUM), _impl_if),
     "POW": _FuncSpec(2, 2, _NUM, (_NUM, _NUM), _impl_pow),
     "SQRT": _FuncSpec(1, 1, _NUM, (_NUM,), _impl_sqrt),
@@ -2746,6 +2947,11 @@ _FUNCTION_EXAMPLE: dict[str, str] = {
     "DIF": "DIF()",
     "DEA": "DEA()",
     "MACD": "MACD()",
+    "ATR": "ATR(14)",
+    "PDI": "PDI(14)",
+    "MDI": "MDI(14)",
+    "ADX": "ADX(14)",
+    "MFI": "MFI(14)",
 }
 
 
