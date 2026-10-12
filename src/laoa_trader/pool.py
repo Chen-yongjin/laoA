@@ -222,14 +222,21 @@ def build_pool(
     # 否则会出现"共 13 只（策略 12 · 自选 12）"这种看着像算错的行。
     total, n_strategy, n_watch = pool_counts(pool)
     logger.info(f"股票池合成完成：{total} 只（策略 {n_strategy} 只 / 自选 {n_watch} 只）")
-    if save and pool:
+    if save:
         rows_to_save = pool if save_picks else [r for r in pool if r.get("watchlist")]
-        if rows_to_save:
-            day = (day or engine.get_latest_data_date()
-                   or datetime.now().strftime("%Y-%m-%d"))
-            save_pool(engine.db_path, rows_to_save, day)
-        else:
-            logger.info("这一轮没有自选标的要落库（筛选结果不再自动进池）")
+        day = (day or engine.get_latest_data_date()
+               or datetime.now().strftime("%Y-%m-%d"))
+        # ⚠️ `rows_to_save` 为空时**也要落这一趟**（2026-10-12 修）。
+        # 为什么：`storage.save_pool` 里那句"删掉同一天里 batch 不是本次的行"是
+        # 清掉**上一轮残留**的唯一机制。筛选结果不再自动进股池之后（`save_picks=False`），
+        # "这一轮没勾任何公式、自选也没开监控"是**很常见**的一轮 —— 那一轮
+        # `rows_to_save` 正好是空的，以前直接跳过落库，于是当天那批**别的策略留下**的行
+        # 一直躺在库里：用户在「自选标的」页看到的就是"他没勾的那条策略的票"，
+        # 而他勾的那条一条都没有（表现为"没按我勾的策略来"）。
+        written = save_pool(engine.db_path, rows_to_save, day)
+        if not written:
+            logger.info(f"这一轮没有自选标的要落库（筛选结果不再自动进池）；"
+                        f"已顺手清掉 {day} 这一天里上一轮留下的残留行")
     return pool
 
 

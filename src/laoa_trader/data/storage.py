@@ -646,26 +646,33 @@ def save_pool(
     再删掉**同一天里 batch 不等于本次**的残留行 —— 只清理"上一次运行留下的、
     这次已经不在池子里的"标的，绝不动其它日期、也绝不出现"空窗期"。
 
+    ⚠️ `pool` 为空时**也要走这一趟清理**（2026-10-12 修）：筛选结果不再自动进股池之后
+    （`build_pool(save_picks=False)`），一次正常的运行经常**一行都不用写**
+    （没勾公式、或自选标的都没开监控）—— 以前这里 `if not pool: return 0` 会连清理一起
+    跳过，于是当天那批**上一轮别的策略留下的行**原样留着，用户点开「自选标的」看到的是
+    他没勾的那条策略的票（"我勾了 A，结果里怎么是 B 选的票"）。清理是"同一天里不是本次
+    写的行"这层语义的**唯一**执行者，不能因为"这次没东西写"就整趟不跑。
+
     Returns:
-        本次写入的池子行数。
+        本次写入的池子行数（清理掉的不算在内）。
     """
-    if not pool:
-        return 0
     day_batch = batch or _new_batch()
     now = _now()
-    written = upsert(
-        conn,
-        "stock_pool",
-        ("date", "symbol", "name", "strategy", "strategies", "score", "reason",
-         "created_at", "batch"),
-        (
-            (day, r["symbol"], r.get("name"), r.get("strategy"), r.get("strategies"),
-             r.get("score"), r.get("reason"), now, day_batch)
-            for r in pool
-        ),
-        conflict=("date", "symbol"),
-        batch_size=1000,
-    )
+    written = 0
+    if pool:
+        written = upsert(
+            conn,
+            "stock_pool",
+            ("date", "symbol", "name", "strategy", "strategies", "score", "reason",
+             "created_at", "batch"),
+            (
+                (day, r["symbol"], r.get("name"), r.get("strategy"), r.get("strategies"),
+                 r.get("score"), r.get("reason"), now, day_batch)
+                for r in pool
+            ),
+            conflict=("date", "symbol"),
+            batch_size=1000,
+        )
     conn.execute(
         "DELETE FROM stock_pool WHERE date = ? AND batch IS NOT ?", (day, day_batch)
     )

@@ -2673,6 +2673,12 @@ def test_run_pipeline_button_runs_in_background_and_is_idempotent(window, qapp,
     )
     monkeypatch.setenv("LUWEIK_FORMULAS", str(formula_dir))
     seeded.enabled_formulas = ["界面测试公式"]
+    # 「写 stock_pool」这一半**必须有一只被盯着的自选标的**：2026-09-21 起
+    # 筛选结果不再自动进股池（`run_daily` 传 `save_picks=False`），池子里只落自选 ——
+    # 没有自选标的时这一轮**一行都不写**，那就测不到"按钮 → 后台 → 落库"这条接线了
+    # （以前这条断言是靠建池不清理时留下的旧行侥幸成立的）。
+    with storage.connect(seeded.db_path) as conn:
+        storage.upsert_watchlist(conn, "600002", name="半导体甲", enabled=True)
 
     window.on_run_pipeline()
     assert window._worker is not None
@@ -2694,6 +2700,50 @@ def test_run_pipeline_button_runs_in_background_and_is_idempotent(window, qapp,
         assert conn.execute("SELECT COUNT(*) FROM signal").fetchone()[0] == signals
         assert conn.execute("SELECT COUNT(*) FROM stock_pool").fetchone()[0] == pool_rows
     assert "未重复推送" in window.status_label.fullText()
+
+
+def test_start_pick_follows_the_ticked_strategy(window, qapp, monkeypatch, seeded) -> None:
+    """在「策略选取」列勾哪条，【开始筛选】就**只跑那一条**，结果里也只有它的票。
+
+    主人 2026-10-12 实报："策略选股里点选指定策略后，没有按照用户选取的策略进行。"
+    这条把**界面那一下**整条走一遍（勾选框 → config.toml → `self.cfg` →
+    【开始筛选】 → 结果页），因为最容易错的地方正是"界面写了一份、实跑用的是另一份"：
+    `on_run_pipeline()` 用的是 `self.cfg`（不重新读盘），靠 `save_settings()`
+    **就地改**那一个对象才成立。
+
+    小库是确定的：600001 ≈ 3.17 元（只有 `C<5` 命中）、600002 ≈ 12.7 元（只有 `C>10`）。
+    """
+    from laoa_trader import scheduler as sched
+
+    monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
+    monkeypatch.setattr("laoa_trader.notify.notify_all",
+                        lambda *a, **k: {"tray": {"kind": "tray", "ok": True}})
+    folder = seeded.data_dir / "formulas"
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, body in (("低价", "C<5"), ("高价", "C>10")):
+        (folder / f"{name}.txt").write_text(
+            f"# 名称: {name}\n# 说明: 界面用例专用\n{body}\n", encoding="utf-8")
+    monkeypatch.setenv("LUWEIK_FORMULAS", str(folder))
+    seeded.enabled_formulas = []
+
+    page = window.formula_page
+    page.reload()
+    qapp.processEvents()
+    assert page._row_boxes["低价"].isChecked() is False
+
+    page._row_boxes["低价"].setChecked(True)
+    qapp.processEvents()
+
+    # ① 勾选**当场**写进 cfg（同一个对象）与 config.toml
+    assert window.cfg.enabled_formulas == ["低价"]
+    assert 'enabled_formulas = ["低价"]' in seeded.source_path.read_text(encoding="utf-8")
+
+    # ② 点【开始筛选】：结果就是这一条选的票，另一条的票一只都不许出现
+    window.on_run_pipeline()
+    window._worker.wait(60_000)
+    qapp.processEvents()
+
+    assert [(r["symbol"], r["label"]) for r in page.result_rows] == [("600001", "低价")]
 
 
 def test_refresh_data_button_only_syncs(window, qapp, monkeypatch, seeded) -> None:
