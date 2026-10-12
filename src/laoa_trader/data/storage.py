@@ -638,13 +638,25 @@ def save_pool(
     day: str,
     *,
     batch: str | None = None,
+    keep_strategies: set[str] | None = None,
 ) -> int:
     """写入当日股票池（幂等）。
 
-    为什么不是"按日期 DELETE 再 INSERT"：那样一旦中间失败当天池子就空了。
-    这里改用 `batch` 标记同一次运行：先 upsert 本次全部行（都打上同一个 batch），
-    再删掉**同一天里 batch 不等于本次**的残留行 —— 只清理"上一次运行留下的、
-    这次已经不在池子里的"标的，绝不动其它日期、也绝不出现"空窗期"。
+    两层清理（**都要跑**，谁也代替不了谁）：
+
+    1. **按 `batch`**（原有判据）：先 upsert 本次全部行（都打上同一个 batch），
+       再删掉同一天里 batch 不等于本次的残留行 —— 只清理"上一次运行留下的、
+       这次已经不在池子里的"标的，绝不动其它日期、也绝不出现"空窗期"。
+       为什么不是"按日期 DELETE 再 INSERT"：那样一旦中间失败当天池子就空了。
+    2. **按策略名**（`keep_strategies`）：删掉这一天里 `strategy` **不在当前勾选集合里**
+       的行 —— 主人 2026-10-12 的口径是"**勾了哪条，就看到哪条的票**"：同一交易日里
+       上一轮（或更早）由别的策略写下去的行，这一轮不该再冒充"这次筛选的结果"。
+       `strategy` 为空的行（用户**手工加**的自选标的）**一律保留**。
+
+    为什么第 2 层是"按策略名"而不是让第 1 层包办：第 1 层只能保证"同一天里只剩本次写的
+    行"，而本次要写的行本身可能是**自选标的**（`build_pool(save_picks=False)` 之后只写
+    自选），这些行的 `strategy` 记着"当初是哪条策略选的" —— 那条策略可能早就不勾了。
+    这一层就是按主人的规矩把它们从池子里剔掉（票还在 `watchlist` 表里，不动用户数据）。
 
     ⚠️ `pool` 为空时**也要走这一趟清理**（2026-10-12 修）：筛选结果不再自动进股池之后
     （`build_pool(save_picks=False)`），一次正常的运行经常**一行都不用写**
@@ -652,6 +664,11 @@ def save_pool(
     跳过，于是当天那批**上一轮别的策略留下的行**原样留着，用户点开「自选标的」看到的是
     他没勾的那条策略的票（"我勾了 A，结果里怎么是 B 选的票"）。清理是"同一天里不是本次
     写的行"这层语义的**唯一**执行者，不能因为"这次没东西写"就整趟不跑。
+
+    Args:
+        keep_strategies: 当前勾选的策略（池子里的写法 `公式·X`）。`None` = 不做第 2 层
+            清理（老调用方/测试的写法，行为与改动前完全一致）；**空集合**是有效值 ——
+            "一条策略都没勾"时它会把当天所有策略行都清掉（只留手工自选的行）。
 
     Returns:
         本次写入的池子行数（清理掉的不算在内）。
@@ -673,6 +690,26 @@ def save_pool(
             conflict=("date", "symbol"),
             batch_size=1000,
         )
+    if keep_strategies is not None:
+        # 第 2 层：**来源策略不在当前勾选集合里**的行（含本次刚 upsert 的那些 ——
+        # 正常情况下 `build_pool` 已经在合并自选之后把它们剔掉了，这里再兜一层，
+        # 别的写库路径进来的漏网行也照样清）。`strategy` 为空 + NULL 的行**不碰**
+        # （用户手工加的自选标的）。
+        names = sorted({str(name) for name in keep_strategies if str(name)})
+        if names:
+            placeholders = ", ".join("?" * len(names))
+            conn.execute(  # noqa: S608 - 表名与列名都是常量，只有策略名是参数
+                "DELETE FROM stock_pool WHERE date = ? AND strategy IS NOT NULL "
+                f"AND strategy != '' AND strategy NOT IN ({placeholders})",
+                (day, *names),
+            )
+        else:
+            # 一条策略都没勾（默认状态）：当天不该有任何"策略选出来的行"
+            conn.execute(
+                "DELETE FROM stock_pool WHERE date = ? AND strategy IS NOT NULL "
+                "AND strategy != ''",
+                (day,),
+            )
     conn.execute(
         "DELETE FROM stock_pool WHERE date = ? AND batch IS NOT ?", (day, day_batch)
     )

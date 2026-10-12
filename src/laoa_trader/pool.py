@@ -72,6 +72,34 @@ def weight_of(strategy: str) -> int:
     return 1
 
 
+def checked_strategies(settings: Any = None) -> set[str]:
+    """**当前勾选**的策略在池子里的写法（`enabled_formulas` → `公式·X`）。
+
+    用途只有一个：判断"池子里这一行是不是当前勾选的那几条策略选出来的"
+    （主人 2026-10-12 的口径："勾了哪条，就看到哪条的票"）。
+
+    三条口径：
+    * 名字取 `config.toml` 的 `enabled_formulas`（**勾选状态的唯一来源**，与
+      `formula_group.run_enabled_formulas()` 同一份）；
+    * 返回值是**池子里的写法**（`公式·X`）—— `stock_pool.strategy` / 池子行的
+      `strategy` 存的就是它，两边直接比；
+    * **老内置策略的类名（`LowPriceStrategy` 这类）永远不在集合里**：那些策略
+      2026-09-18 已经删除，配置里也不可能有它们 —— 盘面上的老行会被当"没勾的策略"
+      清掉（正是要的效果：用户现在根本选不出那条策略）。
+    """
+    cfg = settings if settings is not None else get_config()
+    names = [str(n).strip() for n in (getattr(cfg, "enabled_formulas", None) or [])]
+    return {formula_group.formula_strategy_name(n) for n in names if n}
+
+
+#: 池子行上的标记：**这一行是这一轮真正选出来的**（不是并进来的自选标的）。
+#: 为什么要有它（2026-10-12）：池子是"选出来的票 + 自选标的"合起来的，而结果页要说的
+#: 是"**本次筛选**选出了哪几只" —— 只按"有没有 `strategy`"判会把自选标的行也算进去
+#: （从结果页加进来的自选带着"当初是哪条策略选的"，它也有 `strategy`），
+#: 于是主人看到的数字是"整个池子"（真机日志里是 8/9 只）而不是这一轮的那 3~4 只。
+PICK_FLAG = "picked"
+
+
 def build_pool(
     engine: DataEngine,
     settings: Any = None,
@@ -213,11 +241,40 @@ def build_pool(
             logger.warning("热门行业为空（缺行业/涨停/历史数据），本次不做过滤")
 
     pool = build_pool_from_picks(picks_by_strategy, size=size)
+    # ⚠️ 日志里这三个数字**不是同一件事**（主人 2026-10-12 对着真机日志问过，这里说明白）：
+    #   * `策略标的合成完成：3 只` —— `build_pool_from_picks` 的结果：**这一轮勾选的策略
+    #     选出来的票**（每条策略最多 3 只、总共最多 `size` 只）；
+    #   * `股票池合成完成：8 只（策略 8 只 / 自选 0 只）` —— 上面 3 只**再加上并进来的自选标的**
+    #     （真机是 +5）。`pool_counts()` 是按"**有没有 `strategy`**"分的，而从结果页加进来的
+    #     自选标的带着"当初是哪条策略选的"（`watchlist.source_strategy`），
+    #     所以它们也被算成"策略" —— 这就是"策略 8 只 / 自选 0 只"看着自相矛盾的原因；
+    #   * `股票池已写入 5 只` —— `save_picks=False`（2026-09-21 主人要求"筛选结果不自动进
+    #     股池"）之后只写**自选标的**那 5 行；选出来的 3 只只在结果页/桌面文件/`signal` 表里。
     logger.info(f"策略标的合成完成：{len(pool)} 只")
+    # 这一轮**算作"当前选中"的策略**（池子里的写法 `公式·X`）：下面用它把
+    # "**当前没勾**的策略写进去的行"从池子里剔掉（主人 2026-10-12："勾了哪条，就看到哪条的票"）。
+    #
+    # 两份合起来才是完整的判据：
+    #   ① `checked_strategies()`：`config.toml` 里勾着的（勾选状态的唯一来源）；
+    #   ② 这一轮的**候选来源**（`picks_by_strategy` 的键）—— 正常时它就是 ① 的子集
+    #      （`run_enabled_formulas` 只跑勾上的），但调用方显式传 `picks=` 时（CLI/测试/
+    #      定制部署）它不是：那种调用方明确点名要的候选**不该被自己剔掉**。
+    keep_strategies = checked_strategies(settings) | set(picks_by_strategy)
 
     # ── 自选标的：独立上限、不占策略名额、不受热门行业过滤 ──
     pool = merge_watchlist(engine, pool, settings=settings, watchlist=watchlist,
                            report=report)
+    pool, dropped_rows = drop_unchecked_strategy_rows(pool, keep_strategies)
+    if dropped_rows:
+        # 从结果页加进来的自选标的**记着"当初是哪条策略选的"**（`source_strategy`）——
+        # 那条策略现在没勾，这一行就不该再被当成"这次筛选的结果"（真机日志里那 5 只
+        # 就是这么冒出来的）。票本身还在自选表里（`watchlist`），「自选标的」页照旧看得到、
+        # 照旧被盯 —— 只是不再冒充"当前勾选的策略选出来的"。
+        logger.info(
+            f"剔掉 {len(dropped_rows)} 只由**当前没勾的策略**选出来的自选标的行"
+            f"（{'、'.join(sorted({str(r.get('strategy') or '') for r in dropped_rows}))}）"
+            f"；它们仍在自选表里，只是不算本次筛选结果"
+        )
     # 日志的两个数与表头 `pool_counts()` 同口径：**互斥**（策略行 + 纯自选行 = 总数），
     # 否则会出现"共 13 只（策略 12 · 自选 12）"这种看着像算错的行。
     total, n_strategy, n_watch = pool_counts(pool)
@@ -233,11 +290,38 @@ def build_pool(
         # `rows_to_save` 正好是空的，以前直接跳过落库，于是当天那批**别的策略留下**的行
         # 一直躺在库里：用户在「自选标的」页看到的就是"他没勾的那条策略的票"，
         # 而他勾的那条一条都没有（表现为"没按我勾的策略来"）。
-        written = save_pool(engine.db_path, rows_to_save, day)
+        written = save_pool(engine.db_path, rows_to_save, day,
+                            keep_strategies=keep_strategies)
         if not written:
             logger.info(f"这一轮没有自选标的要落库（筛选结果不再自动进池）；"
                         f"已顺手清掉 {day} 这一天里上一轮留下的残留行")
     return pool
+
+
+def drop_unchecked_strategy_rows(
+    rows: list[dict], checked: set[str],
+) -> tuple[list[dict], list[dict]]:
+    """把"**当前没勾**的策略选出来的行"从池子里剔掉，返回 `(留下的, 剔掉的)`。
+
+    一条行算"当前勾选的策略选出来的"当且仅当：
+
+    * `strategy` **在 `checked` 里**（= 这一轮真正跑的那几条公式）；或
+    * `strategy` **是空的** —— 用户**手工加**的自选标的（`来源=自选`）**必须保留**
+      （主人 2026-10-12 明确要求）。
+
+    其余（来源是当前没勾的那条策略）一律剔掉。为什么放在**合并自选之后、落库之前**：
+    剔掉的必须是"池子里"的行 —— 结果页、桌面文件、推送、`stock_pool` 全都读这一份。
+    """
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for row in rows:
+        strategy = str(row.get("strategy") or "")
+        if strategy and strategy not in checked:
+            dropped.append(row)
+        else:
+            kept.append(row)
+    return kept, dropped
+
 
 
 def merge_watchlist(
@@ -372,6 +456,9 @@ def build_pool_from_picks(
                 "strategies": ",".join(entry["strategies"]),
                 "score": round(entry["score"], 4),
                 "reason": "；".join(entry["reasons"])[:200],
+                # 打上"这一行是这一轮选出来的"（见 `PICK_FLAG`）：池子里随后还会并进
+                # 自选标的，而"本次筛选结果"只该说选出来的那几只。
+                PICK_FLAG: True,
             }
         )
         if len(pool) >= size:
@@ -574,13 +661,28 @@ def remove_watch_symbol(
     return {"watchlist": removed_watch, "pool": bool(removed_pool)}
 
 
-def save_pool(db_path: str, pool: list[dict], day: str | None = None) -> int:
-    """把股票池写入 `stock_pool`（幂等 upsert，同一天重复跑只会覆盖同代码的行）。"""
+def save_pool(
+    db_path: str,
+    pool: list[dict],
+    day: str | None = None,
+    *,
+    keep_strategies: set[str] | None = None,
+) -> int:
+    """把股票池写入 `stock_pool`（幂等 upsert，同一天重复跑只会覆盖同代码的行）。
+
+    Args:
+        keep_strategies: **当前勾选的策略**（池子里的写法 `公式·X`，见
+            `checked_strategies()`）。给了它，落库时还会顺手删掉这一天里
+            "来源策略不在这个集合里"的行 —— 那些是**上一轮（或更早）别的策略**写下去的，
+            主人 2026-10-12 的口径是"勾了哪条就看到哪条的票"。`None`（默认）=
+            不做这道判据，只按 `batch` 清（老调用方/测试的写法，行为与改动前一致）。
+    """
     # 用**北京日期**：池子是按"行情日"存的，机器在 UTC（NAS/Docker/CI）时
     # `datetime.now()` 会差 8 小时、跨零点就写成昨天 —— 界面上"今天的池子"会查不到。
     day = day or clock.today_cn()
     with storage.connect(db_path) as conn:
-        written = storage.save_pool(conn, pool, day)
+        written = storage.save_pool(conn, pool, day,
+                                    keep_strategies=keep_strategies)
     logger.info(f"股票池已写入 {written} 只（{day}）")
     return written
 

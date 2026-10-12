@@ -2067,14 +2067,23 @@ if QT_AVAILABLE:
                 rows: `run_daily()` 的 report（dict，取 `pool` / `data_date` / `errors`）
                     或**行列表**（老调用方的写法，照样收下）。
                 data_date: 行情日（report 里没有时用这个）。
+
+            2026-10-12（主人真机日志实报）：结果页原来把**整个池子**都列出来，于是
+            "本次筛选结果：共 8 只"与日志里"这一轮只选出 3 只"对不上 —— 多出来的那些是
+            **并进池子的自选标的**（它们带着"当初是哪条策略选的"，看着就像别的策略的票）。
+            现在只列**这一轮真正选出来的**（池子行上的 `pool.PICK_FLAG` 标记），
+            并在结论里写明"池内共 M 只"（差在哪一句话里说清，不用用户猜）。
             """
             errors: list[str] = []
             picked: list[dict] = []
+            pool_total = 0
             caliber = ""
             warnings: list[str] = []
             if isinstance(rows, dict):
                 data_date = data_date or rows.get("data_date")
-                picked = [r for r in (rows.get("pool") or []) if isinstance(r, dict)]
+                pool_rows = [r for r in (rows.get("pool") or []) if isinstance(r, dict)]
+                pool_total = len(pool_rows)
+                picked = self._pick_rows(pool_rows)
                 errors = [str(e) for e in (rows.get("errors") or [])]
                 # 这一轮用的是哪套 K 线（盘中实时 / 日 K）：结果页上也要看得见，
                 # 否则"同一份策略昨天选出 3 只、今天选出 7 只"没有解释
@@ -2086,13 +2095,35 @@ if QT_AVAILABLE:
                     warnings = [str(w) for w in (formulas.get("warnings") or [])]
             elif rows is not None:
                 picked = [r for r in rows if isinstance(r, dict)]
+                pool_total = len(picked)
             self._fill_result(picked, data_date=data_date, errors=errors,
-                              caliber=caliber, warnings=warnings)
+                              caliber=caliber, warnings=warnings, pool_total=pool_total)
             self.show_result_page()
             logger.info(
-                "本次筛选结果已显示在「策略筛选」页：%d 只（行情日 %s）",
-                len(self.result_rows), data_date or "未知",
+                "本次筛选结果已显示在「策略筛选」页：%d 只（池内共 %d 只，行情日 %s）",
+                len(self.result_rows), pool_total, data_date or "未知",
             )
+
+        @staticmethod
+        def _pick_rows(pool_rows: list[dict]) -> list[dict]:
+            """池子行 → **这一轮选出来的**那几只。
+
+            两段判据，越靠前越准：
+
+            1. 带 `pool.PICK_FLAG` 标记的行（`pool.build_pool_from_picks()` 打的"这行是
+               这一轮选出来的"）—— 建池那条路走的都是它；
+            2. 老调用方给的 report/行列表没有这个标记时，退回改动前的口径
+               "**有策略来源的行**"（自选标的行没有 `strategy`，会被排除）。
+
+            为什么不能只用第 2 条（改动前就是这么写的）：从结果页点【加入自选】的票在
+            池子行里**也带着 `strategy`**（"当初是哪条策略选的"），于是自选标的会被当成
+            "这次选出来的"列出来 —— 这正是主人看到的数字对不上的原因之一。
+            """
+            marked = [r for r in pool_rows if r.get(pool_mod.PICK_FLAG)]
+            if marked:
+                return marked
+            return [r for r in pool_rows
+                    if str(r.get("strategy") or r.get("strategies") or "")]
 
         def _result_label(self, row: dict) -> str:
             """结果表「来源」列：与「自选标的」那一列**同一个函数**（`pool.source_label`）。"""
@@ -2104,16 +2135,20 @@ if QT_AVAILABLE:
 
         def _fill_result(self, picked: list[dict], *, data_date: Any = None,
                          errors: list[str] | None = None,
-                         caliber: str = "", warnings: list[str] | None = None) -> None:
+                         caliber: str = "", warnings: list[str] | None = None,
+                         pool_total: int = 0) -> None:
             """把池子行铺进结果表，并写好那句结论。
 
-            **只列"选出来的"票**（带来源的行）：`run_daily` 的池子里还会混进自选标的
-            （那是"我自己加的"，不是"这次选出来的"），口径与建池那份清单一致。
+            **只列"选出来的"票**：`run_daily` 的池子里还会混进自选标的（那是"我自己加的"，
+            不是"这次选出来的"）—— 调用方已经把这一层筛好了（见 `_pick_rows()`），
+            这里再按"有来源"兜一次，口径与建池那份清单一致。
 
             `caliber` 是这一轮用的 K 线口径（`formulas.prepare_inputs` 给的那句话）：
             它显示在结论下面，用户才知道"这次是按盘中实时算的，还是按收盘日 K 算的"。
             `warnings` 是口径类的**告知**（如"盘中取不到快照，已退回日 K"）：
             它们与 `errors` 分开（不是失败），但都要让人看见。
+            `pool_total` 是**整个池子**的行数（选出来的 + 自选标的）：与这里列出来的
+            只数不一样时，结论里要写明差在哪 —— 主人 2026-10-12："别让人去猜"。
             """
             rows = [r for r in picked
                     if r.get("symbol") and str(r.get("strategy") or r.get("strategies") or "")]
@@ -2152,10 +2187,15 @@ if QT_AVAILABLE:
                     self.result_table.setItem(index, column, item)
                 self._set_result_add_cell(index, row["symbol"], already=row["symbol"] in in_watch)
             day = str(data_date or "未知")
+            others = max(int(pool_total) - len(self.result_rows), 0)
             if self.result_rows:
                 self.result_hint.setText(
                     f"本次筛选结果：共 {len(self.result_rows)} 只（行情日 {day}）。"
-                    "结果不会自动进股池：要留下哪只就点它那一行的【加入自选】"
+                    # 池子里还有自选标的（用户自己加的 / 以前加进来的）：两个数字不一样时
+                    # 必须一句话说清差在哪，否则用户会以为"软件漏了"或"多了我不知道的票"
+                    + (f"池内共 {int(pool_total)} 只 —— 另外 {others} 只是自选标的"
+                       "（你自己加的），不是这次选出来的。" if others > 0 else "")
+                    + "结果不会自动进股池：要留下哪只就点它那一行的【加入自选】"
                     "（加进去之后记下加入价算盈亏；**默认不提醒**，要盯就去「自选标的」"
                     "打开那一行的监控开关），也可以【导出结果到桌面】。"
                 )
