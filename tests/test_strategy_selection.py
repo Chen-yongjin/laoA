@@ -162,12 +162,14 @@ def _watch_manual(cfg, symbol: str, name: str = "") -> None:
         storage.upsert_watchlist(conn, symbol, name=name or symbol, enabled=True)
 
 
-def test_second_round_keeps_only_the_newly_checked_strategy(
+def test_source_column_follows_the_round_that_just_ran(
         cfg, tmp_path, monkeypatch) -> None:
-    """第一轮勾 A、第二轮只勾 B → 池子里只剩 B 的票 + 手工自选行，A 的行被清掉。
+    """同一交易日两轮：**「来源」列跟着这一轮走**（主人 2026-10-12："策略名当然改成新的"）。
 
-    这就是主人真机日志里的那个现象：他第二轮只勾了一条，结果页/「自选标的」里却还有
-    **别的策略的票**（那些行带着"当初是哪条策略选的"）。
+    场景照真机日志摆：用户早先从 A 的结果页加了 5 只自选并开着监控，另外手工加了一只。
+    * 第一轮只勾 A → 那 5 只的来源是 **A 现在的名字**（这一轮真选中了它）；
+    * 第二轮只勾 B → 这 5 只这一轮**没被任何勾选的策略选中** → 来源写 **`自选`**
+      （不再显示"当初是 A 选的"），而 B 选出来的那只由结果页说 B。
     """
     _ready_db(cfg)
     _write_formulas(tmp_path, monkeypatch, cfg, {A_NAME: "C<5", B_NAME: "C>10"})
@@ -185,38 +187,35 @@ def test_second_round_keeps_only_the_newly_checked_strategy(
     assert {r["symbol"] for r in first["pool"]} == set(LOW) | {MID}
     # 落库的是自选标的行（`save_picks=False`）：A 的票 + 手工那只
     assert {r["symbol"] for r in _pool_rows(cfg, day)} == set(LOW) | {MID}
+    page = {r["symbol"]: r for r in pool_mod.pool_page_rows(cfg.db_path)}
+    for symbol in LOW:
+        assert page[symbol]["source_label"] == "低价"        # 这一轮 A 选中了它
+    assert page[MID]["source_label"] == "自选"
 
     # ── 第二轮：只勾 B ──
     cfg.enabled_formulas = [B_NAME]
     second = _run(cfg, monkeypatch)
 
-    # ① 池子（= 结果页/桌面文件读的那一份）里只剩 B 的票 + 手工自选行
-    assert {r["symbol"] for r in second["pool"]} == {HIGH, MID}
-    assert {r["strategy"] for r in second["pool"]} == {"公式·反转", ""}
+    # ① 池子（= 结果页/桌面文件读的那一份）里只剩 B 的票 + 自选标的行
+    assert {r["symbol"] for r in second["pool"]} == set(LOW) | {MID, HIGH}
+    assert {r["strategy"] for r in second["pool"] if r["symbol"] != HIGH} == {""}
 
-    # ② 库里（今天这一批）也没有「低价」的行了，手工自选那一行还在
+    # ② 库里（今天这一批）没有「低价」的行了：这一轮写下去的自选行都是**没有策略名**的
     left = _pool_rows(cfg, day)
-    assert {r["symbol"] for r in left} == {MID}, left
     assert all("低价" not in str(r["strategy"] or "") for r in left), left
 
-    # ③ 那 5 只在「自选标的」页里变成**不在池子里的自选行**（`reason` 就是这句），
-    #    不再是"这次筛选的池子行"；票本身照旧看得见、照旧被盯。
-    #    ⚠️ 它们的「来源」列**照旧**写"当初是哪条策略选的"（`低价`）—— 那是主人
-    #    2026-09-21 明确要的口径（见 `test_add_to_watchlist_keeps_the_pick_source_in_the_pool_page`）。
-    #    也就是说：`来源`列回答"这票当初怎么来的"，而"是不是本次筛选结果"看的是
-    #    它有没有进**这一轮**的池子（上面 ① ② 两条断言）。
+    # ③ 「自选标的」页那一列：这 5 只这一轮没被选中 → `自选`（不再是 A 的名字）
     page = {r["symbol"]: r for r in pool_mod.pool_page_rows(cfg.db_path)}
     for symbol in LOW:
-        assert page[symbol]["reason"] == "自选标的", page[symbol]
-        assert page[symbol]["source_label"] == "低价"
-    # B 选出来的那只**不在这一页**：2026-09-21 起筛选结果不自动进股池，它只在
-    # 【开始筛选】的结果页 / 桌面文件 / `signal` 表里（上面 `second["pool"]` 已断言）。
-    assert HIGH not in page
+        assert page[symbol]["source_label"] == "自选", page[symbol]
+        assert page[symbol]["strategy"] == ""
+    assert page[MID]["source_label"] == "自选"
 
-    # ④ 用户数据**一个都没少**：那 5 只票还在自选表里（只是不再算"这次选出来的"）
+    # ④ 用户数据**一个都没少**：那 5 只票还在自选表里，库里那个历史字段也原样留着
     with storage.connect(cfg.db_path) as conn:
-        symbols = {r["symbol"] for r in storage.load_watchlist(conn)}
-    assert set(LOW) | {MID} <= symbols
+        entries = {r["symbol"]: r for r in storage.load_watchlist(conn)}
+    assert set(LOW) | {MID} <= set(entries)
+    assert entries[LOW[0]]["source_strategy"] == "公式·低价"     # 不动用户数据
 
 
 def test_checked_strategy_rows_survive_the_next_round(cfg, tmp_path, monkeypatch) -> None:
@@ -236,6 +235,82 @@ def test_checked_strategy_rows_survive_the_next_round(cfg, tmp_path, monkeypatch
 
     assert LOW[0] in {r["symbol"] for r in second["pool"]}
     assert {r["symbol"] for r in _pool_rows(cfg, day)} == {LOW[0]}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2b) 「来源」列：**这一轮谁选中了它**（主人 2026-10-12："策略名当然改成新的"）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 那一列的判据从"历史来源"（`watchlist.source_strategy`：当初是哪条策略选的）
+# 换成了"**当前这一轮勾选集合里真的选中了它的那条**"，没有就是「自选」。
+# "这一轮选出了什么"读 `signal` 台账（`pool.round_pick_strategies()`）—— 建池结果
+# 不落库，台账是唯一记得住它的地方。
+
+
+def test_source_column_shows_the_strategy_that_picked_it_this_round(
+        cfg, tmp_path, monkeypatch) -> None:
+    """① 先被 A 选中加进自选（旧来源 A）→ 这轮只勾 B 且 B 也选中它 → 显示 **B**。
+
+    这只票**没开监控**（2026-10-05 起加自选默认不提醒）→ 它不在池子里，
+    所以这一条只有"读台账"才答得对：池子行里根本没有它。
+    """
+    _ready_db(cfg)
+    _write_formulas(tmp_path, monkeypatch, cfg, {A_NAME: "C<5", B_NAME: "C>10"})
+    # 当初是「低价」选出来加进自选的（库里记着旧来源），但**没开监控**
+    with storage.connect(cfg.db_path) as conn:
+        storage.upsert_watchlist(conn, HIGH, name="反转样本", enabled=False,
+                                 source_strategy=formula_group.formula_strategy_name(A_NAME))
+
+    cfg.enabled_formulas = [B_NAME]
+    report = _run(cfg, monkeypatch)
+    assert [r["symbol"] for r in report["pool"]] == [HIGH]       # 这一轮 B 选中了它
+    assert report["pool"][0]["strategy"] == "公式·反转"
+
+    row = {r["symbol"]: r for r in pool_mod.pool_page_rows(cfg.db_path)}[HIGH]
+    assert row["source_label"] == "反转（已停用）"               # ← B **现在的名字**
+    assert row["strategy"] == "公式·反转"
+    # 库里那个历史字段一个字节都没动（口径改了也不动用户数据）
+    with storage.connect(cfg.db_path) as conn:
+        assert (storage.watchlist_map(conn)[HIGH]["source_strategy"]
+                == "公式·低价")
+
+
+def test_source_column_falls_back_to_self_selected(cfg, tmp_path, monkeypatch) -> None:
+    """② 这轮**没有任何**勾选的策略选中它 → 显示 `自选`（不管库里那个旧名是什么）。"""
+    _ready_db(cfg)
+    _write_formulas(tmp_path, monkeypatch, cfg, {A_NAME: "C<5", B_NAME: "C>10"})
+    # MID（8 元）哪条公式都不命中；A 只选 LOW*、B 只选 HIGH
+    _watch_pick(cfg, MID, formula_group.formula_strategy_name(A_NAME))
+
+    cfg.enabled_formulas = [A_NAME]
+    _run(cfg, monkeypatch)
+
+    row = {r["symbol"]: r for r in pool_mod.pool_page_rows(cfg.db_path)}[MID]
+    assert row["source_label"] == "自选"
+    assert row["strategy"] == ""
+
+
+def test_source_column_with_a_deleted_strategy_name_in_old_data(
+        cfg, tmp_path, monkeypatch) -> None:
+    """③ 老数据：库里存着**已经删掉的那条策略**（`LowPriceStrategy`）→ 显示 `自选`、不许崩。
+
+    那批内置策略 2026-09-18 就删掉了，用户现在根本选不出来它 —— 拿它当来源显示就是
+    "我没勾的策略的票怎么在这儿"。
+    """
+    _ready_db(cfg)
+    _write_formulas(tmp_path, monkeypatch, cfg, {A_NAME: "C<5"})
+    for symbol in (LOW[0], MID):
+        _watch_pick(cfg, symbol, "LowPriceStrategy")      # 已删除的内置策略名（老数据）
+
+    cfg.enabled_formulas = [A_NAME]
+    report = _run(cfg, monkeypatch)
+
+    page = {r["symbol"]: r for r in pool_mod.pool_page_rows(cfg.db_path)}
+    assert page[MID]["source_label"] == "自选"             # 不是「低价股」
+    assert page[LOW[0]]["source_label"] == "低价"           # 这一轮 A 真选中了它 → 说 A
+    # 池子行里也不该留下那个删掉的策略名（建池按"当前勾选集合"清）
+    left = _pool_rows(cfg, report["data_date"])
+    assert all(r["strategy"] != "LowPriceStrategy" for r in left), left
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -302,10 +377,11 @@ def test_previous_round_row_is_cleared_even_when_the_pool_is_empty(
 
 
 def test_result_page_counts_only_this_rounds_picks(cfg, tmp_path, monkeypatch) -> None:
-    """结果页 = **这一轮选出来的**那几只；池子里多出来的自选标的**不能混进去**。
+    """结果页 = **这一轮选出来的**那几只；池子里并进来的自选标的**不能混进去**。
 
-    真机日志里的数字（本轮 3 只 / 池 8 只）就是这么来的：自选标的行也带着 `strategy`
-    （"当初是哪条策略选的"），只按"有没有 strategy"判会把它们算成"本次筛选结果"。
+    真机日志里的数字（本轮 3 只 / 池 8 只）就是这么来的：池子是"选出来的票 + 自选标的"
+    合起来的，只按"有没有 strategy"判会把自选标的也算成"本次筛选结果" ——
+    现在结果页只认 `picked` 标记，并在结论里把"池内共 M 只"说清楚。
     """
     import os
 
@@ -325,7 +401,8 @@ def test_result_page_counts_only_this_rounds_picks(cfg, tmp_path, monkeypatch) -
 
     cfg.enabled_formulas = [B_NAME]
     report = _run(cfg, monkeypatch)
-    assert {r["symbol"] for r in report["pool"]} == {HIGH, MID}    # 池子：选出来的 + 自选
+    # 池子 = 这一轮选出来的（HIGH）+ 并进来的自选标的（LOW[0] 与手工那只）
+    assert {r["symbol"] for r in report["pool"]} == {LOW[0], MID, HIGH}
 
     page = fp.FormulaPage(cfg, directory=tmp_path / "formulas")
     try:
@@ -335,7 +412,7 @@ def test_result_page_counts_only_this_rounds_picks(cfg, tmp_path, monkeypatch) -
         assert [r["symbol"] for r in page.result_rows] == [HIGH]    # 只列选出来的
         hint = page.result_hint.text()
         assert "本次筛选结果：共 1 只" in hint
-        assert "池内共 2 只" in hint and "自选标的" in hint          # 差在哪说清楚
+        assert "池内共 3 只" in hint and "自选标的" in hint          # 差在哪说清楚
     finally:
         page.close()
         page.deleteLater()

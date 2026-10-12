@@ -244,10 +244,11 @@ def build_pool(
     # ⚠️ 日志里这三个数字**不是同一件事**（主人 2026-10-12 对着真机日志问过，这里说明白）：
     #   * `策略标的合成完成：3 只` —— `build_pool_from_picks` 的结果：**这一轮勾选的策略
     #     选出来的票**（每条策略最多 3 只、总共最多 `size` 只）；
-    #   * `股票池合成完成：8 只（策略 8 只 / 自选 0 只）` —— 上面 3 只**再加上并进来的自选标的**
-    #     （真机是 +5）。`pool_counts()` 是按"**有没有 `strategy`**"分的，而从结果页加进来的
-    #     自选标的带着"当初是哪条策略选的"（`watchlist.source_strategy`），
-    #     所以它们也被算成"策略" —— 这就是"策略 8 只 / 自选 0 只"看着自相矛盾的原因；
+    #   * `股票池合成完成：8 只（策略 3 只 / 自选 5 只）` —— 上面 3 只**再加上并进来的自选标的**
+    #     （真机是 +5）。`pool_counts()` 按"**有没有 `strategy`**"分，而自选标的行现在
+    #     一律没有策略名（来源写「自选」，见 `self_select_fields()`）→ 于是这一行如实写成
+    #     "策略 3 / 自选 5"（**2026-10-12 之前**它会把自选行按 `watchlist.source_strategy`
+    #     里那个旧策略名算成"策略"，于是出现"策略 8 只 / 自选 0 只"这种看着矛盾的行）；
     #   * `股票池已写入 5 只` —— `save_picks=False`（2026-09-21 主人要求"筛选结果不自动进
     #     股池"）之后只写**自选标的**那 5 行；选出来的 3 只只在结果页/桌面文件/`signal` 表里。
     logger.info(f"策略标的合成完成：{len(pool)} 只")
@@ -264,14 +265,29 @@ def build_pool(
     # ── 自选标的：独立上限、不占策略名额、不受热门行业过滤 ──
     pool = merge_watchlist(engine, pool, settings=settings, watchlist=watchlist,
                            report=report)
+    # 「来源」列跟着"**这一轮真的选中了它**的那条策略"走（主人 2026-10-12：
+    # "策略名当然改成新的"）—— 池子里除"这一轮选出来的"之外还有并进来的自选标的，
+    # 它们的来源要按**这一轮的候选**重算一遍：
+    #   * 这一轮某条勾选的策略命中了它 → 写那条策略**现在的名字**（哪怕它没进池子的
+    #     前三只，比如"首板缩量整理选了 5 只、池子里只留 3 只"时的那两只）；
+    #   * 这一轮没有任何勾选的策略命中它 → 空串（= 显示「自选」）。
+    # 不再保留 `watchlist.source_strategy` 里"当初是哪条策略选的"那个旧名：那条策略
+    # 可能已改名、甚至已删除，显示出来就是"我没勾的策略的票怎么在这儿"。
+    hits = candidate_strategies(picks_by_strategy)
+    for row in pool:
+        if row.get(PICK_FLAG):
+            continue              # 这一轮选出来并进了池子的那几只：策略名已经是对的
+        name = hits.get(str(row.get("symbol") or ""), "")
+        row["strategy"] = name
+        row["strategies"] = name
     pool, dropped_rows = drop_unchecked_strategy_rows(pool, keep_strategies)
     if dropped_rows:
-        # 从结果页加进来的自选标的**记着"当初是哪条策略选的"**（`source_strategy`）——
-        # 那条策略现在没勾，这一行就不该再被当成"这次筛选的结果"（真机日志里那 5 只
-        # 就是这么冒出来的）。票本身还在自选表里（`watchlist`），「自选标的」页照旧看得到、
-        # 照旧被盯 —— 只是不再冒充"当前勾选的策略选出来的"。
+        # 到这一步还带着"当前没勾的那条策略"的名字的行，只剩显式传 `picks=` 的调用方
+        # （CLI/测试/定制部署）能造出来 —— 自选标的行现在一律写「自选」，
+        # 身上不再挂历史来源名（见 `self_select_fields()`）。票本身还在自选表里
+        # （`watchlist`），「自选标的」页照旧看得到、照旧被盯。
         logger.info(
-            f"剔掉 {len(dropped_rows)} 只由**当前没勾的策略**选出来的自选标的行"
+            f"剔掉 {len(dropped_rows)} 只由**当前没勾的策略**写出来的行"
             f"（{'、'.join(sorted({str(r.get('strategy') or '') for r in dropped_rows}))}）"
             f"；它们仍在自选表里，只是不算本次筛选结果"
         )
@@ -298,19 +314,50 @@ def build_pool(
     return pool
 
 
+def candidate_strategies(picks_by_strategy: dict[str, list[dict]]) -> dict[str, str]:
+    """这一轮的候选 → `{代码: 策略名}`（一只票被多条命中时取**名字排序的第一条**）。
+
+    用途只有一个：把池子行上的「来源」按**这一轮真的选中了它**的那条策略算出来
+    （见 `build_pool()` 里那段说明）。一只票被多条策略同时命中时只写一条 ——
+    「来源」列一行只写得下一条，与 `source_label()` 只写主策略同一条口径。
+
+    ⚠️ 与 `round_pick_strategies()`（读 `signal` 台账的那一份）**同一口径、同一份数据**：
+    台账就是 `formula_run.picks` 写下去的（每条策略最多 `MAX_PER_FORMULA * 3` 只），
+    所以"池子行上的来源"与"「自选标的」页那一列"不会各说各话。
+    """
+    out: dict[str, str] = {}
+    for strategy, candidates in (picks_by_strategy or {}).items():
+        name = str(strategy or "")
+        if not name:
+            continue
+        for pick in candidates or []:
+            symbol = str(pick.get("symbol") or "")
+            if not symbol:
+                continue
+            current = out.get(symbol)
+            if current is None or name < current:
+                out[symbol] = name
+    return out
+
+
 def drop_unchecked_strategy_rows(
     rows: list[dict], checked: set[str],
 ) -> tuple[list[dict], list[dict]]:
-    """把"**当前没勾**的策略选出来的行"从池子里剔掉，返回 `(留下的, 剔掉的)`。
+    """把"**当前没勾**的策略写出来的行"从池子里剔掉，返回 `(留下的, 剔掉的)`。
 
     一条行算"当前勾选的策略选出来的"当且仅当：
 
     * `strategy` **在 `checked` 里**（= 这一轮真正跑的那几条公式）；或
-    * `strategy` **是空的** —— 用户**手工加**的自选标的（`来源=自选`）**必须保留**
+    * `strategy` **是空的** —— 用户自己加的自选标的（`来源=自选`）**必须保留**
       （主人 2026-10-12 明确要求）。
 
     其余（来源是当前没勾的那条策略）一律剔掉。为什么放在**合并自选之后、落库之前**：
     剔掉的必须是"池子里"的行 —— 结果页、桌面文件、推送、`stock_pool` 全都读这一份。
+
+    ⚠️ 2026-10-12 第二版（主人："策略名当然改成新的"）之后，自选标的行**不再带历史来源名**
+    （见 `self_select_fields()`），所以正常链路上这里已经**没有可剔的行**了；
+    它保留下来是为了挡住"显式传 `picks=` 的调用方给了没勾的策略候选"这种情形 ——
+    判据本身没变，只是输入变干净了。
     """
     kept: list[dict] = []
     dropped: list[dict] = []
@@ -337,7 +384,11 @@ def merge_watchlist(
     - **去重**：既是策略选中又是自选 → 只留一行，`source` 记成「公式+自选」
       （内部标记；**显示**只写那条策略名 —— 见 `source_label()`）；
     - **独立上限**：`watchlist_max` 只截自选，超出的部分**提示**（`report["warnings"]`）；
-    - **顺序**：策略标的（按分数降序）在前，纯自选（按加入时间）在后。
+    - **顺序**：策略标的（按分数降序）在前，纯自选（按加入时间）在后；
+    - **来源**（2026-10-12 主人："策略名当然改成新的"）：**被这一轮某条勾选的策略选中**的票，
+      去重时保留的是**本轮候选那条策略名**（= 策略现在的名字）；没被选中的自选标的
+      一律写「自选」（`self_select_fields()`），**不再**搬 `watchlist.source_strategy`
+      里"当初是哪条策略选的"那个旧名。
     """
     cfg = settings if settings is not None else get_config()
     rows = watchlist
@@ -400,11 +451,15 @@ def merge_watchlist(
             "reason": "自选" + (f"（{note}）" if note else ""),
             "note": note,
             "watchlist": True,
-            # 从筛选结果页加入自选的票带着"当初是哪条策略/公式选出来的"
-            # （`watchlist.source_strategy`）—— 推送正文、桌面文件、盘中提醒都读这一份，
-            # 所以这里必须把它带上，否则同一只票在股池表里写 `公式·X+自选`、
-            # 在推送里写「自选」，两处对不上（2026-09-21 主人实报的那个 bug）。
-            **watchlist_source_fields(entry),
+            # ⚠️ 2026-10-12（主人："策略名当然改成新的"）：这里**不再**把
+            # `watchlist.source_strategy`（"当初是哪条策略选的"）搬进池子行 ——
+            # 「来源」列只跟"**这一轮勾选集合里真的选中了它**的那条策略"走，
+            # 没被选中就是「自选」。被选中的那些票走的是上面"去重"那条分支：
+            # 池子行里已经是**本轮候选的策略名**（也就是策略现在的名字），
+            # 所以同一只票"以前是 A 选的、这一轮 B 也选中了它"时会显示 B。
+            # 库里的 `watchlist.source_strategy` **照旧留着**（用户数据不动），
+            # 只是不再拿它当显示来源。
+            **self_select_fields(entry),
         })
     return merged
 
@@ -1189,6 +1244,14 @@ def watchlist_source_fields(entry: dict) -> dict:
     桌面文件都要说**同一个词**。把这一行的 `strategy` 填成那条公式名之后，
     `source_label()` / `source_kind()` / `strategy_names()` 全都不用改 ——
     它们本来就是按 `strategy` 说话的（见 `source_label()` 的说明）。
+
+    ⚠️ **2026-10-12 起它不在显示路径上了**（主人："策略名当然改成新的"）：
+    界面上那一列、池子行、推送、桌面文件现在一律走 `self_select_fields()` ——
+    显示"**这一轮勾选的策略里真的选中了它**的那条"，没被选中就是「自选」。
+    这个函数留着是因为 `watchlist.source_strategy` 那一列**照旧留着**（用户数据不动，
+    见 `storage.upsert_watchlist`）：以后想查"这只票当初是谁选出来的"仍然读得到，
+    只是**不再拿它当显示来源**（那条策略可能已改名、甚至已删除，显示出来就是
+    "我没勾的策略的票怎么在这儿"）。
     来源为空的纯手工自选行：`strategy` 仍是空串，显示就是「自选」（与以前一模一样）。
 
     `enabled=False` 的行照样显示，只是来源里点明状态：`自选（已停用）` /
@@ -1212,6 +1275,85 @@ def watchlist_source_fields(entry: dict) -> dict:
     if not int(entry.get("enabled", 1) or 0):
         fields["source_label"] = f"{fields['source_label']}（已停用）"
     return fields
+
+
+def self_select_fields(entry: dict, picked_by: str = "") -> dict:
+    """自选标的行 → 「来源」列的字段：**跟着"这一轮谁选中了它"走**。
+
+    主人 2026-10-12 的口径（原话："策略名当然改成新的"）：
+    「来源」列显示**当前这一轮勾选集合里、真的选中了它**的那条策略名；
+    这一轮没有勾选的策略选中它（纯手工加的、或**原来是别的/已删策略选的**）→ 写「自选」。
+
+    Args:
+        entry: `watchlist` 的一行（用它的 `enabled` 决定要不要补「（已停用）」）。
+        picked_by: **这一轮选出了它的那条策略**（池子里的写法 `公式·X`）；
+            空串 = 这一轮没有勾选的策略选中它 → 写「自选」。
+            值来自 `round_pick_strategies()`（读 `signal` 台账），**不是**读
+            `watchlist.source_strategy` —— 那一列记的是"当初是哪条策略选的"，
+            可能早就改过名、甚至那条策略已经删掉了；拿它显示就会出现
+            "我没勾的策略的票怎么在这儿"。**库里的那一列照旧留着**（用户数据不动）。
+
+    `enabled=False`（没开监控）的行照旧点明状态：`自选（已停用）` / `X（已停用）` ——
+    与"手工自选"是同一套写法（`source_label()` 那一列的词）。
+    """
+    if picked_by:
+        row = {"strategy": picked_by, "strategies": picked_by, "watchlist": True}
+        # `source_kind()` / `source_label()` 统一按"在自选表里、且是启用的"算 ——
+        # 停用只影响后面补的那个尾巴（与 `watchlist_source_fields()` 同一条口径）。
+        in_watch = {"enabled": 1}
+        fields = {
+            "strategy": picked_by,
+            "strategies": picked_by,
+            "label": legacy.strategy_label(picked_by),
+            "source": source_kind(row, in_watch),
+            "source_label": source_label(row, in_watch),
+        }
+    else:
+        fields = {"strategy": "", "strategies": "", "label": "",
+                  "source": "自选", "source_label": "自选"}
+    if not int(entry.get("enabled", 1) or 0):
+        fields["source_label"] = f"{fields['source_label']}（已停用）"
+    return fields
+
+
+def round_pick_strategies(db_path: str, day: str | None = None) -> dict[str, str]:
+    """**最近一轮筛选**里每一只票是被哪条策略选出来的 → `{代码: 合成策略名}`。
+
+    数据来自 `signal` 表（`legacy.save_signals()` 在建池那一轮写进去的，与池子**同一轮、
+    同一天**），默认取**最近一个信号日**（= 主人说的"这一轮"）。
+
+    为什么「来源」列要问它、而不是看 `stock_pool`：建池结果**不落库**
+    （`save_picks=False`，2026-09-21 主人要求"筛选结果不自动进股池"），所以"从结果页
+    点过【加入自选】、但没开监控"的票根本不在池子里 —— 光看池子行答不出"这一轮谁选中了它"。
+    台账里是每一轮真正跑过的公式与它们的候选（`formula_group.run_enabled_formulas()`
+    的那一份，按代码升序），所以它是"这一轮选出了什么"唯一记得住的答案。
+
+    一只票被多条策略同时命中时取**名字排序的第一条**：「来源」列一行只写得下一条
+    （与 `source_label()` 只写主策略同一条口径）。
+
+    台账为空（老库 / 还没跑过一轮）→ 返回 `{}`，调用方照旧写「自选」。
+    """
+    with storage.connect(db_path) as conn:
+        if day is None:
+            row = conn.execute("SELECT MAX(signal_date) FROM signal").fetchone()
+            day = row[0] if row and row[0] else None
+        if not day:
+            return {}
+        rows = conn.execute(
+            "SELECT symbol, strategy FROM signal "
+            "WHERE signal_date = ? AND strategy IS NOT NULL AND strategy != ''",
+            (day,),
+        ).fetchall()
+    out: dict[str, str] = {}
+    for symbol, strategy in rows:
+        name = str(strategy)
+        key = str(symbol or "")
+        if not key or not name:
+            continue
+        current = out.get(key)
+        if current is None or name < current:
+            out[key] = name
+    return out
 
 
 def strategy_names(row: dict) -> list[str]:
@@ -1442,6 +1584,9 @@ def watchlist_only_rows(db_path: str, day: str | None = None) -> list[dict]:
             for r in conn.execute("SELECT symbol, name FROM stock_basic")
         }
     in_pool = set(pool_symbols(db_path, day))
+    # **这一轮谁选中了它**（读 `signal` 台账，见 `round_pick_strategies()` 的说明）：
+    # 「来源」列显示的是**当前这一轮**的选中情况，不是历史上那个 `source_strategy`。
+    picks = round_pick_strategies(db_path, day)
     limit_up = limit_up_annotations(db_path, day)
     out: list[dict] = []
     for entry in watch:
@@ -1449,10 +1594,13 @@ def watchlist_only_rows(db_path: str, day: str | None = None) -> list[dict]:
         if not symbol or symbol in in_pool:
             continue
         enabled = int(entry.get("enabled", 1)) == 1
-        # 「来源」列（2026-09-21 修）：这一只是**从筛选结果页加入自选**的，就显示
-        # `公式·尾盘超短策略+自选` —— 以前这里写死成「自选」，于是"从匹配列表加入的票
-        # 到股池里全变成自选了"（主人实报）。纯手工加的票没有来源，仍是「自选」。
-        source_fields = watchlist_source_fields(entry)
+        # 「来源」列（2026-10-12 主人定的新口径："策略名当然改成新的"）：
+        #   * 这一轮有勾选的策略选中它 → 显示**那条策略现在的名字**
+        #     （哪怕它是从结果页加进自选、还没开监控 —— 池子里没有它，但台账里有）；
+        #   * 没有 → 写「自选」。
+        # **不再**读 `watchlist.source_strategy` 里"当初是哪条策略选的"：那条策略可能已改名、
+        # 甚至已删除，显示出来就是"我没勾的策略的票怎么在这儿"。库里那一列照旧留着。
+        source_fields = self_select_fields(entry, picks.get(symbol, ""))
         out.append({
             "symbol": symbol,
             "name": str(entry.get("name") or names.get(symbol) or ""),

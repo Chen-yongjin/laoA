@@ -2632,13 +2632,28 @@ def test_result_table_columns_have_room_for_their_text(page) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 3.10) 【加入自选】之后股池里的「来源」不能变成「自选」（2026-09-21 主人实报：
-#       「新版本从匹配列表加入自选的票到股池里的来源都变成自选了，需要改一下」）
+# 3.10) 【加入自选】之后股池那一行的「来源」是谁（**2026-10-12 换过口径**）
 # ══════════════════════════════════════════════════════════════════════════
-# 修的是"加入时没把来源存下来"：结果页那一格知道它是被哪条公式选出来的
-# （`row["strategy"]`），但加进自选表时只写进了备注，股池那一列读的是
-# `pool.watchlist_only_rows()` —— 它对不在池子里的自选行写死「自选」。
-# 现在来源进了 `watchlist.source_strategy`，显示照旧走 `source_label()`（同一套函数）。
+# 沿革（三版，别把它们搞混）：
+#   ① 2026-09-21 主人实报"从匹配列表加入自选的票到股池里的来源都变成自选了"
+#      → 加入时把来源写进 `watchlist.source_strategy`，股池那一列照它显示；
+#   ② 2026-10-12 上半场：来源列只认"**这一轮真的选中了它**的那条策略"，
+#      没被选中就写「自选」（`pool.self_select_fields()`）；"这一轮选出了什么"读
+#      **`signal` 台账**（`pool.round_pick_strategies()`）——建池结果不落库
+#      （`save_picks=False`），台账是唯一记得住它的地方；
+#   ③ 老数据里 `watchlist.source_strategy` 那个旧名（可能已改名/已删除）**不再参与显示**，
+#      但字段照旧留着、照旧在加入自选时写进去（用户数据不动）。
+#
+# 所以【加入自选】这条路径的正确期望是：**这一轮真的选中过它 → 显示那条策略现在的名字**；
+# 库里没有这一轮的台账（比如只跑过界面、没跑过 `run_daily`）→ 显示「自选」。
+
+
+def _signal(page_cfg, symbol: str, strategy: str, day: str = "2026-09-11") -> None:
+    """写一条 `signal` 台账 = "这一轮这条策略选中了这只票"（来源列读的就是它）。"""
+    with storage.connect(page_cfg.db_path) as conn:
+        storage.write_signals(conn, [
+            (day, strategy, symbol, symbol, 10.0, None, "策略：X"),
+        ])
 
 
 def _pool_row(page_cfg, symbol: str) -> dict:
@@ -2649,7 +2664,14 @@ def _pool_row(page_cfg, symbol: str) -> dict:
 
 
 def test_add_to_watchlist_keeps_the_pick_source_in_the_pool_page(page, page_cfg) -> None:
-    """点【加入自选】→ 股池那一行的来源是**那条公式的名字**（**不是**「自选」）。"""
+    """点【加入自选】→ 股池那一行显示**这一轮选中它的那条策略名**（不是「自选」）。
+
+    这一轮刚选出来的票（结果页那一行就说得出是哪条策略）加进自选之后，
+    「自选标的」页那一列必须还是那条策略名 —— 这是主人 2026-09-21 实报过的那条。
+    口径换成"跟着这一轮的台账走"之后，结论不变，但**答案来自台账**（`signal`），
+    不再来自加入时记下的历史字段。
+    """
+    _signal(page_cfg, "600003", "公式·尾盘超短策略")
     page.show_pick_result({"data_date": "2026-09-11",
                            "pool": [{"symbol": "600003", "name": "丙样本",
                                      "strategy": "公式·尾盘超短策略"}]})
@@ -2666,8 +2688,26 @@ def test_add_to_watchlist_keeps_the_pick_source_in_the_pool_page(page, page_cfg)
         assert storage.watchlist_map(conn)["600003"]["source_strategy"] == "公式·尾盘超短策略"
 
 
+def test_added_row_falls_back_to_self_selected_without_a_round_ledger(page, page_cfg) -> None:
+    """台账里没有它（这一轮没选中过它）→ 来源写「自选」，**不再**读历史字段那个旧名。
+
+    这一条是 2026-10-12 主人新口径的看门人：主人原话"策略名当然改成新的"。
+    """
+    with storage.connect(page_cfg.db_path) as conn:
+        # 老数据：库里记着"当初是公式·尾盘超短策略选的"，但这一轮没有任何勾选的策略选中它
+        storage.upsert_watchlist(conn, "600003", name="丙样本", enabled=True,
+                                 source_strategy="公式·尾盘超短策略")
+    page.reload()
+
+    row = _pool_row(page_cfg, "600003")
+    assert row["source_label"] == "自选"
+    assert row["strategy"] == ""
+
+
 def test_one_click_add_keeps_the_pick_source_too(page, page_cfg) -> None:
-    """【一键加入自选】走的是另一条代码路径，来源一样要带上（别只修一条）。"""
+    """【一键加入自选】走的是另一条代码路径，结论一样（别只修一条）。"""
+    _signal(page_cfg, "600003", "公式·尾盘超短策略")
+    _signal(page_cfg, "600001", "公式·放量上攻")
     page.show_pick_result({"data_date": "2026-09-11",
                            "pool": [{"symbol": "600003", "name": "丙样本",
                                      "strategy": "公式·尾盘超短策略"},
@@ -2685,7 +2725,9 @@ def test_adding_an_existing_symbol_fills_the_missing_source_only(page, page_cfg)
 
     为什么单独一条：这一条路界面说的是"已经在自选里了（没有重复添加）"——
     所以补来源时**不能**顺手把用户停用的票启用回来、也不能动加入价与他自己写的备注
-    （见 `storage.fill_watchlist_source()`）。手工加过的票从此显示那条公式名。
+    （见 `storage.fill_watchlist_source()`）。
+    补进去的那个来源仍然只是**历史字段**（"当初是哪条策略选的"）；「来源」列按 2026-10-12
+    的新口径显示 —— 这里没有这一轮的 `signal` 台账，所以显示「自选（已停用）」。
     """
     with storage.connect(page_cfg.db_path) as conn:
         storage.upsert_watchlist(conn, "600003", name="丙样本", note="龙头",
@@ -2698,12 +2740,12 @@ def test_adding_an_existing_symbol_fills_the_missing_source_only(page, page_cfg)
 
     with storage.connect(page_cfg.db_path) as conn:
         row = storage.watchlist_map(conn)["600003"]
-    assert row["source_strategy"] == "公式·尾盘超短策略"     # 来源补上了
+    assert row["source_strategy"] == "公式·尾盘超短策略"     # 历史字段补上了（不再用于显示）
     assert row["enabled"] == 0                              # 停用状态没被动过
     assert row["note"] == "龙头"                            # 用户写的备注没被动过
     assert float(row["added_price"]) == pytest.approx(5.0)  # 加入价没被重置
     assert "已经在自选里了" in page.hint_text
-    assert _pool_row(page_cfg, "600003")["source_label"] == "尾盘超短策略（已停用）"
+    assert _pool_row(page_cfg, "600003")["source_label"] == "自选（已停用）"
 
 
 def test_top_buttons_are_not_stretched_across_the_row(page, qapp) -> None:

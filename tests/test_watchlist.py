@@ -745,23 +745,48 @@ def _page_rows(cfg) -> dict[str, dict]:
     return {r["symbol"]: r for r in pool.pool_page_rows(cfg.db_path)}
 
 
-def test_watchlist_source_is_persisted_and_shown_as_the_plain_strategy(wl_db) -> None:
-    """从结果页加入自选的票：股池那一列写**策略名本身**（不是「自选」、也不带「+自选」）。
+def _signal(cfg, symbol: str, strategy: str, day: str = "2026-09-11") -> None:
+    """往 `signal` 台账里写一行 = "**这一轮**这条策略选中了这只票"。
 
-    2026-09-23 主人："为什么要+自选 什么策略跑出来的 直接记录策略名称
-    只有用户自己输入的才能算自选来源" —— 所以哪怕它同时在自选表里，来源列也只写策略名。
+    「来源」列读的就是它（`pool.round_pick_strategies()`）—— 建池结果**不落库**
+    （`save_picks=False`），所以"这一轮选出了什么"只有这份台账记得住。
+    """
+    with storage.connect(cfg.db_path) as conn:
+        storage.write_signals(conn, [
+            (day, strategy, symbol, symbol, 10.0, None, "策略：X"),
+        ])
+
+
+def test_watchlist_source_column_follows_this_round_not_the_history(wl_db) -> None:
+    """「来源」列 = **这一轮谁选中了它**，不是 `watchlist.source_strategy` 里那个旧名。
+
+    主人 2026-10-12（原话）："策略名当然改成新的"。所以：
+    * 台账里**没有**它 → 显示「自选」（哪怕库里记着"当初是公式·尾盘超短策略选的"）；
+    * 台账里**有**它 → 显示**那条策略现在的名字**。
+
+    库里的 `source_strategy` **一个字节都没动**（用户数据不迁移），只是不再拿它显示。
     """
     _watch_add(wl_db, "600100", name="冷门样本",
                note="匹配来源：公式·尾盘超短策略",
                source_strategy="公式·尾盘超短策略")
 
+    # ① 这一轮没有勾选的策略选中它 → 「自选」
     row = _page_rows(wl_db)["600100"]
+    assert row["source_label"] == "自选"
+    assert row["strategy"] == ""
+    assert row["source"] == "自选"
+    # 库里那一列还在（只是不再当显示来源；以后想查"当初是谁选的"仍读得到）
+    with storage.connect(wl_db.db_path) as conn:
+        assert (storage.watchlist_map(conn)["600100"]["source_strategy"]
+                == "公式·尾盘超短策略")
 
-    assert row["source_label"] == "尾盘超短策略"
+    # ② 这一轮的台账里有它 → 显示那条策略**现在的名字**
+    _signal(wl_db, "600100", "公式·现在这条策略")
+    row = _page_rows(wl_db)["600100"]
+    assert row["source_label"] == "现在这条策略"
+    assert row["strategy"] == "公式·现在这条策略"
     assert row["source"] == "公式"               # 与池子行同一套 `source_kind()`
-    assert row["strategy"] == "公式·尾盘超短策略"
-    # 行 tooltip 的来源明细也是同一个词（界面不自己拼一套）
-    assert pool.source_detail_lines(row)[0] == "来源：尾盘超短策略"
+    assert pool.source_detail_lines(row)[0] == "来源：现在这条策略"
 
 
 def test_manually_added_watchlist_row_still_says_only_self_selected(wl_db) -> None:
@@ -775,19 +800,24 @@ def test_manually_added_watchlist_row_still_says_only_self_selected(wl_db) -> No
     assert row["strategy"] == ""
 
 
-def test_old_watchlist_row_recovers_the_source_from_the_note(wl_db) -> None:
-    """老数据：来源写在备注里（`匹配来源：短期反转`）→ 认出来并原样显示策略名。
+def test_old_source_in_the_note_is_no_longer_shown(wl_db) -> None:
+    """老数据：来源写在备注里（`匹配来源：短期反转`）→ **不再当来源显示**（显示「自选」）。
 
-    这一条救的是"升级之前加的自选"：那时还没有 `source_strategy` 这一列。
-    备注里的 `公式·` / `策略·` 前缀要去掉再当策略名用。
+    这一条原来叫 `test_old_watchlist_row_recovers_the_source_from_the_note`，钉的是
+    "升级之前加的自选，从备注里的 `匹配来源：X` 把来源救回来"。主人 2026-10-12 改了口径
+    （"策略名当然改成新的"）：那一列只认**这一轮**真的选中它的策略，历史写在哪儿都不再看。
+    备注是用户自己的字段，更不该被当成来源 —— 认来源这件事现在只由 `signal` 台账回答。
     """
     _watch_add(wl_db, "600200", name="自选二号", note="匹配来源：短期反转")
 
     row = _page_rows(wl_db)["600200"]
 
-    assert row["strategy"] == "短期反转"             # 去掉前缀的那一份
-    assert row["source_label"] == "短期反转"         # 显示：就是策略名本身
-    assert row["source"] == "策略"
+    assert row["source_label"] == "自选"
+    assert row["strategy"] == ""
+    # 老数据的解析**本身**还留着（`watchlist_source_strategy()`），只是不用于显示了
+    with storage.connect(wl_db.db_path) as conn:
+        entries = {e["symbol"]: e for e in storage.load_watchlist(conn)}
+    assert pool.watchlist_source_strategy(entries["600200"]) == "短期反转"
 
 
 def test_old_watchlist_row_without_any_source_shows_self_selected(wl_db) -> None:
@@ -803,13 +833,21 @@ def test_old_watchlist_row_without_any_source_shows_self_selected(wl_db) -> None
     assert _page_rows(wl_db)["600200"]["source_label"] == "自选"
 
 
-def test_disabled_row_keeps_both_the_source_and_the_disabled_mark(wl_db) -> None:
-    """停用的自选照样显示：来源是策略名、状态用括号标出来 —— `尾盘超短策略（已停用）`。"""
+def test_disabled_row_shows_self_selected_with_the_disabled_mark(wl_db) -> None:
+    """停用的自选照样显示：**这一轮没被选中**就是「自选」+ 状态括号 —— `自选（已停用）`。
+
+    （这一条原来钉的是 `尾盘超短策略（已停用）`；口径 2026-10-12 改成"只认这一轮谁选中了它"
+    之后，`watchlist.source_strategy` 里那个旧名不再参与显示。）
+    """
     _watch_add(wl_db, "600100", name="冷门样本",
                source_strategy="公式·尾盘超短策略")
     with storage.connect(wl_db.db_path) as conn:
         storage.set_watchlist_enabled(conn, "600100", False)
 
+    assert _page_rows(wl_db)["600100"]["source_label"] == "自选（已停用）"
+
+    # 这一轮台账里真有它 → 显示那条策略名 + 停用标记
+    _signal(wl_db, "600100", "公式·尾盘超短策略")
     assert _page_rows(wl_db)["600100"]["source_label"] == "尾盘超短策略（已停用）"
 
 
@@ -892,7 +930,13 @@ def test_old_database_gets_the_source_column_added(tmp_path) -> None:
 
 
 def test_push_and_pool_table_use_the_same_source_word(wl_db) -> None:
-    """推送正文与股池表**同一个词**：加了自选之后两边都还是那条公式名。"""
+    """推送正文与股池表**同一个词**，而且都跟着"这一轮谁选中了它"走。
+
+    2026-10-12 口径（主人："策略名当然改成新的"）：
+    * 这一轮没选中它 → 两边都写「自选」（原来的写法是显示 `watchlist.source_strategy`
+      里那个旧策略名，2026-09-21 定的；主人这次改了口径）；
+    * 这一轮真的有策略选中它（池子行里带着策略名）→ 两边都写那条策略名。
+    """
     _watch_add(wl_db, "600100", name="冷门样本", note="匹配来源：公式·尾盘超短策略",
                source_strategy="公式·尾盘超短策略")
 
@@ -902,9 +946,22 @@ def test_push_and_pool_table_use_the_same_source_word(wl_db) -> None:
     merged = pool.merge_watchlist(engine, [], settings=wl_db, watchlist=entries)
     lines = pool.format_pool_lines(merged)
 
-    assert table_label == "尾盘超短策略"          # 在自选里也不加「+自选」
-    assert lines and lines[0].startswith("1. 冷门样本(600100)尾盘超短策略")
-    # 桌面文件那一列也是同一个词（`pick_export_text` 走 `_export_source`）
-    text = pool.pick_export_text([{**merged[0], "source_label": table_label}])
-    assert "来源：尾盘超短策略" in text
-    assert "+自选" not in text
+    assert table_label == "自选"                  # 这一轮没人选中它
+    assert lines and lines[0].startswith("1. 冷门样本(600100)自选")
+
+    # 这一轮被选中的那一种：池子行带策略名 → 表格与推送都说那条策略名
+    picked = pool.merge_watchlist(
+        engine,
+        [{"symbol": "600100", "name": "冷门样本", "strategy": "公式·尾盘超短策略",
+          "strategies": "公式·尾盘超短策略", "score": 2.0, "reason": "策略：尾盘超短策略"}],
+        settings=wl_db, watchlist=entries,
+    )
+    assert pool.source_label(picked[0], None) == "尾盘超短策略"
+    assert pool.format_pool_lines(picked)[0].startswith("1. 冷门样本(600100)尾盘超短策略")
+    # 桌面文件那一列也是同一个词（`pick_export_text` 走 `_export_source`）——
+    # 这一轮没人选中它的那份写「自选」，被选中的那份写策略名
+    assert "来源：自选" in pool.pick_export_text([{**merged[0],
+                                                   "source_label": table_label}])
+    assert "来源：尾盘超短策略" in pool.pick_export_text(
+        [{**picked[0], "source_label": pool.source_label(picked[0], None)}])
+    assert "+自选" not in pool.pick_export_text([{**picked[0]}])
