@@ -16,6 +16,11 @@
 外加两条边界：不给 `--config` 时必须落到**临时目录**（绝不碰用户真实的数据目录/配置），
 以及"静音"开关用完必须还原（它是进程级的，忘了还原等于把界面上所有错误提示变成只写日志）。
 
+还有一条**定位链**：主窗口初始化每一步都要往日志里刷一行 `启动步骤：…`
+（`ui/app.py::startup_step()`）—— 段错误没有 traceback，崩溃时"日志停在哪一行"就是唯一的现场
+（1.9.2 那次现场只有"主题已应用 / 滚轮防误触"两行，谁也没法定位）。这条链子被删掉的话，
+下一次再崩就又要靠猜，所以在这里钉住。
+
 界面部分用 Qt 的 `offscreen` 平台在无显示器环境里跑（与 `test_ui_smoke.py` 同一套做法）。
 """
 
@@ -235,3 +240,50 @@ def test_gui_selftest_without_config_never_touches_the_real_data_dir(
     # 真实（默认）数据目录自始至终没被碰过
     assert real_default.exists() == existed_before, \
         f"自检往默认数据目录里写了东西：{real_default}"
+
+
+# ── ⑤ 崩溃定位链：每一步都要留下 `启动步骤：…` ──
+
+
+def test_every_startup_step_leaves_a_marker(log_records, cfg) -> None:
+    """主窗口初始化每一步都写一行 `启动步骤：…`（段错误时**最后一行**就是崩溃点）。
+
+    为什么这条要在测试里钉住（2026-10-13 的 1.9.2 实报）：编译版双击打不开，日志停在
+    `界面主题已应用：indigo` + `已启用滚轮防误触…` 两行之后**一个字都没有** ——
+    段错误不给 traceback，于是"它到底崩在屏幕几何、搭界面、托盘、桌宠还是调度器上"
+    完全没法判断，只能靠一遍遍改代码重编再试。有了这串标记，CI 的 `smoke.log`
+    与用户发回来的 `luweik.log` 尾巴就能直接指出崩在哪一步。
+
+    这里顺带把"标记不能只在自检模式下写"钉住：它走的是**生产路径**（普通双击也写），
+    否则用户那边崩了、我们手上那份日志还是什么都没有。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from laoa_trader.__main__ import _teardown_selftest_window
+    from laoa_trader.ui import app as ui_app
+    from laoa_trader.ui import error_popup
+
+    app = QApplication.instance() or QApplication([])
+    # 建窗口时会走到"启动自检失败"那条弹窗路 → 静音（这里不测弹窗，别让它卡住）
+    previous_silent = error_popup.set_silent(True)
+    window = None
+    try:
+        window = ui_app.MainWindow(cfg)
+        window.show()
+        app.processEvents()
+    finally:
+        error_popup.set_silent(previous_silent)
+        if window is not None:
+            _teardown_selftest_window(window, app)
+
+    text = "\n".join(record.getMessage() for record in log_records)
+    steps = [line.split("启动步骤：", 1)[1] for line in text.splitlines()
+             if "启动步骤：" in line]
+    assert steps, f"一条启动步骤标记都没有：\n{text}"
+    # 顺序也要对（顺序错了说明标记插错了地方 —— 定位就会指到错误的一步）
+    for expected in ("主题已应用", "滚轮防误触已装好", "屏幕几何 OK", "界面 OK", "托盘 OK",
+                     "桌宠 OK", "调度器 OK", "授权检查 OK", "快照与评分服务 OK",
+                     "定时器 OK", "首次 _tick OK", "主窗口构造完成"):
+        assert any(step.startswith(expected) for step in steps), \
+            f"启动步骤里缺「{expected}」：{steps}"
+    assert steps[-1].startswith("主窗口构造完成"), f"最后一步应当是构造完成：{steps}"

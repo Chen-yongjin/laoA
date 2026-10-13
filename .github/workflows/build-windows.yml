@@ -442,6 +442,30 @@ jobs:
           Add-Content $log "✅ 冒烟通过：形态 Nuitka、随包策略与资源目录都解析正常"
           Get-Content $log | Write-Host
 
+      # 冒烟失败时把**冒烟日志与 GUI 自检报告**挂到 Release（**公开可读**）。
+      # 为什么不用 artifact：artifact 下载要登录，而这一条存在的意义正是
+      # "作者/维护者（或 agent）没登录也要能拿到失败现场" —— 2026-10-13 那次
+      # "编译版一进图形界面就段错误"就是靠这个才查得下去。
+      - name: 冒烟失败 → 把冒烟日志挂到 Release（公开可读）
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = @(
+            "ci-smoke-data/logs/GUI自检报告.log",
+            "$env:LOCALAPPDATA/LuweikDecision/data/logs/GUI自检报告.log",
+            "smoke.log"
+          )
+          $found = @()
+          foreach ($f in $files) { if (Test-Path $f) { $found += $f } }
+          if ($found.Count -eq 0) { Write-Output "没有可挂的冒烟日志"; exit 0 }
+          foreach ($f in $found) {
+            Copy-Item $f ("ci-log/smoke-" + (Split-Path $f -Leaf)) -Force -ErrorAction SilentlyContinue
+          }
+          gh release upload latest ci-log/smoke-* --clobber
+          Write-Output "已把失败现场挂到 Release：$($found -join ', ')"
+
       - name: 失败时上传构建日志（构建器换了之后更要留档）
         if: failure()
         uses: actions/upload-artifact@v7
