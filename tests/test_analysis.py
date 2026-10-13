@@ -154,9 +154,12 @@ def test_verdicts_never_use_buy_sell_instruction_wording():
 
 
 def test_evidence_requires_a_source():
-    """没有来源的依据写出来不能带空的括号。"""
+    """没有来源的依据写出来不能带空的括号；来源与正文重复时不重复第二遍。"""
     assert Evidence("规则", "当轮被策略命中：公式·X").line() == "当轮被策略命中：公式·X"
     assert Evidence("资金", "主力净额 +300 万元", "资金流").line().endswith("（资金流）")
+    # 策略那一条的来源就是策略名本身 —— 写两遍是噪音（离屏出图时看出来的）
+    assert Evidence("规则", "当轮被策略命中：尾盘超短策略", "尾盘超短策略").line() == \
+        "当轮被策略命中：尾盘超短策略"
 
 
 @pytest.mark.parametrize("verdict", analysis.POOL_VERDICTS)

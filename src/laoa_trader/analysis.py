@@ -75,7 +75,11 @@ class Evidence:
     source: str = ""
 
     def line(self) -> str:
-        return f"{self.text}（{self.source}）" if self.source else self.text
+        """一行显示文本。**来源与正文重复时不再重复一遍**：像"当轮被策略命中：尾盘超短策略
+        （尾盘超短策略）"这种括号纯属噪音 —— 同一份内容说两遍，用户还得琢磨括号里是什么。"""
+        if self.source and self.source not in self.text:
+            return f"{self.text}（{self.source}）"
+        return self.text
 
 
 @dataclass(frozen=True)
