@@ -161,6 +161,9 @@ def _drain_threads_at_session_end():
         if not alive:
             return
         __import__("time").sleep(0.1)
+    # ⚠️ 这里把**守护线程**也一起报出来（2026-10-13 补）：上面那段只等非守护线程，
+    # 而"整场跑完、进程在收尾时 abort"的现场里活着的那条（`laoa-scheduler`）恰好是守护线程 ——
+    # 不报名字的话，下一次还是只能靠 faulthandler 的线程转储去猜它是谁。
     leftover = [f"{t.name}(daemon={t.daemon})" for t in threading.enumerate()
                 if t is not main and t.is_alive()]
     if leftover:
