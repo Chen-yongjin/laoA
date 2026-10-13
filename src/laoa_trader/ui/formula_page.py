@@ -2085,6 +2085,9 @@ if QT_AVAILABLE:
             pool_total = 0
             caliber = ""
             warnings: list[str] = []
+            #: 每一条勾上的策略各出了几只（含 0）+ 0 只的原因（见下面那段注释）
+            per_strategy: list[tuple[str, int]] = []
+            zero_notes: dict[str, str] = {}
             if isinstance(rows, dict):
                 data_date = data_date or rows.get("data_date")
                 pool_rows = [r for r in (rows.get("pool") or []) if isinstance(r, dict)]
@@ -2099,11 +2102,26 @@ if QT_AVAILABLE:
                     # 口径类的告知（如"盘中取不到快照，已退回日 K"）：它们**不是错误**
                     # （不在 `report["errors"]` 里），但用户得知道"这一轮为什么没用实时数据"
                     warnings = [str(w) for w in (formulas.get("warnings") or [])]
+                    # 每一条勾上的策略各出了几只（含 0）+ 0 只的原因：
+                    # 主人 2026-10-13 的困惑就是"我选了 A（0 只），结果里却是 B 的票"，
+                    # 逐条列出来才不会把两条策略的票搞混
+                    per_strategy = [(str(k), int(v))
+                                    for k, v in (formulas.get("picks") or {}).items()]
+                    zero_notes = {str(k): str(v)
+                                  for k, v in (formulas.get("zero_notes") or {}).items()}
+                    have = {key for key, _ in per_strategy}
+                    for name in list(formulas.get("ran") or []):
+                        # `picks` 的键是合成名（`公式·X`），`ran` 里是策略名本身 ——
+                        # 用同一个转换函数对一遍，别拿字符串猜
+                        key = formula_group.formula_strategy_name(str(name))
+                        if key not in have:
+                            per_strategy.append((key, 0))
             elif rows is not None:
                 picked = [r for r in rows if isinstance(r, dict)]
                 pool_total = len(picked)
             self._fill_result(picked, data_date=data_date, errors=errors,
-                              caliber=caliber, warnings=warnings, pool_total=pool_total)
+                              caliber=caliber, warnings=warnings, pool_total=pool_total,
+                              per_strategy=per_strategy, zero_notes=zero_notes)
             self.show_result_page()
             logger.info(
                 "本次筛选结果已显示在「策略筛选」页：%d 只（池内共 %d 只，行情日 %s）",
@@ -2142,7 +2160,9 @@ if QT_AVAILABLE:
         def _fill_result(self, picked: list[dict], *, data_date: Any = None,
                          errors: list[str] | None = None,
                          caliber: str = "", warnings: list[str] | None = None,
-                         pool_total: int = 0) -> None:
+                         pool_total: int = 0,
+                         per_strategy: list[tuple[str, int]] | None = None,
+                         zero_notes: dict[str, str] | None = None) -> None:
             """把池子行铺进结果表，并写好那句结论。
 
             **只列"选出来的"票**：`run_daily` 的池子里还会混进自选标的（那是"我自己加的"，
@@ -2211,6 +2231,29 @@ if QT_AVAILABLE:
                     "常见原因：勾选的策略没有命中、或数据还没更新；"
                     "可以点【返回策略列表】改一改再跑一轮。"
                 )
+            # 每一条勾上的策略各出了几只 + "勾了却 0 只"的原因：
+            # 主人 2026-10-13 实报「我选的策略是 A，一条符合的都没有，结果里却是 B 的票，
+            # 提示也写着 B」—— 那正是"好几条策略同时勾着"时的误会，
+            # 逐条写出来，用户一眼就知道 B 的票不是 A 选的、A 为什么没出票。
+            per = [(name, count) for name, count in (per_strategy or [])]
+            if len(per) >= 2:
+                self.result_hint.setText(
+                    self.result_hint.text() + "\n本轮勾了 %d 条策略：%s" % (
+                        len(per),
+                        " · ".join(
+                            f"{formula_group.formula_name_of(name)} {count} 只"
+                            for name, count in per
+                        ),
+                    )
+                )
+            for name, count in per:
+                if count:
+                    continue
+                reason = (zero_notes or {}).get(name, "")
+                line = f"⚠️ {formula_group.formula_name_of(name)}：这一轮 0 只"
+                if reason:
+                    line += f" —— {reason}"
+                self.result_hint.setText(self.result_hint.text() + "\n" + line)
             for message in (errors or []):
                 # 出错的那几条（数据闸门拦住、策略出错…）直接说在结论下面 ——
                 # 用户点完【开始筛选】最想知道的就是"为什么没结果"

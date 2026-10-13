@@ -582,3 +582,28 @@ def test_source_column_still_follows_the_latest_round_for_its_own_picks(
     page = {r["symbol"]: r for r in pool_mod.pool_page_rows(cfg.db_path)}
     assert page[LOW[1]]["source_label"] == "低价"
     assert page[LOW[1]]["strategy"] == formula_group.formula_strategy_name(A_NAME)
+
+
+def test_zero_hit_strategy_says_why_when_snapshot_is_unavailable(
+        cfg, tmp_path, monkeypatch) -> None:
+    """勾了却一只都没出的策略：要留下"为什么是 0"（`zero_notes`），界面照原话显示。
+
+    主人 2026-10-13 的现场就是这一条：`尾盘匹配策略` 要求流通市值 30~500 亿、换手率 >3%，
+    而这两个数来自**实时快照** —— 非交易时段取不到 ⇒ 用到它们的条件一律不成立 ⇒ 0 只。
+    同一轮里 `首板缩量整理` 只用本地日线，照常出 3 只，于是"我选的是 A，出来的是 B"。
+    """
+    _ready_db(cfg)
+    _write_formulas(tmp_path, monkeypatch, cfg, {
+        A_NAME: "C<5",                                    # 只用本地日线 → 照常出票
+        "尾盘": "流通市值>=30 AND C>=3",                    # 要实时快照 → 这一轮必然 0 只
+    })
+    cfg.enabled_formulas = [A_NAME, "尾盘"]
+
+    report = _run(cfg, monkeypatch)
+
+    formulas = report["formulas"]
+    assert formulas["picks"].get(formula_group.formula_strategy_name(A_NAME))
+    assert formulas["picks"].get(formula_group.formula_strategy_name("尾盘"), 0) == 0
+    note = formulas["zero_notes"].get(formula_group.formula_strategy_name("尾盘"), "")
+    assert "流通市值" in note and "实时快照" in note
+    assert formula_group.formula_strategy_name(A_NAME) not in formulas["zero_notes"]

@@ -119,6 +119,12 @@ class FormulaRun:
     #: （`scheduler.Scheduler._report_succeeded`），把一句告知塞进 errors 会让一次
     #: **正常完成**的筛选被判成失败（票选出来了、推送也发了，状态却写"未成功"再补跑一遍）。
     warnings: list[str] = field(default_factory=list)
+    #: `{策略名: 一句原因}`：**这一轮勾了、却一只都没选出来**的那些策略，为什么是 0。
+    #: 典型：策略用到实时快照字段（流通市值/换手率…），而这一轮取不到快照
+    #: ⇒ 用到它们的条件一律不成立。主人 2026-10-13 实报的困惑正是这一类：
+    #: "我选了 A 一条都没有，打勾的却选出 3 只，提示还是 B" ——
+    #: 多策略同跑时，**哪条出了几只、哪条为什么 0** 必须写在结果页上。
+    zero_notes: dict[str, str] = field(default_factory=dict)
 
     @property
     def empty(self) -> bool:
@@ -300,6 +306,38 @@ def run_enabled_formulas(
         picks.sort(key=lambda pick: pick["symbol"])
         result.picks[formula_strategy_name(label)] = picks[: MAX_PER_FORMULA * 3]
 
+    # ── 勾了却一只都没出的策略：写清"为什么是 0"（界面按策略列出来）
+    #
+    # 为什么要有这一段（主人 2026-10-13 实报）：同一天勾了好几条策略时，
+    # **出票的那条**与**用户以为自己在跑的那条**很容易对不上 ——
+    # 他看到 3 只票、提示写着 B，而他心里选的是 A（A 一条都没有），
+    # 于是结论就是"软件没按我选的策略走"。逐条把只数与原因写出来，这种误会当场消失。
+    for formula in active:
+        if hits.get(formula.label):
+            continue
+        # ⚠️ `prepared.extra` 的形状是 `{代码: {字段: 值}}`（**不是** `{字段: ...}`）——
+        # 所以"这个字段这一轮有没有值"要**把所有票的键并起来**看。第一版就是在这里
+        # 直接 `name not in prepared.extra` 判的，于是永远认为字段都在、原因写不出来（被用例抓住）。
+        available: set[str] = set()
+        for values in (prepared.extra or {}).values():
+            if isinstance(values, dict):
+                available.update(str(k) for k in values)
+        missing = [name for name in lib.SNAPSHOT_FIELDS
+                   if name in formula.fields and name not in available]
+        auction_missing = [name for name in lib.AUCTION_FIELDS
+                           if name in formula.fields and name not in available]
+        reasons: list[str] = []
+        if missing:
+            reasons.append(f"用到 {'、'.join(missing)}（实时快照），本轮取不到")
+        if auction_missing:
+            reasons.append(f"用到 {'、'.join(auction_missing)}（集合竞价），当前不在 9:15–9:30")
+        if reasons:
+            # 键用**合成名**（`公式·X`）—— 与 `result.picks` 的键同一套写法：
+            # 界面那边是拿 `picks` 的键回来查原因的，两边写法不一致就永远查不到
+            # （第一版写成 `formula.label`（光名字），结果页上那条原因是空字符串，被用例抓住）。
+            result.zero_notes[formula_strategy_name(formula.label)] = (
+                "；".join(reasons) + " ⇒ 用到它的条件一律不成立")
+
     _remember(result.status)
     if result.picks:
         logger.info(
@@ -307,7 +345,12 @@ def run_enabled_formulas(
                 f"{formula_name_of(key)} {len(value)} 只"
                 for key, value in result.picks.items()
             )
+            + (f"；另有 {len(result.zero_notes)} 条勾了但 0 只（见 zero_notes）"
+               if result.zero_notes else "")
         )
+    elif result.ran:
+        logger.info(f"策略筛选：{len(result.ran)} 条策略一只都没选出来"
+                    + (f"（{next(iter(result.zero_notes.values()))}）" if result.zero_notes else ""))
     return result
 
 

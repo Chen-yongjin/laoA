@@ -185,6 +185,9 @@ def build_pool(
             "ran": list(formula_run.ran),
             "picks": {k: len(v) for k, v in formula_run.picks.items()},
             "status": dict(formula_run.status),
+            # 勾了却 0 只的策略 → 一句原因（如"用到 流通市值、换手率（实时快照），本轮取不到"）：
+            # 结果页逐条列出来，用户才不会把"另一条策略选的票"当成"自己选的这条选的"
+            "zero_notes": dict(formula_run.zero_notes),
             # 这一轮用的 K 线口径（"开盘时间里跑的筛选都是实时的"，见 `formulas.prepare_inputs`）：
             # 界面的结论行与结果页都会显示它 —— 同一份策略在盘中和收盘后选出的票不一样，
             # 不显示口径就没法解释。

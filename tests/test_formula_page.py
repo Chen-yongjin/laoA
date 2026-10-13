@@ -2773,3 +2773,44 @@ def test_top_buttons_are_not_stretched_across_the_row(page, qapp) -> None:
             f"「{button.text()}」被拉长了：宽 {button.width()}，自然宽 {natural}")
     # 三个按钮仍然靠左排（右侧留白）：最后一个按钮的右边缘远不到整页宽度
     assert page.btn_scorecard.geometry().right() < page.width() - 100
+
+
+def test_result_page_lists_each_checked_strategy_and_why_one_got_zero(page) -> None:
+    """结果页要**逐条列出勾上的策略各出了几只**，并写明"勾了却 0 只"的那条为什么是 0。
+
+    主人 2026-10-13 实报：「我在策略编辑里选尾盘选股，一条符合的也没有，但是那个打勾的
+    选出了 3 只，提示是首板缩量整理」—— 同一轮里勾着好几条策略时，
+    **出票的那条**与**用户以为在跑的那条**很容易对不上；逐条把只数与原因写出来，
+    这种误会才当场消失（原因来自 `zero_notes`：用到实时快照/竞价字段而这一轮取不到）。
+    """
+    page.show_pick_result({
+        "data_date": "2026-09-11",
+        "pool": [
+            {"symbol": "600003", "name": "丙样本", "strategy": "公式·首板缩量整理"},
+        ],
+        "formulas": {
+            "ran": ["首板缩量整理", "尾盘匹配策略"],
+            "picks": {"公式·首板缩量整理": 3, "公式·尾盘匹配策略": 0},
+            "zero_notes": {"公式·尾盘匹配策略":
+                           "用到 流通市值、换手率（实时快照），本轮取不到 ⇒ 用到它的条件一律不成立"},
+            "caliber": "📊 本次口径：日 K 线（最后一根 2026-09-11）",
+        },
+    })
+    hint = page.result_hint.text()
+    # ① 逐条列出（名字是给人看的那个词，不带 `公式·` 前缀）
+    assert "本轮勾了 2 条策略" in hint
+    assert "首板缩量整理 3 只" in hint and "尾盘匹配策略 0 只" in hint
+    assert "公式·" not in hint
+    # ② 0 只那条要说清原因
+    assert "尾盘匹配策略：这一轮 0 只" in hint
+    assert "流通市值" in hint and "换手率" in hint
+
+
+def test_result_page_does_not_repeat_the_count_when_only_one_strategy_ran(page) -> None:
+    """只勾了一条时不写"本轮勾了 1 条策略"（那句话在"共 N 只"里已经有了，纯噪音）。"""
+    page.show_pick_result({
+        "data_date": "2026-09-11",
+        "pool": [{"symbol": "600003", "name": "丙样本", "strategy": "公式·首板缩量整理"}],
+        "formulas": {"ran": ["首板缩量整理"], "picks": {"公式·首板缩量整理": 1}},
+    })
+    assert "本轮勾了" not in page.result_hint.text()
