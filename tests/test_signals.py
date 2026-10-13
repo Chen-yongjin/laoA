@@ -197,3 +197,66 @@ def test_kind_decides_which_verdict_set_is_used(db) -> None:
     assert pool.verdict in analysis.POOL_VERDICTS
     assert pos.verdict in analysis.POSITION_VERDICTS
     assert pool.verdict != pos.verdict or pool.verdict in (WATCH, HOLD)
+
+
+# ── 导出：报告落盘（与筛选结果同一套落点规矩）──
+
+
+def _one_signal(db) -> object:
+    return signals_mod.build_signals(
+        None, db, ["600001"], signals_mod.KIND_POOL,
+        score_getter=_getter({"600001": _score(78.0, advice="偏强")}),
+    )["600001"]
+
+
+def test_export_writes_into_the_luweik_folder_on_the_desktop(tmp_path, db) -> None:
+    """找到桌面就落在 `桌面/luweik/luweik-决策信号-<日期>.txt`（与筛选结果同一个文件夹）。"""
+    from laoa_trader import analysis, pool
+
+    (tmp_path / "Desktop").mkdir()
+    text = analysis.report_text([_one_signal(db)], day="2026-10-13", generated_at="t")
+    path = pool.export_signal_file(text, day="2026-10-13", home=tmp_path)
+    assert path is not None
+    assert path.parent == tmp_path / "Desktop" / pool.EXPORT_FOLDER_NAME
+    assert path.name == "luweik-决策信号-2026-10-13.txt"
+    raw = path.read_bytes()
+    # Windows 用户双击就用记事本打开：带 BOM + CRLF（与筛选结果那份逐字节同一套口径）
+    assert raw.startswith(b"\xef\xbb\xbf")
+    assert b"\r\n" in raw
+    written = path.read_text(encoding="utf-8-sig")
+    assert written.startswith("luweik · 决策信号 · 2026-10-13")
+    assert "【继续观察】600001" in written
+    assert "不构成投资建议" in written
+
+
+def test_export_falls_back_to_the_data_dir_when_there_is_no_desktop(tmp_path, db) -> None:
+    """找不到桌面就退到给它的落点（数据目录那个 `luweik` 子目录），而不是悄悄不导出。"""
+    from laoa_trader import analysis, pool
+
+    text = analysis.report_text([_one_signal(db)], day="2026-10-13", generated_at="t")
+    path = pool.export_signal_file(text, day="2026-10-13", home=tmp_path,
+                                   fallback_dir=tmp_path / "data")
+    assert path is not None
+    assert path.parent == tmp_path / "data" / pool.EXPORT_FOLDER_NAME
+    assert path.exists()
+
+
+def test_export_same_day_overwrites_instead_of_piling_up(tmp_path, db) -> None:
+    """同一天再导一次 = 覆盖同一个文件（桌面不是归档目录）。"""
+    from laoa_trader import analysis, pool
+
+    (tmp_path / "Desktop").mkdir()
+    text = analysis.report_text([_one_signal(db)], day="2026-10-13", generated_at="t")
+    first = pool.export_signal_file(text, day="2026-10-13", home=tmp_path)
+    second = pool.export_signal_file(text + "（第二版）", day="2026-10-13", home=tmp_path)
+    assert first == second
+    assert "第二版" in first.read_text(encoding="utf-8-sig")
+    assert len(list(first.parent.glob("*.txt"))) == 1
+
+
+def test_export_refuses_empty_text(tmp_path, db) -> None:
+    """没有内容就不写文件（返回 None，由界面说"还没有可导出的结论"）。"""
+    from laoa_trader import pool
+
+    assert pool.export_signal_file("   \n", day="2026-10-13", home=tmp_path) is None
+    assert not (tmp_path / "Desktop").exists()

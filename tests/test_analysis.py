@@ -166,3 +166,46 @@ def test_evidence_requires_a_source():
 def test_pool_verdicts_are_within_the_allowed_set(verdict):
     """池子那一路只能落在三条里（顺手把常量本身钉住）。"""
     assert verdict in analysis.VERDICTS
+
+
+# ————————————————————————— 导出用的报告正文 —————————————————————————
+
+def test_report_text_lists_every_signal_with_evidence_and_disclaimer():
+    """报告里每只票都要有结论、依据与免责；统计那一行按结论集的口径数。"""
+    signals = [
+        judge_pool("600001", name="浦发样本", score=make_score(78.0, advice="偏强"),
+                   strategies=["尾盘超短策略"]),
+        judge_pool("600002", name="半导体甲", score=make_score(50.0)),
+    ]
+    text = analysis.report_text(signals, day="2026-10-13", generated_at="2026-10-13 15:04")
+    assert text.startswith(f"{analysis.REPORT_TITLE} · 2026-10-13")
+    assert "共 2 只：进场信号成立 1 · 继续观察 1" in text
+    assert "生成时间 2026-10-13 15:04（北京时间，手动分析）" in text
+    assert "【进场信号成立】600001 浦发样本" in text
+    assert "· 当轮被策略命中：尾盘超短策略" in text        # 依据带上了
+    assert "消息：未获取" in text                          # 没接大模型那条线时如实说
+    assert analysis.DISCLAIMER in text
+    assert text.endswith("\n")
+
+
+def test_report_text_says_uncalibrated_once_not_per_symbol():
+    """阈值没标定只提醒**一次**（十只票重复十遍就是噪音）。"""
+    signals = [judge_pool(f"60000{i}", score=make_score(50.0)) for i in range(3)]
+    text = analysis.report_text(signals, day="2026-10-13", generated_at="x")
+    assert text.count("尚未回测标定") == 1
+
+
+def test_report_text_puts_web_notes_in_and_can_leave_them_out():
+    """大模型的附注进报告（带日期与网址）；`include_web=False` 时连那一行都不提。"""
+    signal = judge_pool("600001", score=make_score(50.0))
+    attach_web(signal, [WebNote(title="公司公告：回购进展", summary="拟回购 1~2 亿元",
+                                url="https://example.com/a", date="2026-10-13")])
+    text = analysis.report_text([signal], day="d", generated_at="t")
+    assert "消息 2026-10-13 公司公告：回购进展 https://example.com/a" in text
+    bare = analysis.report_text([signal], day="d", generated_at="t", include_web=False)
+    assert "消息" not in bare
+
+
+def test_report_text_is_empty_when_there_is_nothing_to_export():
+    """没有结论 → 空串（调用方据此说"还没有可导出的结论"，而不是导出一个空文件）。"""
+    assert analysis.report_text([]) == ""

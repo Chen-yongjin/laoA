@@ -216,3 +216,90 @@ def test_empty_table_gets_a_popup_not_a_silent_noop(window, modal_calls) -> None
     window.pool_table.setRowCount(0)
     window.btn_pool_analyze.click()
     assert any("没有可分析的标的" in str(call) for call in modal_calls)
+
+
+# ── 导出 ──
+
+
+def test_export_button_exists_with_a_short_tooltip(qapp) -> None:
+    from laoa_trader.ui.signal_dialog import SignalDialog
+
+    dialog = SignalDialog()
+    try:
+        tip = dialog.btn_export.toolTip()
+        assert dialog.btn_export.text() == "导出到桌面"
+        assert tip and "\n" not in tip and len(tip) <= 45, tip
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_export_writes_the_report_and_says_where(qapp, tmp_path, monkeypatch) -> None:
+    """点【导出到桌面】→ 落盘一次，状态行写出文件位置（用户不用猜导哪去了）。"""
+    from laoa_trader.ui import signal_dialog as dialog_mod
+
+    calls: list[str] = []
+    target = tmp_path / "luweik-决策信号-2026-10-13.txt"
+
+    def fake_export(text, **kwargs):  # noqa: ANN001, ANN003
+        calls.append(text)
+        target.write_text(text, encoding="utf-8")
+        return target
+
+    monkeypatch.setattr(dialog_mod.pool_mod, "export_signal_file", fake_export)
+    dialog = dialog_mod.SignalDialog()
+    try:
+        dialog.set_signals([_signal("600001", analysis.WATCH, "浦发样本")])
+        dialog.btn_export.click()
+        assert calls, "点了导出却没有写文件"
+        assert "【继续观察】600001 浦发样本" in calls[0]
+        assert analysis.DISCLAIMER in calls[0]
+        assert str(target) in dialog.status_label.text()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_export_without_results_says_so_instead_of_writing_an_empty_file(qapp) -> None:
+    from laoa_trader.ui.signal_dialog import SignalDialog
+
+    dialog = SignalDialog()
+    try:
+        dialog.btn_export.click()
+        assert "还没有结论可导出" in dialog.status_label.text()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_export_failure_is_reported_not_swallowed(qapp, monkeypatch, modal_calls) -> None:
+    """写盘失败要**说出来**（状态行 + 弹窗）：静默失败会让用户以为文件已经在桌面上了。"""
+    from laoa_trader.ui import signal_dialog as dialog_mod
+
+    monkeypatch.setattr(dialog_mod.pool_mod, "export_signal_file",
+                        lambda text, **kwargs: None)
+    dialog = dialog_mod.SignalDialog()
+    try:
+        dialog.set_signals([_signal("600001")])
+        dialog.btn_export.click()
+        assert "导出失败" in dialog.status_label.text()
+        assert any("导出失败" in call["title"] for call in modal_calls)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_report_title_records_which_page_it_came_from(window) -> None:
+    """报告的标题要写清从哪一页导出的（文件离开窗口之后只有这一行能说明来历）。"""
+    window.signals = _FakeService()
+    window.btn_pos_analyze.click()
+    text = window.signal_dialog.report_text(day="2026-10-13", generated_at="t")
+    # 这次没有结论 → 正文为空；标题那一行由 `report_title` 决定
+    assert window.signal_dialog.report_title.endswith("（持仓监控）")
+    window._on_signals_updated({"600002": _signal("600002")}, signals_mod.KIND_POSITION)
+    text = window.signal_dialog.report_text(day="2026-10-13", generated_at="t")
+    assert text.startswith("luweik · 决策信号（持仓监控） · 2026-10-13")

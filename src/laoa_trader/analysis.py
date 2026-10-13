@@ -60,6 +60,13 @@ KIND_POSITION = "持仓"
 KIND_MARKET = "大盘"
 KIND_WEB = "消息"
 
+#: 免责声明（**唯一一份**：结论窗底部与导出的报告用的是同一句 —— 两处各写一份，
+#: 改一次就会有一处落伍，而这句话是合规相关的那一句）。
+DISCLAIMER = "本工具只做数据与形态的描述性统计，不构成投资建议。"
+
+#: 报告第一行（导出文件与窗口标题同一套写法）。
+REPORT_TITLE = "luweik · 决策信号"
+
 
 @dataclass(frozen=True)
 class Evidence:
@@ -342,3 +349,84 @@ def with_rules(rules: RuleSet, **changes: Any) -> RuleSet:
 def format_line(signal: Signal) -> str:
     """一行文本（消息列表、导出、CLI 用同一份）。"""
     return f"{signal.symbol} {signal.name}｜{signal.verdict}｜{signal.headline}".strip()
+
+
+#: 报告里那句"阈值没标定"的提醒：与 `judge_*` 写进 `notes` 的那句是同一件事，
+#: 报告里只在开头提一次（每只票下面再重复一遍，十只票就是十遍噪音）。
+_UNCALIBRATED_HINT = "尚未回测标定"
+
+
+def report_text(
+    signals: Iterable[Signal],
+    *,
+    title: str = REPORT_TITLE,
+    day: str | None = None,
+    generated_at: str | None = None,
+    disclaimer: str = DISCLAIMER,
+    include_web: bool = True,
+) -> str:
+    """一批结论 → **导出用的纯文本报告**（纯函数：不碰磁盘、不联网、不读配置）。
+
+    只认用户手上那几只票的结论，版式照筛选结果那份桌面文件的路子（`pool.export_pick_file`）：
+    第一行标题 + 一行统计、每只票一段（结论 / 依据 / 注）、最后一行免责。
+    无结论时返回**空串**（调用方据此说"还没有可导出的结论"，而不是导出一个空文件）。
+
+    Args:
+        day: 文件名与标题里的日期（默认按**北京时间今天**取）。
+        generated_at: "生成时间"那一行（默认同上，精确到分钟）。
+        include_web: 是否把大模型那条线的附注写进去（默认写；关掉时报告里连标题都不提）。
+    """
+    items = [s for s in (signals or []) if getattr(s, "symbol", "")]
+    if not items:
+        return ""
+    if day is None or generated_at is None:
+        try:                        # 时钟只在这里读一次；显式传入时完全可控（测试用）
+            from laoa_trader import intraday
+
+            now = intraday.now_shanghai()
+            day = day or now.strftime("%Y-%m-%d")
+            generated_at = generated_at or now.strftime("%Y-%m-%d %H:%M")
+        except Exception:           # noqa: BLE001 - 取不到时间不该让报告出不来
+            day = day or ""
+            generated_at = generated_at or ""
+
+    counts: dict[str, int] = {}
+    for signal in items:
+        counts[signal.verdict] = counts.get(signal.verdict, 0) + 1
+    lines = [f"{title} · {day}".rstrip(" ·")]
+    lines.append("共 %d 只：%s" % (
+        len(items),
+        " · ".join(f"{word} {counts[word]}" for word in VERDICTS if word in counts),
+    ))
+    if generated_at:
+        lines.append(f"生成时间 {generated_at}（北京时间，手动分析）")
+    versions = sorted({s.rules_version for s in items if getattr(s, "rules_version", "")})
+    if versions:
+        lines.append(f"判据版本：{'、'.join(versions)}")
+    if any(any(_UNCALIBRATED_HINT in note for note in s.notes) for s in items):
+        lines.append("⚠️ 判定阈值尚未回测标定，结论只作参考。")
+
+    for signal in items:
+        lines.append("")
+        head = f"【{signal.verdict}】{signal.symbol} {signal.name}".rstrip()
+        lines.append(head)
+        if signal.headline:
+            lines.append(f"    {signal.headline}")
+        for item in signal.evidences:
+            lines.append(f"    · {item.line()}")
+        if include_web:
+            if signal.web:
+                for note in signal.web:
+                    when = f"{note.date} " if note.date else ""
+                    where = f" {note.url}" if note.url else ""
+                    lines.append(f"    · 消息 {when}{note.title}{where}")
+            else:
+                lines.append("    · 消息：未获取（未配置大模型或本次未联网；不影响上面的结论）")
+        for note in signal.notes:
+            if _UNCALIBRATED_HINT in note:      # 开头已经提过一次（见常量说明）
+                continue
+            lines.append(f"    注：{note}")
+
+    lines.append("")
+    lines.append(f"（本文件由程序自动生成；{disclaimer}）")
+    return "\n".join(lines) + "\n"

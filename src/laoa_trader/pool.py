@@ -1188,6 +1188,67 @@ def export_pick_file(
         return None
 
 
+#: 决策信号报告的文件名（`luweik-决策信号-2026-10-13.txt`）——与筛选结果同一套落点与命名，
+#: 用户在桌面同一个 `luweik` 文件夹里就能同时找到这两份东西。
+SIGNAL_EXPORT_NAME_PREFIX = "luweik-决策信号-"
+
+
+def export_signal_file_name(day: str) -> str:
+    """决策信号报告的文件名。"""
+    return f"{SIGNAL_EXPORT_NAME_PREFIX}{day}{EXPORT_NAME_SUFFIX}"
+
+
+def export_signal_file(
+    text: str,
+    *,
+    day: str | None = None,
+    dest_dir: Any = None,
+    home: Any = None,
+    fallback_dir: Any = None,
+) -> "Path | None":
+    """把决策信号报告写到桌面上（`桌面/luweik/luweik-决策信号-<日期>.txt`）。
+
+    为什么这段落盘逻辑放在 `pool.py`（而不是 `analysis.py` 或界面里）：
+    **"导出物落在哪、叫什么名、用什么编码"只有这一处**（见上面 `export_pick_file` 那一整套：
+    桌面候选目录、旧目录搬家、`utf-8-sig` + CRLF 写盘）。两处各写一份，迟早出现
+    "筛选结果在桌面、分析报告在别处"这种用户找不着的错位。
+
+    `analysis.report_text()` 负责**正文**（纯函数），这里只负责**落盘**：分工与
+    `pick_export_text` / `export_pick_file` 完全一致。
+
+    Returns:
+        写出去的文件路径；**正文为空 / 找不到可写目录 / 写盘失败**都返回 None
+        （原因全部写进日志，绝不静默 —— 用户点的是"导出"，静默失败他只会以为文件丢了）。
+    """
+    if not str(text or "").strip():
+        logger.info("没有可导出的决策信号结论，不写桌面文件")
+        return None
+    try:
+        if day is None:
+            from laoa_trader import intraday as intraday_mod
+
+            day = intraday_mod.now_shanghai().strftime(EXPORT_DAY_FORMAT)
+        target = (
+            Path(dest_dir).expanduser()
+            if dest_dir is not None
+            else desktop_dir(home=home, fallback_dir=fallback_dir)
+        )
+        if target is not None and dest_dir is None:
+            target = target / EXPORT_FOLDER_NAME
+        if target is None:
+            logger.warning("找不到桌面目录、也没有可用的回退目录：决策信号报告没有导出")
+            return None
+        _migrate_export_dir(target)
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / export_signal_file_name(day)
+        _write_export(path, text)
+        logger.info(f"决策信号报告已导出到 {path}")
+        return path
+    except Exception as exc:  # noqa: BLE001 - 导出失败绝不能把界面带走
+        logger.warning(f"导出决策信号报告失败：{type(exc).__name__}: {exc}")
+        return None
+
+
 #: **老版本**用过、现在只用来"剥掉"的前缀：2026-09-22 那版把来源列显示成 `策略·X`，
 #: 2026-09-23 主人要求连前缀一起去掉。留着它是因为**老的备注文本**里可能写着
 #: `匹配来源：策略·X`（见 `watchlist_source_strategy()`），解析时要把这截剥掉。

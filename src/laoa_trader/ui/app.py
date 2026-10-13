@@ -39,6 +39,8 @@ from typing import Any
 
 import laoa_trader
 from laoa_trader import assets, clock, intraday, market, pool, state
+# 决策信号（进场/离场）：判定与结论文案全在 analysis.py —— 界面只用它的常量与报告正文
+from laoa_trader import analysis
 # 授权（机器码/注册码/试用）：界面只读它，判定逻辑全在 licensing 里
 from laoa_trader import licensing
 from laoa_trader import pool as pool_mod
@@ -4678,7 +4680,9 @@ if QT_AVAILABLE:
             """拿结论窗（**只建一次**，反复分析就复用它，与消息列表同一个做法）。"""
             dialog = getattr(self, "signal_dialog", None)
             if dialog is None:
-                dialog = SignalDialog(self)
+                # 找不到桌面时报告退到**数据目录**（用户找得到的地方），
+                # 与筛选结果那份桌面文件的兜底同一个口径（见 `pool.desktop_dir`）
+                dialog = SignalDialog(self, fallback_dir=Path(self.cfg.db_path).parent)
                 self.signal_dialog = dialog
             return dialog
 
@@ -4701,6 +4705,11 @@ if QT_AVAILABLE:
                 return
             dialog = self._signal_window()
             dialog.setWindowTitle(title)
+            # 导出的报告标题跟着"哪一页点的"走：文件离开窗口之后就靠这一行说明它的来历
+            dialog.report_title = (
+                f"{analysis.REPORT_TITLE}（自选标的）" if kind == signals_mod.KIND_POOL
+                else f"{analysis.REPORT_TITLE}（持仓监控）"
+            )
             dialog.set_status(f"正在分析 {len(symbols)} 只…（判定在后台跑，界面不会卡）")
             #: 这一次要的是哪几只（结果回来时按它排序、也只显示它 —— 单只与整表共用一条路）
             self._signal_wanted = list(symbols)
