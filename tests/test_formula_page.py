@@ -2648,12 +2648,19 @@ def test_result_table_columns_have_room_for_their_text(page) -> None:
 # 库里没有这一轮的台账（比如只跑过界面、没跑过 `run_daily`）→ 显示「自选」。
 
 
-def _signal(page_cfg, symbol: str, strategy: str, day: str = "2026-09-11") -> None:
-    """写一条 `signal` 台账 = "这一轮这条策略选中了这只票"（来源列读的就是它）。"""
+def _signal(page_cfg, symbol: str, strategy: str, day: str = "2026-09-11",
+            *, run_batch: str = "test-round") -> None:
+    """写一条 `signal` 台账 = "这一轮这条策略选中了这只票"（来源列读的就是它）。
+
+    ⚠️ `run_batch` **默认写死同一个值**：台账的"这一轮"是按批次号认的
+    （见 `round_pick_strategies()`），一个用例里想表示"同一轮几条策略各选了几只"，
+    就得让它们落在同一个批次里 —— 真流程也是这样（一轮只调一次 `save_signals()`）。
+    要造"同一天又跑了一轮"的场面，显式传一个新的 `run_batch`。
+    """
     with storage.connect(page_cfg.db_path) as conn:
         storage.write_signals(conn, [
             (day, strategy, symbol, symbol, 10.0, None, "策略：X"),
-        ])
+        ], run_batch=run_batch)
 
 
 def _pool_row(page_cfg, symbol: str) -> dict:

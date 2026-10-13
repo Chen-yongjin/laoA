@@ -65,6 +65,8 @@ def save_signals(
     engine: Any,
     picks: dict[str, list[dict]],
     day: str | None = None,
+    *,
+    run_batch: str | None = None,
 ) -> int:
     """把这一轮选出来的票写入 `signal` 表（盘中风控观察池与将来做前向跟踪用）。
 
@@ -73,6 +75,8 @@ def save_signals(
         picks: `{策略名: [{"symbol","name","reason"}...]}` —— 现在传进来的是
             公式的合成名（`公式·尾盘匹配策略`）与它们的候选。
         day: 信号日；默认按库里最新行情日。
+        run_batch: 这一轮的批次号（`signal.run_batch`）。不传就由 `write_signals()`
+            现生成一个 —— 一轮只会调这里**一次**，所以"这一轮"是可判定的。
     """
     from laoa_trader.data import storage
 
@@ -88,7 +92,7 @@ def save_signals(
             for strategy, items in picks.items()
             for pick in items
         ]
-        return storage.write_signals(conn, payload)
+        return storage.write_signals(conn, payload, run_batch=run_batch)
 
 
 __all__ = [

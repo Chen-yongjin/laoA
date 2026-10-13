@@ -1392,6 +1392,21 @@ def round_pick_strategies(db_path: str, day: str | None = None) -> dict[str, str
     一只票被多条策略同时命中时取**名字排序的第一条**：「来源」列一行只写得下一条
     （与 `source_label()` 只写主策略同一条口径）。
 
+    ⚠️ **「这一轮」= 最新那个信号日里、最后一次写进去的那一批**（2026-10-13 修）。
+    以前这里是"最新信号日的**全部**行"，于是同一天跑几轮就会把几轮并起来：
+    `signal` 表的冲突键是 `(signal_date, strategy, symbol)`，不同策略的行**各存各的**；
+    而盘中每跑一轮写的都是**同一个** signal_date（当晚日更之前，行情日一直是上一个交易日）。
+    后果正是主人 2026-10-13 实报的那句 ——「我选的策略是尾盘匹配策略，他选出来的是
+    首板缩量整理」：早上勾 A 跑过一轮，下午改勾 B 再跑，A 那批行的策略名还挂在台账里，
+    自选标的的「来源」列就把 A 显示成"这一轮选出来的"。
+
+    怎么认出"最后一次写进去的那一批"：`signal.run_batch` —— 一轮 = 一次
+    `save_signals()` = 一次 `storage.write_signals()`，那里给整批盖同一个批次号
+    （`_new_run_batch()`，**可排序**：进程内自增序号打头）。**这是显式的轮次标记**，
+    不靠时钟猜：`created_at` 只到秒，"同一秒里跑两轮"在测试里是常态。
+    老库的行没有批次号（NULL）→ 退回"这一天里 `created_at` 最大的那一批"；
+    连时间戳都没有（更老的库）→ 整天都算（= 加上这个判据之前的行为）。
+
     台账为空（老库 / 还没跑过一轮）→ 返回 `{}`，调用方照旧写「自选」。
     """
     with storage.connect(db_path) as conn:
@@ -1400,11 +1415,27 @@ def round_pick_strategies(db_path: str, day: str | None = None) -> dict[str, str
             day = row[0] if row and row[0] else None
         if not day:
             return {}
-        rows = conn.execute(
-            "SELECT symbol, strategy FROM signal "
-            "WHERE signal_date = ? AND strategy IS NOT NULL AND strategy != ''",
+        # 最新那一批的标记：先按批次号（非空的优先），没有批次号的库再按时间戳
+        mark = conn.execute(
+            "SELECT created_at, run_batch FROM signal "
+            "WHERE signal_date = ? AND strategy IS NOT NULL AND strategy != '' "
+            "ORDER BY (run_batch IS NULL), created_at DESC, run_batch DESC LIMIT 1",
             (day,),
-        ).fetchall()
+        ).fetchone()
+        if mark is None:
+            return {}
+        created_at, run_batch = mark[0], mark[1]
+        sql = ("SELECT symbol, strategy FROM signal "
+               "WHERE signal_date = ? AND strategy IS NOT NULL AND strategy != ''")
+        params: list[Any] = [day]
+        if run_batch:
+            sql += " AND run_batch = ?"
+            params.append(run_batch)
+        elif created_at:
+            # 老库（补列之前写下的行）：退回"这一天里同一秒的那一批"
+            sql += " AND created_at = ?"
+            params.append(created_at)
+        rows = conn.execute(sql, tuple(params)).fetchall()
     out: dict[str, str] = {}
     for symbol, strategy in rows:
         name = str(strategy)

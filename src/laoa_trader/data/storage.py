@@ -63,6 +63,17 @@ def _new_batch() -> str:
     """
     return f"{os.getpid()}-{next(_BATCH_SEQ)}-{uuid.uuid4().hex[:8]}"
 
+def _new_run_batch() -> str:
+    """**一轮筛选**在 `signal` 表里的批次号（`round_pick_strategies()` 靠它认"这一轮"）。
+
+    与 `_new_batch()`（股池那条清理判据）的区别只有一处：**这个必须可排序** ——
+    "哪一轮最新"要能比出来，所以进程内自增序号打头、字典序即先后。
+    为什么不能只靠 `created_at`：它只精确到秒，而"同一秒里连跑两轮"在测试里是常态
+    （真机上是几十秒到几分钟一轮，但判据不该靠人的手速）。
+    """
+    return f"{next(_BATCH_SEQ):09d}-{uuid.uuid4().hex[:6]}"
+
+
 #: 建表 DDL（全部 IF NOT EXISTS，可反复执行）
 SCHEMA: tuple[str, ...] = (
     # ── 原始行情（不复权）+ 后复权因子 ──
@@ -212,6 +223,9 @@ SCHEMA: tuple[str, ...] = (
         score       REAL,
         reason      TEXT,
         created_at  TEXT,
+        -- 一轮筛选的批次号（2026-10-13 加）：同一天跑几轮时用来认出**最后一次写进去的那一批**
+        -- （见 `round_pick_strategies()`）。可排序：进程内自增序号打头。
+        run_batch   TEXT,
         PRIMARY KEY (signal_date, strategy, symbol)
     );
     """,
@@ -359,6 +373,9 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # 见建表那里的说明）。老库补上这一列后值是 NULL —— 界面显示「自选」，
     # 但会先从备注里的 `匹配来源：X` 认一次（能救回一部分老数据）。
     ("watchlist", "source_strategy", "TEXT"),
+    # `signal.run_batch`：一轮筛选的批次号（2026-10-13 加，见建表那里的说明）。
+    # 老库补上这一列后值是 NULL —— `round_pick_strategies()` 对 NULL 行退回"按时间认"。
+    ("signal", "run_batch", "TEXT"),
 )
 
 
@@ -844,17 +861,28 @@ def set_position_monitor(conn: sqlite3.Connection, symbol: str, enabled: bool) -
 # ── 信号 ──
 
 
-def write_signals(conn: sqlite3.Connection, rows: Iterable[Sequence[Any]]) -> int:
-    """信号 upsert。行顺序：signal_date,strategy,symbol,name,close,score,reason。"""
+def write_signals(
+    conn: sqlite3.Connection,
+    rows: Iterable[Sequence[Any]],
+    *,
+    run_batch: str | None = None,
+) -> int:
+    """信号 upsert。行顺序：signal_date,strategy,symbol,name,close,score,reason。
+
+    `run_batch`：这一轮的批次号。**一次调用 = 一轮**（调用方一轮只调一次），
+    所以在里面统一取一个 —— 不传就现生成一个（见 `_new_run_batch()`）。
+    它让"这一轮选出了什么"变成**可判定**的事实，而不是靠时间戳猜。
+    """
     now = _now()
+    batch = str(run_batch) if run_batch else _new_run_batch()
     payload = (
-        (r[0], r[1], r[2], r[3], r[4], r[5], r[6], now) for r in rows
+        (r[0], r[1], r[2], r[3], r[4], r[5], r[6], now, batch) for r in rows
     )
     return upsert(
         conn,
         "signal",
         ("signal_date", "strategy", "symbol", "name", "close", "score", "reason",
-         "created_at"),
+         "created_at", "run_batch"),
         payload,
         conflict=("signal_date", "strategy", "symbol"),
         batch_size=2000,

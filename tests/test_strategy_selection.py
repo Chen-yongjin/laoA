@@ -520,3 +520,65 @@ def test_toggle_keeps_cfg_and_config_file_in_sync(cfg, tmp_path, caplog) -> None
         page.close()
         page.deleteLater()
         app.processEvents()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 6) 同一天跑两轮、勾的策略不同：「来源」只认**后一轮**
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_source_column_ignores_the_previous_round_of_the_same_day(
+        cfg, tmp_path, monkeypatch) -> None:
+    """勾 A 跑一轮、再改勾 B 跑一轮（同一个行情日）→ 「来源」里不许再出现 A。
+
+    主人 2026-10-13 实报：「我选的策略是尾盘匹配策略，他选出来的是首板缩量整理」。
+    根因不在筛选（那一轮确实只跑了勾上的那条），而在**台账**：`signal` 表的冲突键是
+    `(signal_date, strategy, symbol)`，同一交易日的几轮**各存各的行**；
+    而盘中每跑一轮写的都是**同一个** signal_date（当晚日更之前行情日一直是上一个交易日）。
+    「来源」列读台账时不认"最后一次写入的那一批"，就把上一轮那条没勾的策略显示成"这一轮选的"。
+
+    不变式：一轮 = 一次 `storage.write_signals()` = 整批同一个 `run_batch`（显式批次号）。
+    这里**故意不把时钟分开**（两轮在同一秒里跑完）—— 判据要是靠 `created_at` 猜，
+    这条用例就会红。
+    """
+    _ready_db(cfg)
+    _write_formulas(tmp_path, monkeypatch, cfg, {A_NAME: "C<5", B_NAME: "C>10"})
+
+    # ── 第一轮：勾 A（低价），跑完把其中一只加进自选（用户常这么干）──
+    cfg.enabled_formulas = [A_NAME]
+    first = _run(cfg, monkeypatch)
+    assert first["formulas"]["ran"] == [A_NAME]
+    _watch_pick(cfg, LOW[0], formula_group.formula_strategy_name(A_NAME))
+
+    # ── 第二轮：改成只勾 B（反转），同一个行情日 ──
+    cfg.enabled_formulas = [B_NAME]
+    second = _run(cfg, monkeypatch)
+    assert second["data_date"] == first["data_date"], "两轮必须在同一个行情日才复现得出来"
+    assert second["formulas"]["ran"] == [B_NAME]
+
+    # 台账里的"这一轮"只剩 B 的票 —— A 那一批**不许**再出现在来源里
+    picks = pool_mod.round_pick_strategies(cfg.db_path)
+    assert picks == {HIGH: formula_group.formula_strategy_name(B_NAME)}
+    assert formula_group.formula_strategy_name(A_NAME) not in picks.values()
+
+    # 「自选标的」页：上一轮 A 选中的那只票 → 来源写「自选」，不冒充这一轮的结果
+    page = {r["symbol"]: r for r in pool_mod.pool_page_rows(cfg.db_path)}
+    assert page[LOW[0]]["source_label"] == "自选"
+    assert page[LOW[0]]["strategy"] == ""
+
+
+def test_source_column_still_follows_the_latest_round_for_its_own_picks(
+        cfg, tmp_path, monkeypatch) -> None:
+    """反过来：**这一轮**选出来的票照旧写它的策略名（收紧台账不许把真话也一起丢了）。"""
+    _ready_db(cfg)
+    _write_formulas(tmp_path, monkeypatch, cfg, {A_NAME: "C<5", B_NAME: "C>10"})
+    cfg.enabled_formulas = [A_NAME]
+    _run(cfg, monkeypatch)
+    _watch_pick(cfg, LOW[1], formula_group.formula_strategy_name(A_NAME))
+
+    # 第二轮还是勾 A：它这一轮又选中了 LOW[1]（票在自选里，台账里也有它）
+    _run(cfg, monkeypatch)
+
+    page = {r["symbol"]: r for r in pool_mod.pool_page_rows(cfg.db_path)}
+    assert page[LOW[1]]["source_label"] == "低价"
+    assert page[LOW[1]]["strategy"] == formula_group.formula_strategy_name(A_NAME)
