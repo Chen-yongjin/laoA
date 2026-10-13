@@ -26,7 +26,7 @@ import weakref
 from typing import Any, Callable, Iterable, Sequence
 
 from laoa_trader import analysis, pool as pool_mod, scoring, wording
-from laoa_trader.analysis import Evidence, KIND_FUND, KIND_POSITION, KIND_RULE, RuleSet
+from laoa_trader.analysis import Condition, KIND_FUND, KIND_POSITION, KIND_RULE, RuleSet
 from laoa_trader.data import storage
 from laoa_trader.log import get_logger
 from laoa_trader.ui import threads as threads_mod
@@ -143,11 +143,13 @@ def _pool_signals(
         watch = storage.watchlist_map(conn)
         funds = _fund_net_wan(conn, symbols)
     for symbol in symbols:
-        extra: list[Evidence] = []
+        extra: list[Condition] = []
         if symbol in watch:
-            extra.append(Evidence(KIND_RULE, "在自选表里（你自己加的）", "自选标的"))
+            extra.append(Condition(name="自选状态", actual="在自选表里（你自己加的）",
+                                   met=None, source="自选标的", kind=KIND_RULE))
         if symbol in funds:
-            extra.append(Evidence(KIND_FUND, f"主力净额 {funds[symbol]:+.0f} 万元", "资金流"))
+            extra.append(Condition(name="主力资金", actual=f"{funds[symbol]:+.0f} 万元",
+                                   met=None, source="资金流", kind=KIND_FUND))
         picked = wording.display_strategy(str(picks.get(symbol) or ""))
         out[symbol] = analysis.judge_pool(
             symbol,
@@ -197,18 +199,14 @@ def _position_signals(
             change = (price - cost) / cost
             stop_hit = stop > 0 and change <= -stop
             take_hit = take > 0 and change >= take
-        extra: list[Evidence] = []
+        extra: list[Condition] = []
         if price is not None and bar.get("date"):
-            # 口径写在依据里：这是**本地收盘价**，不是实时快照（用户据此核对盈亏）
-            extra.append(Evidence(KIND_POSITION, f"现价取 {bar['date']} 收盘价", "本地日线"))
+            # 口径写在条件那一列：这是**本地收盘价**，不是实时快照（用户据此核对盈亏）
+            extra.append(Condition(name="现价口径", actual=f"{bar['date']} 收盘价",
+                                   met=None, source="本地日线", kind=KIND_POSITION))
         if symbol in funds:
-            extra.append(Evidence(KIND_FUND, f"主力净额 {funds[symbol]:+.0f} 万元", "资金流"))
-        if stop_hit or take_hit:
-            extra.append(Evidence(
-                KIND_POSITION,
-                f"你自己设的线：止损 {stop * 100:.1f}% / 止盈 {take * 100:.1f}%",
-                "系统设置",
-            ))
+            extra.append(Condition(name="主力资金", actual=f"{funds[symbol]:+.0f} 万元",
+                                   met=None, source="资金流", kind=KIND_FUND))
         out[symbol] = analysis.judge_position(
             symbol,
             name=names.get(symbol, ""),
@@ -219,6 +217,8 @@ def _position_signals(
             main_net=funds.get(symbol),
             stop_hit=stop_hit,
             take_hit=take_hit,
+            stop_pct=stop,
+            take_pct=take,
             extra=extra,
             rules=rules,
         )

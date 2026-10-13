@@ -75,10 +75,11 @@ def window(ready_cfg, qapp):
 
 
 def _signal(symbol: str, verdict: str = analysis.WATCH, name: str = "样本") -> object:
-    return analysis.Signal(symbol=symbol, name=name, verdict=verdict,
-                           headline="条件没凑齐，继续观察。",
-                           evidences=[analysis.Evidence(analysis.KIND_SCORE, "评分 50（中性）",
-                                                        "scoring v1.0.0")])
+    return analysis.Signal(
+        symbol=symbol, name=name, verdict=verdict, headline="条件没凑齐，继续观察。",
+        conditions=[analysis.Condition(name="评分（进场门槛）", requirement="≥ 65",
+                                       actual="50（中性）", met=False,
+                                       source="scoring v1.0.0", kind=analysis.KIND_SCORE)])
 
 
 # ── 结论窗本身 ──
@@ -97,7 +98,9 @@ def test_signal_dialog_shows_rows_evidence_and_disclaimer(qapp) -> None:
         assert dialog.table.item(0, 0).text() == "600001"
         assert dialog.table.item(1, 2).text() == analysis.DROP
         # 详情默认显示第一行，且带依据（用户要能自己核一遍）
-        assert "评分 50（中性）" in dialog.detail.toPlainText()
+        text = dialog.detail.toPlainText()
+        assert "评分（进场门槛） ≥ 65：50（中性）" in text      # 条件在前
+        assert text.index("【分析条件】") < text.index("【分析结论】")
         assert dialog.disclaimer.text() == DISCLAIMER
         # 选中第二行 → 详情跟着换
         dialog.table.selectRow(1)
@@ -117,7 +120,7 @@ def test_signal_dialog_says_when_messages_are_not_fetched(qapp) -> None:
     try:
         dialog.set_signals([_signal("600001")])
         text = dialog.detail.toPlainText()
-        assert "未获取" in text and "不影响上面的结论" in text
+        assert "未获取" in text and "不影响下面的结论" in text
     finally:
         dialog.close()
         dialog.deleteLater()
@@ -253,7 +256,7 @@ def test_export_writes_the_report_and_says_where(qapp, tmp_path, monkeypatch) ->
         dialog.set_signals([_signal("600001", analysis.WATCH, "浦发样本")])
         dialog.btn_export.click()
         assert calls, "点了导出却没有写文件"
-        assert "【继续观察】600001 浦发样本" in calls[0]
+        assert "继续观察：600001 浦发样本" in calls[0]
         assert analysis.DISCLAIMER in calls[0]
         assert str(target) in dialog.status_label.text()
     finally:

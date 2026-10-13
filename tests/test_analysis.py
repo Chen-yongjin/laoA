@@ -14,7 +14,7 @@ import pytest
 
 from laoa_trader import analysis
 from laoa_trader.analysis import (
-    DROP, ENTER, EXIT, HOLD, TRIM, WATCH, Evidence, RuleSet, WebNote,
+    DROP, ENTER, EXIT, HOLD, TRIM, WATCH, Condition, RuleSet, WebNote,
     attach_web, format_line, judge_pool, judge_position, with_rules,
 )
 from laoa_trader.scoring import ScoreResult
@@ -33,7 +33,7 @@ def test_pool_enter_needs_both_score_and_strategy():
     score = make_score(78.0, advice="偏强")
     hit = judge_pool("600000", score=score, strategies=["公式·竞价策略"])
     assert hit.verdict == ENTER
-    assert any("公式·竞价策略" in e.line() for e in hit.evidences)
+    assert any("公式·竞价策略" in c.line() for c in hit.conditions)
 
     no_hit = judge_pool("600000", score=score, strategies=[])
     assert no_hit.verdict == WATCH
@@ -98,8 +98,9 @@ def test_position_reports_cost_and_pnl():
     """结论里要带上成本与盈亏，用户一眼知道这条说的是哪一笔。"""
     score = make_score(50.0)
     signal = judge_position("600000", shares=200, cost=10.0, price=11.0, score=score)
-    assert any("成本 10.00" in e.line() and "+10.00%" in e.line() for e in signal.evidences)
-    assert any("持有 200 股" in e.line() for e in signal.evidences)
+    joined = "\n".join(c.line() for c in signal.conditions)
+    assert "成本 10.00" in joined and "+10.00%" in joined
+    assert "持有数量：200 股" in joined
 
 
 # ————————————————————————— 大模型只做附注 —————————————————————————
@@ -113,9 +114,9 @@ def test_web_notes_only_append_and_never_change_the_verdict():
                                   url="https://example.com/a", date="2026-10-13",
                                   source="东财公告")])
     assert with_web.verdict == bare.verdict
-    assert with_web.evidences[:-1] == bare.evidences
-    assert any("回购" in e.line() and "example.com" in e.line() for e in with_web.evidences)
+    assert with_web.conditions == bare.conditions          # 附注不改条件
     assert with_web.web and with_web.web[0].title.startswith("公司公告")
+    assert "回购" in with_web.tip() and "example.com" in with_web.tip()
 
 
 def test_missing_web_line_is_stated_not_silent():
@@ -123,7 +124,7 @@ def test_missing_web_line_is_stated_not_silent():
     signal = judge_pool("600000", score=make_score(50.0))
     if not signal.web:
         assert "未获取" in signal.tip()
-        assert "不影响上面的结论" in signal.tip()
+        assert "不影响下面的结论" in signal.tip()
 
 
 # ————————————————————————— 判据本身 —————————————————————————
@@ -153,13 +154,14 @@ def test_verdicts_never_use_buy_sell_instruction_wording():
     assert analysis.VERDICTS == (ENTER, WATCH, DROP, HOLD, TRIM, EXIT)
 
 
-def test_evidence_requires_a_source():
-    """没有来源的依据写出来不能带空的括号；来源与正文重复时不重复第二遍。"""
-    assert Evidence("规则", "当轮被策略命中：公式·X").line() == "当轮被策略命中：公式·X"
-    assert Evidence("资金", "主力净额 +300 万元", "资金流").line().endswith("（资金流）")
-    # 策略那一条的来源就是策略名本身 —— 写两遍是噪音（离屏出图时看出来的）
-    assert Evidence("规则", "当轮被策略命中：尾盘超短策略", "尾盘超短策略").line() == \
-        "当轮被策略命中：尾盘超短策略"
+def test_condition_line_marks_met_unmet_and_reference():
+    """条件那一行必须写清"满足 / 不满足 / 只作参考"，且来源不与正文重复。"""
+    assert Condition(name="主力资金", actual="+300 万元", met=None,
+                     source="资金流").line() == "主力资金：+300 万元（资金流）（只作参考）"
+    assert Condition(name="评分（进场门槛）", requirement="≥ 65", actual="78（偏强）",
+                     met=True).line(1) == "1. 评分（进场门槛） ≥ 65：78（偏强） → 满足"
+    assert Condition(name="当轮策略命中", actual="尾盘超短策略", met=True,
+                     source="尾盘超短策略").line() == "当轮策略命中：尾盘超短策略 → 满足"
 
 
 @pytest.mark.parametrize("verdict", analysis.POOL_VERDICTS)
@@ -179,10 +181,13 @@ def test_report_text_lists_every_signal_with_evidence_and_disclaimer():
     ]
     text = analysis.report_text(signals, day="2026-10-13", generated_at="2026-10-13 15:04")
     assert text.startswith(f"{analysis.REPORT_TITLE} · 2026-10-13")
-    assert "共 2 只：进场信号成立 1 · 继续观察 1" in text
+    assert "共 2 只：进场信号成立 1 · 继续观察 1" in text      # 汇总在**最后**那一节
     assert "生成时间 2026-10-13 15:04（北京时间，手动分析）" in text
-    assert "【进场信号成立】600001 浦发样本" in text
-    assert "· 当轮被策略命中：尾盘超短策略" in text        # 依据带上了
+    # **先条件、后结论**：条件那一节必须排在结论那一节前面（主人 2026-10-13 的要求）
+    assert text.index("一、分析条件") < text.index("二、分析结论")
+    assert "600001 浦发样本" in text
+    assert "当轮策略命中" in text and "尾盘超短策略" in text     # 条件那一列带上了
+    assert "进场信号成立：600001 浦发样本 —— 评分达标，且当轮有策略命中。" in text
     assert "消息：未获取" in text                          # 没接大模型那条线时如实说
     assert analysis.DISCLAIMER in text
     assert text.endswith("\n")
@@ -201,7 +206,7 @@ def test_report_text_puts_web_notes_in_and_can_leave_them_out():
     attach_web(signal, [WebNote(title="公司公告：回购进展", summary="拟回购 1~2 亿元",
                                 url="https://example.com/a", date="2026-10-13")])
     text = analysis.report_text([signal], day="d", generated_at="t")
-    assert "消息 2026-10-13 公司公告：回购进展 https://example.com/a" in text
+    assert "消息 2026-10-13 公司公告：回购进展，拟回购 1~2 亿元 https://example.com/a" in text
     bare = analysis.report_text([signal], day="d", generated_at="t", include_web=False)
     assert "消息" not in bare
 

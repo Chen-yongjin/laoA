@@ -56,7 +56,8 @@ def test_pool_verdicts_follow_score_and_this_round_picks(db) -> None:
         score_getter=_getter({"600001": _score(21.0, advice="弱势")}),
     )["600001"]
     assert weak.verdict == DROP
-    assert any("长期无信号" in n for n in weak.notes)
+    # 剔除的理由要落在**条件那一列**上（用户看到的是"哪条条件不满足"）
+    assert any("策略命中新鲜度" in c.line() and "不满足" in c.line() for c in weak.conditions)
 
 
 def test_pool_enter_uses_the_round_ledger_without_formula_prefix(db, monkeypatch) -> None:
@@ -68,7 +69,7 @@ def test_pool_enter_uses_the_round_ledger_without_formula_prefix(db, monkeypatch
         score_getter=_getter({"600001": _score(80.0, advice="偏强")}),
     )["600001"]
     assert signal.verdict == ENTER
-    joined = "\n".join(e.line() for e in signal.evidences)
+    joined = "\n".join(c.line() for c in signal.conditions)
     assert "竞价策略" in joined
     assert "公式·" not in joined
 
@@ -81,9 +82,9 @@ def test_pool_carries_watchlist_and_fund_evidence(fund_flow) -> None:
         None, fund_flow, ["600001"], signals_mod.KIND_POOL,
         score_getter=_getter({"600001": _score(50.0)}),
     )["600001"]
-    joined = "\n".join(e.line() for e in signal.evidences)
+    joined = "\n".join(c.line() for c in signal.conditions)
     assert "在自选表里" in joined
-    assert "主力净额 -820 万元" in joined          # 元 → 万元，负号保留
+    assert "-820 万元" in joined                   # 元 → 万元，负号保留
 
 
 def test_position_verdicts_use_cost_and_fund_flow(db) -> None:
@@ -101,9 +102,9 @@ def test_position_verdicts_use_cost_and_fund_flow(db) -> None:
         score_getter=_getter({"600003": _score(22.0, symbol="600003", advice="弱势")}),
     )["600003"]
     assert weak.verdict == EXIT
-    joined = "\n".join(e.line() for e in weak.evidences)
-    assert "成本 18.00" in joined and "持有 200 股" in joined
-    assert "主力净额 -3000 万元" in joined
+    joined = "\n".join(c.line() for c in weak.conditions)
+    assert "成本 18.00" in joined and "持有数量：200 股" in joined
+    assert "-3000 万元" in joined
 
     strong = signals_mod.build_signals(
         None, db, ["600003"], signals_mod.KIND_POSITION,
@@ -141,7 +142,8 @@ def test_position_stop_line_beats_a_strong_score(db) -> None:
         score_getter=_getter({"600001": _score(95.0, advice="强势")}),
     )["600001"]
     assert signal.verdict == EXIT
-    assert any("止损 5.0%" in e.line() for e in signal.evidences)
+    assert any("止损线" in c.line() and "5.0%" in c.line() and c.met
+               for c in signal.conditions)
 
 
 def test_missing_score_still_produces_a_verdict(db) -> None:
@@ -225,7 +227,8 @@ def test_export_writes_into_the_luweik_folder_on_the_desktop(tmp_path, db) -> No
     assert b"\r\n" in raw
     written = path.read_text(encoding="utf-8-sig")
     assert written.startswith("luweik · 决策信号 · 2026-10-13")
-    assert "【继续观察】600001" in written
+    assert written.index("一、分析条件") < written.index("二、分析结论")
+    assert "继续观察：600001 浦发样本" in written
     assert "不构成投资建议" in written
 
 
