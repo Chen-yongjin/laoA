@@ -862,6 +862,16 @@ def _close_orphan_top_level_windows():
         except Exception:  # noqa: BLE001 - 兜底收尾失败不该把用例带崩
             pass
     app.processEvents()
+    # ⚠️ 上面那几只都是 `deleteLater()` 收的，而 `deleteLater()` **只是排队** ——
+    # 不显式跑 DeferredDelete，它们压根不会真删（实测：浮窗与桌宠因此每建一次就漏一只，
+    # 一直挂在事件循环里）。这一步是"兜底真的兜住"的关键。
+    try:
+        from PySide6.QtCore import QEvent
+
+        app.sendPostedEvents(None, QEvent.DeferredDelete)
+        app.processEvents()
+    except Exception:      # noqa: BLE001 - 兜底失败不该把用例带崩
+        pass
     # ── 最后一道：**所有**登记在册的工作线程都必须落地 ──
     # 为什么不能只靠上面那几个属性名：漏一个名字就等于漏一条线程，而漏掉的后果是
     # CI 上"跑到半路中止、没有任何失败记录"（`Worker._live` 的注释里写了同源事故）。

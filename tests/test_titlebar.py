@@ -20,6 +20,8 @@ import os
 
 import pytest
 
+from tests._ui import close_main_window  # noqa: E402 - 建主窗口的用例共用同一个收尾
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过界面用例")
@@ -276,17 +278,10 @@ def frame_window(ready_cfg, qapp):
     try:
         yield window
     finally:
-        window._timer.stop()
-        window._market_timer.stop()
-        window._flash_timer.stop()
-        window.scheduler.stop()
-        window.quotes.stop()
-        window.scores.stop()            # 评分线程要**先停**（见 test_ui_smoke 的同一条注释）
-        window.shutdown()
-        window.tray.hide()
-        window.close()
-        window.deleteLater()
-        qapp.processEvents()
+        # 收尾走**全项目唯一那个顺序**（见 `tests/_ui.py`）：定时器 → 服务（调度/快照/评分）
+        # → 等取数线程 → `shutdown()`（桌宠/消息列表/浮窗/对话框）→ 显式跑 DeferredDelete
+        # → 再等登记在册的工作线程。以前这里手写，少一步就是"窗口拆了线程还在跑"。
+        close_main_window(window, qapp)
 
 
 def test_main_window_has_the_custom_titlebar(frame_window) -> None:

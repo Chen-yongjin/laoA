@@ -101,6 +101,7 @@ from laoa_trader.config import get_config
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import formula as fm
 from laoa_trader.strategy import formula_group
+from laoa_trader.ui import threads as threads_mod
 
 logger = get_logger(__name__)
 
@@ -573,12 +574,17 @@ if QT_AVAILABLE:
         def __init__(self, fn: Callable[..., Any], *args: Any,
                      with_progress: bool = False, **kwargs: Any) -> None:
             super().__init__()
+            # 从创建那一刻起就登记（见 `ui/threads.py`）：本线程没有 C++ 父对象，靠调用方那个
+            # 属性拿着它；"筛选中途用户把窗口关了"时属性会变成 None —— 引用一归零，PySide6 就
+            # 析构还在跑的 QThread，Qt 走 `qFatal` → `abort()`（进程静默死掉）
+            threads_mod.keep(self)
             self._fn = fn
             self._args = args
             self._kwargs = kwargs
             self._with_progress = with_progress
 
         def run(self) -> None:  # noqa: D102 - QThread 约定
+            # 登记在 `__init__` 里做了（见 `ui/threads.py`）：从创建到跑完，永远有人拿着它
             try:
                 kwargs = dict(self._kwargs)
                 if self._with_progress:

@@ -18,6 +18,8 @@ import os
 
 import pytest
 
+from tests._ui import close_main_window  # noqa: E402 - 建主窗口的用例共用同一个收尾
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过界面用例")
@@ -214,18 +216,7 @@ def score_window(ready_cfg, qapp):
     try:
         yield window
     finally:
-        for name in ("_timer", "_market_timer", "_flash_timer"):
-            timer = getattr(window, name, None)
-            if timer is not None:
-                timer.stop()
-        window.scheduler.stop()
-        window.quotes.stop()
-        window.scores.stop()
-        window.shutdown()
-        window.tray.hide()
-        window.close()
-        window.deleteLater()
-        qapp.processEvents()
+        close_main_window(window, qapp)      # 见 `tests/_ui.py`：收尾只有这一个顺序
 
 
 def test_both_tables_have_a_score_column(score_window) -> None:

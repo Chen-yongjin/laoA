@@ -53,6 +53,7 @@ from laoa_trader.config import get_config
 from laoa_trader.hints import BTN_DOWNLOAD_TEXT, TAB_SETTINGS_TEXT
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import formula as fm
+from laoa_trader.ui import threads as threads_mod
 
 logger = get_logger(__name__)
 
@@ -487,9 +488,13 @@ if QT_AVAILABLE:
 
         def __init__(self, db_path: str, parent: Any = None) -> None:
             super().__init__(parent)
+            # 从创建那一刻起就登记（见 `ui/threads.py`）：没有 C++ 父对象的线程只能靠
+            # "有人拿着它"活着，对话框一关、那个属性一没，跑着的 QThread 被析构就是 abort
+            threads_mod.keep(self)
             self._db_path = db_path
 
         def run(self) -> None:  # noqa: D102 - QThread 约定
+            # 登记在 `__init__` 里做了（见 `ui/threads.py`）
             try:
                 result = precheck(self._db_path)
             except Exception as exc:  # noqa: BLE001 - 后台异常必须回主线程说人话
@@ -519,6 +524,7 @@ if QT_AVAILABLE:
         def __init__(self, targets: Sequence[ScorecardTarget], db_path: str, *,
                      conv_key: str, parent: Any = None) -> None:
             super().__init__(parent)
+            threads_mod.keep(self)      # 同预检：见 `ui/threads.py`（跑着的时候永远有人拿着它）
             self._targets = list(targets)
             self._db_path = db_path
             self._conv_key = conv_key
@@ -541,6 +547,8 @@ if QT_AVAILABLE:
             self.progress.emit(stage, done, total)
 
         def run(self) -> None:  # noqa: D102 - QThread 约定
+            # 登记在 `__init__` 里做了（见 `ui/threads.py`）：对话框关掉之后这个线程可能还要
+            # 跑几十秒（逐条策略），没登记就会被"引用归零"析构掉
             try:
                 for item in iter_outcomes(
                     self._targets, self._db_path, conv_key=self._conv_key,

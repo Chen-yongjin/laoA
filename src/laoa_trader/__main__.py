@@ -847,7 +847,13 @@ def cli(argv: list[str] | None = None) -> int:
     if args.gui_selftest:
         # 图形界面冒烟：**在加载配置之前**分支出去 —— 它自带配置与日志，
         # 而且绝不碰用户真实的数据目录（见 `_gui_selftest` 的说明）。
-        return _gui_selftest(args)
+        #
+        # 退出码过 `finish_exit()`：自检收尾之后若还有后台线程在跑（概览取数/评分那几条），
+        # Qt 会在解释器收尾时把它们析构掉 → `abort()` → **退出码 134**，
+        # 而 CI 的冒烟步骤读的就是这个退出码 —— "界面明明是好的"却报红。
+        from laoa_trader.ui import threads as threads_mod
+
+        return threads_mod.finish_exit(_gui_selftest(args))
 
     cfg = load_config(args.config) if args.config else get_config()
     _apply_run_time_override(cfg, args)

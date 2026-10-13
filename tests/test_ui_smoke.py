@@ -27,7 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过界面冒烟测试")
 
-from PySide6.QtCore import QEvent, Qt  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
 from laoa_trader import intraday  # noqa: E402
 from laoa_trader.data import storage  # noqa: E402
 from laoa_trader.intraday import now_shanghai  # noqa: E402
@@ -35,6 +35,7 @@ from laoa_trader.data.engine import DataEngine  # noqa: E402
 from laoa_trader.notify import KINDS  # noqa: E402
 from laoa_trader.ui import app as ui_app  # noqa: E402
 from tests._toml import p  # noqa: E402
+from tests._ui import close_main_window, wait_market  # noqa: E402
 
 
 @pytest.fixture()
@@ -145,40 +146,61 @@ def window(seeded, qapp):
     # 先等它落地，免得它的结果跟用例自己的断言抢同一个 `market_overview`
     _wait_market(win, qapp)
     yield win
-    # ── 收尾必须**彻底**：不然会跨用例累积 ──
-    # 这堆控件每个都带定时器（5 秒界面刷新 / 60 秒概览），窗口没被真正销毁时它们会一直
-    # 在事件循环里触发；用例一多，后面每个 `processEvents()` 都越来越慢 ——
-    # 实测整套界面用例从 ~60 秒劣化到 9 分钟（每个用例 +9 秒）。
-    # 所以要：停定时器 → 停调度线程 → 等概览后台线程落地 → 关闭窗口 → **强制处理
-    # DeferredDelete**（`deleteLater()` 只是排队，不跑 `sendPostedEvents` 就不会真删）。
-    win._timer.stop()
-    win._market_timer.stop()
-    win._flash_timer.stop()
-    win.scheduler.stop()
-    win.quotes.stop()               # 实时快照的工作线程也要收（不然后台还在飞）
-    # 评分线程同理，而且它**更慢**（每只票要读日线 + 评估 17 项 × 2 条公式，
-    # 参数里还可能去取一次快照）：收尾时不先停它，窗口已经拆了它还在飞，
-    # 实测会让整个 pytest 进程在 teardown 阶段 `Fatal Python error: Aborted`
-    win.scores.stop()
+    # ── 收尾：**唯一那个顺序**，见 `tests/_ui.py::close_main_window` ──
+    # 为什么不再在这里手写：手写的版本有八九份，彼此都差着几步 —— 实测漏掉的全是同一条
+    # `scores.stop()`（评分线程），而漏它的后果就是那个查了很久的症状：窗口销毁时评分线程
+    # 还在跑 → Qt `qFatal` → 整个 pytest 进程 `Fatal Python error: Aborted`
+    # （CI 上则是"跑到 ~90% 没了、没有任何用例失败记录"）。顺序与理由都收在那一个函数里，
+    # 以后新增服务/线程只改那一处。
+    close_main_window(win, qapp)
+
+
+def test_closing_the_window_leaves_nothing_behind(seeded, qapp) -> None:
+    """收尾之后：主窗口、托盘菜单、后台线程**一个都不许剩**（跨用例累积就是这么来的）。
+
+    为什么这条要单独测（2026-10-14 实测）：建一只主窗口就会留下
+    **一个没有父对象的 `QMenu`**（托盘右键菜单写成 `QMenu()`，而
+    `QSystemTrayIcon.setContextMenu()` 按 Qt 文档**不接管所有权**），于是每建一次窗口
+    就多一个顶层窗口 + 6 个 `QAction` 一直挂在事件循环里，而它们的槽还连着已经拆掉的窗口。
+    连跑 40 个建窗口的用例就攒下 40 个（`QApplication.topLevelWidgets()` 里数出来的）——
+    与 2026-09-20 那次"孤儿桌宠"是同一种病：**窗口比测试活得久**。
+
+    顺带钉住"窗口真的被销毁了"：`deleteLater()` 只是排队，不显式跑 DeferredDelete
+    就不会真删（窗口没真删，它的定时器与后台线程就都还在）。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from laoa_trader.ui import app as ui_app
+    from laoa_trader.ui import threads as threads_mod
+
+    def _menus() -> list:
+        return [w for w in QApplication.topLevelWidgets()
+                if type(w).__name__ == "QMenu"]
+
+    def _running_threads() -> set:
+        return {id(t) for t in threads_mod.running()}
+
+    menus_before = len(_menus())
+    threads_before = _running_threads()
+
+    win = ui_app.MainWindow(seeded)
+    win.show()
+    qapp.processEvents()
+    win._tick()
     _wait_market(win, qapp)
-    worker = getattr(win, "_market_worker", None)
-    if worker is not None and worker.isRunning():
-        worker.wait(3_000)
-    if win.about_dialog is not None:
-        win.about_dialog.close()    # 「关于软件」窗口同理
-    if win.status_dialog is not None:
-        win.status_dialog.close()   # 「状态详情」窗口同理
-    # ⚠️ **必须显式 shutdown**：桌宠/消息列表/浮窗都是**没有父窗口**的顶层窗口，
-    # `win.deleteLater()` 收不掉它们 —— 每建一次主窗口就留一只桌宠，孤儿越积越多，
-    # 最终某一只在事件循环里踩到已析构对象，pytest 中途 `Fatal Python error: Aborted`
-    # （2026-09-20 实测：连建三次就留下三只）。这条收尾与生产代码的退出路径是同一个方法。
-    win.shutdown()
-    win.tray.hide()
-    win.close()
-    win.deleteLater()
-    qapp.processEvents()
-    qapp.sendPostedEvents(None, QEvent.DeferredDelete)   # 真正执行删除
-    qapp.processEvents()
+    quotes, scores = win.quotes, win.scores
+    assert len(_menus()) == menus_before + 1, "托盘菜单该是这个窗口名下的顶层窗口"
+
+    close_main_window(win, qapp)
+
+    assert [w for w in QApplication.topLevelWidgets()
+            if isinstance(w, ui_app.MainWindow)] == [], \
+        "主窗口没被真正销毁（`deleteLater()` 只是排队，要显式跑 DeferredDelete）"
+    assert len(_menus()) == menus_before, \
+        "托盘菜单被漏下来了（没有父对象的顶层窗口，每建一次主窗口就多一个）"
+    assert quotes._worker is None, "快照服务收尾后不该还挂着线程"
+    assert scores._worker is None, "评分服务收尾后不该还挂着线程"
+    assert _running_threads() - threads_before == set(), "收尾之后还有这个窗口的后台线程在跑"
 
 
 def _layout_widgets(layout) -> list:
@@ -681,10 +703,7 @@ def test_window_builds_and_refreshes_in_every_theme(seeded, qapp) -> None:
                 assert win.pool_table.rowCount() == 1
                 assert win.theme_box.currentData() == name  # 下拉框跟着配置走
             finally:
-                win.scheduler.stop()
-                win.tray.hide()
-                win.deleteLater()
-                qapp.processEvents()
+                close_main_window(win, qapp)
     finally:
         market.clear_cache()
 
@@ -706,10 +725,7 @@ def test_illegal_theme_in_config_still_opens_window(seeded, qapp) -> None:
         qapp.processEvents()
         assert win.position_table.rowCount() == 1
     finally:
-        win.scheduler.stop()
-        win.tray.hide()
-        win.deleteLater()
-        qapp.processEvents()
+        close_main_window(win, qapp)
         seeded.ui_theme = "silver"
 
 
@@ -2112,12 +2128,7 @@ def test_window_opens_without_icon_assets(seeded, qapp, monkeypatch) -> None:
         texts = [lb.text() for lb in win.about_dialog.findChildren(QLabel)]
         assert any(t.startswith("版本：") for t in texts)   # 正文不受图标影响
     finally:
-        if win.about_dialog is not None:
-            win.about_dialog.close()
-        win.scheduler.stop()
-        win.tray.hide()
-        win.deleteLater()
-        qapp.processEvents()
+        close_main_window(win, qapp)
 
 
 def test_save_notify_writes_channels_and_params(window, seeded, qapp) -> None:
@@ -2459,13 +2470,7 @@ def test_formula_page_button_runs_the_pipeline_through_its_signal(
         qapp.processEvents()
         assert called == [1, 1, 1]
     finally:
-        win._timer.stop()
-        win._market_timer.stop()
-        win.scheduler.stop()
-        win.quotes.stop()
-        win.tray.hide()
-        win.deleteLater()
-        qapp.processEvents()
+        close_main_window(win, qapp)
 
 
 def test_test_connection_probe_reports_every_outcome(window) -> None:
@@ -2958,13 +2963,9 @@ def hint_window(cfg, qapp, monkeypatch):
     win.run_preflight()                # 显式触发（不依赖 singleShot 时序）
     qapp.processEvents()
     yield win
-    win._timer.stop()
-    win._market_timer.stop()
-    win.scheduler.stop()
-    win.quotes.stop()
-    win.tray.hide()
-    win.deleteLater()
-    qapp.processEvents()
+    # 与 `window` 夹具同一套收尾（以前这里少了 `scores.stop()` / `shutdown()` /
+    # 处理 DeferredDelete 三步 —— 漏了就会把还在跑的评分线程交给窗口的销毁链去析构）
+    close_main_window(win, qapp)
 
 
 #: 删掉的那些"常驻解释性小字"里出现过的**原话**（一个都不许再出现在界面上）。
@@ -3293,16 +3294,8 @@ def _inject_market_client(monkeypatch, injected):
 
 
 
-def _wait_market(window, qapp, timeout_ms: int = 10_000) -> None:
-    """等概览页那一轮**后台**取数结束，并把结果送到界面上。
-
-    界面路径（启动 / 定时器 / 切页 / 【立即刷新】）都跑在 QThread 里，
-    而 `finished_ok` 是排队信号 —— 不 wait + processEvents 就断言，会读到上一轮的值。
-    """
-    worker = getattr(window, "_market_worker", None)
-    if worker is not None:
-        worker.wait(timeout_ms)
-    qapp.processEvents()
+#: 等概览页后台取数落地：实现移到 `tests/_ui.py`（收尾与它用的是同一份），这里只留名字
+_wait_market = wait_market
 
 
 @pytest.fixture()
@@ -3542,15 +3535,7 @@ def test_window_opens_with_a_public_only_config_and_leaves_it_alone(
         assert 'data_sources = ["public"]' in config_file.read_text(encoding="utf-8")
         assert seeded.data_sources == ["public"]             # 内存里那份也没被动过
     finally:
-        win._timer.stop()
-        win._market_timer.stop()
-        win.scheduler.stop()
-        win.quotes.stop()
-        win.scores.stop()
-        win.shutdown()
-        win.tray.hide()
-        win.deleteLater()
-        qapp.processEvents()
+        close_main_window(win, qapp)
 
 
 def test_source_group_builds_without_the_source_registry(
@@ -3583,15 +3568,7 @@ def test_source_group_builds_without_the_source_registry(
         # 一键保存照样收这个键（键名是内置的，不靠注册表告诉它）
         assert win._collect_settings_updates()["hithink_api_key"] == "k-without-registry"
     finally:
-        win._timer.stop()
-        win._market_timer.stop()
-        win.scheduler.stop()
-        win.quotes.stop()
-        win.scores.stop()
-        win.shutdown()
-        win.tray.hide()
-        win.deleteLater()
-        qapp.processEvents()
+        close_main_window(win, qapp)
 
 
 def test_settings_tab_is_scrollable_so_the_window_can_shrink(window, qapp) -> None:
@@ -3663,13 +3640,7 @@ def test_market_page_refreshes_right_after_startup(seeded, qapp, monkeypatch) ->
         assert [b["name"] for b in hot.widget.blocks][0] == "半导体"
         assert "更新于 —" not in win.market_as_of_label.fullText()   # 页脚已是真实取数时间
     finally:
-        win._timer.stop()
-        win._market_timer.stop()
-        win.scheduler.stop()
-        win.quotes.stop()
-        win.tray.hide()
-        win.deleteLater()
-        qapp.processEvents()
+        close_main_window(win, qapp)
         market.clear_cache()
 
 #: 概览页两块**指数**应当长成的样子（顺序 = 配置顺序，数值照抄 `SAMPLE_ROWS` 的当日在值）。
@@ -4403,6 +4374,11 @@ def test_market_layout_survives_wider_fonts(seeded, qapp, monkeypatch) -> None:
         assert list(win.market_sections) == list(ui_app.MARKET_SECTION_TITLES)
         assert all(section.isVisible() for section in win.market_sections.values())
     finally:
+        # ⚠️ 这里原来只还原了字体：`opened` 列表里那只主窗口**从来没被收过** ——
+        # 每跑一次这条用例就漏一整只窗口（连带托盘菜单/消息列表/浮窗）。
+        # 收尾走与别处同一个顺序（见 `tests/_ui.py`）。
+        for win in opened:
+            close_main_window(win, qapp)
         qapp.setFont(original)
         market.clear_cache()
 
@@ -4435,14 +4411,9 @@ def screen_window(seeded, qapp, monkeypatch):
     yield _open
 
     for win in opened:
-        win._timer.stop()
-        win._market_timer.stop()
-        win.scheduler.stop()
-        win.quotes.stop()
-        _wait_market(win, qapp)
-        win.tray.hide()
-        win.deleteLater()
-    qapp.processEvents()
+        # 与 `window` 夹具同一套收尾（这里原来少收 `scores`、少 `shutdown()`、
+        # 也没显式跑 DeferredDelete —— 每开一档屏幕尺寸就漏一只窗口 + 一个托盘菜单）
+        close_main_window(win, qapp)
 
 
 def _bottom_of(widget, window) -> int:
@@ -4546,10 +4517,7 @@ def test_window_falls_back_to_the_default_size_without_screen(seeded, qapp,
         assert ui_app.WINDOW_PREFERRED_SIZE == (1120, 760)
         assert (win.width(), win.height()) == (1120, 760)
     finally:
-        win.scheduler.stop()
-        win.tray.hide()
-        win.deleteLater()
-        qapp.processEvents()
+        close_main_window(win, qapp)
 
 
 def test_window_stays_usable_when_dragged_down_to_the_minimum(
@@ -5912,14 +5880,5 @@ def test_formula_tab_fallback_run_button_does_not_stretch(
             f"{button.sizeHint().width()}"
         )
     finally:
-        win._timer.stop()
-        win._market_timer.stop()
-        win.scheduler.stop()
-        win.quotes.stop()
-        win.scores.stop()
-        win.shutdown()
-        win.tray.hide()
-        win.close()
-        win.deleteLater()
-        qapp.processEvents()
+        close_main_window(win, qapp)
 

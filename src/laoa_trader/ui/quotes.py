@@ -58,6 +58,7 @@ from laoa_trader.config import Config
 from laoa_trader.data import hithink as hx
 from laoa_trader.data import sources
 from laoa_trader.log import get_logger
+from laoa_trader.ui import threads as threads_mod
 
 logger = get_logger(__name__)
 
@@ -229,6 +230,10 @@ class QuoteWorker(QThread):
 
     def __init__(self, fn: Callable[..., dict], *args: Any) -> None:
         super().__init__()
+        # 从创建那一刻起就登记（见 `ui/threads.py`）：`start()` 之后到 `run()` 被调度之间
+        # 还有个空档，那时线程已是"running"、却谁都还没拿着它 —— 收尾在这几微秒里把引用丢掉
+        # （`QuoteService.stop()` 里的 `self._worker = None`），跑着的 QThread 就会被析构 → abort
+        threads_mod.keep(self)
         self._fn = fn
         self._args = args
         #: 已被取消（收尾时置位）。用普通 bool 而不是锁：只会被主线程写、被工作线程读，
@@ -243,6 +248,9 @@ class QuoteWorker(QThread):
         return self._cancelled
 
     def run(self) -> None:  # noqa: D102 - QThread 约定
+        # 登记在 `__init__` 里做了（见 `ui/threads.py`）：从创建到跑完，永远有人拿着它 ——
+        # `stop()` 只等 3 秒，等不到之后调用方那句 `self._worker = None` 会让引用归零，
+        # 而 PySide6 一析构跑着的 QThread，Qt 就走 `qFatal` → `abort()`。
         try:
             result = self._fn(*self._args)
         except Exception as exc:  # noqa: BLE001 - 工作线程异常也必须回主线程
@@ -399,6 +407,10 @@ class QuoteService(QObject):
         真实环境 20~30 秒很常见）时线程会带着"发结果"的念头活到窗口销毁之后 ——
         在 Windows 上就是那个查了很久的 access violation（见 `QuoteWorker` 的 docstring）。
         cancel 之后即使它稍后才收工，也只会把结果丢掉。
+
+        等不到就**寄存**（`threads.park`）：`self._worker = None` 会让 Python 引用归零，
+        而一条还在跑的 `QThread` 被析构 = `qFatal` → `abort()`（进程静默死掉，
+        CI 上表现为"跑到半路没了、没有任何用例失败记录"）。
         """
         worker, self._worker = self._worker, None
         if worker is None:
@@ -406,6 +418,7 @@ class QuoteService(QObject):
         worker.cancel()
         if worker.isRunning():
             worker.wait(3_000)
+        threads_mod.park(worker)      # 还在跑就寄存；跑完了它什么都不做
 
 
 __all__ = [

@@ -20,10 +20,12 @@
 from __future__ import annotations
 
 import threading
+import weakref
 from typing import Any, Iterable, Sequence
 
 from laoa_trader import scoring
 from laoa_trader.log import get_logger
+from laoa_trader.ui import threads as threads_mod
 
 logger = get_logger(__name__)
 
@@ -38,21 +40,44 @@ except Exception as _exc:  # noqa: BLE001
 if QT_AVAILABLE:
 
     class _ScoreWorker(QThread):
-        """算一批票的评分（**只读库、只读快照**，一个字都不写）。"""
+        """算一批票的评分（**只读库、只读快照**，一个字都不写）。
+
+        ⚠️ **故意不挂 C++ 父对象**（`parent=None`）：原来它挂在 `ScoreService` 下面，
+        而服务又挂在主窗口下面 —— 窗口一销毁，整条父子链连子带孙一起析构，跑着的评分线程
+        被析构 = `qFatal` → `abort()`（2026-10-13 CI 跑到 90% 无声中止、2026-10-14 本机
+        `Fatal Python error: Aborted` 栈停在 `scores.py in run`，都是这一条）。
+        不挂父对象的代价是"没人替你收"，所以它在**构造时**就向 `ui/threads.py` 登记自己：
+        **从创建到跑完，永远有人拿着它**（跑完自动除名）。
+        """
 
         done = Signal(dict)
 
         def __init__(self, cfg: Any, db_path: Any, symbols: Sequence[str],
-                     parent: Any = None) -> None:
+                     service: Any = None, parent: Any = None) -> None:
             super().__init__(parent)
+            # 从创建那一刻起就登记（见 `ui/threads.py`）：`start()` 之后到 `run()` 被调度之间
+            # 还有个空档，那时线程已是"running"、却谁都还没拿着它 —— 收尾刚好撞上就是把一条
+            # 跑着的 QThread 交给析构，Qt 走 `qFatal` → `abort()`（这就是那个"跑到 90% 无声中止"）
+            threads_mod.keep(self)
             self.cfg = cfg
             self.db_path = db_path
             self.symbols = [str(s) for s in symbols]
+            #: 服务用**弱引用**记：直接拿着它会和服务形成引用环（服务 → 线程 → 服务），
+            #: 那个环一旦被 gc 收掉，跑着的线程就跟着被析构 —— 又是同一种 abort。
+            self._service_ref = weakref.ref(service) if service is not None else None
+
+        def _stopped(self) -> bool:
+            """服务是不是已经收尾了（拿不到服务就按"没停"算，与加这个判断之前一样）。"""
+            service = self._service_ref() if self._service_ref is not None else None
+            if service is None:
+                service = self.parent()
+            return bool(getattr(service, "_stopped", False))
 
         def run(self) -> None:  # noqa: D102 - QThread 接口
+            # 登记在 `__init__` 里做了（见 `ui/threads.py`）：跑着的时候永远有人拿着它。
             # 服务已经收尾了就别再干活（退出流程里窗口可能已经拆了，
             # 这时候还去读库/取快照，出了问题连日志都写不出去）
-            if getattr(self.parent(), "_stopped", False):
+            if self._stopped():
                 return
             try:
                 results = scoring.score_symbols(self.cfg, self.db_path, self.symbols)
@@ -61,6 +86,11 @@ if QT_AVAILABLE:
                 results = {symbol: scoring.ScoreResult(symbol=symbol,
                                                        note=f"评分失败：{exc}")
                            for symbol in self.symbols}
+            # 算的过程中被收尾了 → **一个信号都不发**：接收方（`ScoreService._on_done` →
+            # 界面那两张表）此刻可能已经拆了，发过去就是往已析构的对象上打
+            if self._stopped():
+                logger.debug("评分线程已取消，丢弃这一批结果")
+                return
             self.done.emit(results)
 
     class ScoreService(QObject):
@@ -122,16 +152,35 @@ if QT_AVAILABLE:
                     self._cache.pop(str(symbol), None)
 
         def stop(self) -> None:
-            """收尾：停线程（退出流程里必须调，否则解释器退出时 QThread 还活着会 abort）。"""
+            """收尾：停线程（退出流程里必须调，否则解释器退出时 QThread 还活着会 abort）。
+
+            顺序是刻意的，三步缺一不可：
+
+            1. **先落 `_stopped`**：`_start_if_idle()` 从此一次都不再起新线程、
+               `_on_done()` 也不再发信号（否则收尾途中的一个回包就能再拉起一条线程，
+               而那条线程正是"窗口拆了它还在跑"的来源）；
+            2. **`setParent(None)` 摘出 C++ 销毁链**：`_ScoreWorker` 是挂在**服务**
+               下面的，而服务又挂在主窗口下面 —— 不摘的话，窗口一销毁就连子带孙析构，
+               跑着的评分线程被析构 = `qFatal` → `abort()`（本机复现：收尾那一步稳定
+               以退出码 134 死掉，栈停在 `scores.py in run`）；
+            3. **等**，等不到就**寄存**（见 `ui/threads.py`）：`self._worker = None`
+               会让 Python 引用归零，PySide6 同样会析构它 —— 寄存才真的安全。
+            """
             self._stopped = True
+            with self._lock:
+                self._pending.clear()
             worker = self._worker
-            if worker is not None:
-                try:
-                    if worker.isRunning():
-                        worker.wait(5_000)
-                except RuntimeError:      # 底层对象已经没了
-                    pass
+            if worker is None:
+                return
+            try:
+                worker.setParent(None)     # 先摘出来，再谈等不等得到
+            except RuntimeError:           # 底层对象已经没了
                 self._worker = None
+                return
+            if worker.isRunning():
+                worker.wait(5_000)
+            threads_mod.park(worker)       # 还在跑就寄存（跑完了它什么都不做）
+            self._worker = None
 
         # ── 内部 ──
         @staticmethod
@@ -142,6 +191,12 @@ if QT_AVAILABLE:
             return True
 
         def _start_if_idle(self) -> None:
+            if self._stopped:
+                # 收尾之后**一次都不许再起线程**：这时窗口随时可能被销毁，
+                # 新起的 QThread 就算 `run()` 立刻返回，"还在跑"的那几毫秒里被析构也是 abort
+                with self._lock:
+                    self._pending.clear()
+                return
             if self._worker is not None and self._worker.isRunning():
                 return
             with self._lock:
@@ -155,7 +210,13 @@ if QT_AVAILABLE:
             worker.start()
 
         def _on_done(self, results: dict) -> None:
-            """一批算完：写缓存 → 把还没算的接着排 → 通知界面。"""
+            """一批算完：写缓存 → 把还没算的接着排 → 通知界面。
+
+            服务已经收尾时**什么都不做**：不写缓存、不发 `updated`（接收方可能已经拆了）、
+            也不再排队 —— 收尾之后"顺手多做一点"正是那条活过窗口的线程的来源。
+            """
+            if self._stopped:
+                return
             with self._lock:
                 for symbol, result in (results or {}).items():
                     self._cache[str(symbol)] = (scoring.cache_key(result), result)

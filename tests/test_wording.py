@@ -27,11 +27,12 @@ import os
 
 import pytest
 
+from tests._ui import close_main_window  # noqa: E402 - 建主窗口的用例共用同一个收尾
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过界面文案用例")
 
-from PySide6.QtCore import QEvent  # noqa: E402
 from PySide6.QtGui import QAction  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
@@ -193,12 +194,9 @@ def window(cfg, qapp, tmp_path):
     win.show()
     qapp.processEvents()
     yield win
-    win.shutdown()
-    win.close()
-    win.deleteLater()
-    qapp.processEvents()
-    qapp.sendPostedEvents(None, QEvent.DeferredDelete)
-    qapp.processEvents()
+    # 收尾走**全项目唯一那个顺序**（见 `tests/_ui.py`）：这一步不能用"只 close()"糊过去 ——
+    # 窗口没被真正销毁时，它的定时器与后台线程（评分那条最慢）都还在跑
+    close_main_window(win, qapp)
 
 
 def _widget_texts(root: QWidget) -> list[tuple[str, str]]:

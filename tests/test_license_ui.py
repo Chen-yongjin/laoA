@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._ui import close_main_window  # noqa: E402 - 建主窗口的用例共用同一个收尾
+
 from laoa_trader import clock, licensing as L
 
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过授权界面测试")
@@ -60,32 +62,16 @@ def _expire_trial(path: Path) -> None:
 
 
 def _teardown_window(win, qapp) -> None:
-    """收尾：**与 `tests/test_ui_smoke.py` 的 window fixture 逐条对齐**。
+    """收尾：走**全项目唯一那个顺序**（`tests/_ui.py::close_main_window`）。
 
-    为什么必须一样严（这里踩过）：主窗口一建起来就在后台起 `_market_worker`（概览取数）
-    与 `quotes`（快照）两条线程。只 `close()` 的话它们还在飞，收尾时往**已经关掉的日志流**
-    里写日志（CI 日志里能看到 `I/O operation on closed file`），再往后就是随机顺序下的
+    为什么不能自己写一份（这里踩过）：主窗口一建起来就在后台起概览取数、快照、
+    **评分**三条线程。只 `close()` 的话它们还在飞，收尾时往**已经关掉的日志流**里写日志
+    （CI 日志里能看到 `I/O operation on closed file`），再往后就是
     `Fatal Python error: Aborted` —— 与 2026-09-20 那次"孤儿桌宠"是同一种病：
-    **窗口/线程比测试活得久**。
+    **窗口/线程比测试活得久**。以前这份手写的收尾漏了 `scores.stop()`，
+    顺序与理由现在统一收在 `tests/_ui.py` 里，新增服务只改那一处。
     """
-    from PySide6.QtCore import QEvent
-
-    for timer_name in ("_timer", "_market_timer", "_flash_timer"):
-        timer = getattr(win, timer_name, None)
-        if timer is not None:
-            timer.stop()
-    win.scheduler.stop()
-    win.quotes.stop()
-    # 等概览那条后台线程落地（它是最慢的一条；不等就是在赌它跑完前进程先退出）
-    worker = getattr(win, "_market_worker", None)
-    if worker is not None and worker.isRunning():
-        worker.wait(3_000)
-    win.shutdown()                 # 收桌宠 / 消息列表 / 浮窗 / 授权·关于窗口
-    win.tray.hide()
-    win.close()
-    win.deleteLater()
-    qapp.processEvents()
-    qapp.sendPostedEvents(None, QEvent.DeferredDelete)
+    close_main_window(win, qapp)
 
 
 @pytest.fixture()

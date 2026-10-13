@@ -17,11 +17,12 @@ import types
 
 import pytest
 
+from tests._ui import close_main_window, close_top_level  # noqa: E402 - 共用同一套收尾
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过界面测试")
 
-from PySide6.QtCore import QEvent  # noqa: E402
 from PySide6.QtWidgets import QSystemTrayIcon  # noqa: E402
 
 from laoa_trader.data import storage  # noqa: E402
@@ -86,10 +87,9 @@ def popup(qapp):
     """一个独立的浮窗（不起动画，免得断言位置时还在滑）。"""
     widget = AlertPopup(max_items=5, seconds=8, animate=False)
     yield widget
-    widget.hide_popup()
-    widget.close()
-    widget.deleteLater()
-    qapp.processEvents()
+    # 浮窗**没有父窗口**：`close()` 只是隐藏、`deleteLater()` 只是排队 ——
+    # 不跑 DeferredDelete 就不会真删（实测：连跑 6 条用例攒下 6 只浮窗）
+    close_top_level(widget, qapp)
 
 
 @pytest.fixture()
@@ -119,23 +119,9 @@ def win(cfg, qapp, monkeypatch):
     window.show()
     qapp.processEvents()
     yield window
-    # 收尾：定时器/调度/顶层窗口都要收干净，否则会跨用例累积（与界面冒烟测试同一套做法）
-    window._timer.stop()
-    window._market_timer.stop()
-    window._flash_timer.stop()
-    window.scheduler.stop()
-    window.quotes.stop()               # 实时快照的工作线程也要收（不然后台还在飞）
-    if window.alert_popup is not None:
-        window.alert_popup.hide_popup()
-        window.alert_popup.close()
-    if window.alert_detail_dialog is not None:
-        window.alert_detail_dialog.close()
-    window.tray.hide()
-    window.close()
-    window.deleteLater()
-    qapp.processEvents()
-    qapp.sendPostedEvents(None, QEvent.DeferredDelete)
-    qapp.processEvents()
+    # 收尾：定时器/服务/浮窗/顶层窗口都收干净，否则会跨用例累积 —— 顺序见 `tests/_ui.py`
+    # （浮窗与「提醒详情」都在那个函数里收，不用在这里再写一遍）
+    close_main_window(window, qapp)
 
 
 def _add_alerts(cfg, rows: list[dict]) -> None:
@@ -425,13 +411,7 @@ def test_alerts_already_in_db_do_not_popup_on_startup(cfg, qapp, monkeypatch, tr
     # 同一条再对一次账也不能弹（去重键用的是 (日期, 标的, 类型)）
     window._tick()
     assert window.alert_popup is None
-    window._timer.stop()
-    window._market_timer.stop()
-    window.scheduler.stop()
-    window.tray.hide()
-    window.close()
-    window.deleteLater()
-    qapp.processEvents()
+    close_main_window(window, qapp)      # 收尾只有这一个顺序（见 `tests/_ui.py`）
 
 
 def test_popup_off_only_means_no_popup(win, cfg, qapp, traces) -> None:

@@ -24,11 +24,13 @@ import sys
 
 import pytest
 
+from tests._ui import close_main_window  # noqa: E402 - 建主窗口的用例共用同一个收尾
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="未安装 PySide6，跳过桌宠接线测试")
 
-from PySide6.QtCore import QEvent, Qt  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from laoa_trader.data import storage  # noqa: E402
@@ -83,23 +85,11 @@ def window(cfg, qapp, tmp_path):
     win.show()
     qapp.processEvents()
     yield win
-    # 收尾：定时器/线程/窗口都要收干净，否则跨用例累积（见 test_ui_smoke 的同一段注释）
-    win._timer.stop()
-    win._market_timer.stop()
-    win._flash_timer.stop()
-    win.scheduler.stop()
-    win.quotes.stop()
-    if getattr(win, "message_center", None) is not None:
-        win.message_center.close()
-    if win.pet is not None:
-        win.pet.hide()
-        win.pet.deleteLater()
-    win.tray.hide()
-    win.close()
-    win.deleteLater()
-    qapp.processEvents()
-    qapp.sendPostedEvents(None, QEvent.DeferredDelete)
-    qapp.processEvents()
+    # 收尾：定时器/服务/桌宠/消息列表/后台线程都要收干净，否则跨用例累积。
+    # ⚠️ 顺序只在 `tests/_ui.py::close_main_window` 一处维护 —— 这份以前是手写的，
+    # 漏掉了 `scores.stop()`（评分线程），而"窗口拆了评分线程还在跑"正是那个
+    # `Fatal Python error: Aborted` 的来源。
+    close_main_window(win, qapp)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -154,15 +144,7 @@ def test_pet_is_not_created_when_switched_off(cfg, qapp, monkeypatch) -> None:
     try:
         assert win.pet is None or win.pet.isVisible() is False
     finally:
-        win._timer.stop()
-        win._market_timer.stop()
-        win._flash_timer.stop()
-        win.scheduler.stop()
-        win.quotes.stop()
-        win.tray.hide()
-        win.close()
-        win.deleteLater()
-        qapp.processEvents()
+        close_main_window(win, qapp)      # 收尾只有这一个顺序（见 `tests/_ui.py`）
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -638,20 +620,8 @@ def test_a_fresh_install_shows_rate_1_0_and_the_pet_on(qapp, tmp_path) -> None:
         assert win.pet_box.isChecked() is True, "全新安装桌宠应当默认勾上"
         assert win.pet is not None and win.pet.isVisible() is True, "全新安装桌宠就该在桌面上"
     finally:
-        for name in ("_timer", "_market_timer", "_flash_timer"):
-            timer = getattr(win, name, None)
-            if timer is not None:
-                timer.stop()
-        win.scheduler.stop()
-        win.quotes.stop()
-        worker = getattr(win, "_market_worker", None)
-        if worker is not None and worker.isRunning():
-            worker.wait(3_000)
-        win.shutdown()
-        win.tray.hide()
-        win.close()
-        win.deleteLater()
-        qapp.processEvents()
+        # 与 `window` 夹具同一套收尾（以前这里少等了两条取数线程、也没真删窗口）
+        close_main_window(win, qapp)
 
 
 def test_settings_page_has_no_rate_control(window) -> None:

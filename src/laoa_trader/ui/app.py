@@ -60,6 +60,7 @@ from laoa_trader.scheduler import Scheduler, data_gate, refresh_data, run_daily
 from laoa_trader.ui import error_popup as error_popup_mod
 from laoa_trader.ui import quotes as quotes_mod
 from laoa_trader.ui import theme as theme_mod
+from laoa_trader.ui import threads as threads_mod
 
 logger = get_logger(__name__)
 
@@ -1407,6 +1408,11 @@ if QT_AVAILABLE:
                      with_stage: bool = False, with_note: bool = False,
                      **kwargs) -> None:
             super().__init__()
+            # 从创建那一刻起就登记（见 `ui/threads.py`）：`start()` 之后到 `run()` 被调度
+            # 之间还有个空档，那时线程已是"running"、却谁都还没拿着它 —— 调用方在这几微秒里
+            # 把引用丢掉（收尾里那句 `self._worker = None`），PySide6 就会析构跑着的 QThread，
+            # Qt 走 `qFatal` → `abort()`。
+            threads_mod.keep(self)
             self._fn = fn
             self._args = args
             self._kwargs = kwargs
@@ -1415,6 +1421,8 @@ if QT_AVAILABLE:
             self._with_note = with_note
 
         def run(self) -> None:  # noqa: D102
+            # 登记两道：① 自己的登记册（给"收尾时逐条等"用）；② `ui/threads.py` 的强引用登记
+            # 在 `__init__` 里就做了（覆盖 `start()` → `run()` 之间那个空档，见那里的注释）。
             with Worker._live_lock:
                 Worker._live[id(self)] = self
             try:
@@ -1441,6 +1449,10 @@ if QT_AVAILABLE:
             为什么要按条分配超时、而不是"总共等 N 秒"：几条线程各自卡在超时边界上时，
             总共等 N 秒会让最后那条连等的机会都没有 —— 收尾阶段最怕的就是"漏一条"。
 
+            ⚠️ 等不到的**必须寄存**（`threads.park`），绝不能像原来那样 `_live.clear()`
+            一了百了：那等于把"最后一份引用"丢掉，而一条还在跑的 `QThread` 被析构 =
+            `qFatal` → `abort()`（进程静默死掉，CI 上就是"跑到半路没了、没有用例失败记录"）。
+
             ⚠️ `timeout` 的单位是**秒**（跟 `threading.Thread.join` 一致，方便调用方读），
             而 Qt 的 `QThread.wait()` 收的是**毫秒** —— 这里必须乘 1000 再传，
             否则 5.0 会被当成 5 毫秒（实测：线程没跑完就返回，收尾等于没做）。
@@ -1448,19 +1460,19 @@ if QT_AVAILABLE:
             wait_ms = int(max(timeout, 0) * 1000)
             with cls._live_lock:
                 pending = list(cls._live.values())
+                cls._live.clear()
             left = 0
             for thread in pending:
                 try:
                     if thread.isRunning():
                         thread.wait(wait_ms)
                     if thread.isRunning():
+                        threads_mod.park(thread)      # 还在跑 → 寄存，别让它被析构
                         left += 1
                 except RuntimeError:       # 底层 C++ 对象已销毁
                     continue
                 except Exception:  # noqa: BLE001 - 收尾失败不该挡住退出
                     left += 1
-            with cls._live_lock:
-                cls._live.clear()
             return left
 
         def _emit_progress(self, stage: str, done: int, total: int) -> None:
@@ -3606,7 +3618,12 @@ if QT_AVAILABLE:
             self.tray.setToolTip(APP_NAME)
             # 闪烁要交替两张图，得先记住"正常的那张"（见 `_start_alert_flash`）
             self._normal_tray_icon = icon
-            menu = QMenu()
+            # ⚠️ 菜单**必须挂父对象**（`QMenu(self)`）：`QSystemTrayIcon.setContextMenu()`
+            # 不接管所有权（Qt 文档原话），写成 `QMenu()` 的话它就成了一个**没有父对象的
+            # 顶层窗口** —— 主窗口销毁时它不会被收掉，每建一次主窗口就漏一个菜单 +
+            # 6 个 QAction（实测：连跑 40 个建窗口的用例就攒下 40 个，一直挂在事件循环里，
+            # 而它们的槽还连着已经拆掉的窗口）。桌宠那次"孤儿窗口"是同一种病。
+            menu = QMenu(self)
             act_show = QAction("显示主窗口", self)
             act_show.triggered.connect(self._restore_window)
             # 「消息（N）」= 仿 QQ 的消息列表（用户 2026-09-18 要求）：
@@ -7653,8 +7670,17 @@ if QT_AVAILABLE:
                     except RuntimeError:      # 底层对象已销毁
                         pass
             if self.alert_popup is not None:
+                # ⚠️ 只 `hide_popup()` 是不够的：浮窗**没有父窗口**（见 `ui/alert_popup.py`），
+                # 主窗口销毁时 Qt 不会顺带收掉它 —— 每建一次主窗口就漏一只浮窗，一直挂在
+                # 事件循环里（它的滑出动画与自动消失定时器还连着），与 2026-09-20 那次
+                # "孤儿桌宠"是同一种病：**窗口比测试/进程活得久**。实测：连跑 6 条提醒用例
+                # 就攒下 6 只（`QApplication.topLevelWidgets()` 里数出来的）。
+                popup = self.alert_popup
+                self.alert_popup = None
                 try:
-                    self.alert_popup.hide_popup()
+                    popup.hide_popup()
+                    popup.close()
+                    popup.deleteLater()
                 except Exception:  # noqa: BLE001
                     logger.debug("收浮窗失败", exc_info=True)
             # ── 后台线程也在这里收 ──
@@ -7691,6 +7717,11 @@ if QT_AVAILABLE:
                 try:
                     if thread.isRunning():
                         thread.wait(3_000)      # 线程此刻在收尾，等几毫秒到几秒即可
+                        # 等不到就**寄存**：紧接着那句 `setattr(self, attr, None)` 会丢掉
+                        # 最后一份引用，而"跑着的时候被析构"= `qFatal` → `abort()`。
+                        # （`Worker.wait_all()` 也会兜一层，但那是在这之后才跑的，
+                        # 中间这几微秒足够让进程死掉 —— 本机已复现过同源的 abort。）
+                        threads_mod.park(thread)
                 except RuntimeError:            # 底层对象已销毁
                     pass
                 except Exception:  # noqa: BLE001
@@ -7781,7 +7812,10 @@ def run_gui(cfg: Config | None = None) -> int:
     _set_app_icon(app)                    # 任务栏/Alt-Tab 取的是应用图标，不设会退回 python 默认图标
     window = MainWindow(cfg)
     window.show()
-    return int(app.exec())
+    # 退出码过最后一道闸：还有后台线程在跑（卡在网络上，最长可能要等 90 秒的超时）就
+    # **直接结束进程** —— 否则 Qt 会在解释器收尾时把跑着的 QThread 析构掉，那是 `qFatal`
+    # → `abort()`：退出码 134，Windows 上还会弹一次"程序已停止工作"（见 `ui/threads.py`）。
+    return threads_mod.finish_exit(int(app.exec()))
 
 
 def main(cfg: Config | None = None) -> int:
