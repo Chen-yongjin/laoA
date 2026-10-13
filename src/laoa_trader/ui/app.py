@@ -2361,19 +2361,25 @@ if QT_AVAILABLE:
             #: + `market_sector_indices` 两组（同一类同花顺板块指数）；
             #: 热力图那一块：面积/颜色走全市场快照（`data/market_map.py`），tooltip 里的
             #: 涨跌停家数与主力净额来自 `sector_payload()`（见 `_heatmap_extras`）。
-            self.market_sections: dict[str, Any] = {
-                MARKET_SECTION_FLOW: MarketSection(
-                    MARKET_SECTION_FLOW, (),
-                    with_stats=True,
-                ),
-                MARKET_SECTION_WIDE: MarketSection(
-                    MARKET_SECTION_WIDE, ("indices",),
-                ),
-                MARKET_SECTION_SENTIMENT: MarketSection(
-                    MARKET_SECTION_SENTIMENT, ("sentiment", "sector"),
-                ),
-                MARKET_SECTION_HOT: SectorHeatmapSection(MARKET_SECTION_HOT),
-            }
+            # ⚠️ 逐块建、逐块打标记（原来是**一个字典字面量**一次建完）：2026-10-13 的编译版崩溃
+            # 就发生在这一页（Windows access violation，最后的 Python 帧是 `_build_market_page`
+            # 直接调用的某个控件 `__init__`），而段错误没有更细的 traceback，只能靠 `启动步骤：…`
+            # 一行行缩小范围 —— 一次建完只能说"死在这四块里"，逐块建下一步就能说是**哪一块**。
+            self.market_sections: dict[str, Any] = {}
+            self.market_sections[MARKET_SECTION_FLOW] = MarketSection(
+                MARKET_SECTION_FLOW, (),
+                with_stats=True,
+            )
+            startup_step("概览页：成交与情绪块 OK")
+            self.market_sections[MARKET_SECTION_WIDE] = MarketSection(
+                MARKET_SECTION_WIDE, ("indices",),
+            )
+            self.market_sections[MARKET_SECTION_SENTIMENT] = MarketSection(
+                MARKET_SECTION_SENTIMENT, ("sentiment", "sector"),
+            )
+            startup_step("概览页：宽基/情绪块 OK")
+            self.market_sections[MARKET_SECTION_HOT] = SectorHeatmapSection(MARKET_SECTION_HOT)
+            startup_step("概览页：热力图块 OK")
             hot_section = self.market_sections[MARKET_SECTION_HOT]
             hot_section.btn_refresh.clicked.connect(self.on_refresh_heatmap)
             hot_section.btn_zoom.clicked.connect(self.show_heatmap_window)
@@ -2385,6 +2391,7 @@ if QT_AVAILABLE:
             self.market_scroll = scroll
             self.market_content = content
             layout.addWidget(scroll, 1)
+            startup_step("概览页：滚动区 OK")
 
             # 取不到数据时的原因写在这里（正常时**隐藏**）：光看一排 `—` 用户猜不出为什么
             # 2026-10-11 主人："常驻的'数据不足/去设置里下载'那种提示行…也删掉" ——
@@ -2414,6 +2421,7 @@ if QT_AVAILABLE:
             footer.addWidget(self.btn_market_refresh, 0)
             self.market_footer_layout = footer
             layout.addWidget(self.market_footer, 0)
+            startup_step("概览页：页脚 OK")
 
             self.market_page = page
             #: 每个指数条目的控件（`thscode` / `name_label` / `value_label` / `pct_label`）
@@ -2427,6 +2435,7 @@ if QT_AVAILABLE:
             self._heatmap_ts: float = 0.0
             self._heatmap_window: Any = None
             self._load_heatmap_cache()
+            startup_step("概览页：热力图磁盘缓存 OK")
             #: 板块榜的数据（`sector_payload()` 的结果：up/down/source/note）——
             #: 2026-10-08 起它喂的是热力图 tooltip 与那行小字，不再是两张表
             self.market_sectors: dict[str, Any] = {
@@ -2435,6 +2444,7 @@ if QT_AVAILABLE:
             self._market_columns = 0
             self._market_stat_columns = 0
             self._render_market_overview()   # 先画空骨架：第一秒就是"能看"的样子
+            startup_step("概览页：空骨架渲染 OK")
             return page
 
         def _market_item_need(self) -> int:

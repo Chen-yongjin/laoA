@@ -118,6 +118,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          # ── 为什么要把 Nuitka **钉在 4.2.2**（2026-10-13 排查 1.9.2 崩溃得出的）──
+          # 时间线（都是 UTC，全部可查）：
+          #   * 1.9.1 的包 10-10 08:50 传上去 → 那次构建时**最新版 Nuitka 是 4.2.2**（4.3 还没发）
+          #   * Nuitka 4.3 在 10-10 11:13 发布
+          #   * 1.9.2 的包 10-12 12:00 传上去 → 那次构建 `pip install -e ".[dev]"` 抓到的是 **4.3**
+          #   而 `nuitka>=2.4` 是**没钉版本**的，于是"同一份源码、1.9.1 能开、1.9.2 一进界面就崩"
+          #   完全对得上"构建器换了一版"。（PySide6 也想过：6.12.0 是 10-08 发的，两次构建都可能
+          #   已经用它，所以对不上"1.9.1 好 / 1.9.2 坏"这条线。）
+          # 本机旁证：4.3 自带的 SCons 4.10.1 在这台机器上连构建环境都建不起来
+          # （`No tool module 'ilink'`），退回 4.2.2 就正常 —— 4.3 这一版本来就容易出岔子。
+          # ⚠️ 这只是**头号嫌疑**，不是已证实的根因：所以同时把版本记进 smoke.log，
+          # 万一 1.9.3 还是崩，两轮的版本号摆在一起就能立刻排除/确认它。
+          pip install "nuitka==4.2.2"
 
       - id: test
         name: 跑测试（不通过就不出包）
@@ -296,6 +309,18 @@ jobs:
           [System.IO.File]::WriteAllText($cfg, $content, (New-Object System.Text.UTF8Encoding($false)))
           Add-Content $log "配置文件：$cfg → $content"
 
+          # ── 构建器与依赖的版本（**必须留档**）──
+          # 起因（2026-10-13 排查 1.9.2 崩溃）：1.9.1 能开、1.9.2 一进界面就段错误，而源码几乎没变 ——
+          # 那么"两次构建用的工具链/依赖不是同一版"就是头号嫌疑。这一步把当时的版本写进
+          # smoke.log（会进 ci-log）：以后两轮一比就知道是不是版本漂移，不必再靠猜。
+          Add-Content $log "----- 构建环境版本 -----"
+          foreach ($line in @(
+              (python -m nuitka --version 2>&1 | Select-Object -First 6),
+              (python -c "import PySide6, pandas, pyarrow; print('PySide6', PySide6.__version__, '| pandas', pandas.__version__, '| pyarrow', pyarrow.__version__)" 2>&1)
+            )) {
+            foreach ($l in $line) { Add-Content $log ("  " + $l) }
+          }
+
           $exe = "dist/LuweikDecision/luweik决策系统.exe"
           Add-Content $log ("exe 存在：{0}  大小：{1} 字节" -f (Test-Path $exe), (Get-Item $exe -ErrorAction SilentlyContinue).Length)
           Add-Content $log "----- dist/LuweikDecision 前 25 项 -----"
@@ -439,6 +464,33 @@ jobs:
             throw "编译产物的图形界面没通过自检（逐行看 ci-log/gui-selftest-report.log）"
           }
           Add-Content $log "✅ 图形界面冒烟通过：真主窗口建出来了（报告见 ci-log/gui-selftest-report.log）"
+
+          # ── 诊断（**不参与判定**）：用真的 Windows 平台插件再跑一次 ──
+          # 为什么要有这一步：上面那次是**离屏**（offscreen）的，而 2026-10-13 报的崩溃
+          # 发生在**真实显示路径**上（用户双击）——它是"只在 Windows、只在界面上"的，
+          # 离屏的绿色并不能证明真机不崩。`--gui-selftest` 用的是 `setdefault`，
+          # 所以外部把 QT_QPA_PLATFORM 设成 windows 就能强制走真平台插件。
+          # ⚠️ runner 没有交互桌面会话时这一步会失败（Qt 会报 no Qt platform plugin…）——
+          # 那属于**环境限制**，不是产品问题，所以它只写日志、绝不改这一步的结论。
+          # 一旦它真跑起来了，"最后走到的一步"就是"用户双击时崩在哪一步"的直接答案。
+          $cfgWin = Join-Path $PWD "ci-smoke-config-windows.toml"
+          $contentWin = "data_dir = `"$($PWD.Path -replace '\\','/')/ci-smoke-data-windows`"`n"
+          [System.IO.File]::WriteAllText($cfgWin, $contentWin, (New-Object System.Text.UTF8Encoding($false)))
+          $env:QT_QPA_PLATFORM = "windows"
+          $winCode = Invoke-Exe "gui-selftest-windows" @("--gui-selftest", "--config", $cfgWin)
+          Remove-Item Env:\QT_QPA_PLATFORM -ErrorAction SilentlyContinue
+          $winReport = Join-Path $PWD "ci-smoke-data-windows/logs/GUI自检报告.log"
+          if (Test-Path $winReport) {
+            $winText = Get-Content $winReport -Raw
+            $winSteps = @($winText -split "`n" | Where-Object { $_ -match '启动步骤：' })
+            if ($winSteps.Count -gt 0) {
+              Add-Content $log ("真 Windows 平台自检最后走到的一步：" + $winSteps[-1].Trim())
+            }
+            Add-Content $log "----- 真 Windows 平台自检报告全文（诊断用，不参与判定）-----"
+            Get-Content $winReport | ForEach-Object { Add-Content $log ("  " + $_) }
+          } else {
+            Add-Content $log "（真 Windows 平台自检没写出报告；退出码 $winCode —— runner 无交互桌面时属正常，见上面它的输出）"
+          }
           Add-Content $log "✅ 冒烟通过：形态 Nuitka、随包策略与资源目录都解析正常"
           Get-Content $log | Write-Host
 
@@ -759,6 +811,12 @@ jobs:
           if ($guiReport) {
             Copy-Item $guiReport.FullName ci-log/gui-selftest-report.log -Force
             Write-Host "归档 GUI 自检报告：$($guiReport.FullName)"
+          }
+          # 「真 Windows 平台」那次诊断（不参与判定）的报告也留一份：它才是"用户双击那条路"
+          $guiWinReport = Get-ChildItem "ci-smoke-data-windows/logs/GUI自检报告.log" -ErrorAction SilentlyContinue
+          if ($guiWinReport) {
+            Copy-Item $guiWinReport.FullName ci-log/gui-selftest-report-windows.log -Force
+            Write-Host "归档真 Windows 平台自检报告：$($guiWinReport.FullName)"
           }
           Get-Content ci-log/meta.txt
           git add -f ci-log

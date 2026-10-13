@@ -262,6 +262,32 @@ GUI_SELFTEST_REPORT_NAME = "GUI自检报告.log"
 GUI_SELFTEST_MIN_WIDGETS = 50
 
 
+def _dependency_versions() -> str:
+    """自检报告里的"依赖版本"一行（PySide6/Qt/pandas/pyarrow/numpy）。
+
+    为什么要打这一行（2026-10-13 的 1.9.2 事故里，这是最可疑的一条线索）：CI 每次构建都
+    从头 `pip install -e ".[dev]"`，而 `PySide6>=6.6` **没有钉版本** —— 于是
+    "1.9.1 能双击打开、1.9.2 一进界面就段错误"完全可能是**构建时 Qt 版本漂了**
+    （同一份源码、不同的 Qt：Qt 自己的插件/DLL 与 Nuitka 的收集结果都会变）。
+    把版本写进报告之后，两个版本的包/两份 smoke.log 放一起对比就能一眼看出差在哪。
+    """
+    parts: list[str] = []
+    try:
+        import PySide6
+        from PySide6.QtCore import qVersion
+
+        parts.append(f"PySide6 {PySide6.__version__}（Qt {qVersion()}）")
+    except Exception:  # noqa: BLE001 - 报告里少一行不该影响自检
+        parts.append("PySide6 不可用")
+    for name in ("pandas", "pyarrow", "numpy"):
+        try:
+            module = __import__(name)
+            parts.append(f"{name} {getattr(module, '__version__', '?')}")
+        except Exception:  # noqa: BLE001
+            parts.append(f"{name} 缺失")
+    return " / ".join(parts)
+
+
 def _teardown_selftest_window(window: Any, app: Any) -> None:
     """自检收尾：定时器、后台线程、桌宠/消息列表/浮窗全部收掉（绝不抛、可重复调用）。
 
@@ -401,6 +427,7 @@ def _gui_selftest(args) -> int:
         print(f"程序版本  : {laoa_trader.__version__}")
         print(f"运行形态  : {runtime.describe()}")
         print(f"平台插件  : QT_QPA_PLATFORM={os.environ.get('QT_QPA_PLATFORM')}")
+        print(f"依赖版本  : {_dependency_versions()}")   # Qt 版本漂了 = 1.9.2 事故的头号嫌疑
         print(f"配置来源  : {source_text}")
         print(f"数据目录  : {cfg.data_dir}")
         if problem:

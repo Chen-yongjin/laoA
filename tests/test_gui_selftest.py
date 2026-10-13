@@ -81,6 +81,9 @@ def test_gui_selftest_builds_a_real_window_and_exits_zero(capsys, cfg, selftest_
     text = report.read_text(encoding="utf-8")
     assert "GUI 自检 OK" in text
     assert "平台插件  : QT_QPA_PLATFORM=offscreen" in text       # 离屏是它自己在进程里设的
+    # 依赖版本也要写进报告：Qt 版本漂了是"1.9.1 能用、1.9.2 一进界面就崩"的头号嫌疑，
+    # 两份 smoke.log 放一起对比就是靠这一行（见 `_dependency_versions` 的说明）
+    assert "依赖版本  : PySide6" in text and "pandas" in text
     assert "Traceback" not in text
 
 
@@ -281,7 +284,11 @@ def test_every_startup_step_leaves_a_marker(log_records, cfg) -> None:
              if "启动步骤：" in line]
     assert steps, f"一条启动步骤标记都没有：\n{text}"
     # 顺序也要对（顺序错了说明标记插错了地方 —— 定位就会指到错误的一步）
-    for expected in ("主题已应用", "滚轮防误触已装好", "屏幕几何 OK", "界面 OK", "托盘 OK",
+    # 概览页那几步是 2026-10-13 的崩溃现场（Windows access violation 就死在这一页里），
+    # 颗粒度必须留着："四块一次建完"就只能说"死在这四块里"，逐块建才能说是哪一块
+    for expected in ("主题已应用", "滚轮防误触已装好", "屏幕几何 OK",
+                     "概览页：成交与情绪块 OK", "概览页：热力图块 OK",
+                     "概览页：空骨架渲染 OK", "界面 OK", "托盘 OK",
                      "桌宠 OK", "调度器 OK", "授权检查 OK", "快照与评分服务 OK",
                      "定时器 OK", "首次 _tick OK", "主窗口构造完成"):
         assert any(step.startswith(expected) for step in steps), \
