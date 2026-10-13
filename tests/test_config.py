@@ -136,6 +136,56 @@ def test_broken_toml_is_reported_not_silent(tmp_path: Path) -> None:
     assert cfg.config_warning() == cfg.config_error
 
 
+def test_utf8_bom_is_accepted(tmp_path: Path) -> None:
+    """**带 BOM 的 UTF-8 要能读**（2026-10-13 主人实报"config.toml 解析失败"）。
+
+    记事本"另存为 → UTF-8 带 BOM"、PowerShell 5.1 的 `Set-Content -Encoding UTF8`
+    都会在开头写 `EF BB BF`，而 `tomllib` 只收纯 UTF-8 —— 报的还是
+    `Invalid statement (at line 1, column 1)`，用户根本看不出是编码问题，
+    只会看到"配置解析失败、已退回默认值"，而他明明什么都没写错。
+    """
+    path = tmp_path / "config.toml"
+    path.write_bytes('run_at = "20:00"\n'.encode("utf-8-sig"))
+    cfg = load_config(path, use_env=False)
+    assert cfg.config_error == ""
+    assert cfg.run_at == "20:00"
+
+
+def test_gbk_config_is_accepted(tmp_path: Path) -> None:
+    """老记事本存的"ANSI"（= GBK）也要能读：以前这里会抛 `UnicodeDecodeError`。"""
+    path = tmp_path / "config.toml"
+    path.write_bytes('hithink_api_key = "中文键值"\nrun_at = "20:00"\n'.encode("gbk"))
+    cfg = load_config(path, use_env=False)
+    assert cfg.config_error == ""
+    assert cfg.run_at == "20:00"
+    assert cfg.hithink_api_key == "中文键值"
+
+
+def test_unreadable_encoding_is_reported_not_raised(tmp_path: Path) -> None:
+    """两种编码都读不出来时：**说清楚**、退回默认值，绝不把异常抛到启动路径上。"""
+    path = tmp_path / "config.toml"
+    path.write_bytes(b"\xff\xfe\x00run_at")          # 既不是 UTF-8 也不是 GBK
+    cfg = load_config(path, use_env=False)
+    assert "UTF-8" in cfg.config_error and "已退回默认值" in cfg.config_error
+    assert cfg.run_at == "16:00"
+
+
+def test_broken_config_is_backed_up_and_says_where_to_look(tmp_path: Path) -> None:
+    """解析失败要**留一份备份**、并把文件名与"改哪一行/删掉它"写进告警里。
+
+    备份的意义：接下来用户在界面里"保存设置"是写回**这一份坏文件**的（行级替换，
+    坏的那一行还是坏的）—— 没有备份，他改到一半的配置就说不清了。
+    """
+    path = _write(tmp_path, "this is not = = toml [[[")
+    cfg = load_config(path, use_env=False)
+    assert "config.toml.bad" in cfg.config_error
+    assert str(path) in cfg.config_error
+    assert "第 N 行第 M 列" in cfg.config_error or "行" in cfg.config_error
+    backup = tmp_path / "config.toml.bad"
+    assert backup.is_file()
+    assert backup.read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
+
+
 def test_quoted_chinese_keys_are_valid_toml(tmp_path: Path) -> None:
     """用户如果想用中文键，加上引号就是合法 TOML（此时不该有告警）。"""
     path = _write(tmp_path, 'run_at = "09:30"\n\n["我自己的表"]\n"未知键" = "别动我"\n')
@@ -932,3 +982,28 @@ def test_a_config_file_without_these_keys_keeps_the_same_defaults(tmp_path: Path
     loaded = load_config(path, use_env=False)
 
     assert not hasattr(loaded, "notify_voice_rate") and loaded.notify_pet is True
+
+
+def test_saving_settings_cleans_a_bom_away(tmp_path: Path) -> None:
+    """保存设置时顺手把 BOM 洗掉：坏文件不该"永远坏下去"。"""
+    path = tmp_path / "config.toml"
+    path.write_bytes('run_at = "20:00"\n'.encode("utf-8-sig"))
+    assert path.read_bytes().startswith(b"\xef\xbb\xbf")
+    config_mod.update_config_file(path, {"run_at": "16:30"})
+    raw = path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")          # BOM 没了
+    assert load_config(path, use_env=False).run_at == "16:30"
+
+
+def test_pasted_newline_in_a_value_stays_writable(tmp_path: Path) -> None:
+    """粘进来的值带换行也要写得出去（不然下次启动就是"配置解析失败"）。
+
+    真实场景：从网页/记事本复制 Key，尾部带了换行 —— 字面换行写进 TOML 基本字符串
+    就是语法错，而错因发生在昨天粘贴的那一下，用户根本联系不起来。
+    """
+    path = tmp_path / "config.toml"
+    config_mod.update_config_file(path, {"hithink_api_key": "abc\ndef\tghi"})
+    cfg = load_config(path, use_env=False)
+    assert cfg.config_error == ""                    # 文件仍是合法 TOML
+    assert cfg.hithink_api_key == "abc\ndef\tghi"    # 读回来一个字符不差
+    assert '\\n' in path.read_text(encoding="utf-8")

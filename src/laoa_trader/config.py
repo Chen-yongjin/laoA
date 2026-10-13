@@ -255,6 +255,55 @@ def find_config_file() -> Path | None:
     return None
 
 
+def _read_config_text(path: Path) -> tuple[str, str]:
+    """读配置文本：**先按 UTF-8（带不带 BOM 都收），再退回 GBK**。
+
+    为什么不能直接交给 `tomllib.load(fh)`（2026-10-13 主人实报"config.toml 解析失败"）：
+    `tomllib` 收的是**纯 UTF-8**，两种在 Windows 上非常常见的存法它都读不了 ——
+
+    * **UTF-8 带 BOM**：记事本"另存为 → UTF-8 带 BOM"、PowerShell 5.1 的
+      `Set-Content -Encoding UTF8` 都会在开头写 `EF BB BF`。`tomllib` 会把它当成
+      非法字符，报 `Invalid statement (at line 1, column 1)` —— 一眼看不出是编码问题，
+      用户只会看到"配置解析失败、已退回默认值"，而他明明什么都没写错；
+    * **GBK/ANSI**：老记事本存的"ANSI"就是 GBK，中文键值直接解码失败
+      （`UnicodeDecodeError`，**原来连 except 都兜不住**，会直接抛到启动路径上）。
+
+    Returns:
+        (文本, 错误说明)；错误说明为空表示读到了。两种编码都读不出来时，
+        文本为空、错误说明里写清"这份文件不是 UTF-8/GBK"。
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return "", f"config.toml 读取失败（已退回默认值）：{exc}"
+    if not raw.strip():
+        return "", ""
+    last: Exception | None = None
+    for encoding in ("utf-8-sig", "gbk"):
+        try:
+            return raw.decode(encoding), ""
+        except UnicodeDecodeError as exc:   # GBK 也救不回来才认输
+            last = exc
+    return "", f"config.toml 不是 UTF-8/GBK 编码（已退回默认值）：{last}"
+
+
+def _backup_broken_config(path: Path) -> Path | None:
+    """把**解析失败的配置**另存一份 `config.toml.bad`（同一目录，固定名，覆盖旧的）。
+
+    为什么要留这一份：解析失败后界面会按默认值跑，用户接下来的"保存设置"会把新值
+    写回**这一份坏文件**（行级替换，坏的那一行还是坏的）—— 没有备份的话，
+    他改到一半的配置和那句没来得及看懂的报错就都说不清了。备份失败只记日志。
+    """
+    try:
+        target = path.with_name(path.name + ".bad")
+        target.write_bytes(path.read_bytes())
+        logger.warning(f"配置解析失败，已另存一份：{target}")
+        return target
+    except Exception as exc:  # noqa: BLE001 - 备份失败不该影响启动
+        logger.debug(f"备份坏配置失败：{exc}")
+        return None
+
+
 def _load_toml(path: Path | None) -> tuple[dict[str, Any], str]:
     """读取 TOML；文件损坏时**不抛异常**（GUI 不能因为一个坏文件起不来）。
 
@@ -266,11 +315,23 @@ def _load_toml(path: Path | None) -> tuple[dict[str, Any], str]:
     """
     if path is None:
         return {}, ""
+    text, read_error = _read_config_text(path)
+    if read_error:
+        return {}, read_error
     try:
-        with open(path, "rb") as fh:
-            data = tomllib.load(fh)
+        data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
-        return {}, f"config.toml 解析失败（已退回默认值）：{exc}"
+        backup = _backup_broken_config(path)
+        where = f"（文件：{path}）"
+        if backup is not None:
+            where += f"；原样另存了一份：{backup.name}"
+        return {}, (
+            f"config.toml 解析失败（已退回默认值）：{exc}{where}\n"
+            "常见原因：用记事本/命令行另存成了「UTF-8 带 BOM」（现在这种也能读了，"
+            "所以多半是别的）、键名写成了中文、或者漏了引号/等号。\n"
+            "下一步：按上面那行的「第 N 行第 M 列」去改；改不动就把这个文件删掉，"
+            "程序会重新生成一份默认配置。"
+        )
     except OSError as exc:
         return {}, f"config.toml 读取失败（已退回默认值）：{exc}"
     # 允许 [laoa_trader] / [laoa] / [trader] 这类分区表，也允许平铺在顶层
@@ -1185,7 +1246,31 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_toml_value(v) for v in value) + "]"
     text = str(value).replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{text}"'
+    return f'"{_escape_control(text)}"'
+
+
+def _escape_control(text: str) -> str:
+    """把字符串里的**控制字符**转成 TOML 转义（`\\n` / `\\r` / `\\t` / `\\uXXXX`）。
+
+    为什么要这一步（2026-10-13 顺出来的第二个坑）：配置值是从界面控件里来的，
+    用户**粘贴**一个 Key/密钥时很容易带上换行（从网页、从记事本里粘都带）。
+    而 TOML 的基本字符串**不允许字面换行**，写出来的就是一个语法错误文件 ——
+    下次启动必然报"config.toml 解析失败、已退回默认值"，而且错在昨天粘贴的那一下，
+    今天根本联系不起来。转义之后这种值照样存得住、读回来也是原字符。
+    """
+    out: list[str] = []
+    for ch in text:
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 #: 顶层 `key = value` 行（不含缩进里的表内键）
@@ -1338,7 +1423,11 @@ def update_config_file(
     original = ""
     if target.is_file():
         try:
-            original = target.read_text(encoding="utf-8")
+            # `utf-8-sig`：**顺手把 BOM 洗掉**。用户用记事本/命令行另存过的话，
+            # 那份文件开头带着 `EF BB BF`（见 `_read_config_text` 的说明）——
+            # 读的时候用 `utf-8` 会把这个字符带进第一行、再原样写回去，
+            # 于是"坏文件"永远坏下去；用 `utf-8-sig` 读完就干净了，写回去也就干净了。
+            original = target.read_text(encoding="utf-8-sig")
         except OSError:
             original = ""
     elif not create:

@@ -177,20 +177,28 @@ def test_gui_selftest_refuses_when_the_given_config_is_not_honored(capsys, tmp_p
     **用户真实那一个**（自检会往里建库、写日志）。CI 就踩过它的孪生形态：config.toml 带
     BOM 时第一个键名变成 `\\ufeffdata_dir`、被当成未知键忽略，数据目录于是变成了
     `%LOCALAPPDATA%\\LuweikDecision\\data` —— 报告写到了别处，还差点被当成"编译版退回了源码形态"。
+
+    ⚠️ **2026-10-13 起"带 BOM"不再是这一类的例子**：`_read_config_text()` 按 `utf-8-sig` 读
+    （主人当天实报"config.toml 解析失败"，根因正是记事本存成了带 BOM），那种文件现在
+    **读得进来、`data_dir` 也真的生效** —— 所以在下面单独钉住（①，比"拦住它"更强的断言）。
+    这条守卫本身照旧管着真正读不出来的两种情况（②键写错、③文件不存在）。
     """
     from laoa_trader import config as config_mod
 
     real_default = config_mod.default_data_dir()
     existed_before = real_default.exists()
 
-    # ① 带 BOM：TOML 解析失败 → 静默退回默认数据目录（上面那次事故的形态）
+    # ① 带 BOM：**现在必须真的生效**（以前它会退回默认数据目录 —— 那条 BOM 事故的形态）
     bom = tmp_path / "bom.toml"
     bom.write_bytes('\ufeffdata_dir = "/tmp/不该被用到"\n'.encode("utf-8"))
+    cfg = config_mod.load_config(bom, use_env=False)
+    assert cfg.config_error == "", cfg.config_error
+    assert str(cfg.data_dir) == "/tmp/不该被用到"
     # ② 键名写错：文件读得进来，但 data_dir 没生效，照样落到默认数据目录
     no_dir = tmp_path / "nodata.toml"
     no_dir.write_text('hithink_api_key = ""\n', encoding="utf-8")
     # ③ 路径压根不存在
-    for bad in (bom, no_dir, tmp_path / "没有这个文件.toml"):
+    for bad in (no_dir, tmp_path / "没有这个文件.toml"):
         assert cli(["--gui-selftest", "--config", str(bad)]) != 0, f"没拦住：{bad}"
 
     out = capsys.readouterr().out
