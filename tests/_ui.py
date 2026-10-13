@@ -102,7 +102,7 @@ def close_main_window(window: Any, qapp: Any, *, drain_timeout: float = 2.0) -> 
         except RuntimeError:      # 底层对象已销毁
             pass
 
-    for name in ("scheduler", "quotes", "scores"):
+    for name in ("scheduler", "quotes", "scores", "signals"):
         service = getattr(window, name, None)
         stop = getattr(service, "stop", None)
         if not callable(stop):
@@ -125,7 +125,7 @@ def close_main_window(window: Any, qapp: Any, *, drain_timeout: float = 2.0) -> 
 
     # 「关于软件」「状态详情」「提醒详情」是挂在窗口上的对话框，但 Qt 里对话框也是顶层窗口，
     # 可能比主窗口活得更久 —— 显式关掉，别赌"父窗口会带上它"
-    for name in ("about_dialog", "status_dialog", "alert_detail_dialog"):
+    for name in ("about_dialog", "status_dialog", "alert_detail_dialog", "signal_dialog"):
         dialog = getattr(window, name, None)
         if dialog is None:
             continue

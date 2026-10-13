@@ -442,6 +442,10 @@ try:  # Qt 缺失时必须优雅降级（Linux 开发机、精简环境）
     from laoa_trader.ui import wheel_guard as wheel_guard_mod
     # 个股评分的界面侧服务（后台算、算完通知；见 ui/scores.py）
     from laoa_trader.ui import scores as scores_mod
+    # 决策信号（进场/离场）：判定在 `laoa_trader/analysis.py`，界面侧在 ui/signals.py，
+    # 结论窗是 ui/signal_dialog.py —— 三块分开，主窗口只负责"点一下 → 出窗"（见设计稿）
+    from laoa_trader.ui import signals as signals_mod
+    from laoa_trader.ui.signal_dialog import SignalDialog
     # 公式编辑器（「公式匹配」页）：单独一个模块 —— 主窗口这边只负责把它挂成页签
     from laoa_trader.ui.formula_page import FormulaPage
 
@@ -1614,6 +1618,19 @@ if QT_AVAILABLE:
             # 两者的节奏与失败口径都不一样，混在一起会让"评分没出来"变得没法解释。
             self.scores = scores_mod.ScoreService(self.cfg, self.cfg.db_path, self)
             self.scores.updated.connect(self._on_scores_updated)
+            # 决策信号：**只在用户点【分析】时才跑**（主人 2026-10-13：「所有分析都是用户手动的，
+            # 不是自动执行」）。与评分共用那份缓存：同一个分不能有第二个来源。
+            # 现在它一条网络请求都不发 —— 大模型那条线（网上那些行情里读不到的消息）还没接，
+            # 接上之后也只往结论里**挂附注**，不改结论（见 docs/AI分析设计.md）。
+            self.signals = signals_mod.SignalService(
+                self.cfg, self.cfg.db_path, self, score_getter=self.scores.result
+            )
+            self.signals.updated.connect(self._on_signals_updated)
+            #: 结论窗（**只建一次**，反复点【分析】就复用它 —— 与消息列表同一个做法）
+            self.signal_dialog: Any = None
+            #: 这一次分析点了哪几只、走的是哪一路（结果回来时按它排序与计数）
+            self._signal_wanted: list[str] = []
+            self._signal_kind: str = signals_mod.KIND_POOL
             # 快照一到就重画两张表（不然要等下一个 5 秒拍子，用户会觉得"现价没更新"）
             self.quotes.updated.connect(self._on_quotes_updated)
             # 「策略筛选」的结果表要显示「实时股价 / 市值 / 换手率」：把**本窗口这一份**
@@ -2116,6 +2133,13 @@ if QT_AVAILABLE:
             )
             self.btn_watch_unmute_all.clicked.connect(lambda: self.on_watch_bulk(True))
             row.addWidget(self.btn_watch_unmute_all)
+            # 【分析】：对**表里这些票**出一份进场/离场结论（主人 2026-10-13：
+            # "自选/持仓加「分析」，出结论窗"）。放在这一行而不是每个页签的角落里：
+            # 它和"全部关闭提醒"同样是"对整张表动手"的按钮，位置一致才不用找。
+            self.btn_pool_analyze = QPushButton("分析")
+            self.btn_pool_analyze.setToolTip("对表里这些标的出一份信号结论（手动触发）")
+            self.btn_pool_analyze.clicked.connect(self.on_analyze_pool)
+            row.addWidget(self.btn_pool_analyze)
             row.addStretch(1)
             return row
 
@@ -2308,6 +2332,12 @@ if QT_AVAILABLE:
             self.t_strategy_box.setToolTip("持仓做T提示（近似，默认关）")
             self.t_strategy_box.toggled.connect(self.on_toggle_t_strategy)
             row.addWidget(self.t_strategy_box)
+            # 【分析】：持仓这一路的结论集与自选池不同（持有/减仓/离场，不是"进场/剔除"），
+            # 所以这里是**另一个按钮**、另一次判定 —— 两个页面各点各的，不会串。
+            self.btn_pos_analyze = QPushButton("分析")
+            self.btn_pos_analyze.setToolTip("对这些持仓出一份信号结论（手动触发）")
+            self.btn_pos_analyze.clicked.connect(self.on_analyze_position)
+            row.addWidget(self.btn_pos_analyze)
             row.addStretch(1)
             return row
 
@@ -4633,6 +4663,100 @@ if QT_AVAILABLE:
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"评分回来后刷新表格失败：{exc}")
 
+        # ── 决策信号（进场/离场）：**用户点了才算**，判定过程一条网络请求都不发 ──
+
+        def _table_symbols(self, table: Any) -> list[str]:
+            """这张表里所有行的代码（顺序 = 表格顺序，与用户看到的一致）。"""
+            out: list[str] = []
+            for row in range(table.rowCount()):
+                symbol = self._symbol_at(table, row)
+                if symbol and symbol not in out:
+                    out.append(symbol)
+            return out
+
+        def _signal_window(self) -> Any:
+            """拿结论窗（**只建一次**，反复分析就复用它，与消息列表同一个做法）。"""
+            dialog = getattr(self, "signal_dialog", None)
+            if dialog is None:
+                dialog = SignalDialog(self)
+                self.signal_dialog = dialog
+            return dialog
+
+        def _analyze(self, symbols: list[str], kind: str, *, title: str,
+                     empty_hint: str) -> None:
+            """发起一次分析并把结论窗亮出来（**唯一的入口**，按钮与右键都走它）。
+
+            为什么要一个统一入口：结论窗、状态文案、"上一轮还没跑完"这三个东西
+            在四条入口（自选页按钮 / 持仓页按钮 / 右键 / 未来别的地方）上必须一模一样，
+            各写一遍必然有一处忘了处理"服务是 None"或"表是空的"。
+            """
+            service = getattr(self, "signals", None)
+            if service is None:
+                self._show_error("分析不可用", "分析服务没有起来。\n下一步：重启软件后再试。",
+                                 once_key="signals_missing")
+                return
+            if not symbols:
+                self._show_error("没有可分析的标的", f"{empty_hint}\n"
+                                 "分析只对表里已有的标的生效。", once_key="")
+                return
+            dialog = self._signal_window()
+            dialog.setWindowTitle(title)
+            dialog.set_status(f"正在分析 {len(symbols)} 只…（判定在后台跑，界面不会卡）")
+            #: 这一次要的是哪几只（结果回来时按它排序、也只显示它 —— 单只与整表共用一条路）
+            self._signal_wanted = list(symbols)
+            self._signal_kind = kind
+            try:
+                started = service.analyze(symbols, kind)
+            except Exception as exc:  # noqa: BLE001 - 分析起不来要如实说
+                logger.warning(f"发起分析失败：{exc}")
+                dialog.set_status("分析没起来，请看日志")
+                self._show_error("分析失败", f"{type(exc).__name__}: {exc}\n"
+                                 "下一步：稍后重试；仍不行请看【显示详情】里的日志。",
+                                 once_key="")
+                return
+            if not started:
+                dialog.set_status("上一轮分析还没跑完，等它出结果再点")
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+
+        def on_analyze_pool(self) -> None:
+            """【自选标的 → 分析】：表里这些票还要不要继续留着观察。"""
+            self._analyze(self._table_symbols(self.pool_table), signals_mod.KIND_POOL,
+                          title="自选标的 · 信号结论",
+                          empty_hint="「自选标的」表现在是空的。")
+
+        def on_analyze_position(self) -> None:
+            """【持仓监控 → 分析】：这些持仓是持有、减仓还是离场。"""
+            self._analyze(self._table_symbols(self.position_table), signals_mod.KIND_POSITION,
+                          title="持仓监控 · 信号结论",
+                          empty_hint="「持仓监控」表现在是空的。")
+
+        def on_analyze_symbol(self, symbol: str, kind: str) -> None:
+            """右键【分析】：只分析这一只（同一个结论窗，只有一行）。"""
+            title = ("自选标的 · 信号结论" if kind == signals_mod.KIND_POOL
+                     else "持仓监控 · 信号结论")
+            self._analyze([str(symbol)], kind, title=title, empty_hint=f"没找到 {symbol}。")
+
+        def _on_signals_updated(self, results: dict, kind: str) -> None:
+            """一批结论回来了 → 填进结论窗（**不弹提示**：窗自己就在用户眼前）。"""
+            dialog = getattr(self, "signal_dialog", None)
+            if dialog is None:
+                return
+            wanted = list(getattr(self, "_signal_wanted", []) or [])
+            ordered = [results[s] for s in wanted if s in results]
+            ordered.extend(v for k, v in results.items() if k not in set(wanted))
+            if not ordered:
+                dialog.set_status("没算出结论（多半是本地数据不足）；详情见日志")
+                return
+            dialog.set_signals(ordered)
+            missing = len(wanted) - len([s for s in wanted if s in results])
+            text = f"{len(ordered)} 只 · 点一行看依据"
+            if missing > 0:
+                text += f"（{missing} 只没能算出来）"
+            text += " · 大模型消息附注还没接，暂不显示"
+            dialog.set_status(text)
+
         def _refresh_pool_table(self) -> None:
             """填「自选标的」：名称/现价/涨幅/市值/换手/板块/来源/监控开关。
 
@@ -4954,6 +5078,15 @@ if QT_AVAILABLE:
                 )
             menu.addAction(act_delete)
             menu.addAction(act_toggle)
+            # 【分析】：只分析**右键这一行**（整表分析在页面上那两个【分析】按钮里）。
+            # 与按钮走同一条路（`_analyze`），区别只是这次只给一只票。
+            act_analyze = QAction("分析", menu)
+            act_analyze.setToolTip("给这一只出一份信号结论")
+            act_analyze.triggered.connect(
+                lambda _=False, s=symbol, k=kind: self.on_analyze_symbol(
+                    s, signals_mod.KIND_POOL if k == "pool" else signals_mod.KIND_POSITION)
+            )
+            menu.addAction(act_analyze)
             menu.addSeparator()
             act_open = QAction("打开雪球", menu)
             act_open.setEnabled(bool(market.xueqiu_url(symbol)))
@@ -7694,6 +7827,7 @@ if QT_AVAILABLE:
             # 那种通用任务线程（`_worker`）。
             for name, stop in (("quotes", lambda obj: obj.stop()),
                                ("scores", lambda obj: obj.stop()),
+                               ("signals", lambda obj: obj.stop()),
                                ("scheduler", lambda obj: obj.stop())):
                 target = getattr(self, name, None)
                 if target is None:
@@ -7755,7 +7889,7 @@ if QT_AVAILABLE:
             # 「软件授权」窗口：它虽然挂在主窗口下面（有父窗口），但**对话框在 Qt 里同样是
             # 顶层窗口**，随机顺序的测试里可能比主窗口活得更久（= 窗口销毁了对话框还在，
             # 它的控件再被绘制时踩到已析构对象）。收尾统一关掉，别赌"父窗口会带上它"。
-            for attr in ("license_dialog", "about_dialog", "status_dialog"):
+            for attr in ("license_dialog", "about_dialog", "status_dialog", "signal_dialog"):
                 dialog = getattr(self, attr, None)
                 if dialog is None:
                     continue

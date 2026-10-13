@@ -1419,12 +1419,16 @@ def test_position_pnl_is_dash_when_there_is_no_price(window, seeded, qapp) -> No
 
 
 def test_position_row_menu_toggle_monitor(window, seeded, qapp) -> None:
-    """右键：删持仓 / 关闭监控↔打开监控（关了就不再进做T提示）。"""
+    """右键：删持仓 / 关闭监控↔打开监控（关了就不再进做T提示）/ 分析一只 / 打开雪球。
+
+    【分析】是 2026-10-13 加的（主人：「自选/持仓加「分析」，出结论窗」）：排在两个
+    开关后面、雪球前面 —— 前两项改的是"这一行的状态"，后两项才是"看它"。
+    """
     from laoa_trader import intraday
 
     menu = window._row_menu(window.position_table, 0, "position")
     texts = [a.text() for a in menu.actions() if a.text()]
-    assert texts == ["删除", "关闭监控", "打开雪球"]
+    assert texts == ["删除", "关闭监控", "分析", "打开雪球"]
     next(a for a in menu.actions() if a.text() == "关闭监控").trigger()
     qapp.processEvents()
     # `monitor = 0` → 做T的观察面里不再有它（这是"关闭监控"的**真实作用**）；

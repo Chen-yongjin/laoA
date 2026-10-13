@@ -203,7 +203,8 @@ def judge_pool(
     """自选池里的一只票 → 进场信号成立 / 继续观察 / 建议剔除。
 
     `strategies` 是**当轮**选出了它的策略名（`pool.round_pick_strategies()` 的那份）；
-    `stale_days` 是"距最近一次命中过了多少交易日"（`None` = 从来没有过策略命中）。
+    `stale_days` 是"距最近一次命中过了多少交易日"，**`None` = 查不到命中记录**
+    （按"长期没有信号"算，与"刚命中过"是两回事）。
 
     「建议剔除」只针对**自选池**（不再值得占着观察位），不是清仓建议 ——
     这两件事在持仓那一路上分开算，别混。
@@ -221,12 +222,14 @@ def judge_pool(
     evidences.extend(extra)
 
     total = float(getattr(score, "total", 0.0)) if scored else None
-    fresh = stale_days is None or stale_days <= rules.stale_days
+    # "还新鲜"的两种证据：当轮命中（`strategies` 非空）、或查得到且没超期（`stale_days`）。
+    # **查不到命中记录不算新鲜**：那正是"这只票已经很久没被任何策略选中"的样子。
+    fresh = bool(strategies) or (stale_days is not None and stale_days <= rules.stale_days)
     if stale_days is not None:
         evidences.append(Evidence(KIND_RULE, f"距最近一次策略命中 {stale_days} 个交易日",
                                   f"阈值 {rules.stale_days} 日"))
     elif not strategies:
-        notes.append("没有查到这只票的策略命中记录。")
+        notes.append("没有查到这只票被策略命中的记录（按长期无信号算）。")
 
     if total is not None and total >= rules.enter_score and strategies:
         verdict, headline = ENTER, "评分达标，且当轮有策略命中。"
