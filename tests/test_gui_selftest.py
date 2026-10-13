@@ -193,7 +193,8 @@ def test_gui_selftest_refuses_when_the_given_config_is_not_honored(capsys, tmp_p
     bom.write_bytes('\ufeffdata_dir = "/tmp/不该被用到"\n'.encode("utf-8"))
     cfg = config_mod.load_config(bom, use_env=False)
     assert cfg.config_error == "", cfg.config_error
-    assert str(cfg.data_dir) == "/tmp/不该被用到"
+    # ⚠️ 只比**目录名**：Windows 上 `Path("/tmp/x")` 会规整成 `\tmp\x`（CI 上真的红过）
+    assert cfg.data_dir.name == "不该被用到"
     # ② 键名写错：文件读得进来，但 data_dir 没生效，照样落到默认数据目录
     no_dir = tmp_path / "nodata.toml"
     no_dir.write_text('hithink_api_key = ""\n', encoding="utf-8")
