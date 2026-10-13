@@ -183,6 +183,65 @@ def _drain_threads_at_session_end():
             pass
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _track_every_qthread():
+    """整场测试里**每一条 `QThread` 从一出生就被记名**，收尾逐条等/寄存。
+
+    为什么还要这一道（2026-10-13 CI 实况）：那一轮**所有用例都过了**
+    （`2054 passed, 1 skipped`），进程却在这之后 `Fatal Python error: Aborted` ——
+    faulthandler 的现场里还挂着一条活着的后台线程。这类 abort 的机理只有一条：
+    **跑着的 `QThread` 被析构**（Qt 走 `qFatal` → `abort()`），而"被析构"通常发生在
+    最后一份 Python 引用归零的那一刻 —— 收尾顺序里少等一步就会踩上。
+
+    生产代码那边已经给每个服务都写了"先取消、再等、等不到就寄存"（`ui/threads.py`
+    的 `park()` 就是"寄存"），但**测试里直接建出来的 QThread**（以及将来新加、忘了登记的）
+    没人管。这里在**测试进程里**给 `QThread.start` 打一层记录：谁起过就记下来，
+    整场结束时逐条 `wait`，等不到的**寄存**（有强引用 ⇒ 不会被析构 ⇒ 不会 abort）。
+    只影响测试，生产代码一个字都没动。
+    """
+    try:
+        from PySide6.QtCore import QThread
+    except Exception:  # noqa: BLE001 - 没装 Qt 的用例集不需要这一道
+        yield
+        return
+
+    from laoa_trader.ui import threads as threads_mod
+
+    original = QThread.start
+    started: list = []
+
+    def _start(self, *args, **kwargs):
+        started.append(self)          # 出生即记名（哪怕调用方随后就把引用丢了）
+        return original(self, *args, **kwargs)
+
+    QThread.start = _start
+    yield
+    QThread.start = original
+    leaked: list[str] = []
+    for thread in list(started):
+        try:
+            if thread.isRunning():
+                thread.wait(3_000)
+            if thread.isRunning():
+                leaked.append(type(thread).__name__)
+                threads_mod.park(thread)      # 等不到就寄存：绝不让它被析构
+        except RuntimeError:
+            continue                          # 底层对象已经没了
+        except Exception:  # noqa: BLE001 - 收尾失败不该影响测试结论
+            continue
+    if leaked:
+        try:
+            import sys as _sys
+
+            stream = getattr(_sys, "__stderr__", None)
+            if stream is not None:
+                stream.write("[tests] 收尾时仍在跑的 QThread（已寄存）："
+                             + "、".join(leaked) + "\n")
+                stream.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @pytest.fixture(autouse=True)
 def _block_network(monkeypatch: pytest.MonkeyPatch):
     """封死 IPv4/IPv6 的连接与域名解析；放行 AF_UNIX（Qt/DBus 等本地 IPC 需要）。
