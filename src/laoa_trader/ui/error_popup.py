@@ -47,6 +47,29 @@ MAX_LINES = 3
 #: 各记一份就等于同一件事弹两次。
 _once_seen: set[str] = set()
 
+#: 「只记日志、不弹框」的进程级开关（`--gui-selftest` 打开，见 `set_silent`）。
+#: 为什么要有：自检（以及将来任何无人值守的跑法）里**没有人能点掉模态框** ——
+#: 一个框就足以让进程永远停在那里（CI 上表现为"卡到超时"），而自检里唯一要做的是
+#: "把这次启动发生过什么"记下来。
+_silent = False
+
+
+def set_silent(silent: bool = True) -> bool:
+    """打开/关闭"只记日志、不弹框"模式，返回**原来的值**（调用方负责还原）。
+
+    只用一处：`__main__._gui_selftest`（编译产物的图形界面冒烟自检）。用完必须还原 ——
+    这是进程级的开关，忘了还原就等于把用户界面上的错误提示全变成"只写日志"了。
+    """
+    global _silent
+    previous = _silent
+    _silent = bool(silent)
+    return previous
+
+
+def is_silent() -> bool:
+    """现在是不是"只记日志"模式（测试与排查用）。"""
+    return _silent
+
 
 def seen_once_keys() -> set[str]:
     """已经弹过的 `once_key`（测试与排查用）。"""
@@ -89,6 +112,10 @@ def show_error(parent: Any, title: str, text: str, *, once_key: str = "") -> boo
         title: 标题，短，例如"下载失败"。
         text: 正文（最多三行）：**出了什么事 + 下一步做什么**。
         once_key: 非空 = 这一类错误"每次运行只弹一次"（后台/定时任务用）。
+
+    Returns:
+        是否**真的弹了**。被 `once_key` 去重挡掉、或处在"只记日志"模式（`set_silent`）时
+        返回 False —— 调用方（与测试）靠它区分"用户看到了"和"只进了日志"。
     """
     if once_key:
         if once_key in _once_seen:
@@ -97,6 +124,12 @@ def show_error(parent: Any, title: str, text: str, *, once_key: str = "") -> boo
         _once_seen.add(once_key)
     body = _clip(text)
     logger.warning(f"【弹窗】{title}：{body.replace(chr(10), ' / ')}")
+    if _silent:
+        # 自检/无人值守模式：**只记日志**。这条分支必须在建 QMessageBox 之前 ——
+        # `--gui-selftest` 里没有人能点那个框，弹出来就是卡死（与测试里
+        # `tests/conftest.py` 打桩 `_exec` 是同一个理由，只是这里由生产代码自己保证）。
+        logger.info("（GUI 自检模式：只记日志，不弹框）")
+        return False
     if not QT_AVAILABLE or QApplication is None or QApplication.instance() is None:
         # 没有 Qt / 还没有 QApplication（CLI、或程序起得比界面还早）：
         # 日志已经写下了原因，这里**绝不**去构造 QWidget —— 那样只会崩或卡住

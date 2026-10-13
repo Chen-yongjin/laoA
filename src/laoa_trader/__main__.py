@@ -8,6 +8,7 @@
     python -m laoa_trader --cli --market       # 打印大盘概览那几行
     python -m laoa_trader --cli --market       # 只看大盘概览（与页面同一份：家数/成交额/涨跌家数/三组指数）
     python -m laoa_trader --cli --serve        # 常驻：定时日更 + 盘中提醒
+    python -m laoa_trader --gui-selftest       # 图形界面冒烟自检（离屏；发版前/CI 用）
 
 界面不可用（例如没装 PySide6）时**自动降级为 CLI**，不会直接崩。
 """
@@ -15,14 +16,19 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import sys
+import tempfile
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from laoa_trader import pool as pool_mod
 from laoa_trader import runtime
-from laoa_trader.config import get_config, load_config
+from laoa_trader.config import Config, default_data_dir, get_config, load_config
 from laoa_trader.data import sync
 from laoa_trader.data.engine import DataEngine
 from laoa_trader.log import LOG_NAME, get_logger, setup_logging
@@ -51,13 +57,19 @@ class _Tee:
     重定向 stdout 不一定拿得到内容，读文件最稳）。
     """
 
-    def __init__(self, *streams) -> None:
+    def __init__(self, *streams, flush_each: bool = False) -> None:
         self._streams = streams
+        #: 每写一段就 flush 一次。`--gui-selftest` 用得上：那段代码要盯的恰恰是
+        #: "界面建到一半整个进程没了"（Nuitka 段错误），缓冲里没落盘的内容会一起消失，
+        #: 报告就成了空文件 —— 而那正是最需要它的时候。
+        self._flush_each = flush_each
 
     def write(self, text: str) -> int:
         for stream in self._streams:
             try:
                 stream.write(text)
+                if self._flush_each:
+                    stream.flush()
             except Exception:  # noqa: BLE001 - 其中一个流坏了不该影响另一个
                 pass
         return len(text)
@@ -68,6 +80,32 @@ class _Tee:
                 stream.flush()
             except Exception:  # noqa: BLE001
                 pass
+
+
+class _ReportLogHandler(logging.Handler):
+    """把 `laoa_trader` 的日志**同时**写进自检报告（每一条都 flush）。
+
+    为什么要它（2026-10-13 的 1.9.2 编译版实报"双击打不开"）：那次崩的是**段错误** ——
+    没有 traceback、stdout 缓冲也可能一起没掉，唯一的下落不明的现场就是"日志停在哪一行"。
+    所以自检报告里除了自己打印的几行，还要有**逐步的日志**：
+    `ui/app.py::startup_step()` 写的 `启动步骤：…` 每一步都刷新一次，
+    报告（以及 CI 的 smoke.log）里的**最后一行**就是崩溃点。
+
+    只挂在自检期间（`_gui_selftest` 装上、跑完摘掉），不影响正常运行的日志配置。
+    """
+
+    def __init__(self, stream: Any) -> None:
+        super().__init__()
+        self._stream = stream
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._stream.write(self.format(record) + "\n")
+            self._stream.flush()          # 崩了就崩在这一行之后 —— 必须立刻落盘
+        except Exception:  # noqa: BLE001 - 报告写不进去不该影响程序
+            pass
 
 
 def _doctor(cfg, startup_problem: str = "") -> None:
@@ -212,6 +250,243 @@ def _doctor(cfg, startup_problem: str = "") -> None:
             print("\n提示：未配置同花顺 API Key，只能基于本地已有数据匹配，无法更新。")
     except Exception as exc:  # noqa: BLE001 - 自检本身不能崩
         print(f"数据概况读取失败：{type(exc).__name__}: {exc}")
+
+
+#: GUI 自检报告的文件名。
+#: **故意用 `.log` 而不是 `.txt`**：`--doctor` 那份叫 `logs/自检报告.txt`，而 CI 里是按
+#: `logs/*.txt` 取"最新一份"来断言"运行形态 = Nuitka / 随包策略 / 资源目录"的 ——
+#: 这份写得更晚，如果也叫 `.txt` 就会把 doctor 那份挤掉，让那几条断言莫名其妙地红。
+GUI_SELFTEST_REPORT_NAME = "GUI自检报告.log"
+#: 控件数下限：主窗口是五个页签 + 两张表格 + 一堆按钮，正常在 300 个以上。
+#: 低于这个数说明界面**根本没搭出来**（自检不该在这种情况下报 OK）。
+GUI_SELFTEST_MIN_WIDGETS = 50
+
+
+def _teardown_selftest_window(window: Any, app: Any) -> None:
+    """自检收尾：定时器、后台线程、桌宠/消息列表/浮窗全部收掉（绝不抛、可重复调用）。
+
+    为什么不能只是 `window.close()`：关窗在主窗口里等于"收进托盘"（`closeEvent` 是
+    `ignore()` + `hide()`），定时器与后台线程照旧活着 —— 而自检完了就要退出进程，
+    那时还活着的 `QThread` 会给出 `QThread: Destroyed while thread '' is still running`，
+    在 CI 上表现为"自检崩了、却看不出是谁的锅"。
+    所以走**生产代码的退出路径**（`MainWindow.shutdown()`，与托盘【退出】同一个方法），
+    再补上测试里那套"显式处理 DeferredDelete"（`deleteLater()` 只排队，不跑
+    `sendPostedEvents` 就不会真删）。
+    """
+    for name in ("_timer", "_market_timer", "_flash_timer", "_flash_stop_timer"):
+        timer = getattr(window, name, None)
+        if timer is None:
+            continue
+        try:
+            timer.stop()
+        except Exception:  # noqa: BLE001 - 收尾失败不该挡住退出
+            pass
+    for step in (
+        window.shutdown,
+        lambda: getattr(window, "tray", None) and window.tray.hide(),
+        window.close,
+        window.deleteLater,
+    ):
+        try:
+            step()
+        except Exception:  # noqa: BLE001 - 收尾失败不该挡住退出
+            pass
+    if app is None:
+        return
+    try:
+        app.processEvents()
+        from PySide6.QtCore import QEvent
+
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)   # 真正执行删除
+        app.processEvents()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _gui_selftest(args) -> int:
+    """`--gui-selftest`：**图形界面**的冒烟自检（编译产物发版前的守门人）。
+
+    为什么必须有这一条（2026-10-13 主人实报）：1.9.2 双击打不开 ——
+    `luweik决策系统.exe --cli --version` 一切正常，一进图形界面就是 Nuitka 段错误，
+    而当时的 CI 冒烟只跑 `--version` / `--doctor`（**全程不碰 GUI**），
+    于是"只在编译版、只在界面路径上出现"的崩溃一路绿灯发到了用户手里。
+
+    走的是与用户双击**同一条路**：`QT_QPA_PLATFORM=offscreen`（在进程内自己设，
+    不依赖外部环境）→ 建 `QApplication`（含 `setQuitOnLastWindowClosed` 与图标，
+    与 `ui/app.py::run_gui` 一致）→ 建**真的** `MainWindow` → `show()` → 跑一次
+    `_tick()` → `processEvents()` 几轮 → `shutdown()` 收尾 →
+    打印一行 `GUI 自检 OK：窗口 N 个控件、版本 x.y.z` → 退出码 0。
+
+    四条纪律：
+
+    1. **绝不弹模态框**：关掉 `ui/error_popup.py` 那条唯一出口（自检里没人能点掉它，
+       弹出来就是永远等下去 —— CI 上是超时，用户看到的是"卡住"）；
+    2. **不联网**：概览页那 4~6 个（热力图 28 个）请求自检不需要 —— 断网/服务端不响应
+       会让"界面冒烟"变成随机红，退出时还可能留下一条活线程；
+    3. **不碰用户真实目录**：`--config` 指哪用哪；没给就用一个临时目录；
+    4. **任何异常都吐 traceback 并返回非 0**：CI 靠退出码判红，不能"看起来跑完了"。
+
+    Args:
+        args: `cli()` 解析出来的参数（只用到 `config`）。
+
+    Returns:
+        进程退出码：0 = 界面建出来了；1 = 界面起不来/自检失败（traceback 已打印）；
+        2 = 前提不成立（`--config` 指定了却没生效，见下面那段说明）。
+    """
+    # 离屏平台：CI runner（没有交互桌面）也能把真窗口建出来。
+    # 用 `setdefault` 而不是硬覆盖：真机上排查"是不是平台插件的问题"时，
+    # 我们自己指定 QT_QPA_PLATFORM 要能生效。
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    if args.config:
+        cfg = load_config(args.config)
+        # ⚠️ 必须查它到底认没认这个文件：`load_config` 读不出来（路径写错 / 带 BOM /
+        # TOML 语法错）时会**静默退回默认值**，而默认数据目录正是**用户真实那一个** ——
+        # 自检会往里建库、写日志。CI 就踩过它的孪生形态（config.toml 带 BOM → 第一个键名
+        # 变成 `\ufeffdata_dir` → 被当成未知键忽略 → 报告写进了 %LOCALAPPDATA%）。
+        # 与其"悄悄跑到别的目录上"再报个 OK（那正是 1.9.2 那种静默失败的路子），
+        # 不如直接拒绝并说清哪个文件没起作用。
+        why = ""
+        if cfg.source_path is None:
+            why = "文件不存在（或读不动）"
+        elif cfg.config_warning():
+            why = cfg.config_warning()
+        elif Path(cfg.data_dir) == default_data_dir():
+            why = (f"配置里的 data_dir 没生效，解析出来还是默认数据目录（{cfg.data_dir}）"
+                   "—— 常见原因是文件带 BOM，或者压根没写 data_dir")
+        if why:
+            print(f"❌ GUI 自检拒绝运行：--config {args.config} 没能生效（{why}）。")
+            print(f"   它现在指向默认数据目录 {cfg.data_dir} —— 那是**用户真实目录**，")
+            print("   而自检会往里建库、写日志；自检宁可不跑，也不碰用户真实目录。")
+            print("   请修好配置后重跑；或者不带 --config 跑（那样自动用临时数据目录）。")
+            return 2
+        source_text = str(cfg.source_path)
+    else:
+        # 没给 --config 时**绝不能**回落到用户真实的数据目录（自检会建库、写日志、
+        # 界面上还可能回写配置）：造一个临时目录给它。
+        # 跑完**不删**：Windows 上日志文件还开着（删不掉），而且真出问题时那个目录
+        # 正好是排查材料 —— 把路径打出来，让用户自己决定留还是删。
+        temp_dir = Path(tempfile.mkdtemp(prefix="luweik-gui-selftest-"))
+        cfg = Config(data_dir=temp_dir)
+        source_text = "内置默认值（没给 --config：数据目录用临时目录，不碰用户真实目录）"
+
+    problem = cfg.ensure_dirs_message()
+    # 日志先配上：自检里"界面建到一半就没了"时，日志是**唯一**能说明它走到哪一步的东西
+    # （1.9.2 那次段错误的最后两行就是这么来的）。
+    if not problem:
+        setup_logging(cfg.data_dir)
+    logger = get_logger("cli")
+
+    report_path = Path(cfg.data_dir) / "logs" / GUI_SELFTEST_REPORT_NAME
+    handle = None
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(report_path, "w", encoding="utf-8")
+    except OSError as exc:      # 报告写不了不该让自检本身失败（CI 那边还能看退出码）
+        print(f"（GUI 自检报告没能写入 {report_path}：{exc}）")
+
+    original = sys.stdout
+    mirror = None
+    if handle is not None:
+        # flush_each=True：见 `_Tee` 的说明（要盯的就是"建到一半进程没了"）
+        sys.stdout = _Tee(original, handle, flush_each=True)
+        # 日志也镜像进报告：崩在哪一步，看报告里 `启动步骤：…` 的最后一行
+        mirror = _ReportLogHandler(handle)
+        logging.getLogger("laoa_trader").addHandler(mirror)
+    try:
+        import laoa_trader
+
+        print("luweik —— GUI 自检（离屏）")
+        print("=" * 56)
+        print(f"程序版本  : {laoa_trader.__version__}")
+        print(f"运行形态  : {runtime.describe()}")
+        print(f"平台插件  : QT_QPA_PLATFORM={os.environ.get('QT_QPA_PLATFORM')}")
+        print(f"配置来源  : {source_text}")
+        print(f"数据目录  : {cfg.data_dir}")
+        if problem:
+            print(f"⚠️ {problem}")
+        print("-" * 56)
+        print("定位提示：下面日志里 `启动步骤：…` 的**最后一行**就是崩溃点"
+              "（段错误没有 traceback，只能靠它）")
+        logger.info(f"GUI 自检开始：数据目录 {cfg.data_dir}")
+        try:
+            return _gui_selftest_run(cfg, report_path)
+        except BaseException:   # noqa: BLE001 - 自检的意义就是"崩了要让人看见"
+            print("❌ GUI 自检失败：")
+            # 两份都要：stderr 那份进 CI 的 `gui-selftest.err.txt`，
+            # stdout 这份**同时进报告文件**（界面崩了时报告是唯一的现场）
+            traceback.print_exc()
+            print(traceback.format_exc())
+            logger.error("GUI 自检失败", exc_info=True)
+            return 1
+    finally:
+        if mirror is not None:
+            logging.getLogger("laoa_trader").removeHandler(mirror)
+        sys.stdout = original
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
+
+
+def _gui_selftest_run(cfg, report_path: Path) -> int:
+    """自检的正题：建真窗口 → 跑一拍 → 收尾。异常一路抛给 `_gui_selftest`（它负责非 0）。"""
+    import laoa_trader
+    from laoa_trader.ui import app as ui_app
+    from laoa_trader.ui import error_popup as error_popup_mod
+
+    if not ui_app.QT_AVAILABLE:
+        print("❌ 图形界面不可用（PySide6 没装 / 导入失败）—— GUI 自检无法进行。")
+        return 1
+
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    # ① 自检期间**一个模态框都不许弹**（见 `_gui_selftest` 的第 1 条纪律）。
+    #    放在建窗口之前：`MainWindow.__init__` 里就会走到启动自检那条会弹框的路。
+    previous_silent = error_popup_mod.set_silent(True)
+    app = None
+    window = None
+    try:
+        app = QApplication.instance() or QApplication([sys.argv[0]])
+        app.setQuitOnLastWindowClosed(False)   # 与 run_gui 一致：关窗只是收进托盘
+        ui_app._set_app_icon(app)              # 与 run_gui 一致（图标=资源路径解析的探针）
+
+        # 真主窗口：与用户双击时**同一段代码**（`ui/app.py::MainWindow.__init__`）——
+        # 1.9.2 的段错误正是死在这里的后半段（屏幕几何 / `_build_ui` / 托盘 / 桌宠 / 定时器）。
+        window = ui_app.MainWindow(cfg)
+
+        # ② 不联网：概览页的取数只在"这一页真的在眼前"时才发（见 `MainWindow._market_page_visible`）。
+        #    ⚠️ **必须在第一次 processEvents 之前**切页签：`__init__` 用
+        #    `QTimer.singleShot(0, self._market_tick)` 排了启动那一轮概览取数，
+        #    只要跑一次事件循环它就会发出去（4~6 个请求，还有热力图那 28 个）——
+        #    实测第一次跑就是"打印 OK 之后进程 Aborted、退出码 134"（退出时那两条线程还在飞）。
+        #    切走之后 `_market_tick` 自己就返回了，窗口照建照 show，五页照搭。
+        watch_page = getattr(window, "watch_page", None)
+        if watch_page is not None:
+            window.tabs.setCurrentWidget(watch_page)
+
+        window.show()
+        app.processEvents()
+
+        # ③ 真跑一拍：与用户双击后每 5 秒那一拍是**同一段代码**（含刷状态/两张表/快照/评分/提醒对账）
+        window._tick()
+        for _ in range(5):
+            app.processEvents()
+
+        count = len(window.findChildren(QWidget))
+        if count < GUI_SELFTEST_MIN_WIDGETS:
+            print(f"❌ GUI 自检失败：主窗口只建出 {count} 个控件"
+                  f"（低于下限 {GUI_SELFTEST_MIN_WIDGETS}，界面没搭起来）")
+            return 1
+        print(f"GUI 自检 OK：窗口 {count} 个控件、版本 {laoa_trader.__version__}")
+        print(f"报告文件  : {report_path}")
+        return 0
+    finally:
+        # 先收窗口再还原弹窗开关：收尾过程中真出了问题也该**只记日志**，不许弹框
+        if window is not None:
+            _teardown_selftest_window(window, app)
+        error_popup_mod.set_silent(previous_silent)
 
 
 def _split_list(text: str | None) -> list[str]:
@@ -518,6 +793,13 @@ def cli(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--doctor", action="store_true",
                         help="自检：打印路径/依赖/凭据/数据概况，排障时先跑它")
+    parser.add_argument(
+        "--gui-selftest", action="store_true",
+        help="图形界面冒烟自检：离屏（offscreen）建一次**真的**主窗口、跑一拍后退出。"
+             "只跑 --version/--doctor 是碰不到界面的（1.9.2 的段错误就是这么漏过去的），"
+             "发版前与 CI 用它守门；退出码非 0 即失败，"
+             f"过程同时写进 <数据目录>/logs/{GUI_SELFTEST_REPORT_NAME}",
+    )
     parser.add_argument("--no-notify", action="store_true", help="不推送通知（只落库）")
     parser.add_argument("--auto-download", action="store_true",
                         help="自检发现数据不可用时先自动下载再继续"
@@ -534,6 +816,11 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, help="只处理前 N 只股票（试跑）")
     args = parser.parse_args(argv)
     _PROGRESS_LAST.clear()          # 每轮重新计数：同一阶段第二次跑也要有进度输出
+
+    if args.gui_selftest:
+        # 图形界面冒烟：**在加载配置之前**分支出去 —— 它自带配置与日志，
+        # 而且绝不碰用户真实的数据目录（见 `_gui_selftest` 的说明）。
+        return _gui_selftest(args)
 
     cfg = load_config(args.config) if args.config else get_config()
     _apply_run_time_override(cfg, args)
@@ -701,6 +988,11 @@ def cli(argv: list[str] | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     """统一入口：无参数进 GUI，有 --cli / 参数进命令行。"""
     argv = list(sys.argv[1:] if argv is None else argv)
+    # GUI 自检**先于真实配置加载**就分流：它自带临时数据目录与日志（见 `_gui_selftest`），
+    # 而 `get_config()` 会去读用户的 config.toml、`setup_logging()` 会往用户的数据目录写日志 ——
+    # "绝不碰用户真实目录"是这条命令的硬要求，所以连读都不该先读一遍。
+    if "--gui-selftest" in argv:
+        return cli(argv)
     cfg = get_config()
     setup_logging(cfg.data_dir)
 

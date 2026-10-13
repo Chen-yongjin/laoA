@@ -1365,6 +1365,19 @@ if QT_AVAILABLE:
         if not icon.isNull():
             app.setWindowIcon(icon)
 
+    def startup_step(name: str) -> None:
+        """主窗口启动的**逐步标记**：崩在哪一步，就看日志的最后一行。
+
+        为什么要它（2026-10-13 的 1.9.2 编译版实报"双击打不开"）：那次的 `luweik.log`
+        停在 `界面主题已应用：indigo` + `已启用滚轮防误触…` 两行，**后面一个字都没有** ——
+        于是没人分得清它到底崩在屏幕几何、搭界面、托盘、桌宠还是调度器上。
+        段错误（Nuitka 编译版在 Windows 上就是这么死的）**不会留下 traceback**，
+        所以定位手段只有一条：每一步都往日志里刷一行，最后那一行就是现场。
+
+        代价只有几行 INFO 日志（正常双击启动也写，用户报障时正好用得上）。
+        """
+        logger.info(f"启动步骤：{name}")
+
     class Worker(QThread):
         """通用工作线程：把可调用对象丢到后台跑，结果通过信号回主线程。
 
@@ -1464,6 +1477,7 @@ if QT_AVAILABLE:
             # 主题名非法/素材缺失都在 `theme` 层兜住（退回默认主题 / 纯色背景条）
             theme_mod.apply_theme(QApplication.instance(),
                                   getattr(self.cfg, "ui_theme", None))
+            startup_step(f"主题已应用（{getattr(self.cfg, 'ui_theme', None) or '默认'}）")
             # 数据目录可能在只读盘/权限不足：界面照开，状态栏挂提示（别直接崩）
             self._startup_problem = self.cfg.ensure_dirs_message()
             if not self._startup_problem and self.cfg.config_warning():
@@ -1471,6 +1485,7 @@ if QT_AVAILABLE:
                 self._startup_problem = self.cfg.config_warning()
             if self._startup_problem:
                 logger.error(self._startup_problem)
+            startup_step("数据目录与配置检查完成")
             self.engine = DataEngine(self.cfg.db_path)
             self.scheduler = Scheduler(self.cfg, self.engine)
             self._worker: Worker | None = None
@@ -1558,17 +1573,24 @@ if QT_AVAILABLE:
             # 会直接改值（Qt 默认行为，与焦点无关）—— 用户只是想往下翻页，
             # 结果把止损 % 改了。装一次应用级过滤器拦住（见 ui/wheel_guard.py）。
             self.wheel_guard = wheel_guard_mod.install(QApplication.instance())
+            startup_step("滚轮防误触已装好")
             self._apply_screen_geometry()
+            startup_step(f"屏幕几何 OK（{self.width()}×{self.height()}，窗口外观={self.window_frame}）")
             self._build_ui()
+            startup_step(f"界面 OK（{len(self.findChildren(QWidget))} 个控件）")
             self._build_tray()
+            startup_step("托盘 OK")
             # 桌宠**启动就摆出来**（用户原话："像一个桌宠一样的，软件隐藏时停留在桌面"）——
             # 不是"来消息才出现"：桌宠是常驻的，用户要能随时看到它、双击它看消息。
             # `notify_pet` 关着时 `_ensure_pet()` 直接把已有那只藏起来（见它的实现）。
             self._ensure_pet()
+            startup_step(f"桌宠 OK（{'已摆出' if self.pet is not None else '未启用'}）")
             self._start_scheduler()
+            startup_step("调度器 OK")
             # 授权检查放在最后：先让界面出来（他要能看到机器码），再决定要不要提醒。
             # 试用期内不打扰；到期/未授权才弹一次（见 `_maybe_prompt_license`）。
             self._maybe_prompt_license()
+            startup_step("授权检查 OK")
 
             # 实时行情快照缓存（两张表的现价/涨幅）：**没有自己的 QTimer**，
             # 跟着下面这个 5 秒拍子走、内部按 60 秒限流（见 `quotes.QuoteService.tick`）
@@ -1590,6 +1612,7 @@ if QT_AVAILABLE:
             set_provider = getattr(self.formula_page, "set_quotes_provider", None)
             if callable(set_provider):
                 set_provider(self.quotes.quote)
+            startup_step("快照与评分服务 OK")
 
             # 界面刷新定时器：运行状态 + 两张表 + 托盘消息 + 提醒对账
             self._timer = QTimer(self)
@@ -1625,13 +1648,16 @@ if QT_AVAILABLE:
             # 真正的请求在后台线程（见 request_market_overview）——
             # 启动时数据自检也在跑，两条都压在主线程上界面就会"出来了但点不动"
             QTimer.singleShot(0, self._market_tick)
+            startup_step("定时器 OK（界面刷新/概览/闪烁）")
 
             self._tick()
+            startup_step("首次 _tick OK")
             if self._startup_problem:
                 self._set_status("⚠️ " + self._startup_problem.replace("\n", " "))
             else:
                 # 启动自检放在最后：窗口已经能显示，用户先看到界面再看到结论
                 QTimer.singleShot(0, lambda: self.run_preflight(auto=True))
+            startup_step("主窗口构造完成")
 
         # ── 界面搭建 ──
 
@@ -4239,7 +4265,15 @@ if QT_AVAILABLE:
             return [str(s) for s in dict.fromkeys(out) if s]
 
         def _on_quotes_updated(self) -> None:
-            """实时快照回来了（主线程）：立刻重画两张表，不等下一个 5 秒拍子。"""
+            """实时快照回来了（主线程）：立刻重画两张表，不等下一个 5 秒拍子。
+
+            ⚠️ 与 `_tick` 里那两处一样要过**下载期闸门**：这条回调是后台线程的信号打过来的，
+            它绕过闸门的话"下载期间不重建表格"这条规矩就是破的 —— 实测表现为
+            `test_tick_skips_heavy_work_while_downloading` 偶发红（`processEvents()` 期间
+            快照正好回来一次就多计一次），而且真机上就是下载时被按住卡一下。
+            """
+            if not self._heavy_refresh_allowed():
+                return
             try:
                 self._refresh_pool_table()
                 self._refresh_positions()
@@ -4558,8 +4592,13 @@ if QT_AVAILABLE:
                 )
 
         def _on_scores_updated(self, results: dict) -> None:
-            """一批评分回来了 → 重画那两张表（不弹任何提示：用户看得到数字变了）。"""
-            if not results:
+            """一批评分回来了 → 重画那两张表（不弹任何提示：用户看得到数字变了）。
+
+            与 `_on_quotes_updated` 同一条纪律：**下载期间不重建**（闸门见 `_heavy_refresh_allowed`）——
+            评分是后台线程算完发信号回来的，不走 `_tick`，不自己过闸门就会在下载时把界面按住；
+            算完的分不会丢，下一次 `_tick`（下载结束那拍会强制刷一次）就补上了。
+            """
+            if not results or not self._heavy_refresh_allowed():
                 return
             try:
                 self._refresh_pool_table()
@@ -7627,10 +7666,15 @@ if QT_AVAILABLE:
                     stop(target)
                 except Exception:  # noqa: BLE001 - 收尾失败不该挡住退出
                     logger.debug(f"收 {name} 失败", exc_info=True)
-            for attr in ("_market_worker", "_worker"):
+            for attr in ("_market_worker", "_heatmap_worker", "_worker"):
                 # 注意：这份名单**只管"收尾时主动停止还没跑完的线程"**，
                 # 新增后台线程时别忘了同步加到这里 —— 它跑的是真的网络请求，
                 # 收尾时还在飞就会成为"活过用例的那条线程"（后果见 `Worker` 的说明）。
+                # ⚠️ `_heatmap_worker`（板块热力图，最多 28 个请求）2026-10-13 补上：
+                # 它当初加进界面时漏了这一行 —— 而这份名单漏一个名字就等于漏一条线程，
+                # 后果正是下半段反复描述的那一种（退出时 QThread 还活着 → 进程 Aborted）。
+                # 这一处是由 `--gui-selftest` 引出来的：那条自检第一次跑就是以
+                # "打印 OK 之后进程 Aborted、退出码 134"收场的（还有后台取数线程在飞）。
                 thread = getattr(self, attr, None)
                 if thread is None:
                     continue

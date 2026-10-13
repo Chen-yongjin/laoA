@@ -8,7 +8,7 @@
 1. **最简单的策略编辑** —— 通达信 / 同花顺的公式粘进来就能跑；右边一排中文按钮，点一下就插到光标处，不用记语法。
 2. **盘中监控** —— 交易时段按分钟盯池子与持仓，触及止损 / 止盈 / 涨停打开等情况立刻提醒（图标闪烁 + 「消息」列表，飞书 / 语音 / 桌宠可另开）。
 
-当前版本 **1.9.2**。版本号只有一个真源：`src/laoa_trader/__init__.py` 的 `__version__`。
+当前版本 **1.9.3**。版本号只有一个真源：`src/laoa_trader/__init__.py` 的 `__version__`。
 
 产品名分三层：界面与窗口标题是「luweik决策系统」，通知 / 导出文件名用短自称「luweik」，
 exe 叫 `luweik决策系统.exe`，而目录与压缩包用 ASCII 的 `LuweikDecision`。
@@ -137,6 +137,7 @@ python -m laoa_trader --cli --market       # 只看大盘概览那几行
 python -m laoa_trader --cli --download     # 下载 / 更新历史数据（可中断，重跑续传）
 python -m laoa_trader --cli --serve        # 常驻：定时日更 + 盘中提醒
 python -m laoa_trader --cli --version      # 版本 + 构建形态（报障先跑这个）
+python -m laoa_trader --gui-selftest       # 图形界面冒烟自检：离屏建一次**真**主窗口后退出（发版前/CI 用）
 ```
 
 Windows 上双击 `一键运行.bat` 最省事：建 `.venv` → 装依赖 → 起界面。
@@ -154,6 +155,7 @@ Windows 上双击 `一键运行.bat` 最省事：建 `.venv` → 装依赖 → �
 | `--no-auto-run` | 临时关掉「每天自动运行」 |
 | `--interval 60` / `--limit 200` | 盘中轮询间隔（秒） / 只处理前 N 只（试跑） |
 | `--doctor` | 自检报告，并往 `<数据目录>/logs/自检报告.txt` 落一份 |
+| `--gui-selftest` | **图形界面**冒烟自检：离屏（offscreen）建一次真主窗口、跑一拍后退出（退出码非 0 即失败），并把过程写进 `<数据目录>/logs/GUI自检报告.log`。不给 `--config` 时用临时数据目录，绝不碰用户真实目录 |
 
 界面不可用（没装 PySide6）时自动降级为命令行，不会直接崩。
 

@@ -315,6 +315,15 @@ jobs:
               if (Test-Path $f) {
                 Add-Content $log "----- $Tag $([System.IO.Path]::GetFileName($f))（前 40 行）-----"
                 Get-Content $f -TotalCount 40 | ForEach-Object { Add-Content $log ("  " + $_) }
+                # **尾部也要**（2026-10-13 加的）：崩了的时候（段错误）有用的恰恰是**最后几行**，
+                # 而头部 40 行往往全是无关的启动噪音 —— 1.9.2 那次就是"日志停在某一行之后再没有第三行"，
+                # 现在 `ui/app.py::startup_step()` 每走一步写一行 `启动步骤：…`，
+                # 所以这条尾巴的最后一行**就是崩溃点**。
+                $tail = @(Get-Content $f -Tail 30)
+                if ($tail.Count -gt 0) {
+                  Add-Content $log "----- $Tag $([System.IO.Path]::GetFileName($f))（末 30 行）-----"
+                  $tail | ForEach-Object { Add-Content $log ("  " + $_) }
+                }
               }
             }
             return $proc.ExitCode
@@ -324,6 +333,24 @@ jobs:
           $verCode = Invoke-Exe "version" @("--cli", "--version", "--config", $cfg)
           # 再跑 --doctor（会把报告同时写盘）
           $docCode = Invoke-Exe "doctor" @("--cli", "--doctor", "--config", $cfg)
+          # 最后跑 --gui-selftest：**图形界面**的冒烟（上面两条**全程不碰 GUI**）。
+          # 为什么必须有（2026-10-13 主人实报的 1.9.2）：那个包 `--cli --version` 一切正常，
+          # 一进图形界面就是 Nuitka 段错误 —— 而当时的冒烟只有上面两条，于是"只在编译版、
+          # 只在界面路径上出现"的崩溃一路绿灯发到了用户手里。这一步就是补这个窟窿的。
+          # 它自己在进程里设 `QT_QPA_PLATFORM=offscreen`，所以**不依赖桌面会话**
+          # （离屏插件随包：Nuitka 的 pyside6 插件会把整个 platforms 家族收进去，
+          # runner 上没有交互桌面照样能把真窗口建出来）。
+          $guiCode = Invoke-Exe "gui-selftest" @("--gui-selftest", "--config", $cfg)
+          # 顺手把"离屏插件到底在不在产物里"写进 smoke.log：GUI 自检离屏跑全靠它，
+          # 而这一步一旦红，第一眼看的就是这两行（也顺便钉住"Nuitka 会把整个 platforms
+          # 家族收进去"这个前提 —— 哪天有人加了 --noinclude-qt-plugins，这里立刻能看出来）。
+          Add-Content $log "----- 产物里的 Qt 平台插件（qoffscreen 是 GUI 自检的前提）-----"
+          $offscreen = Get-ChildItem -Recurse 'dist/LuweikDecision' -Filter 'qoffscreen.*' -ErrorAction SilentlyContinue
+          if ($offscreen) {
+            foreach ($f in $offscreen | Select-Object -First 3) { Add-Content $log ("  " + $f.FullName) }
+          } else {
+            Add-Content $log "  ⚠️ 产物里没找到 qoffscreen 插件（离屏自检会失败）"
+          }
 
           # 报告可能落在两处：指定的数据目录（--config 生效）或**默认数据目录**（--config 没被认时）。
           # 两处都找 —— 否则报错会是"没写出报告"，而真相是"写到了别处"。
@@ -355,10 +382,10 @@ jobs:
           Get-Content $report.FullName | ForEach-Object { Add-Content $log ("  " + $_) }
 
           $text = Get-Content $report.FullName -Raw
-          if ($verCode -ne 0 -or $docCode -ne 0) {
-            Add-Content $log "❌ 退出码异常：version=$verCode doctor=$docCode"
+          if ($verCode -ne 0 -or $docCode -ne 0 -or $guiCode -ne 0) {
+            Add-Content $log "❌ 退出码异常：version=$verCode doctor=$docCode gui-selftest=$guiCode"
             Get-Content $log | Write-Host
-            throw "编译产物退出码异常（version=$verCode doctor=$docCode）—— 详见 ci-log/smoke.log"
+            throw "编译产物退出码异常（version=$verCode doctor=$docCode gui-selftest=$guiCode）—— 详见 ci-log/smoke.log"
           }
           if ($text -notmatch "运行形态\s*:\s*Nuitka") {
             Add-Content $log "❌ 报告里没有 Nuitka 形态"
@@ -375,6 +402,43 @@ jobs:
             Get-Content $log | Write-Host
             throw "资源目录没解析出来（图标会全丢，详见 ci-log/smoke.log）"
           }
+
+          # ── GUI 自检的结论：以**它自己写的那份报告**为准 ──
+          # 为什么读文件而不是读 stdout：GUI 子系统的 exe 重定向 stdout 不一定拿得到内容
+          # （与上面 --doctor 那份报告同一个理由）。报告名是 `GUI自检报告.log`
+          # —— **故意不用 .txt**：上面取 doctor 报告是按 `logs/*.txt` 找"最新一份"的，
+          # 这份写得更晚，也叫 .txt 就会把它挤掉，让"运行形态/随包策略/资源目录"三条断言莫名其妙地红。
+          $guiReport = $null
+          $guiCandidates = @(
+            (Join-Path $dataDir "logs/GUI自检报告.log"),
+            (Join-Path $env:LOCALAPPDATA "LuweikDecision/data/logs/GUI自检报告.log")
+          )
+          foreach ($p in $guiCandidates) {
+            if (Test-Path $p) { $guiReport = $p; break }
+          }
+          if (-not $guiReport) {
+            Add-Content $log "❌ 没找到 GUI 自检报告（两处都没找到）"
+            Get-Content $log | Write-Host
+            throw "编译产物的 GUI 自检没写出报告：界面多半起来就崩了（看 smoke.log 里 gui-selftest 的退出码与输出）"
+          }
+          Add-Content $log "GUI 自检报告：$guiReport"
+          Add-Content $log "----- GUI 自检报告全文 -----"
+          Get-Content $guiReport | ForEach-Object { Add-Content $log ("  " + $_) }
+          $guiText = Get-Content $guiReport -Raw
+          # 把"走到哪一步"单独拎出来一行：报告里 `启动步骤：…` 是每一步刷一次的，
+          # 崩了（段错误）时这一行的最后一条就是现场，比翻整份报告快得多。
+          $stepLines = @($guiText -split "`n" | Where-Object { $_ -match '启动步骤：' })
+          if ($stepLines.Count -gt 0) {
+            Add-Content $log ("最后走到的一步：" + $stepLines[-1].Trim())
+          } else {
+            Add-Content $log "⚠️ 报告里没有 `启动步骤：` 标记（这一步的日志没进来？）"
+          }
+          if ($guiText -notmatch "GUI 自检 OK") {
+            Add-Content $log "❌ GUI 自检报告里没有 OK 那一行"
+            Get-Content $log | Write-Host
+            throw "编译产物的图形界面没通过自检（逐行看 ci-log/gui-selftest-report.log）"
+          }
+          Add-Content $log "✅ 图形界面冒烟通过：真主窗口建出来了（报告见 ci-log/gui-selftest-report.log）"
           Add-Content $log "✅ 冒烟通过：形态 Nuitka、随包策略与资源目录都解析正常"
           Get-Content $log | Write-Host
 
@@ -659,6 +723,18 @@ jobs:
           if ($report) {
             Copy-Item $report.FullName ci-log/smoke-report.txt -Force
             Write-Host "归档自检报告：$($report.FullName)"
+          }
+          # GUI 自检那份也留一份（它**是 .log**，不会参与上面"取最新一份 .txt"的选择）。
+          # 为什么必须归档：它是 GUI 子系统 exe 唯一一定能写出来的现场 ——
+          # 界面崩了的时候，重定向的 stdout 常常是空的（见 smoke 那一步的说明）。
+          $guiReport = Get-ChildItem "ci-smoke-data/logs/GUI自检报告.log" -ErrorAction SilentlyContinue
+          if (-not $guiReport) {
+            $guiReport = Get-ChildItem (Join-Path $env:LOCALAPPDATA "LuweikDecision/data/logs/GUI自检报告.log") `
+              -ErrorAction SilentlyContinue
+          }
+          if ($guiReport) {
+            Copy-Item $guiReport.FullName ci-log/gui-selftest-report.log -Force
+            Write-Host "归档 GUI 自检报告：$($guiReport.FullName)"
           }
           Get-Content ci-log/meta.txt
           git add -f ci-log
