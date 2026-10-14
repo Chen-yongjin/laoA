@@ -2925,3 +2925,58 @@ def test_list_hint_names_the_checked_set_when_more_than_one(page, page_cfg) -> N
     assert "当前勾着 2 条策略" in text
     assert "甲策略" in text and "乙策略" in text
     assert fp.MENU_ONLY_THIS in text                     # 顺手告诉用户怎么收成一条
+
+
+def test_checked_strategy_is_red_and_bold(page, page_cfg) -> None:
+    """勾上的那条：名字**标红加粗**、勾选框是自绘的红勾（主人 2026-10-14 的要求）。
+
+    为什么这条要单独钉：主人连着两次说"程序没按我选的策略跑"，根子都是没看出
+    "另一条还勾着"（勾选是累加的）。系统默认那个细勾在深色底上几乎看不见 ——
+    所以要红、要粗。判据不去比像素，而是比"用了主题里的哪个色 + 有没有加粗"，
+    以及"勾选框还是不是我们那个自绘的类"（防止哪天被改回普通 `QCheckBox`）。
+    """
+    from laoa_trader.ui import theme as theme_mod
+
+    _write_formula(page.directory, "甲策略", "C>MA(C,5)")
+    _write_formula(page.directory, "乙策略", "C<MA(C,5)")
+    page.reload()
+    page.on_toggle_enabled("甲策略", True)
+    page.reload()
+
+    rows = {row.key: index for index, row in enumerate(page.rows)}
+    checked = page.table.item(rows["甲策略"], 0)
+    unchecked = page.table.item(rows["乙策略"], 0)
+    red = theme_mod.semantic("up")
+    assert checked.foreground().color().name().lower() == red.lower()
+    assert checked.font().bold() is True
+    assert unchecked.font().bold() is False
+    assert unchecked.foreground().color().name().lower() != red.lower()
+    # 勾选框是自绘的那个类（红勾由它画）+ 勾没勾的状态对得上
+    box = page._row_boxes["甲策略"]
+    assert isinstance(box, fp.PickCheckBox)
+    assert box.isChecked() is True
+    assert page._row_boxes["乙策略"].isChecked() is False
+
+
+def test_result_page_flags_a_mismatch_between_ran_and_checked(page, page_cfg) -> None:
+    """跑的那批与现在勾着的那批不一致时，结果页要**当场说出来**。
+
+    主人 2026-10-14 的硬要求：「改成勾选几条就筛选几条 这是最基本的。」
+    现实里不一致只有两种可能：跑完之后用户又改了勾（正常），或者程序里那份配置与界面
+    那份漂移了（真 bug）。两种都该明说 —— 否则用户只能猜"为什么我没勾的策略也出票了"。
+    """
+    _write_formula(page.directory, "甲策略", "C>MA(C,5)")
+    _write_formula(page.directory, "乙策略", "C<MA(C,5)")
+    page.reload()
+    page.on_toggle_enabled("甲策略", True)          # 现在勾着：甲
+
+    # 报告里实际跑的是"乙"（模拟漂移/跑完又改勾）
+    page.show_pick_result({"data_date": "2026-09-11",
+                           "pool": [{"symbol": "600003", "name": "丙样本",
+                                     "strategy": "公式·乙策略"}],
+                           "formulas": {"ran": ["乙策略"],
+                                        "picks": {"公式·乙策略": 1}}})
+
+    hint = page.result_hint.text()
+    assert "实际跑" in hint and "勾选不一致" in hint
+    assert "乙策略" in hint and "甲策略" in hint

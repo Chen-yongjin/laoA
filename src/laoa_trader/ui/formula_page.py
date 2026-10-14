@@ -101,13 +101,14 @@ from laoa_trader.config import get_config
 from laoa_trader.log import get_logger
 from laoa_trader.strategy import formula as fm
 from laoa_trader.strategy import formula_group
+from laoa_trader.ui import theme as theme_mod
 from laoa_trader.ui import threads as threads_mod
 
 logger = get_logger(__name__)
 
 try:  # Qt 缺失时不应该 import 就炸（与 ui/app.py 同一个约定）
     from PySide6.QtCore import QEvent, QSize, Qt, QThread, Signal
-    from PySide6.QtGui import QFont, QFontMetrics, QTextCursor
+    from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -205,6 +206,61 @@ THREAD_JOIN_MS = 3_000
 LIST_COLUMNS: tuple[str, ...] = ("策略名称", "说明", "策略选取")
 #: 「策略选取」那一列的下标（= 打勾那一列）。**不写字面量**：列顺序改了也不会错位。
 SELECT_COLUMN = LIST_COLUMNS.index("策略选取")
+
+if True:  # noqa: SIM108 - 与下面 QT_AVAILABLE 的导入保持一致的写法
+
+    class PickCheckBox(QCheckBox):
+        """「策略选取」那一列的勾：**选中时画一个红色加粗的勾**。
+
+        主人 2026-10-14 的要求（原话：「建议把那个勾的颜色改为红色加粗」）：
+        勾选是**累加**的（勾上一条不会取消另一条），而"当前勾着哪几条"必须**一眼看出** ——
+        他连着两次以为"程序没按我选的策略跑"，根子就是没注意到另一条还勾着
+        （系统默认那个细勾在深色底上几乎看不见）。
+
+        颜色与粗细按当前主题取（红 = `theme.semantic("up")`，A 股涨色），**界面里不写色值**；
+        没勾时只画一圈细边（与其它框线同色），勾上才是红勾 + 红边 —— 对比足够强。
+        """
+
+        #: 方框边长与勾的粗细（像素）。16 px 在 100%/125%/150% 缩放下都清楚
+        BOX = 16
+        PEN = 2.6
+
+        def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt 命名
+            from PySide6.QtCore import QPointF, QRectF
+            from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            colors = theme_mod.palette()
+            checked = self.isChecked()
+            red = QColor(theme_mod.semantic("up"))
+            border = QColor(colors.get("btn_border", "#8a94a6"))
+            if not self.isEnabled():
+                border.setAlpha(110)
+                red.setAlpha(130)
+            side = float(self.BOX)
+            box = QRectF((self.width() - side) / 2.0, (self.height() - side) / 2.0, side, side)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(red if checked else border, 1.6 if checked else 1.0))
+            painter.drawRoundedRect(box, 3.0, 3.0)
+            if checked:
+                # 勾的三段点：粗到能一眼看见（`PEN` 比边框粗一倍）
+                pen = QPen(red, self.PEN)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                painter.setPen(pen)
+                painter.drawPolyline(QPolygonF([
+                    QPointF(box.left() + side * 0.22, box.top() + side * 0.54),
+                    QPointF(box.left() + side * 0.43, box.top() + side * 0.76),
+                    QPointF(box.left() + side * 0.80, box.top() + side * 0.26),
+                ]))
+            painter.end()
+
+        def sizeHint(self) -> Any:  # noqa: N802 - Qt 命名
+            from PySide6.QtCore import QSize
+
+            return QSize(self.BOX + 6, self.BOX + 4)
+
 
 #: 右键菜单项文案
 MENU_ENABLE = "启用"
@@ -1235,6 +1291,13 @@ if QT_AVAILABLE:
             for index, row in enumerate(self.rows):
                 name_item = QTableWidgetItem(row.name)
                 name_item.setToolTip(f"策略文件：{getattr(row.spec, 'path', '')}")
+                if row.enabled:
+                    # 勾上的那条**名字也标红加粗**：勾选框在第三列、名字在第一列，
+                    # 隔着两列扫一眼，字符串比那个小方框好认（主人 2026-10-14 的诉求）
+                    name_item.setForeground(QBrush(QColor(theme_mod.semantic("up"))))
+                    font = name_item.font()
+                    font.setBold(True)
+                    name_item.setFont(font)
                 self.table.setItem(index, 0, name_item)
 
                 note_item = QTableWidgetItem(row.note)
@@ -1242,7 +1305,7 @@ if QT_AVAILABLE:
                     note_item.setToolTip(row.note_tip)
                 self.table.setItem(index, 1, note_item)
 
-                box = QCheckBox()
+                box = PickCheckBox()
                 box.setChecked(row.enabled)
                 box.setToolTip(self._box_tooltip(row))
                 if row.spec is not None and not row.spec.ok:
@@ -2182,6 +2245,8 @@ if QT_AVAILABLE:
             #: 每一条勾上的策略各出了几只（含 0）+ 0 只的原因（见下面那段注释）
             per_strategy: list[tuple[str, int]] = []
             zero_notes: dict[str, str] = {}
+            #: 这一轮**真正跑过**的策略名（结果页的自检用它跟当前勾选对一遍）
+            ran_names: list[str] = []
             if isinstance(rows, dict):
                 data_date = data_date or rows.get("data_date")
                 pool_rows = [r for r in (rows.get("pool") or []) if isinstance(r, dict)]
@@ -2192,6 +2257,7 @@ if QT_AVAILABLE:
                 # 否则"同一份策略昨天选出 3 只、今天选出 7 只"没有解释
                 formulas = rows.get("formulas")
                 if isinstance(formulas, dict):
+                    ran_names = [str(n) for n in (formulas.get("ran") or [])]
                     caliber = str(formulas.get("caliber") or "")
                     # 口径类的告知（如"盘中取不到快照，已退回日 K"）：它们**不是错误**
                     # （不在 `report["errors"]` 里），但用户得知道"这一轮为什么没用实时数据"
@@ -2215,7 +2281,8 @@ if QT_AVAILABLE:
                 pool_total = len(picked)
             self._fill_result(picked, data_date=data_date, errors=errors,
                               caliber=caliber, warnings=warnings, pool_total=pool_total,
-                              per_strategy=per_strategy, zero_notes=zero_notes)
+                              per_strategy=per_strategy, zero_notes=zero_notes,
+                              ran=ran_names)
             self.show_result_page()
             logger.info(
                 "本次筛选结果已显示在「策略筛选」页：%d 只（池内共 %d 只，行情日 %s）",
@@ -2256,7 +2323,8 @@ if QT_AVAILABLE:
                          caliber: str = "", warnings: list[str] | None = None,
                          pool_total: int = 0,
                          per_strategy: list[tuple[str, int]] | None = None,
-                         zero_notes: dict[str, str] | None = None) -> None:
+                         zero_notes: dict[str, str] | None = None,
+                         ran: list[str] | None = None) -> None:
             """把池子行铺进结果表，并写好那句结论。
 
             **只列"选出来的"票**：`run_daily` 的池子里还会混进自选标的（那是"我自己加的"，
@@ -2348,6 +2416,26 @@ if QT_AVAILABLE:
                 if reason:
                     line += f" —— {reason}"
                 self.result_hint.setText(self.result_hint.text() + "\n" + line)
+            # ── 自检：**实际跑的策略**与**现在勾着的策略**必须是一批（主人 2026-10-14：
+            #    "改成勾选几条就筛选几条 这是最基本的"）──
+            # 不一致只有两种可能：跑完之后用户又改了勾（正常），或者程序里那份配置与界面
+            # 那份漂移了（真 bug）。两种情况都该**当场说出来**，而不是让用户自己猜
+            # "为什么我没勾的策略也出票了"。
+            ran_set = {str(n) for n in (ran or [])}
+            if ran_set:
+                try:
+                    checked = set(formulas_lib.enabled_names(self.cfg, self.directory))
+                except Exception:  # noqa: BLE001 - 自检失败不该影响结果展示
+                    checked = set()
+                if checked and ran_set != checked:
+                    only_ran = "、".join(sorted(ran_set - checked)) or "（没有）"
+                    only_checked = "、".join(sorted(checked - ran_set)) or "（没有）"
+                    self.result_hint.setText(
+                        self.result_hint.text()
+                        + f"\n⚠️ 这一轮实际跑的与当前勾选不一致：只跑了没勾的「{only_ran}」、"
+                          f"勾了没跑的「{only_checked}」—— 请再点一次【开始筛选】；"
+                          "若反复如此，请把这一行发给作者。"
+                    )
             for message in (errors or []):
                 # 出错的那几条（数据闸门拦住、策略出错…）直接说在结论下面 ——
                 # 用户点完【开始筛选】最想知道的就是"为什么没结果"

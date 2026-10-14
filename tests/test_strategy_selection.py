@@ -607,3 +607,73 @@ def test_zero_hit_strategy_says_why_when_snapshot_is_unavailable(
     note = formulas["zero_notes"].get(formula_group.formula_strategy_name("尾盘"), "")
     assert "流通市值" in note and "实时快照" in note
     assert formula_group.formula_strategy_name(A_NAME) not in formulas["zero_notes"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 7) 勾了几条就只跑几条：开跑前按 config.toml 校准（主人 2026-10-14 的硬要求）
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_screening_follows_the_checked_ones_in_the_config_file(
+        cfg, tmp_path, monkeypatch) -> None:
+    """内存里那份与 `config.toml` 不一致时，**以文件为准**（用户勾的就是文件里那几条）。
+
+    主人原话：「改成勾选几条就筛选几条，这是最基本的。」他的名字就在文件里、
+    勾选框显示的也是文件里那份 —— 所以跑的那一份必须是它。两个 `Config` 对象、
+    某次写盘没成功、别处改过这个键，都会让内存那份悄悄漂移；这里开跑前校准一次。
+    """
+    _ready_db(cfg)
+    _write_formulas(tmp_path, monkeypatch, cfg, {A_NAME: "C<5", B_NAME: "C>10"})
+    # 文件里勾的是 B（反转），内存里那份还停在 A（低价）—— 模拟"漂移"
+    cfg.source_path = tmp_path / "config.toml"
+    cfg.source_path.write_text('enabled_formulas = ["%s"]\n' % B_NAME, encoding="utf-8")
+    cfg.enabled_formulas = [A_NAME]
+    # 校准的判据是 mtime：**只在"文件比我们记下的那一刻更新"时才以文件为准**
+    # （无条件以文件为准会覆盖程序里主动设好的配置，那条路一次红掉 17 条用例）。
+    cfg.source_mtime = cfg.source_path.stat().st_mtime - 10
+    monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
+
+    report = sched.run_daily(cfg, DataEngine(cfg.db_path), notify=False, with_data=False)
+
+    assert report["formulas"]["ran"] == [B_NAME]          # 只跑了文件里勾的那条
+    assert {r["strategy"] for r in report["pool"]} == {formula_group.formula_strategy_name(B_NAME)}
+    assert cfg.enabled_formulas == [B_NAME]                # 内存那份也被拉回一致
+
+
+def test_screening_keeps_memory_when_the_config_file_is_broken(
+        cfg, tmp_path, monkeypatch) -> None:
+    """`config.toml` 读不出来时**保持内存那份**，绝不因为读不到文件就把策略清空。"""
+    _ready_db(cfg)
+    _write_formulas(tmp_path, monkeypatch, cfg, {A_NAME: "C<5"})
+    cfg.source_path = tmp_path / "config.toml"
+    cfg.source_path.write_text("this is not = = toml\n", encoding="utf-8")
+    cfg.enabled_formulas = [A_NAME]
+    cfg.source_mtime = cfg.source_path.stat().st_mtime - 10   # 文件被外面改过（但写坏了）
+    monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
+
+    report = sched.run_daily(cfg, DataEngine(cfg.db_path), notify=False, with_data=False)
+
+    assert report["formulas"]["ran"] == [A_NAME]
+    assert cfg.enabled_formulas == [A_NAME]
+
+
+def test_screening_does_not_touch_memory_when_the_file_was_not_touched(
+        cfg, tmp_path, monkeypatch) -> None:
+    """文件没被外面改过时，**内存那份说了算**（不许多此一举地"以文件为准"）。
+
+    为什么单独钉：无条件以文件为准会覆盖"程序里主动设好的配置" —— 首次运行向导、
+    CLI 的 `--config` 组合、以及一大堆用例都会直接给 `cfg` 赋值而文件不跟着变。
+    第一版就是这么写的，CI 上一次红掉 17 条用例。判据是 mtime 有没有变。
+    """
+    _ready_db(cfg)
+    _write_formulas(tmp_path, monkeypatch, cfg, {A_NAME: "C<5", B_NAME: "C>10"})
+    cfg.source_path = tmp_path / "config.toml"
+    cfg.source_path.write_text('enabled_formulas = ["%s"]\n' % B_NAME, encoding="utf-8")
+    cfg.source_mtime = cfg.source_path.stat().st_mtime        # 与我们记下的那一刻一致
+    cfg.enabled_formulas = [A_NAME]                            # 内存里是 A
+    monkeypatch.setattr(sched.sync, "daily_update", lambda *a, **k: [])
+
+    report = sched.run_daily(cfg, DataEngine(cfg.db_path), notify=False, with_data=False)
+
+    assert report["formulas"]["ran"] == [A_NAME]               # 跑的是内存里那份
+    assert cfg.enabled_formulas == [A_NAME]

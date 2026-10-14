@@ -344,6 +344,21 @@ def _load_toml(path: Path | None) -> tuple[dict[str, Any], str]:
     return {k: v for k, v in data.items() if not isinstance(v, dict)}, ""
 
 
+def _mtime_of(path: Any) -> float:
+    """文件修改时间；**文件不存在 / 没给路径 / 取不到**都返回 0.0（"不知道"）。
+
+    ⚠️ `Path(None)` 抛的是 `TypeError` 而不是 `OSError`（`load_config(None)` 这条路
+    在"没找到配置文件"时是常态）—— 三种异常都要接住，否则读配置这条路会直接炸
+    （第一版只写了 `OSError`，CI 上红掉 30 条用例）。
+    """
+    if not path:
+        return 0.0
+    try:
+        return Path(path).stat().st_mtime
+    except (OSError, TypeError, ValueError):
+        return 0.0
+
+
 def _env_str(name: str) -> str | None:
     value = os.environ.get(name)
     if value is None:
@@ -771,6 +786,12 @@ class Config:
     source_path: Path | None = None
     #: 配置文件解析/读取失败的原因（空 = 一切正常）
     config_error: str = ""
+    #: 配置文件的**修改时间**（读进来那一刻 / 我们自己写完那一刻的 mtime）。
+    #: 用途只有一个：判断"这份文件在我们加载之后有没有被外面改过" ——
+    #: 比如用户手改了 `enabled_formulas`，或者另一个窗口/另一个副本写过它。
+    #: 判据用 mtime 而不是内容比对，是为了**不误伤程序里主动设置的配置**
+    #: （测试与首次运行向导都会直接给 `cfg` 赋值，那种情况下文件不一定跟着变）。
+    source_mtime: float = 0.0
 
     def __post_init__(self) -> None:
         """把界面偏好与概览参数收紧到合法取值。
@@ -1084,6 +1105,8 @@ def load_config(path: Path | str | None = None, *, use_env: bool = True) -> Conf
         kwargs["data_dir"] = Path(os.path.expandvars(str(raw_dir))).expanduser()
     kwargs["source_path"] = source
     kwargs["config_error"] = config_error
+    # 记下"这一刻这份文件长什么样"（mtime），好判断它之后有没有被外面改过
+    kwargs["source_mtime"] = _mtime_of(source)
 
     cfg = Config(**kwargs)
 
@@ -1460,6 +1483,7 @@ def save_settings(cfg: Config, updates: dict[str, Any]) -> tuple[Path, Config]:
                 value = Path(value)
             setattr(cfg, key, value)
     cfg.source_path = path
+    cfg.source_mtime = _mtime_of(path)      # 刚写完：这就是"最新"的那一份
     set_config(cfg)
     return path, cfg
 

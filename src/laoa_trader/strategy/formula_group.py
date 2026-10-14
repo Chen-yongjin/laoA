@@ -156,6 +156,7 @@ def run_enabled_formulas(
     （见 `formulas.prepare_inputs`）；其余情况一个请求都不发。
     """
     result = FormulaRun()
+    cfg = sync_enabled_formulas(cfg)
     names = lib.enabled_names(cfg, directory)
     if not names:
         # 没勾任何公式：一次库都不读（这是默认状态，必须与"没这个功能"完全一样）
@@ -354,6 +355,64 @@ def run_enabled_formulas(
     return result
 
 
+def sync_enabled_formulas(cfg: Any) -> Any:
+    """**筛选以 `config.toml` 里勾着的那几条为准**（"勾了几条就只跑几条"）。
+
+    为什么要这一步（主人 2026-10-14 的原话：「改成勾选几条就筛选几条，这是最基本的」）：
+    跑的那一份策略名单来自**内存里的 `cfg.enabled_formulas`**，而用户勾的是**文件里那一份**
+    （勾选框一拨就写盘）。两者只要有一次对不上——两个 `Config` 对象、某次写盘没成功、
+    或者别处改过这个键——用户看到的就是"我勾的没跑 / 我没勾的跑了"，
+    而且他没有任何办法看出来。这里在开跑之前**按文件校准一次**：
+
+    * 文件读得出来 → 它就是唯一真相；与内存不一致时**以文件为准**，并把两边都写进日志
+      （用户看不到日志也没关系：跑的就是他勾的）；
+    * 文件读不出来 / 解析失败 → 保持内存那份不动（`config_error` 那条路已经在界面上说了），
+      绝不因为读不到文件就把策略全清空；
+    * 没给 `cfg`（CLI 的老调用方式）→ 原样返回。
+
+    返回同一个 `cfg` 对象（就地改属性）：界面上的勾选框与这里读的是**同一个对象**，
+    所以"校准"同时也是把界面拉回与文件一致的状态。
+    """
+    if cfg is None:
+        return cfg
+    path = getattr(cfg, "source_path", None)
+    if not path:
+        return cfg
+    # ⚠️ **只在"这份文件在我们加载之后被外面改过"时才校准**（2026-10-14 补）：
+    # 无条件以文件为准会把"程序里主动设好的配置"覆盖掉 —— 首次运行向导、CLI 的
+    # `--config` 组合、以及一大堆用例都会直接给 `cfg` 赋值而文件不跟着变，
+    # 那种情况下文件反而更旧（第一版就是这么写的，一次红掉 17 条用例）。
+    # 判据是 mtime：我们自己写完会刷新它，所以"没被外面动过"时两边必然一致，不必比对。
+    from laoa_trader.config import _mtime_of
+
+    stamp = float(getattr(cfg, "source_mtime", 0.0) or 0.0)
+    now = _mtime_of(path)
+    if not stamp or not now or now == stamp:
+        return cfg
+    try:
+        from laoa_trader.config import load_config
+
+        fresh = load_config(path, use_env=False)
+    except Exception as exc:  # noqa: BLE001 - 读不到就按内存那份跑，绝不静默清空
+        logger.warning(f"按 config.toml 校准勾选时读配置失败（继续用内存里那份）：{exc}")
+        return cfg
+    if getattr(fresh, "config_error", ""):
+        logger.warning(f"config.toml 有问题（{fresh.config_error}），勾选按内存里那份跑")
+        return cfg
+    wanted = [str(n) for n in (getattr(fresh, "enabled_formulas", None) or [])]
+    have = [str(n) for n in (getattr(cfg, "enabled_formulas", None) or [])]
+    if wanted != have:
+        logger.warning(
+            f"勾选与 config.toml 不一致：文件里是 {wanted}，内存里是 {have} → "
+            "以文件为准（筛选只跑勾着的那几条）"
+        )
+        try:
+            cfg.enabled_formulas = list(wanted)
+        except Exception:  # noqa: BLE001 - 只读属性等极端情况：不动它
+            logger.debug("把勾选同步回内存失败", exc_info=True)
+    return cfg
+
+
 def confirm_days_of(cfg: Any) -> int:
     """读「连续确认天数」配置（负数/写错一律当 0 = 不确认）。
 
@@ -385,4 +444,5 @@ __all__ = [
     "last_status",
     "reset_status",
     "run_enabled_formulas",
+    "sync_enabled_formulas",
 ]
