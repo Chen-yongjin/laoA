@@ -2798,7 +2798,7 @@ def test_result_page_lists_each_checked_strategy_and_why_one_got_zero(page) -> N
     })
     hint = page.result_hint.text()
     # ① 逐条列出（名字是给人看的那个词，不带 `公式·` 前缀）
-    assert "本轮勾了 2 条策略" in hint
+    assert "本轮按你勾的策略跑（共 2 条）" in hint
     assert "首板缩量整理 3 只" in hint and "尾盘匹配策略 0 只" in hint
     assert "公式·" not in hint
     # ② 0 只那条要说清原因
@@ -2813,4 +2813,43 @@ def test_result_page_does_not_repeat_the_count_when_only_one_strategy_ran(page) 
         "pool": [{"symbol": "600003", "name": "丙样本", "strategy": "公式·首板缩量整理"}],
         "formulas": {"ran": ["首板缩量整理"], "picks": {"公式·首板缩量整理": 1}},
     })
-    assert "本轮勾了" not in page.result_hint.text()
+    assert "本轮按你勾的策略跑" not in page.result_hint.text()
+
+
+def test_ticking_a_strategy_names_every_strategy_that_is_now_checked(page, page_cfg) -> None:
+    """勾一条时，提示要念出**当前勾着的全部策略**（主人 2026-10-13 实报的坑）。
+
+    主人原话：「策略选股的问题还没解决，我只选了一条策略。选股结果却出来别的策略。」
+    —— 勾选是**累加**的：他新勾一条时，之前那条还勾着，程序跑的正是这两条；
+    而提示只回一句"已加入匹配"，非常容易读成"选中 = 只有这一条"。
+    """
+    page.on_toggle_enabled("甲策略", True)
+    page.on_toggle_enabled("乙策略", True)
+    hint = page.hint_text
+    assert "当前勾着 2 条" in hint
+    assert "甲策略" in hint and "乙策略" in hint
+    assert "同时" in hint                      # "会同时跑这几条"
+    # 关掉一条 → 提示里只剩另一条
+    page.on_toggle_enabled("甲策略", False)
+    assert "已退出匹配" in page.hint_text
+
+
+def test_ticking_a_snapshot_strategy_warns_about_the_session(page, page_cfg,
+                                                            tmp_path, monkeypatch) -> None:
+    """勾上"要实时快照"的策略时，当场说清"非交易时段跑会是 0 只"。
+
+    这条策略就是主人踩的那条（`尾盘匹配策略` 要 流通市值/换手率）：
+    勾了它、盘后跑出 0 只、结果里却是另一条策略的票 —— 提前一句警告就没有这个误会了。
+    """
+    folder = tmp_path / "formulas"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "要快照的策略.txt").write_text(
+        "# 名称: 要快照的策略\n# 说明: 测试\n流通市值>=30 AND C>3\n", encoding="utf-8")
+    monkeypatch.setenv("LUWEIK_FORMULAS", str(folder))
+    page.reload()
+    assert any(row.key == "要快照的策略" for row in page.rows)
+
+    page.on_toggle_enabled("要快照的策略", True)
+
+    assert "实时快照" in page.hint_text
+    assert "0 只" in page.hint_text

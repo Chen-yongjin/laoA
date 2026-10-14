@@ -1457,15 +1457,44 @@ if QT_AVAILABLE:
             self._sync_box(name, checked)
             self._refresh_row_states()
             if checked:
+                # ⚠️ 这句话必须把**当前勾着的全部策略**念出来（2026-10-13 主人实报：
+                # 「我只选了一条策略，选股结果却出来别的策略」—— 勾选是**累加**的，
+                # 他新勾一条时，之前那条还勾着，而程序跑的正是这两条。
+                # 只回一句"已加入匹配"，用户非常容易以为"选中 = 只有这一条"）。
+                now = [str(n) for n in names]
+                joined = "、".join(now) if now else "（一条都没有）"
+                extra = self._snapshot_warning(name)
                 self._set_hint(
                     f"✅ 「{name}」已加入匹配（写回 {path.name}）。\n"
-                    "下次【开始筛选】时它会作为「策略」组参与：进池的票来源会标成"
-                    f"「{name}」。"
+                    f"当前勾着 {len(now)} 条：{joined}\n"
+                    "点【开始筛选】会**同时**跑这几条（勾是累加的：想只跑一条，"
+                    "就把其它几条的勾去掉）。"
+                    + (f"\n{extra}" if extra else "")
                 )
                 # 成功**不弹提示**（2026-09-18 用户："软件操作的一些提醒都不需要"）；
                 # 列表里那个勾 + 提示区那句话本身就是反馈
             else:
                 self._set_hint(f"「{name}」已退出匹配（{path.name} 里的 enabled_formulas 已更新）")
+
+        def _snapshot_warning(self, name: str) -> str:
+            """这条策略要不要实时快照？要的话就把"什么时段才有票"提前说清楚。
+
+            为什么要在**勾的那一刻**说（2026-10-13 主人实报）：`尾盘匹配策略` 要
+            `流通市值`/`换手率`，非交易时段取不到 ⇒ 跑出来 0 只，而"我明明勾了它、
+            结果里却是另一条策略的票"会让人以为程序跑错了策略。
+            """
+            spec = next((sp for sp in self.rows if sp.key == name), None)
+            formula = getattr(getattr(spec, "spec", None), "formula", None)
+            fields = set(getattr(formula, "fields", ()) or ())
+            if not fields:
+                return ""
+            if fields & set(formulas_lib.SNAPSHOT_FIELDS):
+                return ("⚠️ 这条策略用到实时快照字段（流通市值 / 换手率 / 现价 / 现涨幅 / "
+                        "现量比 / 现换手）：**非交易时段取不到，跑出来会是 0 只**。")
+            if fields & set(formulas_lib.AUCTION_FIELDS):
+                return ("⚠️ 这条策略用到集合竞价字段：只有 9:15–9:30 才取得到值，"
+                        "其它时段跑会是 0 只。")
+            return ""
 
         def _sync_box(self, key: str, checked: bool) -> None:
             """把某一行的勾选框同步成 `checked`（**屏蔽信号**，避免再触发一次写回）。"""
@@ -2238,7 +2267,7 @@ if QT_AVAILABLE:
             per = [(name, count) for name, count in (per_strategy or [])]
             if len(per) >= 2:
                 self.result_hint.setText(
-                    self.result_hint.text() + "\n本轮勾了 %d 条策略：%s" % (
+                    self.result_hint.text() + "\n本轮按你勾的策略跑（共 %d 条）：%s" % (
                         len(per),
                         " · ".join(
                             f"{formula_group.formula_name_of(name)} {count} 只"
