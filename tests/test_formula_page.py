@@ -1644,7 +1644,9 @@ def test_row_menu_for_formula_offers_toggle_and_delete(page, monkeypatch) -> Non
     page.reload()
 
     picked = page.row_menu(page.row_of("放量上攻"))
-    assert [action.text() for action in picked.menu.actions()] == ["启用", "删除"]
+    # 菜单三项：【启用】/【只选这一条】/【删除】。中间那一项是 2026-10-14 加的 ——
+    # 勾选是累加的，用户"只想跑这一条"时需要一键收口（见 `on_only_this_strategy`）。
+    assert [action.text() for action in picked.menu.actions()] == ["启用", fp.MENU_ONLY_THIS, "删除"]
     assert picked.delete.isEnabled() is True
 
     monkeypatch.setattr(QMessageBox, "question",
@@ -2853,3 +2855,73 @@ def test_ticking_a_snapshot_strategy_warns_about_the_session(page, page_cfg,
 
     assert "实时快照" in page.hint_text
     assert "0 只" in page.hint_text
+
+
+def test_only_this_strategy_makes_the_choice_exclusive(page, page_cfg) -> None:
+    """【只选这一条】：一键把匹配收成只有它（主人 2026-10-13「我只选了一条策略」的解法）。
+
+    勾选在语义上是**累加**的：新勾一条不会取消旧的。用户想表达的常常是"这次只跑它"，
+    而一条条去取消勾既别扭又容易漏 —— 所以给一个一键入口，并把"取消了哪几条"说清。
+    """
+    from laoa_trader import config as config_mod
+
+    _write_formula(page.directory, "甲策略", "C>MA(C,5)")
+    _write_formula(page.directory, "乙策略", "C<MA(C,5)")
+    page.reload()
+    page.on_toggle_enabled("甲策略", True)
+    page.on_toggle_enabled("乙策略", True)
+    assert set(page_cfg.enabled_formulas) == {"甲策略", "乙策略"}
+
+    page.on_only_this_strategy("乙策略")
+
+    assert page_cfg.enabled_formulas == ["乙策略"]
+    assert "只跑「乙策略」" in page.hint_text
+    assert "甲策略" in page.hint_text                     # 明确说清取消了谁
+    # 落盘也要跟上（下次启动仍然是"只跑乙策略"）
+    assert config_mod.load_config(page_cfg.source_path, use_env=False).enabled_formulas == ["乙策略"]
+    # 勾选框跟着走：只有乙还勾着
+    assert page._row_boxes["乙策略"].isChecked() is True
+    assert page._row_boxes["甲策略"].isChecked() is False
+
+
+def test_row_menu_has_only_this_and_it_is_disabled_when_alone(page, page_cfg) -> None:
+    """右键菜单里有【只选这一条】；已经只有它一条时该项置灰（点了也没意义）。"""
+    _write_formula(page.directory, "甲策略", "C>MA(C,5)")
+    page.reload()
+
+    menu = page.row_menu(page.row_of("甲策略"))
+    labels = [a.text() for a in menu.menu.actions() if a.text()]
+    assert fp.MENU_ONLY_THIS in labels
+    assert menu.only is not None                          # 菜单把那一项也递出来了
+    assert menu.only.isEnabled() is False                 # 只有它一条 → 置灰（点了也没意义）
+
+    _write_formula(page.directory, "乙策略", "C<MA(C,5)")
+    page.reload()
+    page.on_toggle_enabled("乙策略", True)
+    alone = page.row_menu(page.row_of("甲策略"))
+    item = next(a for a in alone.menu.actions() if a.text() == fp.MENU_ONLY_THIS)
+    assert item.isEnabled() is True                       # 还有别的条勾着 → 可用
+
+
+def test_list_hint_names_the_checked_set_when_more_than_one(page, page_cfg) -> None:
+    """勾了两条以上时，列表上方挂一行状态：**当前勾着哪几条**（只勾一条时不说话）。
+
+    主人 2026-10-14 实报：「每次选股他都默认带这个首板缩量整理，我选的别的策略测试，
+    也带这首板缩量整理策略，像是默认似的」—— 勾选是累加的，"当前一共勾着几条"
+    在这之前只能逐行看勾选框。多这一行状态，误会当场消失；只勾一条时保持简洁（不说话）。
+    """
+    _write_formula(page.directory, "甲策略", "C>MA(C,5)")
+    _write_formula(page.directory, "乙策略", "C<MA(C,5)")
+    page.reload()
+    assert page.list_hint.isVisible() is False          # 一条都没勾 → 不说话
+
+    page.on_toggle_enabled("甲策略", True)
+    page.reload()
+    assert page.list_hint.isVisible() is False          # 只勾一条 → 还是不说话
+
+    page.on_toggle_enabled("乙策略", True)
+    page.reload()
+    text = page.list_hint.text()
+    assert "当前勾着 2 条策略" in text
+    assert "甲策略" in text and "乙策略" in text
+    assert fp.MENU_ONLY_THIS in text                     # 顺手告诉用户怎么收成一条

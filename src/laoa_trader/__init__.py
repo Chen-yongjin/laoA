@@ -10,5 +10,5 @@
 
 from laoa_trader.config import Config, get_config, load_config
 
-__version__ = "1.9.5"
+__version__ = "1.9.6"
 __all__ = ["Config", "get_config", "load_config", "__version__"]

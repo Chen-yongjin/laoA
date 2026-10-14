@@ -210,6 +210,8 @@ SELECT_COLUMN = LIST_COLUMNS.index("策略选取")
 MENU_ENABLE = "启用"
 MENU_DISABLE = "关闭"
 MENU_DELETE = "删除"
+#: 【只选这一条】：把 `enabled_formulas` 收成"只有它"（勾选是累加的，这是快捷方式）
+MENU_ONLY_THIS = "只选这一条"
 
 #: 备注（写进 `# 说明:` 注释头）的长度上限。为什么这里要拦：
 #: 注释头是**一行**，超长的说明会把文件第一屏占满，用户用记事本打开公式时
@@ -601,7 +603,7 @@ if QT_AVAILABLE:
 class RowMenu:
     """一行的右键菜单（**把菜单与两个动作一起递出来**，方便测试与接线）。
 
-    `menu` 是真正要 `exec()` 的东西；`toggle`/`delete` 是那两个动作。
+    `menu` 是真正要 `exec()` 的东西；`toggle`/`delete`/`only` 是那几个动作。
     单独包一层的原因：测试要在**不弹菜单**的前提下验证"这一行右键能做什么"
     （`exec()` 会阻塞事件循环，离屏测试里没人去点它）。
     """
@@ -609,6 +611,9 @@ class RowMenu:
     menu: Any
     toggle: Any
     delete: Any
+    #: 【只选这一条】（把匹配收成只有这一行）。默认 None 是为了**兼容老调用方**：
+    #: 它只读 `menu/toggle/delete`，多一个字段不该让它炸。
+    only: Any = None
 
 
 if QT_AVAILABLE:
@@ -1283,15 +1288,27 @@ if QT_AVAILABLE:
             known = set(str(n) for n in (getattr(self.cfg, "enabled_formulas", None) or []))
             files = {spec.name for spec in self.specs}
             missing = sorted(name for name in known if name not in files)
-            if not missing:
-                self.list_hint.setText("")
-                self.list_hint.setVisible(False)
+            if missing:
+                self.list_hint.setText(
+                    "⚠️ config.toml 里勾了这几条策略，但策略目录里找不到（这会让勾选与实跑"
+                    "不一致）：" + "、".join(missing)
+                )
+                self.list_hint.setVisible(True)
                 return
-            self.list_hint.setText(
-                "⚠️ config.toml 里勾了这几条策略，但策略目录里找不到（这会让勾选与实跑"
-                "不一致）：" + "、".join(missing)
-            )
-            self.list_hint.setVisible(True)
+            # **勾了两条以上时**把这行状态挂出来（2026-10-14 主人实报："每次选股他都默认带
+            # 这个首板缩量整理，像是默认似的"）：勾选是累加的，而"当前到底勾着哪几条"
+            # 在这之前只能靠逐行看勾选框 —— 多一条状态行，这种误会就没有了。
+            # 只勾一条时**不说话**（没有歧义，界面保持简洁，这是主人 2026-10-11 的要求）。
+            if len(known) >= 2:
+                self.list_hint.setText(
+                    "当前勾着 %d 条策略：%s（点【开始筛选】会同时跑这几条；"
+                    "只想跑一条 → 右键它选【只选这一条】）"
+                    % (len(known), "、".join(sorted(known)))
+                )
+                self.list_hint.setVisible(True)
+                return
+            self.list_hint.setText("")
+            self.list_hint.setVisible(False)
 
         def selected_row(self) -> StrategyRow | None:
             """当前选中的行（没有选中返回 None）。"""
@@ -1424,12 +1441,26 @@ if QT_AVAILABLE:
                 lambda _checked=False, r=row: self.set_row_enabled(r.key, not r.enabled)
             )
 
+            # 【只选这一条】（2026-10-14 加）：勾选是**累加**的，而用户的心里话往往是
+            # "我只想跑这一条" —— 让他一条条去取消勾太别扭（主人 2026-10-13 就是因为
+            # 之前那条还勾着，看到结果里是另一条策略的票，以为程序没按他选的来）。
+            only = menu.addAction(MENU_ONLY_THIS)
+            others = [other.name for other in self.rows if other.enabled and other.key != row.key]
+            only.setToolTip(
+                f"把匹配收成只跑「{row.name}」（取消其它 {len(others)} 条的勾）"
+                if others else f"当前就只勾着「{row.name}」"
+            )
+            only.setEnabled(bool(others))
+            only.triggered.connect(
+                lambda _checked=False, r=row: self.on_only_this_strategy(r.key)
+            )
+
             delete = menu.addAction(MENU_DELETE)
             delete.setToolTip(f"删掉策略文件「{row.key}」（会先问一句）")
             delete.triggered.connect(
                 lambda _checked=False, r=row: self.on_delete_formula(r.key)
             )
-            return RowMenu(menu=menu, toggle=toggle, delete=delete)
+            return RowMenu(menu=menu, toggle=toggle, delete=delete, only=only)
 
         # ── 「参与筛选」写回 config.toml ──────────────────────────────
 
@@ -1475,6 +1506,40 @@ if QT_AVAILABLE:
                 # 列表里那个勾 + 提示区那句话本身就是反馈
             else:
                 self._set_hint(f"「{name}」已退出匹配（{path.name} 里的 enabled_formulas 已更新）")
+
+        def on_only_this_strategy(self, name: str) -> None:
+            """【只选这一条】：把 `enabled_formulas` 收成 `[name]`，其余全部取消勾。
+
+            为什么要有这个入口（主人 2026-10-13 实报「我只选了一条策略，结果却出来别的策略」）：
+            勾选在语义上是**累加**的（新勾一条不会取消旧的），而用户想表达的常常是
+            "这次只跑它"。让他一条条去取消勾既别扭又容易漏，给一个一键的入口，
+            并按名字把结果说清楚（取消了哪几条）。
+            """
+            from laoa_trader.config import save_settings
+
+            keys = {row.key for row in self.rows}
+            if name not in keys:
+                return
+            names = [str(n) for n in (getattr(self.cfg, "enabled_formulas", None) or [])]
+            if names == [name]:
+                self._set_hint(f"当前就只勾着「{name}」这一条，不用改")
+                return
+            dropped = [n for n in names if n != name]
+            try:
+                path, self.cfg = save_settings(self.cfg, {"enabled_formulas": [name]})
+            except OSError as exc:      # 只读盘：什么都不动，如实说
+                self._set_hint(f"❌ 保存失败：{exc}（可手改 config.toml 的 enabled_formulas）")
+                return
+            for row in self.rows:
+                self._sync_box(row.key, row.key == name)
+            self._refresh_row_states()
+            extra = self._snapshot_warning(name)
+            tail = f"（已取消 {len(dropped)} 条的勾：{'、'.join(dropped)}）" if dropped else ""
+            self._set_hint(
+                f"✅ 已改成只跑「{name}」{tail}（写回 {path.name}）。\n"
+                "点【开始筛选】就只会跑这一条。"
+                + (f"\n{extra}" if extra else "")
+            )
 
         def _snapshot_warning(self, name: str) -> str:
             """这条策略要不要实时快照？要的话就把"什么时段才有票"提前说清楚。
