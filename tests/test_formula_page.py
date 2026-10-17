@@ -2927,16 +2927,13 @@ def test_list_hint_names_the_checked_set_when_more_than_one(page, page_cfg) -> N
     assert fp.MENU_ONLY_THIS in text                     # 顺手告诉用户怎么收成一条
 
 
-def test_checked_strategy_is_red_and_bold(page, page_cfg) -> None:
-    """勾上的那条：名字**标红加粗**、勾选框是自绘的红勾（主人 2026-10-14 的要求）。
+def test_only_the_tick_turns_red_and_the_name_stays_plain(page, page_cfg) -> None:
+    """勾上只有那个**勾**变红：策略名不变色、也不加粗（主人 2026-10-14 的第二次要求）。
 
-    为什么这条要单独钉：主人连着两次说"程序没按我选的策略跑"，根子都是没看出
-    "另一条还勾着"（勾选是累加的）。系统默认那个细勾在深色底上几乎看不见 ——
-    所以要红、要粗。判据不去比像素，而是比"用了主题里的哪个色 + 有没有加粗"，
-    以及"勾选框还是不是我们那个自绘的类"（防止哪天被改回普通 `QCheckBox`）。
+    原话：「策略页勾选的时候，策略名称也会变色，修复一下。只把选中的勾改为红色就行，
+    其它不要改。」 —— 醒目交给第三列那个红勾（`PickCheckBox`），第一列保持常态。
+    判据不比像素：名字的前景色/字重必须与**没勾的那行**一致，而勾选框仍是自绘那个类。
     """
-    from laoa_trader.ui import theme as theme_mod
-
     _write_formula(page.directory, "甲策略", "C>MA(C,5)")
     _write_formula(page.directory, "乙策略", "C<MA(C,5)")
     page.reload()
@@ -2946,12 +2943,11 @@ def test_checked_strategy_is_red_and_bold(page, page_cfg) -> None:
     rows = {row.key: index for index, row in enumerate(page.rows)}
     checked = page.table.item(rows["甲策略"], 0)
     unchecked = page.table.item(rows["乙策略"], 0)
-    red = theme_mod.semantic("up")
-    assert checked.foreground().color().name().lower() == red.lower()
-    assert checked.font().bold() is True
-    assert unchecked.font().bold() is False
-    assert unchecked.foreground().color().name().lower() != red.lower()
-    # 勾选框是自绘的那个类（红勾由它画）+ 勾没勾的状态对得上
+    assert checked.text() == "甲策略"
+    # 与没勾的那行**完全一致**：同一个前景色、同一个字重（不标红、不加粗）
+    assert checked.foreground().color().name() == unchecked.foreground().color().name()
+    assert checked.font().bold() == unchecked.font().bold() is False
+    # 只把勾改成红的：勾选框是我们自绘的那个类，勾/没勾的状态对得上
     box = page._row_boxes["甲策略"]
     assert isinstance(box, fp.PickCheckBox)
     assert box.isChecked() is True

@@ -108,7 +108,7 @@ logger = get_logger(__name__)
 
 try:  # Qt 缺失时不应该 import 就炸（与 ui/app.py 同一个约定）
     from PySide6.QtCore import QEvent, QSize, Qt, QThread, Signal
-    from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QTextCursor
+    from PySide6.QtGui import QColor, QFont, QFontMetrics, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -1291,13 +1291,9 @@ if QT_AVAILABLE:
             for index, row in enumerate(self.rows):
                 name_item = QTableWidgetItem(row.name)
                 name_item.setToolTip(f"策略文件：{getattr(row.spec, 'path', '')}")
-                if row.enabled:
-                    # 勾上的那条**名字也标红加粗**：勾选框在第三列、名字在第一列，
-                    # 隔着两列扫一眼，字符串比那个小方框好认（主人 2026-10-14 的诉求）
-                    name_item.setForeground(QBrush(QColor(theme_mod.semantic("up"))))
-                    font = name_item.font()
-                    font.setBold(True)
-                    name_item.setFont(font)
+                # 名字**不跟着勾选变色**（主人 2026-10-14：「策略页勾选的时候，策略名称也会
+                # 变色，修复一下。只把选中的勾改为红色就行，其它不要改」）——
+                # 醒目由第三列那个红勾负责，名字保持常态，列表才不乱。
                 self.table.setItem(index, 0, name_item)
 
                 note_item = QTableWidgetItem(row.note)
