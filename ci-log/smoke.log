@@ -1,0 +1,479 @@
+===== 冒烟：编译产物自检 =====
+run=39017757545  sha=a19c62fcca01f36ad310f947cf8da9a118b10c3f
+配置文件：D:\a\laoA\laoA\ci-smoke-config.toml → data_dir = "D:/a/laoA/laoA/ci-smoke-data"
+
+----- 构建环境版本 -----
+  4.2.2
+  Update status: stable release '4.3' available (cached, 17 minutes old).
+  Commercial: None
+  Python: 3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]
+  Flavor: CPython Official
+  Executable: C:\hostedtoolcache\windows\Python\3.11.9\x64\python.exe
+  PySide6 6.12.0 | pandas 3.0.6 | pyarrow 26.0.0
+exe 存在：True  大小：59999232 字节
+----- dist/LuweikDecision 前 25 项 -----
+  certifi
+  charset_normalizer
+  formulas
+  laoa_trader
+  numpy
+  numpy.libs
+  pandas
+  pandas.libs
+  pyarrow
+  pyarrow.libs
+  PySide6
+  shiboken6
+  tzdata
+  _bz2.pyd
+  _ctypes.pyd
+  _decimal.pyd
+  _elementtree.pyd
+  _hashlib.pyd
+  _lzma.pyd
+  _multiprocessing.pyd
+  _queue.pyd
+  _socket.pyd
+  _sqlite3.pyd
+  _ssl.pyd
+  _uuid.pyd
+===== version 退出码：0 =====
+----- version version.out.txt（前 40 行）-----
+  luweik 1.9.7
+  构建形态：Nuitka 编译版（原生 exe）
+  程序位置：D:\a\laoA\laoA\dist\LuweikDecision
+  策略引擎：支持 80 个函数
+----- version version.out.txt（末 30 行）-----
+  luweik 1.9.7
+  构建形态：Nuitka 编译版（原生 exe）
+  程序位置：D:\a\laoA\laoA\dist\LuweikDecision
+  策略引擎：支持 80 个函数
+----- version version.err.txt（前 40 行）-----
+  2026-10-17 09:00:48,638 [INFO] laoa_trader.cli: 数据目录：D:\a\laoA\laoA\ci-smoke-data（配置来源：D:\a\laoA\laoA\ci-smoke-config.toml）
+----- version version.err.txt（末 30 行）-----
+  2026-10-17 09:00:48,638 [INFO] laoa_trader.cli: 数据目录：D:\a\laoA\laoA\ci-smoke-data（配置来源：D:\a\laoA\laoA\ci-smoke-config.toml）
+===== doctor 退出码：0 =====
+----- doctor doctor.out.txt（前 40 行）-----
+  luweik —— 自检
+  ========================================================
+  程序版本    : 1.9.7
+  运行形态    : Nuitka 编译版（原生 exe）
+  程序位置    : D:\a\laoA\laoA\dist\LuweikDecision
+  随包资源    : D:\a\laoA\laoA\dist\LuweikDecision
+  资源目录    : D:\a\laoA\laoA\dist\LuweikDecision\laoa_trader\assets
+  随包策略    : D:\a\laoA\laoA\dist\LuweikDecision\formulas
+  Python      : 3.11.9（Windows 10）
+  配置来源    : D:\a\laoA\laoA\ci-smoke-config.toml
+  数据目录    : D:\a\laoA\laoA\ci-smoke-data
+  数据库      : D:\a\laoA\laoA\ci-smoke-data\trader.db（尚未创建）
+  dump 目录   : D:\a\laoA\laoA\ci-smoke-data\dumps（已存在）
+  日志文件    : D:\a\laoA\laoA\ci-smoke-data\logs\luweik.log
+  --------------------------------------------------------
+  同花顺 Key  : （未配置）
+  数据来源    : 同花顺金融数据服务（内置）（要 Key）、公开行情源（腾讯为主，免 Key）（免 Key）
+  飞书凭证    : AppID （未配置） / Secret （未配置） / 会话 （自动发现）
+  通知开关    : 飞书 True、托盘 True
+  通知频道    : notify_channels = []；实际发送 无（只走自绘浮窗 notify_popup=False）
+  交易参数    : 资金 100000 元、单票 20%、最多 5 只、止损 5%、止盈 10%
+  定时        : 每天 16:00（主跑）；补跑 19:15；自动运行 **关闭**；盘中间隔 60s
+  下次自动运行: 已关闭（每天自动运行）
+  --------------------------------------------------------
+  ✅ pandas     行情计算
+  ✅ numpy      行情计算
+  ✅ pyarrow    读同花顺 Parquet
+  ✅ requests   调用接口
+  ✅ PySide6    图形界面
+  ✅ winotify   Windows 原生通知（仅 Windows）
+  --------------------------------------------------------
+  数据自检    : ❌ needs_full —— 本地还没有数据库（首次运行）
+    行情行数  : 0；股票数 0（阈值 4000）
+    历史跨度  : 0 年（阈值 0.4）；最新 None
+    已导入区间: — → —；0 行；覆盖 0 年
+    history_years: 0.5（导入年限，dump 固定 10 年、按这个值过滤；改成 10 可导满 10 年）
+    落后交易日: 0（ready 允许 ≤0）
+    复权事件  : **缺失**；行业覆盖 0%；交易日历 **缺失**
+    需要下载  : full（auto_download_on_start=True）
+    缺表      : adjust_event、auction_scan、fund_flow、index_daily、intraday_alert、limit_up_pool、position、push_log、signal、stock_basic、stock_daily_raw、stock_pool、trading_calendar、watchlist
+----- doctor doctor.out.txt（末 30 行）-----
+  定时        : 每天 16:00（主跑）；补跑 19:15；自动运行 **关闭**；盘中间隔 60s
+  下次自动运行: 已关闭（每天自动运行）
+  --------------------------------------------------------
+  ✅ pandas     行情计算
+  ✅ numpy      行情计算
+  ✅ pyarrow    读同花顺 Parquet
+  ✅ requests   调用接口
+  ✅ PySide6    图形界面
+  ✅ winotify   Windows 原生通知（仅 Windows）
+  --------------------------------------------------------
+  数据自检    : ❌ needs_full —— 本地还没有数据库（首次运行）
+    行情行数  : 0；股票数 0（阈值 4000）
+    历史跨度  : 0 年（阈值 0.4）；最新 None
+    已导入区间: — → —；0 行；覆盖 0 年
+    history_years: 0.5（导入年限，dump 固定 10 年、按这个值过滤；改成 10 可导满 10 年）
+    落后交易日: 0（ready 允许 ≤0）
+    复权事件  : **缺失**；行业覆盖 0%；交易日历 **缺失**
+    需要下载  : full（auto_download_on_start=True）
+    缺表      : adjust_event、auction_scan、fund_flow、index_daily、intraday_alert、limit_up_pool、position、push_log、signal、stock_basic、stock_daily_raw、stock_pool、trading_calendar、watchlist
+  --------------------------------------------------------
+  行情行数    : 0（0 只股票）
+  最新数据日期: 无（还没下载过历史数据）
+  行业 / 日历 : 0 个行业、0 个交易日
+  涨停池天数  : 0
+  股票池行数  : 0；当前持仓 0 只
+  最新日覆盖率: 0.0%（0/0）
+  
+  提示：先跑 `python -m laoa_trader --cli --download` 建库。
+  
+  自检报告已写入：D:\a\laoA\laoA\ci-smoke-data\logs\自检报告.txt
+----- doctor doctor.err.txt（前 40 行）-----
+  2026-10-17 09:00:48,942 [INFO] laoa_trader.cli: 数据目录：D:\a\laoA\laoA\ci-smoke-data（配置来源：D:\a\laoA\laoA\ci-smoke-config.toml）
+----- doctor doctor.err.txt（末 30 行）-----
+  2026-10-17 09:00:48,942 [INFO] laoa_trader.cli: 数据目录：D:\a\laoA\laoA\ci-smoke-data（配置来源：D:\a\laoA\laoA\ci-smoke-config.toml）
+===== gui-selftest 退出码：0 =====
+----- gui-selftest gui-selftest.out.txt（前 40 行）-----
+  luweik —— GUI 自检（离屏）
+  ========================================================
+  程序版本  : 1.9.7
+  运行形态  : Nuitka 编译版（原生 exe）
+  平台插件  : QT_QPA_PLATFORM=offscreen
+  依赖版本  : PySide6 6.12.0（Qt 6.12.0） / pandas 3.0.6 / pyarrow 26.0.0 / numpy 2.4.6
+  配置来源  : D:\a\laoA\laoA\ci-smoke-config.toml
+  数据目录  : D:\a\laoA\laoA\ci-smoke-data
+  --------------------------------------------------------
+  定位提示：下面日志里 `启动步骤：…` 的**最后一行**就是崩溃点（段错误没有 traceback，只能靠它）
+  GUI 自检 OK：窗口 485 个控件、版本 1.9.7
+  报告文件  : D:\a\laoA\laoA\ci-smoke-data\logs\GUI自检报告.log
+----- gui-selftest gui-selftest.out.txt（末 30 行）-----
+  luweik —— GUI 自检（离屏）
+  ========================================================
+  程序版本  : 1.9.7
+  运行形态  : Nuitka 编译版（原生 exe）
+  平台插件  : QT_QPA_PLATFORM=offscreen
+  依赖版本  : PySide6 6.12.0（Qt 6.12.0） / pandas 3.0.6 / pyarrow 26.0.0 / numpy 2.4.6
+  配置来源  : D:\a\laoA\laoA\ci-smoke-config.toml
+  数据目录  : D:\a\laoA\laoA\ci-smoke-data
+  --------------------------------------------------------
+  定位提示：下面日志里 `启动步骤：…` 的**最后一行**就是崩溃点（段错误没有 traceback，只能靠它）
+  GUI 自检 OK：窗口 485 个控件、版本 1.9.7
+  报告文件  : D:\a\laoA\laoA\ci-smoke-data\logs\GUI自检报告.log
+----- gui-selftest gui-selftest.err.txt（前 40 行）-----
+  2026-10-17 09:00:50,393 [INFO] laoa_trader.cli: GUI 自检开始：数据目录 D:\a\laoA\laoA\ci-smoke-data
+  2026-10-17 09:00:50,409 [INFO] laoa_trader.ui.app: 启动步骤：主题已应用（indigo）
+  2026-10-17 09:00:50,409 [INFO] laoa_trader.ui.app: 启动步骤：数据目录与配置检查完成
+  2026-10-17 09:00:50,413 [INFO] laoa_trader.ui.app: 启动步骤：滚轮防误触已装好
+  2026-10-17 09:00:50,413 [INFO] laoa_trader.ui.app: 启动步骤：屏幕几何 OK（760×760，窗口外观=custom）
+  2026-10-17 09:00:50,439 [INFO] laoa_trader.ui.app: 启动步骤：概览页：成交与情绪块 OK
+  2026-10-17 09:00:50,439 [INFO] laoa_trader.ui.app: 启动步骤：概览页：宽基/情绪块 OK
+  2026-10-17 09:00:50,441 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图块 OK
+  2026-10-17 09:00:50,450 [INFO] laoa_trader.ui.app: 启动步骤：概览页：滚动区 OK
+  2026-10-17 09:00:50,452 [INFO] laoa_trader.ui.app: 启动步骤：概览页：页脚 OK
+  2026-10-17 09:00:50,452 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图磁盘缓存 OK
+  2026-10-17 09:00:50,454 [INFO] laoa_trader.ui.app: 启动步骤：概览页：空骨架渲染 OK
+  2026-10-17 09:00:50,554 [INFO] laoa_trader.strategy.formula: 策略目录 D:\a\laoA\laoA\dist\LuweikDecision\formulas：载入 12/12 条策略
+  2026-10-17 09:01:00,744 [INFO] laoa_trader.ui.app: 启动步骤：界面 OK（459 个控件）
+  2026-10-17 09:01:00,746 [INFO] laoa_trader.ui.app: 启动步骤：托盘 OK
+  2026-10-17 09:01:00,787 [INFO] laoa_trader.ui.desktop_pet: 桌宠形象：待机 1 帧 / 走路 3 帧 / 动作 2 帧（think 1、sad 1）
+  2026-10-17 09:01:00,789 [INFO] laoa_trader.ui.app: 启动步骤：桌宠 OK（已摆出）
+  2026-10-17 09:01:00,791 [INFO] laoa_trader.scheduler: 调度器已启动：自动运行【关（只手动跑）】；主跑 16:00，补跑 19:15；交易时段每 60s 跑盘中提醒
+  2026-10-17 09:01:00,791 [INFO] laoa_trader.ui.app: 启动步骤：调度器 OK
+  2026-10-17 09:01:00,809 [INFO] laoa_trader.ui.app: 启动步骤：授权检查 OK
+  2026-10-17 09:01:00,809 [INFO] laoa_trader.ui.app: 启动步骤：快照与评分服务 OK
+  2026-10-17 09:01:00,811 [INFO] laoa_trader.ui.app: 启动步骤：定时器 OK（界面刷新/概览/闪烁）
+  2026-10-17 09:01:00,833 [INFO] laoa_trader.ui.app: 启动步骤：首次 _tick OK
+  2026-10-17 09:01:00,835 [INFO] laoa_trader.ui.app: 启动步骤：主窗口构造完成
+  2026-10-17 09:01:00,857 [WARNING] laoa_trader.ui.error_popup: 【弹窗】本地数据还不能用（筛选需要它）：本地数据还没准备好 · 在【系统设置】里点【下载数据】下载历史数据 / （完整原因与自检阈值在【显示详情】里）
+  2026-10-17 09:01:00,859 [INFO] laoa_trader.ui.error_popup: （GUI 自检模式：只记日志，不弹框）
+  2026-10-17 09:01:00,878 [INFO] laoa_trader.scheduler: 调度器已停止
+----- gui-selftest gui-selftest.err.txt（末 30 行）-----
+  2026-10-17 09:00:50,393 [INFO] laoa_trader.cli: GUI 自检开始：数据目录 D:\a\laoA\laoA\ci-smoke-data
+  2026-10-17 09:00:50,409 [INFO] laoa_trader.ui.app: 启动步骤：主题已应用（indigo）
+  2026-10-17 09:00:50,409 [INFO] laoa_trader.ui.app: 启动步骤：数据目录与配置检查完成
+  2026-10-17 09:00:50,413 [INFO] laoa_trader.ui.app: 启动步骤：滚轮防误触已装好
+  2026-10-17 09:00:50,413 [INFO] laoa_trader.ui.app: 启动步骤：屏幕几何 OK（760×760，窗口外观=custom）
+  2026-10-17 09:00:50,439 [INFO] laoa_trader.ui.app: 启动步骤：概览页：成交与情绪块 OK
+  2026-10-17 09:00:50,439 [INFO] laoa_trader.ui.app: 启动步骤：概览页：宽基/情绪块 OK
+  2026-10-17 09:00:50,441 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图块 OK
+  2026-10-17 09:00:50,450 [INFO] laoa_trader.ui.app: 启动步骤：概览页：滚动区 OK
+  2026-10-17 09:00:50,452 [INFO] laoa_trader.ui.app: 启动步骤：概览页：页脚 OK
+  2026-10-17 09:00:50,452 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图磁盘缓存 OK
+  2026-10-17 09:00:50,454 [INFO] laoa_trader.ui.app: 启动步骤：概览页：空骨架渲染 OK
+  2026-10-17 09:00:50,554 [INFO] laoa_trader.strategy.formula: 策略目录 D:\a\laoA\laoA\dist\LuweikDecision\formulas：载入 12/12 条策略
+  2026-10-17 09:01:00,744 [INFO] laoa_trader.ui.app: 启动步骤：界面 OK（459 个控件）
+  2026-10-17 09:01:00,746 [INFO] laoa_trader.ui.app: 启动步骤：托盘 OK
+  2026-10-17 09:01:00,787 [INFO] laoa_trader.ui.desktop_pet: 桌宠形象：待机 1 帧 / 走路 3 帧 / 动作 2 帧（think 1、sad 1）
+  2026-10-17 09:01:00,789 [INFO] laoa_trader.ui.app: 启动步骤：桌宠 OK（已摆出）
+  2026-10-17 09:01:00,791 [INFO] laoa_trader.scheduler: 调度器已启动：自动运行【关（只手动跑）】；主跑 16:00，补跑 19:15；交易时段每 60s 跑盘中提醒
+  2026-10-17 09:01:00,791 [INFO] laoa_trader.ui.app: 启动步骤：调度器 OK
+  2026-10-17 09:01:00,809 [INFO] laoa_trader.ui.app: 启动步骤：授权检查 OK
+  2026-10-17 09:01:00,809 [INFO] laoa_trader.ui.app: 启动步骤：快照与评分服务 OK
+  2026-10-17 09:01:00,811 [INFO] laoa_trader.ui.app: 启动步骤：定时器 OK（界面刷新/概览/闪烁）
+  2026-10-17 09:01:00,833 [INFO] laoa_trader.ui.app: 启动步骤：首次 _tick OK
+  2026-10-17 09:01:00,835 [INFO] laoa_trader.ui.app: 启动步骤：主窗口构造完成
+  2026-10-17 09:01:00,857 [WARNING] laoa_trader.ui.error_popup: 【弹窗】本地数据还不能用（筛选需要它）：本地数据还没准备好 · 在【系统设置】里点【下载数据】下载历史数据 / （完整原因与自检阈值在【显示详情】里）
+  2026-10-17 09:01:00,859 [INFO] laoa_trader.ui.error_popup: （GUI 自检模式：只记日志，不弹框）
+  2026-10-17 09:01:00,878 [INFO] laoa_trader.scheduler: 调度器已停止
+----- 产物里的 Qt 平台插件（qoffscreen 是 GUI 自检的前提）-----
+  D:\a\laoA\laoA\dist\LuweikDecision\PySide6\qt-plugins\platforms\qoffscreen.dll
+----- 数据目录 ci-smoke-data -----
+  D:\a\laoA\laoA\ci-smoke-data\dumps
+  D:\a\laoA\laoA\ci-smoke-data\logs
+  D:\a\laoA\laoA\ci-smoke-data\trader.db
+  D:\a\laoA\laoA\ci-smoke-data\logs\GUI自检报告.log
+  D:\a\laoA\laoA\ci-smoke-data\logs\luweik.log
+  D:\a\laoA\laoA\ci-smoke-data\logs\自检报告.txt
+----- 默认数据目录（%LOCALAPPDATA%）-----
+  C:\Users\runneradmin\AppData\Local\LuweikDecision\data\dumps
+  C:\Users\runneradmin\AppData\Local\LuweikDecision\data\logs
+  C:\Users\runneradmin\AppData\Local\LuweikDecision\data\trader.db
+  C:\Users\runneradmin\AppData\Local\LuweikDecision\data\logs\luweik.log
+自检报告：D:\a\laoA\laoA\ci-smoke-data\logs\自检报告.txt
+----- 自检报告全文 -----
+  luweik —— 自检
+  ========================================================
+  程序版本    : 1.9.7
+  运行形态    : Nuitka 编译版（原生 exe）
+  程序位置    : D:\a\laoA\laoA\dist\LuweikDecision
+  随包资源    : D:\a\laoA\laoA\dist\LuweikDecision
+  资源目录    : D:\a\laoA\laoA\dist\LuweikDecision\laoa_trader\assets
+  随包策略    : D:\a\laoA\laoA\dist\LuweikDecision\formulas
+  Python      : 3.11.9（Windows 10）
+  配置来源    : D:\a\laoA\laoA\ci-smoke-config.toml
+  数据目录    : D:\a\laoA\laoA\ci-smoke-data
+  数据库      : D:\a\laoA\laoA\ci-smoke-data\trader.db（尚未创建）
+  dump 目录   : D:\a\laoA\laoA\ci-smoke-data\dumps（已存在）
+  日志文件    : D:\a\laoA\laoA\ci-smoke-data\logs\luweik.log
+  --------------------------------------------------------
+  同花顺 Key  : （未配置）
+  数据来源    : 同花顺金融数据服务（内置）（要 Key）、公开行情源（腾讯为主，免 Key）（免 Key）
+  飞书凭证    : AppID （未配置） / Secret （未配置） / 会话 （自动发现）
+  通知开关    : 飞书 True、托盘 True
+  通知频道    : notify_channels = []；实际发送 无（只走自绘浮窗 notify_popup=False）
+  交易参数    : 资金 100000 元、单票 20%、最多 5 只、止损 5%、止盈 10%
+  定时        : 每天 16:00（主跑）；补跑 19:15；自动运行 **关闭**；盘中间隔 60s
+  下次自动运行: 已关闭（每天自动运行）
+  --------------------------------------------------------
+  ✅ pandas     行情计算
+  ✅ numpy      行情计算
+  ✅ pyarrow    读同花顺 Parquet
+  ✅ requests   调用接口
+  ✅ PySide6    图形界面
+  ✅ winotify   Windows 原生通知（仅 Windows）
+  --------------------------------------------------------
+  数据自检    : ❌ needs_full —— 本地还没有数据库（首次运行）
+    行情行数  : 0；股票数 0（阈值 4000）
+    历史跨度  : 0 年（阈值 0.4）；最新 None
+    已导入区间: — → —；0 行；覆盖 0 年
+    history_years: 0.5（导入年限，dump 固定 10 年、按这个值过滤；改成 10 可导满 10 年）
+    落后交易日: 0（ready 允许 ≤0）
+    复权事件  : **缺失**；行业覆盖 0%；交易日历 **缺失**
+    需要下载  : full（auto_download_on_start=True）
+    缺表      : adjust_event、auction_scan、fund_flow、index_daily、intraday_alert、limit_up_pool、position、push_log、signal、stock_basic、stock_daily_raw、stock_pool、trading_calendar、watchlist
+  --------------------------------------------------------
+  行情行数    : 0（0 只股票）
+  最新数据日期: 无（还没下载过历史数据）
+  行业 / 日历 : 0 个行业、0 个交易日
+  涨停池天数  : 0
+  股票池行数  : 0；当前持仓 0 只
+  最新日覆盖率: 0.0%（0/0）
+  
+  提示：先跑 `python -m laoa_trader --cli --download` 建库。
+GUI 自检报告：D:\a\laoA\laoA\ci-smoke-data\logs\GUI自检报告.log
+----- GUI 自检报告全文 -----
+  luweik —— GUI 自检（离屏）
+  ========================================================
+  程序版本  : 1.9.7
+  运行形态  : Nuitka 编译版（原生 exe）
+  平台插件  : QT_QPA_PLATFORM=offscreen
+  依赖版本  : PySide6 6.12.0（Qt 6.12.0） / pandas 3.0.6 / pyarrow 26.0.0 / numpy 2.4.6
+  配置来源  : D:\a\laoA\laoA\ci-smoke-config.toml
+  数据目录  : D:\a\laoA\laoA\ci-smoke-data
+  --------------------------------------------------------
+  定位提示：下面日志里 `启动步骤：…` 的**最后一行**就是崩溃点（段错误没有 traceback，只能靠它）
+  2026-10-17 09:00:50,393 [INFO] laoa_trader.cli: GUI 自检开始：数据目录 D:\a\laoA\laoA\ci-smoke-data
+  2026-10-17 09:00:50,409 [DEBUG] laoa_trader.ui.theme: 界面主题已应用：indigo
+  2026-10-17 09:00:50,409 [INFO] laoa_trader.ui.app: 启动步骤：主题已应用（indigo）
+  2026-10-17 09:00:50,409 [INFO] laoa_trader.ui.app: 启动步骤：数据目录与配置检查完成
+  2026-10-17 09:00:50,413 [DEBUG] laoa_trader.ui.wheel_guard: 已启用滚轮防误触（下拉框/数字框没焦点时滚轮不改值）
+  2026-10-17 09:00:50,413 [INFO] laoa_trader.ui.app: 启动步骤：滚轮防误触已装好
+  2026-10-17 09:00:50,413 [INFO] laoa_trader.ui.app: 启动步骤：屏幕几何 OK（760×760，窗口外观=custom）
+  2026-10-17 09:00:50,439 [INFO] laoa_trader.ui.app: 启动步骤：概览页：成交与情绪块 OK
+  2026-10-17 09:00:50,439 [INFO] laoa_trader.ui.app: 启动步骤：概览页：宽基/情绪块 OK
+  2026-10-17 09:00:50,441 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图块 OK
+  2026-10-17 09:00:50,450 [INFO] laoa_trader.ui.app: 启动步骤：概览页：滚动区 OK
+  2026-10-17 09:00:50,452 [INFO] laoa_trader.ui.app: 启动步骤：概览页：页脚 OK
+  2026-10-17 09:00:50,452 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图磁盘缓存 OK
+  2026-10-17 09:00:50,454 [INFO] laoa_trader.ui.app: 启动步骤：概览页：空骨架渲染 OK
+  2026-10-17 09:00:50,546 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'HIGH', 'LOW', 'OPEN')，函数 ('REF',)，5 条语句
+  2026-10-17 09:00:50,548 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('VOL', 'AMOUNT', 'C', 'OPEN', 'ST')，函数 ('REF', 'MA')，8 条语句
+  2026-10-17 09:00:50,548 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'HIGH')，函数 ('MA', 'HHV')，8 条语句
+  2026-10-17 09:00:50,550 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', '流通市值', '换手率', 'VOL', '热门行业', 'ST', '科创', '北交所')，函数 ('REF', 'MA', '涨停天数')，14 条语句
+  2026-10-17 09:00:50,550 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', '换手率', 'ST', '科创', '北交所')，函数 ('REF', '量比')，7 条语句
+  2026-10-17 09:00:50,550 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'OPEN')，函数 ('MA',)，3 条语句
+  2026-10-17 09:00:50,550 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'AMOUNT', 'ST')，函数 ('REF', 'MA')，7 条语句
+  2026-10-17 09:00:50,552 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('现涨幅', '现量比', '竞价匹配额', 'ST')，函数 ()，8 条语句
+  2026-10-17 09:00:50,552 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'ST')，函数 ('MA', 'EMA', 'BARSCOUNT')，11 条语句
+  2026-10-17 09:00:50,552 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'ST')，函数 ('MA', 'EMA', 'BARSCOUNT')，12 条语句
+  2026-10-17 09:00:50,554 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', '主力净额', '主力净占比', '近5日主力净额', 'ST')，函数 ('MA', 'EMA')，11 条语句
+  2026-10-17 09:00:50,554 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'ST')，函数 ('REF',)，8 条语句
+  2026-10-17 09:00:50,554 [INFO] laoa_trader.strategy.formula: 策略目录 D:\a\laoA\laoA\dist\LuweikDecision\formulas：载入 12/12 条策略
+  2026-10-17 09:01:00,609 [DEBUG] laoa_trader.notify.voice: 枚举语音失败（当作没有可用音色）：Command '['C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', '-NoProfile', '-NonInteractive', '-Command', 'Add-Type -AssemblyName System.Speech;(New-Object System.Speech.Synthesis.SpeechSynthesizer).GetInstalledVoices() | ForEach-Object { $i=$_.VoiceInfo; "$($i.Name)|$($i.Culture)|$($i.Gender)" }']' timed out after 10.0 seconds
+  2026-10-17 09:01:00,744 [INFO] laoa_trader.ui.app: 启动步骤：界面 OK（459 个控件）
+  2026-10-17 09:01:00,746 [INFO] laoa_trader.ui.app: 启动步骤：托盘 OK
+  2026-10-17 09:01:00,787 [INFO] laoa_trader.ui.desktop_pet: 桌宠形象：待机 1 帧 / 走路 3 帧 / 动作 2 帧（think 1、sad 1）
+  2026-10-17 09:01:00,789 [INFO] laoa_trader.ui.app: 启动步骤：桌宠 OK（已摆出）
+  2026-10-17 09:01:00,791 [INFO] laoa_trader.scheduler: 调度器已启动：自动运行【关（只手动跑）】；主跑 16:00，补跑 19:15；交易时段每 60s 跑盘中提醒
+  2026-10-17 09:01:00,791 [INFO] laoa_trader.ui.app: 启动步骤：调度器 OK
+  2026-10-17 09:01:00,809 [INFO] laoa_trader.ui.app: 启动步骤：授权检查 OK
+  2026-10-17 09:01:00,809 [INFO] laoa_trader.ui.app: 启动步骤：快照与评分服务 OK
+  2026-10-17 09:01:00,811 [INFO] laoa_trader.ui.app: 启动步骤：定时器 OK（界面刷新/概览/闪烁）
+  2026-10-17 09:01:00,833 [INFO] laoa_trader.ui.app: 启动步骤：首次 _tick OK
+  2026-10-17 09:01:00,835 [INFO] laoa_trader.ui.app: 启动步骤：主窗口构造完成
+  2026-10-17 09:01:00,857 [WARNING] laoa_trader.ui.error_popup: 【弹窗】本地数据还不能用（筛选需要它）：本地数据还没准备好 · 在【系统设置】里点【下载数据】下载历史数据 / （完整原因与自检阈值在【显示详情】里）
+  2026-10-17 09:01:00,859 [INFO] laoa_trader.ui.error_popup: （GUI 自检模式：只记日志，不弹框）
+  GUI 自检 OK：窗口 485 个控件、版本 1.9.7
+  报告文件  : D:\a\laoA\laoA\ci-smoke-data\logs\GUI自检报告.log
+  2026-10-17 09:01:00,878 [INFO] laoa_trader.scheduler: 调度器已停止
+最后走到的一步：2026-10-17 09:01:00,835 [INFO] laoa_trader.ui.app: 启动步骤：主窗口构造完成
+✅ 图形界面冒烟通过：真主窗口建出来了（报告见 ci-log/gui-selftest-report.log）
+===== gui-selftest-windows 退出码：0 =====
+----- gui-selftest-windows gui-selftest-windows.out.txt（前 40 行）-----
+  luweik —— GUI 自检（离屏）
+  ========================================================
+  程序版本  : 1.9.7
+  运行形态  : Nuitka 编译版（原生 exe）
+  平台插件  : QT_QPA_PLATFORM=windows
+  依赖版本  : PySide6 6.12.0（Qt 6.12.0） / pandas 3.0.6 / pyarrow 26.0.0 / numpy 2.4.6
+  配置来源  : D:\a\laoA\laoA\ci-smoke-config-windows.toml
+  数据目录  : D:\a\laoA\laoA\ci-smoke-data-windows
+  --------------------------------------------------------
+  定位提示：下面日志里 `启动步骤：…` 的**最后一行**就是崩溃点（段错误没有 traceback，只能靠它）
+  GUI 自检 OK：窗口 477 个控件、版本 1.9.7
+  报告文件  : D:\a\laoA\laoA\ci-smoke-data-windows\logs\GUI自检报告.log
+----- gui-selftest-windows gui-selftest-windows.out.txt（末 30 行）-----
+  luweik —— GUI 自检（离屏）
+  ========================================================
+  程序版本  : 1.9.7
+  运行形态  : Nuitka 编译版（原生 exe）
+  平台插件  : QT_QPA_PLATFORM=windows
+  依赖版本  : PySide6 6.12.0（Qt 6.12.0） / pandas 3.0.6 / pyarrow 26.0.0 / numpy 2.4.6
+  配置来源  : D:\a\laoA\laoA\ci-smoke-config-windows.toml
+  数据目录  : D:\a\laoA\laoA\ci-smoke-data-windows
+  --------------------------------------------------------
+  定位提示：下面日志里 `启动步骤：…` 的**最后一行**就是崩溃点（段错误没有 traceback，只能靠它）
+  GUI 自检 OK：窗口 477 个控件、版本 1.9.7
+  报告文件  : D:\a\laoA\laoA\ci-smoke-data-windows\logs\GUI自检报告.log
+----- gui-selftest-windows gui-selftest-windows.err.txt（前 40 行）-----
+  2026-10-17 09:01:02,224 [INFO] laoa_trader.cli: GUI 自检开始：数据目录 D:\a\laoA\laoA\ci-smoke-data-windows
+  2026-10-17 09:01:02,364 [INFO] laoa_trader.ui.app: 启动步骤：主题已应用（indigo）
+  2026-10-17 09:01:02,364 [INFO] laoa_trader.ui.app: 启动步骤：数据目录与配置检查完成
+  2026-10-17 09:01:02,368 [INFO] laoa_trader.ui.app: 启动步骤：滚轮防误触已装好
+  2026-10-17 09:01:02,368 [INFO] laoa_trader.ui.app: 启动步骤：屏幕几何 OK（984×680，窗口外观=custom）
+  2026-10-17 09:01:06,748 [INFO] laoa_trader.ui.app: 启动步骤：概览页：成交与情绪块 OK
+  2026-10-17 09:01:06,749 [INFO] laoa_trader.ui.app: 启动步骤：概览页：宽基/情绪块 OK
+  2026-10-17 09:01:06,751 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图块 OK
+  2026-10-17 09:01:06,964 [INFO] laoa_trader.ui.app: 启动步骤：概览页：滚动区 OK
+  2026-10-17 09:01:06,986 [INFO] laoa_trader.ui.app: 启动步骤：概览页：页脚 OK
+  2026-10-17 09:01:06,986 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图磁盘缓存 OK
+  2026-10-17 09:01:06,990 [INFO] laoa_trader.ui.app: 启动步骤：概览页：空骨架渲染 OK
+  2026-10-17 09:01:07,513 [INFO] laoa_trader.strategy.formula: 策略目录 D:\a\laoA\laoA\dist\LuweikDecision\formulas：载入 12/12 条策略
+  2026-10-17 09:01:09,683 [INFO] laoa_trader.notify.voice: 系统里没有中文语音，已跳过朗读（英文音色念中文会是怪腔怪调）
+  2026-10-17 09:01:09,947 [INFO] laoa_trader.ui.app: 启动步骤：界面 OK（451 个控件）
+  2026-10-17 09:01:09,960 [INFO] laoa_trader.ui.app: 启动步骤：托盘 OK
+  2026-10-17 09:01:10,008 [INFO] laoa_trader.ui.desktop_pet: 桌宠形象：待机 1 帧 / 走路 3 帧 / 动作 2 帧（think 1、sad 1）
+  2026-10-17 09:01:10,013 [INFO] laoa_trader.ui.app: 启动步骤：桌宠 OK（已摆出）
+  2026-10-17 09:01:10,013 [INFO] laoa_trader.scheduler: 调度器已启动：自动运行【关（只手动跑）】；主跑 16:00，补跑 19:15；交易时段每 60s 跑盘中提醒
+  2026-10-17 09:01:10,013 [INFO] laoa_trader.ui.app: 启动步骤：调度器 OK
+  2026-10-17 09:01:10,033 [INFO] laoa_trader.ui.app: 启动步骤：授权检查 OK
+  2026-10-17 09:01:10,033 [INFO] laoa_trader.ui.app: 启动步骤：快照与评分服务 OK
+  2026-10-17 09:01:10,034 [INFO] laoa_trader.ui.app: 启动步骤：定时器 OK（界面刷新/概览/闪烁）
+  2026-10-17 09:01:10,071 [INFO] laoa_trader.ui.app: 启动步骤：首次 _tick OK
+  2026-10-17 09:01:10,071 [INFO] laoa_trader.ui.app: 启动步骤：主窗口构造完成
+  2026-10-17 09:01:10,224 [WARNING] laoa_trader.ui.error_popup: 【弹窗】本地数据还不能用（筛选需要它）：本地数据还没准备好 · 在【系统设置】里点【下载数据】下载历史数据 / （完整原因与自检阈值在【显示详情】里）
+  2026-10-17 09:01:10,224 [INFO] laoa_trader.ui.error_popup: （GUI 自检模式：只记日志，不弹框）
+  2026-10-17 09:01:10,282 [INFO] laoa_trader.scheduler: 调度器已停止
+----- gui-selftest-windows gui-selftest-windows.err.txt（末 30 行）-----
+  2026-10-17 09:01:02,224 [INFO] laoa_trader.cli: GUI 自检开始：数据目录 D:\a\laoA\laoA\ci-smoke-data-windows
+  2026-10-17 09:01:02,364 [INFO] laoa_trader.ui.app: 启动步骤：主题已应用（indigo）
+  2026-10-17 09:01:02,364 [INFO] laoa_trader.ui.app: 启动步骤：数据目录与配置检查完成
+  2026-10-17 09:01:02,368 [INFO] laoa_trader.ui.app: 启动步骤：滚轮防误触已装好
+  2026-10-17 09:01:02,368 [INFO] laoa_trader.ui.app: 启动步骤：屏幕几何 OK（984×680，窗口外观=custom）
+  2026-10-17 09:01:06,748 [INFO] laoa_trader.ui.app: 启动步骤：概览页：成交与情绪块 OK
+  2026-10-17 09:01:06,749 [INFO] laoa_trader.ui.app: 启动步骤：概览页：宽基/情绪块 OK
+  2026-10-17 09:01:06,751 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图块 OK
+  2026-10-17 09:01:06,964 [INFO] laoa_trader.ui.app: 启动步骤：概览页：滚动区 OK
+  2026-10-17 09:01:06,986 [INFO] laoa_trader.ui.app: 启动步骤：概览页：页脚 OK
+  2026-10-17 09:01:06,986 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图磁盘缓存 OK
+  2026-10-17 09:01:06,990 [INFO] laoa_trader.ui.app: 启动步骤：概览页：空骨架渲染 OK
+  2026-10-17 09:01:07,513 [INFO] laoa_trader.strategy.formula: 策略目录 D:\a\laoA\laoA\dist\LuweikDecision\formulas：载入 12/12 条策略
+  2026-10-17 09:01:09,683 [INFO] laoa_trader.notify.voice: 系统里没有中文语音，已跳过朗读（英文音色念中文会是怪腔怪调）
+  2026-10-17 09:01:09,947 [INFO] laoa_trader.ui.app: 启动步骤：界面 OK（451 个控件）
+  2026-10-17 09:01:09,960 [INFO] laoa_trader.ui.app: 启动步骤：托盘 OK
+  2026-10-17 09:01:10,008 [INFO] laoa_trader.ui.desktop_pet: 桌宠形象：待机 1 帧 / 走路 3 帧 / 动作 2 帧（think 1、sad 1）
+  2026-10-17 09:01:10,013 [INFO] laoa_trader.ui.app: 启动步骤：桌宠 OK（已摆出）
+  2026-10-17 09:01:10,013 [INFO] laoa_trader.scheduler: 调度器已启动：自动运行【关（只手动跑）】；主跑 16:00，补跑 19:15；交易时段每 60s 跑盘中提醒
+  2026-10-17 09:01:10,013 [INFO] laoa_trader.ui.app: 启动步骤：调度器 OK
+  2026-10-17 09:01:10,033 [INFO] laoa_trader.ui.app: 启动步骤：授权检查 OK
+  2026-10-17 09:01:10,033 [INFO] laoa_trader.ui.app: 启动步骤：快照与评分服务 OK
+  2026-10-17 09:01:10,034 [INFO] laoa_trader.ui.app: 启动步骤：定时器 OK（界面刷新/概览/闪烁）
+  2026-10-17 09:01:10,071 [INFO] laoa_trader.ui.app: 启动步骤：首次 _tick OK
+  2026-10-17 09:01:10,071 [INFO] laoa_trader.ui.app: 启动步骤：主窗口构造完成
+  2026-10-17 09:01:10,224 [WARNING] laoa_trader.ui.error_popup: 【弹窗】本地数据还不能用（筛选需要它）：本地数据还没准备好 · 在【系统设置】里点【下载数据】下载历史数据 / （完整原因与自检阈值在【显示详情】里）
+  2026-10-17 09:01:10,224 [INFO] laoa_trader.ui.error_popup: （GUI 自检模式：只记日志，不弹框）
+  2026-10-17 09:01:10,282 [INFO] laoa_trader.scheduler: 调度器已停止
+真 Windows 平台自检最后走到的一步：2026-10-17 09:01:10,071 [INFO] laoa_trader.ui.app: 启动步骤：主窗口构造完成
+----- 真 Windows 平台自检报告全文（诊断用，不参与判定）-----
+  luweik —— GUI 自检（离屏）
+  ========================================================
+  程序版本  : 1.9.7
+  运行形态  : Nuitka 编译版（原生 exe）
+  平台插件  : QT_QPA_PLATFORM=windows
+  依赖版本  : PySide6 6.12.0（Qt 6.12.0） / pandas 3.0.6 / pyarrow 26.0.0 / numpy 2.4.6
+  配置来源  : D:\a\laoA\laoA\ci-smoke-config-windows.toml
+  数据目录  : D:\a\laoA\laoA\ci-smoke-data-windows
+  --------------------------------------------------------
+  定位提示：下面日志里 `启动步骤：…` 的**最后一行**就是崩溃点（段错误没有 traceback，只能靠它）
+  2026-10-17 09:01:02,224 [INFO] laoa_trader.cli: GUI 自检开始：数据目录 D:\a\laoA\laoA\ci-smoke-data-windows
+  2026-10-17 09:01:02,364 [DEBUG] laoa_trader.ui.theme: 界面主题已应用：indigo
+  2026-10-17 09:01:02,364 [INFO] laoa_trader.ui.app: 启动步骤：主题已应用（indigo）
+  2026-10-17 09:01:02,364 [INFO] laoa_trader.ui.app: 启动步骤：数据目录与配置检查完成
+  2026-10-17 09:01:02,366 [DEBUG] laoa_trader.ui.wheel_guard: 已启用滚轮防误触（下拉框/数字框没焦点时滚轮不改值）
+  2026-10-17 09:01:02,368 [INFO] laoa_trader.ui.app: 启动步骤：滚轮防误触已装好
+  2026-10-17 09:01:02,368 [INFO] laoa_trader.ui.app: 启动步骤：屏幕几何 OK（984×680，窗口外观=custom）
+  2026-10-17 09:01:06,748 [INFO] laoa_trader.ui.app: 启动步骤：概览页：成交与情绪块 OK
+  2026-10-17 09:01:06,749 [INFO] laoa_trader.ui.app: 启动步骤：概览页：宽基/情绪块 OK
+  2026-10-17 09:01:06,751 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图块 OK
+  2026-10-17 09:01:06,964 [INFO] laoa_trader.ui.app: 启动步骤：概览页：滚动区 OK
+  2026-10-17 09:01:06,986 [INFO] laoa_trader.ui.app: 启动步骤：概览页：页脚 OK
+  2026-10-17 09:01:06,986 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图磁盘缓存 OK
+  2026-10-17 09:01:06,990 [INFO] laoa_trader.ui.app: 启动步骤：概览页：空骨架渲染 OK
+  2026-10-17 09:01:07,505 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'HIGH', 'LOW', 'OPEN')，函数 ('REF',)，5 条语句
+  2026-10-17 09:01:07,507 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('VOL', 'AMOUNT', 'C', 'OPEN', 'ST')，函数 ('REF', 'MA')，8 条语句
+  2026-10-17 09:01:07,507 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'HIGH')，函数 ('MA', 'HHV')，8 条语句
+  2026-10-17 09:01:07,507 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', '流通市值', '换手率', 'VOL', '热门行业', 'ST', '科创', '北交所')，函数 ('REF', 'MA', '涨停天数')，14 条语句
+  2026-10-17 09:01:07,509 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', '换手率', 'ST', '科创', '北交所')，函数 ('REF', '量比')，7 条语句
+  2026-10-17 09:01:07,509 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'OPEN')，函数 ('MA',)，3 条语句
+  2026-10-17 09:01:07,509 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'AMOUNT', 'ST')，函数 ('REF', 'MA')，7 条语句
+  2026-10-17 09:01:07,511 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('现涨幅', '现量比', '竞价匹配额', 'ST')，函数 ()，8 条语句
+  2026-10-17 09:01:07,511 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'ST')，函数 ('MA', 'EMA', 'BARSCOUNT')，11 条语句
+  2026-10-17 09:01:07,511 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'ST')，函数 ('MA', 'EMA', 'BARSCOUNT')，12 条语句
+  2026-10-17 09:01:07,513 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', '主力净额', '主力净占比', '近5日主力净额', 'ST')，函数 ('MA', 'EMA')，11 条语句
+  2026-10-17 09:01:07,513 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'ST')，函数 ('REF',)，8 条语句
+  2026-10-17 09:01:07,513 [INFO] laoa_trader.strategy.formula: 策略目录 D:\a\laoA\laoA\dist\LuweikDecision\formulas：载入 12/12 条策略
+  2026-10-17 09:01:09,683 [INFO] laoa_trader.notify.voice: 系统里没有中文语音，已跳过朗读（英文音色念中文会是怪腔怪调）
+  2026-10-17 09:01:09,947 [INFO] laoa_trader.ui.app: 启动步骤：界面 OK（451 个控件）
+  2026-10-17 09:01:09,960 [INFO] laoa_trader.ui.app: 启动步骤：托盘 OK
+  2026-10-17 09:01:10,008 [INFO] laoa_trader.ui.desktop_pet: 桌宠形象：待机 1 帧 / 走路 3 帧 / 动作 2 帧（think 1、sad 1）
+  2026-10-17 09:01:10,013 [INFO] laoa_trader.ui.app: 启动步骤：桌宠 OK（已摆出）
+  2026-10-17 09:01:10,013 [INFO] laoa_trader.scheduler: 调度器已启动：自动运行【关（只手动跑）】；主跑 16:00，补跑 19:15；交易时段每 60s 跑盘中提醒
+  2026-10-17 09:01:10,013 [INFO] laoa_trader.ui.app: 启动步骤：调度器 OK
+  2026-10-17 09:01:10,033 [INFO] laoa_trader.ui.app: 启动步骤：授权检查 OK
+  2026-10-17 09:01:10,033 [INFO] laoa_trader.ui.app: 启动步骤：快照与评分服务 OK
+  2026-10-17 09:01:10,034 [INFO] laoa_trader.ui.app: 启动步骤：定时器 OK（界面刷新/概览/闪烁）
+  2026-10-17 09:01:10,071 [INFO] laoa_trader.ui.app: 启动步骤：首次 _tick OK
+  2026-10-17 09:01:10,071 [INFO] laoa_trader.ui.app: 启动步骤：主窗口构造完成
+  2026-10-17 09:01:10,224 [WARNING] laoa_trader.ui.error_popup: 【弹窗】本地数据还不能用（筛选需要它）：本地数据还没准备好 · 在【系统设置】里点【下载数据】下载历史数据 / （完整原因与自检阈值在【显示详情】里）
+  2026-10-17 09:01:10,224 [INFO] laoa_trader.ui.error_popup: （GUI 自检模式：只记日志，不弹框）
+  GUI 自检 OK：窗口 477 个控件、版本 1.9.7
+  报告文件  : D:\a\laoA\laoA\ci-smoke-data-windows\logs\GUI自检报告.log
+  2026-10-17 09:01:10,282 [INFO] laoa_trader.scheduler: 调度器已停止
+✅ 冒烟通过：形态 Nuitka、随包策略与资源目录都解析正常

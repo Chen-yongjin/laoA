@@ -1,0 +1,54 @@
+luweik —— GUI 自检（离屏）
+========================================================
+程序版本  : 1.9.7
+运行形态  : Nuitka 编译版（原生 exe）
+平台插件  : QT_QPA_PLATFORM=offscreen
+依赖版本  : PySide6 6.12.0（Qt 6.12.0） / pandas 3.0.6 / pyarrow 26.0.0 / numpy 2.4.6
+配置来源  : D:\a\laoA\laoA\ci-smoke-config.toml
+数据目录  : D:\a\laoA\laoA\ci-smoke-data
+--------------------------------------------------------
+定位提示：下面日志里 `启动步骤：…` 的**最后一行**就是崩溃点（段错误没有 traceback，只能靠它）
+2026-10-17 09:00:50,393 [INFO] laoa_trader.cli: GUI 自检开始：数据目录 D:\a\laoA\laoA\ci-smoke-data
+2026-10-17 09:00:50,409 [DEBUG] laoa_trader.ui.theme: 界面主题已应用：indigo
+2026-10-17 09:00:50,409 [INFO] laoa_trader.ui.app: 启动步骤：主题已应用（indigo）
+2026-10-17 09:00:50,409 [INFO] laoa_trader.ui.app: 启动步骤：数据目录与配置检查完成
+2026-10-17 09:00:50,413 [DEBUG] laoa_trader.ui.wheel_guard: 已启用滚轮防误触（下拉框/数字框没焦点时滚轮不改值）
+2026-10-17 09:00:50,413 [INFO] laoa_trader.ui.app: 启动步骤：滚轮防误触已装好
+2026-10-17 09:00:50,413 [INFO] laoa_trader.ui.app: 启动步骤：屏幕几何 OK（760×760，窗口外观=custom）
+2026-10-17 09:00:50,439 [INFO] laoa_trader.ui.app: 启动步骤：概览页：成交与情绪块 OK
+2026-10-17 09:00:50,439 [INFO] laoa_trader.ui.app: 启动步骤：概览页：宽基/情绪块 OK
+2026-10-17 09:00:50,441 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图块 OK
+2026-10-17 09:00:50,450 [INFO] laoa_trader.ui.app: 启动步骤：概览页：滚动区 OK
+2026-10-17 09:00:50,452 [INFO] laoa_trader.ui.app: 启动步骤：概览页：页脚 OK
+2026-10-17 09:00:50,452 [INFO] laoa_trader.ui.app: 启动步骤：概览页：热力图磁盘缓存 OK
+2026-10-17 09:00:50,454 [INFO] laoa_trader.ui.app: 启动步骤：概览页：空骨架渲染 OK
+2026-10-17 09:00:50,546 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'HIGH', 'LOW', 'OPEN')，函数 ('REF',)，5 条语句
+2026-10-17 09:00:50,548 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('VOL', 'AMOUNT', 'C', 'OPEN', 'ST')，函数 ('REF', 'MA')，8 条语句
+2026-10-17 09:00:50,548 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'HIGH')，函数 ('MA', 'HHV')，8 条语句
+2026-10-17 09:00:50,550 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', '流通市值', '换手率', 'VOL', '热门行业', 'ST', '科创', '北交所')，函数 ('REF', 'MA', '涨停天数')，14 条语句
+2026-10-17 09:00:50,550 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', '换手率', 'ST', '科创', '北交所')，函数 ('REF', '量比')，7 条语句
+2026-10-17 09:00:50,550 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'OPEN')，函数 ('MA',)，3 条语句
+2026-10-17 09:00:50,550 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'AMOUNT', 'ST')，函数 ('REF', 'MA')，7 条语句
+2026-10-17 09:00:50,552 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('现涨幅', '现量比', '竞价匹配额', 'ST')，函数 ()，8 条语句
+2026-10-17 09:00:50,552 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'ST')，函数 ('MA', 'EMA', 'BARSCOUNT')，11 条语句
+2026-10-17 09:00:50,552 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'ST')，函数 ('MA', 'EMA', 'BARSCOUNT')，12 条语句
+2026-10-17 09:00:50,554 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', '主力净额', '主力净占比', '近5日主力净额', 'ST')，函数 ('MA', 'EMA')，11 条语句
+2026-10-17 09:00:50,554 [DEBUG] laoa_trader.strategy.formula: 策略编译通过：字段 ('C', 'VOL', 'ST')，函数 ('REF',)，8 条语句
+2026-10-17 09:00:50,554 [INFO] laoa_trader.strategy.formula: 策略目录 D:\a\laoA\laoA\dist\LuweikDecision\formulas：载入 12/12 条策略
+2026-10-17 09:01:00,609 [DEBUG] laoa_trader.notify.voice: 枚举语音失败（当作没有可用音色）：Command '['C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', '-NoProfile', '-NonInteractive', '-Command', 'Add-Type -AssemblyName System.Speech;(New-Object System.Speech.Synthesis.SpeechSynthesizer).GetInstalledVoices() | ForEach-Object { $i=$_.VoiceInfo; "$($i.Name)|$($i.Culture)|$($i.Gender)" }']' timed out after 10.0 seconds
+2026-10-17 09:01:00,744 [INFO] laoa_trader.ui.app: 启动步骤：界面 OK（459 个控件）
+2026-10-17 09:01:00,746 [INFO] laoa_trader.ui.app: 启动步骤：托盘 OK
+2026-10-17 09:01:00,787 [INFO] laoa_trader.ui.desktop_pet: 桌宠形象：待机 1 帧 / 走路 3 帧 / 动作 2 帧（think 1、sad 1）
+2026-10-17 09:01:00,789 [INFO] laoa_trader.ui.app: 启动步骤：桌宠 OK（已摆出）
+2026-10-17 09:01:00,791 [INFO] laoa_trader.scheduler: 调度器已启动：自动运行【关（只手动跑）】；主跑 16:00，补跑 19:15；交易时段每 60s 跑盘中提醒
+2026-10-17 09:01:00,791 [INFO] laoa_trader.ui.app: 启动步骤：调度器 OK
+2026-10-17 09:01:00,809 [INFO] laoa_trader.ui.app: 启动步骤：授权检查 OK
+2026-10-17 09:01:00,809 [INFO] laoa_trader.ui.app: 启动步骤：快照与评分服务 OK
+2026-10-17 09:01:00,811 [INFO] laoa_trader.ui.app: 启动步骤：定时器 OK（界面刷新/概览/闪烁）
+2026-10-17 09:01:00,833 [INFO] laoa_trader.ui.app: 启动步骤：首次 _tick OK
+2026-10-17 09:01:00,835 [INFO] laoa_trader.ui.app: 启动步骤：主窗口构造完成
+2026-10-17 09:01:00,857 [WARNING] laoa_trader.ui.error_popup: 【弹窗】本地数据还不能用（筛选需要它）：本地数据还没准备好 · 在【系统设置】里点【下载数据】下载历史数据 / （完整原因与自检阈值在【显示详情】里）
+2026-10-17 09:01:00,859 [INFO] laoa_trader.ui.error_popup: （GUI 自检模式：只记日志，不弹框）
+GUI 自检 OK：窗口 485 个控件、版本 1.9.7
+报告文件  : D:\a\laoA\laoA\ci-smoke-data\logs\GUI自检报告.log
+2026-10-17 09:01:00,878 [INFO] laoa_trader.scheduler: 调度器已停止

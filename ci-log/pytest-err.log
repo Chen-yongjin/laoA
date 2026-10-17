@@ -1,0 +1,98 @@
+--- Logging error ---
+Call stack:
+Call stack:
+  File "D:\a\laoA\laoA\src\laoa_trader\ui\scores.py", line 83, in run
+    results = scoring.score_symbols(self.cfg, self.db_path, self.symbols)
+  File "D:\a\laoA\laoA\src\laoa_trader\scoring.py", line 507, in score_symbols
+    prepared = formulas.prepare_inputs(
+  File "D:\a\laoA\laoA\src\laoa_trader\formulas.py", line 1100, in prepare_inputs
+    quotes = _quote_rows(cfg, targets)
+  File "D:\a\laoA\laoA\src\laoa_trader\formulas.py", line 950, in _quote_rows
+    quotes = sources.snapshot_map(cfg, wanted)
+  File "D:\a\laoA\laoA\src\laoa_trader\data\sources.py", line 532, in snapshot_map
+    logger.info("没有可用来源取到快照（表格退回本地收盘价并标注）")
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1489, in info
+    self._log(INFO, msg, args, **kwargs)
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1634, in _log
+    self.handle(record)
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1644, in handle
+    self.callHandlers(record)
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1706, in callHandlers
+    hdlr.handle(record)
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 978, in handle
+    self.emit(record)
+Call stack:
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+--- Logging error ---
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+Message: '没有可用来源取到快照（表格退回本地收盘价并标注）'
+Arguments: ()
+--- Logging error ---
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "D:\a\laoA\laoA\src\laoa_trader\ui\scores.py", line 83, in run
+    results = scoring.score_symbols(self.cfg, self.db_path, self.symbols)
+--- Logging error ---
+Message: "新浪兜底这一批失败（2 只）：测试不允许联网，但检测到对 ('hq.sinajs.cn', 443) 的连接尝试；请把该调用改成注入假 client / 假 Session（见 tests/conftest.py）"
+Arguments: ()
+  File "D:\a\laoA\laoA\src\laoa_trader\ui\app.py", line 1442, in run
+    result = self._fn(*self._args, **kwargs)
+  File "D:\a\laoA\laoA\src\laoa_trader\ui\app.py", line 2685, in _heatmap_payload
+    quotes = quotes_mod.fetch_snapshot_prices(self.cfg, codes)
+  File "D:\a\laoA\laoA\src\laoa_trader\ui\quotes.py", line 201, in fetch_snapshot_prices
+    items = sources.snapshot_map(cfg, wanted)
+  File "D:\a\laoA\laoA\src\laoa_trader\data\sources.py", line 521, in snapshot_map
+    rows = fetch(cfg, wanted)
+  File "D:\a\laoA\laoA\src\laoa_trader\data\sources.py", line 405, in _public_rows
+    rows = public_quotes.snapshot(symbols)
+  File "D:\a\laoA\laoA\src\laoa_trader\data\public_quotes.py", line 339, in snapshot
+    logger.info(f"新浪兜底这一批失败（{len(batch)} 只）：{exc}")
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1489, in info
+    self._log(INFO, msg, args, **kwargs)
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1634, in _log
+    self.handle(record)
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1644, in handle
+    self.callHandlers(record)
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1706, in callHandlers
+    hdlr.handle(record)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+Call stack:
+  File "D:\a\laoA\laoA\src\laoa_trader\ui\scores.py", line 83, in run
+    results = scoring.score_symbols(self.cfg, self.db_path, self.symbols)
+  File "D:\a\laoA\laoA\src\laoa_trader\scoring.py", line 507, in score_symbols
+    prepared = formulas.prepare_inputs(
+  File "D:\a\laoA\laoA\src\laoa_trader\formulas.py", line 1100, in prepare_inputs
+    quotes = _quote_rows(cfg, targets)
+  File "D:\a\laoA\laoA\src\laoa_trader\formulas.py", line 950, in _quote_rows
+    quotes = sources.snapshot_map(cfg, wanted)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+Message: "新浪兜底这一批失败（2 只）：测试不允许联网，但检测到对 ('hq.sinajs.cn', 443) 的连接尝试；请把该调用改成注入假 client / 假 Session（见 tests/conftest.py）"
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\logging\__init__.py", line 1113, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+Message: "新浪兜底这一批失败（2 只）：测试不允许联网，但检测到对 ('hq.sinajs.cn', 443) 的连接尝试；请把该调用改成注入假 client / 假 Session（见 tests/conftest.py）"
+Arguments: ()
